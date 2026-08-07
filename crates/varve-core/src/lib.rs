@@ -21,6 +21,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod archive;
 pub mod discover;
 pub mod install;
 pub mod layer;
@@ -33,6 +34,7 @@ pub mod source;
 pub mod store;
 pub mod verify;
 
+pub use archive::{ArchiveError, OciLayoutSource, export as export_archive};
 pub use install::{
     InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
 };

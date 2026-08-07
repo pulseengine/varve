@@ -51,6 +51,14 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
+    /// Extract the core: export an installed layer as a directory-shaped
+    /// OCI image layout — the offline artifact of record.
+    Archive {
+        /// Layer to export, e.g. `2026.07.0`.
+        layer: String,
+        /// Destination directory for the oci-layout.
+        dest: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -71,7 +79,35 @@ fn run() -> anyhow::Result<()> {
         Cmd::List => list(&store),
         Cmd::Install { from } => install(&store, &from),
         Cmd::Verify { all } => verify(&store, all),
+        Cmd::Archive { layer, dest } => archive(&store, &layer, &dest),
     }
+}
+
+fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result<()> {
+    let wanted: varve_core::LayerId = layer.parse()?;
+    let matching: Vec<_> = store
+        .list()?
+        .into_iter()
+        .filter(|entry| entry.layer == wanted)
+        .collect();
+    let entry = match matching.len() {
+        0 => bail!(
+            "layer {layer} is not installed — run `varve install` in a project pinning it, then archive"
+        ),
+        1 => matching.into_iter().next().expect("len checked"),
+        n => bail!(
+            "layer {layer} is installed {n} times under different digests — archive by digest is \
+             not supported yet; clean up the core first"
+        ),
+    };
+    varve_core::export_archive(store, &entry, dest)?;
+    println!(
+        "archived layer {} {} as oci-layout at {}",
+        entry.layer,
+        entry.digest,
+        dest.display()
+    );
+    Ok(())
 }
 
 /// Load the PulseEngine trust root: `$VARVE_TRUST_ROOT` names a file holding
@@ -128,14 +164,22 @@ fn today_rfc3339() -> String {
 fn install(store: &Store, from: &std::path::Path) -> anyhow::Result<()> {
     let pin = load_pin()?;
     let verifier = trust_root()?;
-    let source = varve_core::DirSource::at(from);
+    // Auto-detect the archive shape: a standard OCI image layout (the
+    // `varve archive` output) or the plain manifests/+blobs/ directory.
+    // Either way the same pipeline and the same trust root decide.
+    let source: Box<dyn varve_core::LayerSource> = if from.join("oci-layout").is_file() {
+        Box::new(varve_core::OciLayoutSource::at(from))
+    } else {
+        Box::new(varve_core::DirSource::at(from))
+    };
+    let source = &*source;
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let now = today_rfc3339();
     let policy = varve_core::InstallPolicy {
         now: &now,
         staleness_threshold_days: 90,
     };
-    let outcome = varve_core::install(&pin, &source, &verifier, store, &mut marks, &policy)?;
+    let outcome = varve_core::install(&pin, source, &verifier, store, &mut marks, &policy)?;
     println!(
         "installed layer {} (counter {}) {}",
         outcome.layer, outcome.counter, outcome.digest
