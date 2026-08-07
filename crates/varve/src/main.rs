@@ -130,6 +130,16 @@ enum Cmd {
     /// invocation's working directory and exec — switching projects is cd.
     #[command(subcommand)]
     Shim(ShimCmd),
+    /// Print idempotent shell code putting the shim directory on PATH.
+    /// Setup is one line: `eval "$(varve env)"` — or source the env file
+    /// `shim install` writes. Never hand-edit PATH.
+    Env {
+        /// Shell dialect: sh (default, works for bash/zsh) or fish.
+        #[arg(long, default_value = "sh")]
+        shell: String,
+    },
+    /// Emit shell completion scripts (zsh, bash, fish, ...).
+    Completions { shell: clap_complete::Shell },
     /// (CI) Sign a release SHA256SUMS.txt into the DSSE envelope
     /// `self-verify` consumes — the producing half of DD-009.
     SignSums {
@@ -210,6 +220,12 @@ fn run() -> anyhow::Result<()> {
             out,
         } => sign_status(&file, &key, &key_id, &out),
         Cmd::Shim(ShimCmd::Install { extra_tools }) => shim_install(&store, &extra_tools),
+        Cmd::Env { shell } => print_env(&store, &shell),
+        Cmd::Completions { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(shell, &mut Cli::command(), "varve", &mut std::io::stdout());
+            Ok(())
+        }
         Cmd::SignSums {
             sums,
             key,
@@ -218,6 +234,28 @@ fn run() -> anyhow::Result<()> {
         } => sign_sums(&sums, &key, &key_id, &out),
         Cmd::SelfVerify { archive, envelope } => self_verify(&archive, &envelope),
     }
+}
+
+/// The idempotent sh fragment for a shim dir; the guard keeps repeated
+/// evaluation (login shells, nested shells) from stacking PATH entries.
+fn env_script_sh(shim_dir: &std::path::Path) -> String {
+    format!(
+        "case \":$PATH:\" in\n  *:\"{dir}\":*) ;;\n  *) export PATH=\"{dir}:$PATH\" ;;\nesac\n",
+        dir = shim_dir.display()
+    )
+}
+
+fn print_env(store: &Store, shell: &str) -> anyhow::Result<()> {
+    let shim_dir = store.root().join("shims");
+    match shell {
+        "sh" | "bash" | "zsh" => print!("{}", env_script_sh(&shim_dir)),
+        "fish" => println!(
+            "if not contains \"{dir}\" $PATH\n    set -gx PATH \"{dir}\" $PATH\nend",
+            dir = shim_dir.display()
+        ),
+        other => bail!("unknown shell '{other}' — supported: sh, bash, zsh, fish"),
+    }
+    Ok(())
 }
 
 fn shim_install(store: &Store, extra_tools: &[String]) -> anyhow::Result<()> {
@@ -252,10 +290,16 @@ fn shim_install(store: &Store, extra_tools: &[String]) -> anyhow::Result<()> {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
     }
+    // The sourceable environment, rustup-style: one line in the shell
+    // config sets everything up, and re-sourcing never stacks PATH.
+    let env_file = store.root().join("env");
+    std::fs::write(&env_file, env_script_sh(&shim_dir))
+        .with_context(|| format!("cannot write {}", env_file.display()))?;
     println!(
-        "installed {} shim(s) in {} — add it to PATH; switching projects is cd",
+        "installed {} shim(s) in {} — switching projects is cd\n\nadd ONE line to your shell config:\n  . \"{}\"        # or: eval \"$(varve env)\"",
         names.len(),
-        shim_dir.display()
+        shim_dir.display(),
+        env_file.display()
     );
     Ok(())
 }
