@@ -1,0 +1,159 @@
+artifacts:
+  # ─────────────────────────────────────────────────────────────────────
+  # STPA-Sec seed for the distribution attack surface. This is the chain
+  # that makes the anti-rollback and source-independence requirements
+  # analysis-driven rather than opinion-driven: sec-loss → sec-hazard →
+  # sec-constraint, with each constraint satisfied by a requirement.
+  #
+  # Deliberately a seed, not the full analysis: the control structure,
+  # sec-UCAs and loss scenarios are the v0.1.0 stpa-audit work item, and
+  # will extend this file.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: SL-001
+    type: sec-loss
+    title: An artifact is produced or accepted under a toolchain other than the pinned, qualified set
+    status: approved
+    description: >
+      The output looks fine, ships, and its qualification evidence is void —
+      the artifact was built by tools nobody qualified, or by a mix of layers
+      no review covered. The costliest loss varve exists to prevent: it
+      destroys evidence a consumer paid for, silently.
+    fields:
+      cia-impact: [integrity]
+      stakeholders: [relay, jess, wohl, assessors]
+
+  - id: SL-002
+    type: sec-loss
+    title: A qualified line stops being reconstructible
+    status: approved
+    description: >
+      The safety case requires rebuilding with the exact qualified toolchain
+      years later. If the layer can no longer be obtained and verified — the
+      registry forgot it, the archive is unverifiable — the case degrades from
+      evidence to assertion.
+    fields:
+      cia-impact: [availability, integrity]
+      stakeholders: [wohl, assessors]
+
+  - id: SH-001
+    type: sec-hazard
+    title: A consumer accepts a stale but validly-signed layer as current (rollback)
+    status: approved
+    description: >
+      An adversary — or a poisoned cache, or a repointed tag — serves an
+      older, validly-signed layer. Digest pinning protects a project that
+      already pins a digest; a fresh consumer resolving a line by name has no
+      defence. The stale layer carries known defects presented as current.
+    links:
+      - type: leads-to-sec-loss
+        target: SL-001
+    fields:
+      cia-impact: [integrity]
+      severity: high
+
+  - id: SH-002
+    type: sec-hazard
+    title: A consumer is held on an old view while newer deposits exist (freeze)
+    status: approved
+    description: >
+      The adversary does not need to substitute anything — merely suppressing
+      knowledge of newer deposits keeps the consumer on a layer with known
+      problems. Staleness that stays silent is the phantom-capability failure
+      from pulseengine.eu#157, weaponised.
+    links:
+      - type: leads-to-sec-loss
+        target: SL-001
+    fields:
+      cia-impact: [integrity, availability]
+      severity: medium
+
+  - id: SH-003
+    type: sec-hazard
+    title: The source of the bytes influences whether the bytes are accepted
+    status: approved
+    description: >
+      A registry, mirror, or archive gains any say in the accept/reject
+      verdict — a "trusted source" short-circuit, a provider-supplied trust
+      anchor, a relaxed check on the authenticated path. The source has then
+      joined the trusted base without review, and every downstream verdict
+      inherits its compromise.
+    links:
+      - type: leads-to-sec-loss
+        target: SL-001
+      - type: leads-to-sec-loss
+        target: SL-002
+    fields:
+      cia-impact: [integrity]
+      severity: critical
+
+  - id: SH-004
+    type: sec-hazard
+    title: A build runs half on one layer, half on another (mixed toolchain)
+    status: approved
+    description: >
+      Resolution drift mid-pipeline — one stage dispatched from the pinned
+      layer, another from PATH leftovers or a different line. The output is a
+      configuration no qualification covered, and nothing in the artifact says
+      so.
+    links:
+      - type: leads-to-sec-loss
+        target: SL-001
+    fields:
+      cia-impact: [integrity]
+      severity: high
+
+  - id: SC-001
+    type: sec-constraint
+    title: A layer below the line's accepted high-water mark must be rejected
+    status: approved
+    description: >
+      Acceptance of a layer on a release line requires its release counter to
+      be at or above the highest counter this client has accepted for that
+      line, and its signed issued-at feeds a staleness verdict. Inverts SH-001
+      and bounds SH-002 (a frozen view eventually trips the staleness
+      threshold).
+    links:
+      - type: prevents-sec-hazard
+        target: SH-001
+      - type: prevents-sec-hazard
+        target: SH-002
+
+  - id: SC-002
+    type: sec-constraint
+    title: The accept/reject verdict must be a pure function of bytes and trust root
+    status: approved
+    description: >
+      Signature and digest verification run against the PulseEngine trust
+      root on every path; no source, transport, or credential state may
+      supply, override, or relax a trust anchor. Mechanised as the
+      two-sources-same-verdict kill-criterion test.
+    links:
+      - type: prevents-sec-hazard
+        target: SH-003
+
+  - id: SC-003
+    type: sec-constraint
+    title: Every dispatch resolves to exactly the pinned layer or fails
+    status: approved
+    description: >
+      A tool invocation either executes the binary from the layer the pin
+      names — completely resolved, completely installed — or fails with the
+      corrective command. No PATH fallback, no partial layer, no per-stage
+      drift.
+    links:
+      - type: prevents-sec-hazard
+        target: SH-004
+
+  - id: SC-004
+    type: sec-constraint
+    title: Every artifact must record the layer that produced it
+    status: approved
+    description: >
+      Detection backstop for SH-004: with the layer identity stamped at every
+      transformation hop inside the signed artifact, a mixed-toolchain build
+      is discoverable from the artifact alone, offline — the audit trail an
+      assessor can check without trusting the build machine.
+    links:
+      - type: prevents-sec-hazard
+        target: SH-004
