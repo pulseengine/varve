@@ -73,7 +73,7 @@ artifacts:
   - id: REQ-OFFLINE-001
     type: requirement
     title: An archived core installs with no registry and no network
-    status: approved
+    status: verified
     release: v0.3.0
     description: >
       varve shall export a layer as a directory-shaped oci-layout archive, and

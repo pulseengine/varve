@@ -298,6 +298,64 @@ fn a_rolled_back_layer_is_refused_by_the_cli() {
         .stderr(predicate::str::contains("rollback").or(predicate::str::contains("high-water")));
 }
 
+// rivet: verifies REQ-OFFLINE-001
+#[test]
+fn archive_then_offline_install_round_trips_with_verification_unchanged() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+
+    // Export the installed layer as an oci-layout archive.
+    let exported = fx.project.parent().unwrap().join("core-2026.07.0");
+    varve(&fx)
+        .args(["archive", "2026.07.0"])
+        .arg(&exported)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("oci-layout"));
+    assert!(exported.join("oci-layout").is_file());
+    assert!(exported.join("index.json").is_file());
+
+    // A fresh machine (fresh VARVE_ROOT), no registry: install from the
+    // archive with the same trust root, then re-verify offline.
+    let fresh_root = fx.project.parent().unwrap().join("fresh-root");
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("VARVE_ROOT", &fresh_root)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .current_dir(&fx.project)
+        .args(["install", "--from"])
+        .arg(&exported)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2026.07.0"));
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("VARVE_ROOT", &fresh_root)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .current_dir(&fx.project)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("verified"));
+}
+
+// rivet: verifies REQ-OFFLINE-001
+#[test]
+fn archive_of_an_uninstalled_layer_fails_with_guidance() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let dest = fx.project.parent().unwrap().join("nowhere");
+    varve(&fx)
+        .args(["archive", "2026.07.0"])
+        .arg(&dest)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("2026.07.0"));
+}
+
 // rivet: verifies REQ-COEXIST-001
 #[test]
 fn list_with_an_empty_core_succeeds_and_says_so() {

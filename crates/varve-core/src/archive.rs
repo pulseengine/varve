@@ -1,0 +1,414 @@
+//! The archived core (REQ-OFFLINE-001) — the artifact of record.
+//!
+//! A registry is a cache; retention policies forget. A qualified line must
+//! remain reconstructible after every registry has forgotten it, so `varve
+//! archive` exports an installed, verified layer as a **directory-shaped OCI
+//! image layout** — `oci-layout`, `index.json`, `blobs/sha256/<hex>` — the
+//! standard interchange shape (`oras`/`skopeo`-inspectable), with the DSSE
+//! signature envelope carried as a blob so verification travels with the
+//! evidence. Install from an archive runs the *same* pipeline with the same
+//! trust root: where the bytes come from changes, whether they are accepted
+//! does not.
+
+use std::path::Path;
+
+use crate::install::VerifyError;
+use crate::manifest::LayerManifest;
+use crate::reverify::ENVELOPE_FILE;
+use crate::source::{LayerRef, LayerSource, SourceError};
+use crate::store::{InstalledLayer, Store, StoreError, manifest_digest};
+
+/// artifactType marking the envelope blob in the archive index.
+pub const SIGNATURE_ARTIFACT_TYPE: &str = "application/vnd.pulseengine.varve.signature.v1+json";
+/// Annotation on the signature entry naming the manifest digest it signs.
+pub const ANN_SIGNS: &str = "eu.pulseengine.varve.signs";
+
+#[derive(Debug, thiserror::Error)]
+pub enum ArchiveError {
+    #[error("io error at {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "layer {digest} has no retained signature envelope — an archive without its signature \
+         cannot serve as the artifact of record; reinstall from a signed source first"
+    )]
+    NoEnvelope { digest: String },
+    #[error("layer.json in the core is not a valid manifest: {0}")]
+    Manifest(#[from] crate::manifest::ManifestError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Verify(#[from] VerifyError),
+}
+
+/// Export one installed layer as a directory-shaped OCI image layout.
+/// Refuses when the layer has no retained envelope: an unsigned archive is
+/// not an artifact of record.
+pub fn export(store: &Store, layer: &InstalledLayer, dest: &Path) -> Result<(), ArchiveError> {
+    let io = |path: &Path, source: std::io::Error| ArchiveError::Io {
+        path: path.display().to_string(),
+        source,
+    };
+
+    // Gather everything first; write nothing until the layer proves whole.
+    let manifest_path = layer.root.join("layer.json");
+    let payload = std::fs::read(&manifest_path).map_err(|e| io(&manifest_path, e))?;
+    let envelope_path = layer.root.join(ENVELOPE_FILE);
+    let envelope = match std::fs::read(&envelope_path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ArchiveError::NoEnvelope {
+                digest: layer.digest.clone(),
+            });
+        }
+        Err(e) => return Err(io(&envelope_path, e)),
+    };
+    let manifest = LayerManifest::parse(&payload)?;
+    let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
+    for entry in &manifest.entries {
+        if let Some(tool) = entry.annotations.get("eu.pulseengine.tool") {
+            let path = layer.root.join("bin").join(tool);
+            let bytes = std::fs::read(&path).map_err(|e| io(&path, e))?;
+            blobs.push((entry.digest.clone(), bytes));
+        }
+    }
+    let payload_digest = manifest_digest(&payload);
+    let envelope_digest = manifest_digest(&envelope);
+
+    // Lay out the archive: oci-layout, blobs/sha256/<hex>, index.json.
+    let blob_dir = dest.join("blobs").join("sha256");
+    std::fs::create_dir_all(&blob_dir).map_err(|e| io(&blob_dir, e))?;
+    let write_blob = |digest: &str, bytes: &[u8]| -> Result<(), ArchiveError> {
+        let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+        let path = blob_dir.join(hex);
+        std::fs::write(&path, bytes).map_err(|e| io(&path, e))
+    };
+    write_blob(&payload_digest, &payload)?;
+    write_blob(&envelope_digest, &envelope)?;
+    for (digest, bytes) in &blobs {
+        write_blob(digest, bytes)?;
+    }
+
+    let marker_path = dest.join("oci-layout");
+    std::fs::write(&marker_path, br#"{"imageLayoutVersion":"1.0.0"}"#)
+        .map_err(|e| io(&marker_path, e))?;
+
+    let index = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {
+                "mediaType": "application/vnd.oci.image.index.v1+json",
+                "digest": payload_digest,
+                "size": payload.len(),
+                "annotations": {
+                    "eu.pulseengine.varve.layer": manifest.layer.to_string(),
+                    "eu.pulseengine.varve.channel": manifest.channel,
+                }
+            },
+            {
+                "mediaType": "application/json",
+                "artifactType": SIGNATURE_ARTIFACT_TYPE,
+                "digest": envelope_digest,
+                "size": envelope.len(),
+                "annotations": { ANN_SIGNS: payload_digest }
+            }
+        ]
+    });
+    let index_path = dest.join("index.json");
+    std::fs::write(
+        &index_path,
+        serde_json::to_vec_pretty(&index).expect("index serializes"),
+    )
+    .map_err(|e| io(&index_path, e))?;
+    let _ = store; // reads go through the layer's recorded root; the store itself is untouched
+    Ok(())
+}
+
+/// A `LayerSource` over a directory-shaped OCI image layout — the reading
+/// half of REQ-OFFLINE-001. No registry, no network, verification unchanged.
+#[derive(Debug)]
+pub struct OciLayoutSource {
+    root: std::path::PathBuf,
+}
+
+impl OciLayoutSource {
+    pub fn at(root: impl Into<std::path::PathBuf>) -> Self {
+        OciLayoutSource { root: root.into() }
+    }
+
+    fn blob_path(&self, digest: &str) -> std::path::PathBuf {
+        let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+        self.root.join("blobs").join("sha256").join(hex)
+    }
+}
+
+impl LayerSource for OciLayoutSource {
+    fn fetch_manifest(&self, layer: &LayerRef) -> Result<Vec<u8>, SourceError> {
+        // The archive index tells us which blob is the signed envelope for
+        // which manifest digest — untrusted discovery, as always: the
+        // returned envelope still has to verify and match the pin.
+        let index_path = self.root.join("index.json");
+        let index: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&index_path)
+                .map_err(|e| SourceError::Transport(format!("{}: {e}", index_path.display())))?,
+        )
+        .map_err(|e| SourceError::Transport(format!("index.json: {e}")))?;
+        let entries = index["manifests"].as_array().cloned().unwrap_or_default();
+
+        // Find candidate manifest digests in the index that match the ref.
+        let wanted: Vec<String> = entries
+            .iter()
+            .filter(|e| e["artifactType"] != SIGNATURE_ARTIFACT_TYPE)
+            .filter_map(|e| {
+                let digest = e["digest"].as_str()?.to_string();
+                match layer {
+                    LayerRef::Digest(d) => (&digest == d).then_some(digest),
+                    LayerRef::Name(id) => {
+                        let name = e["annotations"]["eu.pulseengine.varve.layer"].as_str()?;
+                        (name == id.to_string()).then_some(digest)
+                    }
+                }
+            })
+            .collect();
+
+        for digest in wanted {
+            // Prefer the signed envelope blob; fall back to the bare
+            // manifest blob (the pipeline's verifier decides acceptability).
+            let envelope = entries.iter().find(|e| {
+                e["artifactType"] == SIGNATURE_ARTIFACT_TYPE
+                    && e["annotations"][ANN_SIGNS] == *digest
+            });
+            let blob_digest = envelope
+                .and_then(|e| e["digest"].as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| digest.clone());
+            match std::fs::read(self.blob_path(&blob_digest)) {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(SourceError::Transport(e.to_string())),
+            }
+        }
+        Err(SourceError::NotFound(format!("{layer:?}")))
+    }
+
+    fn fetch_blob(&self, digest: &str) -> Result<Vec<u8>, SourceError> {
+        match std::fs::read(self.blob_path(digest)) {
+            Ok(bytes) => Ok(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(SourceError::NotFound(digest.to_string()))
+            }
+            Err(e) => Err(SourceError::Transport(e.to_string())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::install::{InstallPolicy, install};
+    use crate::manifest::fixtures::manifest_with_tools;
+    use crate::pin::Pin;
+    use crate::rollback::HighWaterMarks;
+    use crate::source::MemorySource;
+    use crate::verify::{PinnedKeyVerifier, generate_root_keypair, sign_layer_manifest};
+
+    fn pin(layer: &str) -> Pin {
+        Pin::parse(
+            &format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"{layer}\"\n"
+            ),
+            "varve.toml",
+        )
+        .unwrap()
+    }
+
+    fn policy() -> InstallPolicy<'static> {
+        InstallPolicy {
+            now: "2026-08-07T00:00:00Z",
+            staleness_threshold_days: 90,
+        }
+    }
+
+    /// Install a signed layer into a fresh store; return everything needed
+    /// downstream.
+    fn installed() -> (
+        tempfile::TempDir,
+        Store,
+        InstalledLayer,
+        PinnedKeyVerifier,
+        Vec<u8>,
+    ) {
+        let (sk, pk) = generate_root_keypair();
+        let tool = b"synth-bytes".to_vec();
+        let blob_digest = manifest_digest(&tool);
+        let payload = manifest_with_tools(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[("synth", &blob_digest)],
+        );
+        let envelope = sign_layer_manifest(&payload, &sk, "varve-root-1").unwrap();
+        let source = MemorySource::new()
+            .with_manifest(envelope.as_bytes())
+            .with_blob(&blob_digest, &tool);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let store = Store::at(&root);
+        let mut marks = HighWaterMarks::load(&root).unwrap();
+        let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &verifier,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap();
+        let layer = store.get(&outcome.digest).unwrap().unwrap();
+        (tmp, store, layer, verifier, payload)
+    }
+
+    // rivet: verifies REQ-OFFLINE-001
+    #[test]
+    fn export_writes_a_standard_oci_image_layout() {
+        let (tmp, store, layer, _verifier, payload) = installed();
+        let dest = tmp.path().join("archive");
+        export(&store, &layer, &dest).unwrap();
+
+        // oci-layout marker file, per the OCI image-layout spec.
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dest.join("oci-layout")).unwrap()).unwrap();
+        assert_eq!(marker["imageLayoutVersion"], "1.0.0");
+
+        // Every blob is stored under its own digest, content-addressed.
+        let payload_digest = manifest_digest(&payload);
+        let hex = payload_digest.strip_prefix("sha256:").unwrap();
+        let manifest_blob = dest.join("blobs/sha256").join(hex);
+        assert_eq!(std::fs::read(&manifest_blob).unwrap(), payload);
+
+        // index.json references the manifest and the signature blob.
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dest.join("index.json")).unwrap()).unwrap();
+        let entries = index["manifests"].as_array().unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["digest"] == payload_digest.as_str()),
+            "index must reference the layer manifest"
+        );
+        let signature = entries
+            .iter()
+            .find(|e| e["artifactType"] == SIGNATURE_ARTIFACT_TYPE)
+            .expect("index must reference the signature envelope");
+        assert_eq!(signature["annotations"][ANN_SIGNS], payload_digest.as_str());
+
+        // The tool blob is present under its digest.
+        let manifest = LayerManifest::parse(&payload).unwrap();
+        for entry in &manifest.entries {
+            let hex = entry.digest.strip_prefix("sha256:").unwrap();
+            assert!(
+                dest.join("blobs/sha256").join(hex).is_file(),
+                "blob {}",
+                entry.digest
+            );
+        }
+    }
+
+    // rivet: verifies REQ-OFFLINE-001
+    #[test]
+    fn an_archived_layer_installs_into_a_fresh_core_with_verification_unchanged() {
+        let (tmp, store, layer, verifier, payload) = installed();
+        let dest = tmp.path().join("archive");
+        export(&store, &layer, &dest).unwrap();
+
+        // Fresh machine: new store, no registry, no network — same verifier.
+        let fresh_root = tmp.path().join("fresh");
+        let fresh_store = Store::at(&fresh_root);
+        let mut fresh_marks = HighWaterMarks::load(&fresh_root).unwrap();
+        let source = OciLayoutSource::at(&dest);
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &verifier,
+            &fresh_store,
+            &mut fresh_marks,
+            &policy(),
+        )
+        .unwrap();
+        assert_eq!(outcome.digest, manifest_digest(&payload));
+        // And the reinstalled layer re-verifies offline, envelope retained.
+        let entry = fresh_store.get(&outcome.digest).unwrap().unwrap();
+        let checked = crate::reverify::verify_installed(&fresh_store, &entry, &verifier).unwrap();
+        assert_eq!(checked, 1);
+    }
+
+    // rivet: verifies REQ-VERIFY-001
+    #[test]
+    fn the_archive_source_cannot_relax_acceptance() {
+        // Same bytes through the archive path and the memory path: identical
+        // verdicts, including rejection by a different trust root.
+        let (tmp, store, layer, _verifier, _payload) = installed();
+        let dest = tmp.path().join("archive");
+        export(&store, &layer, &dest).unwrap();
+
+        let (_, other_pk) = generate_root_keypair();
+        let wrong = PinnedKeyVerifier::from_public_key_bytes(&other_pk).unwrap();
+        let fresh_root = tmp.path().join("fresh2");
+        let fresh_store = Store::at(&fresh_root);
+        let mut fresh_marks = HighWaterMarks::load(&fresh_root).unwrap();
+        let err = install(
+            &pin("2026.07.0"),
+            &OciLayoutSource::at(&dest),
+            &wrong,
+            &fresh_store,
+            &mut fresh_marks,
+            &policy(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, crate::install::InstallError::Verify(_)),
+            "archive path must reject exactly like any other: {err}"
+        );
+        assert!(fresh_store.list().unwrap().is_empty());
+    }
+
+    // rivet: verifies REQ-OFFLINE-001
+    #[test]
+    fn export_refuses_a_layer_without_its_envelope() {
+        let (tmp, store, layer, _verifier, _payload) = installed();
+        std::fs::remove_file(layer.root.join(ENVELOPE_FILE)).unwrap();
+        let err = export(&store, &layer, &tmp.path().join("archive")).unwrap_err();
+        assert!(matches!(err, ArchiveError::NoEnvelope { .. }), "got: {err}");
+    }
+
+    // rivet: verifies REQ-SCOPE-001
+    #[test]
+    fn export_does_not_mutate_the_core() {
+        let (tmp, store, layer, _verifier, _payload) = installed();
+        let snapshot = |root: &Path| -> Vec<(String, Vec<u8>)> {
+            let mut out = Vec::new();
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(dir) = stack.pop() {
+                for e in std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()) {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else {
+                        out.push((p.display().to_string(), std::fs::read(&p).unwrap()));
+                    }
+                }
+            }
+            out.sort();
+            out
+        };
+        let before = snapshot(store.root());
+        export(&store, &layer, &tmp.path().join("archive")).unwrap();
+        assert_eq!(before, snapshot(store.root()));
+    }
+}

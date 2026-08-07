@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.3.0 — 2026-08-07
+
+The offline core (REQ-OFFLINE-001 verified; `rivet release status v0.3.0`:
+cuttable).
+
+- `varve archive <layer> <dest>` exports an installed layer as a standard
+  directory-shaped OCI image layout (`oci-layout`, `index.json`,
+  `blobs/sha256/<hex>`), with the DSSE signature envelope carried as a blob
+  and referenced from the index (`…varve.signature.v1+json`, signs-digest
+  annotation) — the artifact of record travels with its evidence
+- Export refuses a layer whose envelope was not retained: an unsigned
+  archive is not an artifact of record
+- `varve install --from` auto-detects oci-layout archives; installing from
+  an archive runs the same pipeline against the same trust root — the
+  archive path cannot relax acceptance (tested), and a reinstalled layer
+  re-verifies offline
+- Falsification: a layer that cannot be reconstructed and re-verified from
+  its archive alone, with no registry and no network, fails these tests
+
 ## v0.2.0 — 2026-08-07
 
 Verified install and anti-rollback. `rivet release status v0.2.0`: cuttable
