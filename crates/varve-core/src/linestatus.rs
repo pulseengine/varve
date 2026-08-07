@@ -405,6 +405,7 @@ mod tests {
             tools: vec![DepositTool {
                 name: "synth".into(),
                 version: "1".into(),
+                platform: None,
                 bytes: b"t".to_vec(),
             }],
         };

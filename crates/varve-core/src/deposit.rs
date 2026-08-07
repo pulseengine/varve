@@ -35,6 +35,9 @@ pub struct DepositSpec {
 pub struct DepositTool {
     pub name: String,
     pub version: String,
+    /// Target triple this binary is built for; `None` claims
+    /// platform-independence (scripts, data). New deposits should stamp it.
+    pub platform: Option<String>,
     pub bytes: Vec<u8>,
 }
 
@@ -74,9 +77,9 @@ pub fn deposit(
         return Err(DepositError::NoTools);
     }
     let mut tools: Vec<&DepositTool> = spec.tools.iter().collect();
-    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    tools.sort_by(|a, b| (&a.name, &a.platform).cmp(&(&b.name, &b.platform)));
     for pair in tools.windows(2) {
-        if pair[0].name == pair[1].name {
+        if pair[0].name == pair[1].name && pair[0].platform == pair[1].platform {
             return Err(DepositError::DuplicateTool(pair[0].name.clone()));
         }
     }
@@ -88,14 +91,23 @@ pub fn deposit(
     let entries: Vec<serde_json::Value> = tools
         .iter()
         .map(|tool| {
+            let mut annotations = serde_json::Map::new();
+            annotations.insert("eu.pulseengine.tool".into(), tool.name.clone().into());
+            annotations.insert(
+                "eu.pulseengine.tool.version".into(),
+                tool.version.clone().into(),
+            );
+            if let Some(platform) = &tool.platform {
+                annotations.insert(
+                    crate::platform::ANN_PLATFORM.into(),
+                    platform.clone().into(),
+                );
+            }
             serde_json::json!({
                 "mediaType": "application/vnd.oci.image.manifest.v1+json",
                 "digest": manifest_digest(&tool.bytes),
                 "size": tool.bytes.len(),
-                "annotations": {
-                    "eu.pulseengine.tool": tool.name,
-                    "eu.pulseengine.tool.version": tool.version,
-                }
+                "annotations": annotations,
             })
         })
         .collect();
@@ -156,11 +168,13 @@ mod tests {
                 DepositTool {
                     name: "synth".into(),
                     version: "0.45.0".into(),
+                    platform: None,
                     bytes: b"synth-bytes".to_vec(),
                 },
                 DepositTool {
                     name: "rivet".into(),
                     version: "0.32.0".into(),
+                    platform: None,
                     bytes: b"rivet-bytes".to_vec(),
                 },
             ],
@@ -193,6 +207,7 @@ mod tests {
         let policy = InstallPolicy {
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
+            platform: "test-platform",
         };
         let installed = install(
             &pin,
@@ -206,7 +221,8 @@ mod tests {
         assert_eq!(installed.digest, outcome.digest);
         assert_eq!(installed.counter, 1);
         let entry = store.get(&installed.digest).unwrap().unwrap();
-        let checked = crate::reverify::verify_installed(&store, &entry, &verifier).unwrap();
+        let checked =
+            crate::reverify::verify_installed(&store, &entry, &verifier, "test-platform").unwrap();
         assert_eq!(checked, 2);
     }
 

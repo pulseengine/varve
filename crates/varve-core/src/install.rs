@@ -76,6 +76,11 @@ pub enum InstallError {
     BlobDigestMismatch { tool: String, digest: String },
     #[error("manifest entry {digest} is missing the eu.pulseengine.tool annotation")]
     UnnamedEntry { digest: String },
+    #[error(
+        "layer {layer} carries no entry for platform {platform} — refusing to install a \
+         wrong-architecture toolchain; use --platform only if you know why"
+    )]
+    NoPlatformEntry { layer: String, platform: String },
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
@@ -88,6 +93,9 @@ pub struct InstallPolicy<'a> {
     /// RFC 3339 "now" for the staleness verdict.
     pub now: &'a str,
     pub staleness_threshold_days: u32,
+    /// Target platform (a triple) entries must match. Entries without a
+    /// platform annotation are platform-independent (REQ-PLATFORM-001).
+    pub platform: &'a str,
 }
 
 pub fn install(
@@ -153,8 +161,21 @@ pub fn install(
     }
 
     // 5. Fetch blobs; each is accepted only if it matches its signed digest.
+    // Platform filtering happens BEFORE any fetch: a foreign entry's blob
+    // never even leaves the source (REQ-PLATFORM-001).
     let mut tools: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut matched = 0usize;
     for entry in &manifest.entries {
+        if !crate::platform::entry_matches(
+            entry
+                .annotations
+                .get(crate::platform::ANN_PLATFORM)
+                .map(String::as_str),
+            policy.platform,
+        ) {
+            continue;
+        }
+        matched += 1;
         let tool = entry
             .annotations
             .get("eu.pulseengine.tool")
@@ -170,6 +191,15 @@ pub fn install(
             });
         }
         tools.push((tool, blob));
+    }
+
+    // A fully-stamped layer with nothing for this platform fails closed —
+    // a wrong-architecture toolchain must not land looking installed.
+    if matched == 0 && !manifest.entries.is_empty() {
+        return Err(InstallError::NoPlatformEntry {
+            layer: manifest.layer.to_string(),
+            platform: policy.platform.to_string(),
+        });
     }
 
     // 6. Lay down.
@@ -245,6 +275,7 @@ mod tests {
         InstallPolicy {
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
+            platform: "test-platform",
         }
     }
 
@@ -526,6 +557,7 @@ mod tests {
         let policy = InstallPolicy {
             now: "2026-12-01T00:00:00Z",
             staleness_threshold_days: 90,
+            platform: "test-platform",
         };
         let outcome = install(
             &pin("2026.07.0"),
@@ -537,6 +569,111 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome.staleness_days, Some(123));
+    }
+
+    // rivet: verifies REQ-PLATFORM-001
+    #[test]
+    fn install_selects_only_entries_for_the_target_platform() {
+        let (_tmp, store, mut marks) = setup();
+        let here = b"here-tool".to_vec();
+        let there = b"there-tool".to_vec();
+        let (d_here, d_there) = (manifest_digest(&here), manifest_digest(&there));
+        let bytes = crate::manifest::fixtures::manifest_with_platform_tools(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[
+                ("synth", &d_here, Some("test-platform")),
+                ("synth", &d_there, Some("other-platform")),
+            ],
+        );
+        // Only the matching blob is served — a correct install never asks
+        // for the foreign one.
+        let source = MemorySource::new()
+            .with_manifest(&bytes)
+            .with_blob(&d_here, &here);
+        let policy = InstallPolicy {
+            now: "2026-08-07T00:00:00Z",
+            staleness_threshold_days: 90,
+            platform: "test-platform",
+        };
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy,
+        )
+        .unwrap();
+        let entry = store.get(&outcome.digest).unwrap().unwrap();
+        assert_eq!(
+            std::fs::read(store.tool_path(&entry, "synth").unwrap()).unwrap(),
+            here,
+            "the host-platform binary landed"
+        );
+    }
+
+    // rivet: verifies REQ-PLATFORM-001
+    #[test]
+    fn a_layer_with_nothing_for_the_host_platform_fails_closed() {
+        let (_tmp, store, mut marks) = setup();
+        let there = b"there-tool".to_vec();
+        let d_there = manifest_digest(&there);
+        let bytes = crate::manifest::fixtures::manifest_with_platform_tools(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[("synth", &d_there, Some("other-platform"))],
+        );
+        let source = MemorySource::new()
+            .with_manifest(&bytes)
+            .with_blob(&d_there, &there);
+        let policy = InstallPolicy {
+            now: "2026-08-07T00:00:00Z",
+            staleness_threshold_days: 90,
+            platform: "test-platform",
+        };
+        let err = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, InstallError::NoPlatformEntry { .. }),
+            "got: {err}"
+        );
+        assert!(store.list().unwrap().is_empty(), "no wrong-arch bytes land");
+    }
+
+    // rivet: verifies REQ-PLATFORM-001
+    #[test]
+    fn unstamped_legacy_entries_install_on_any_platform() {
+        let (_tmp, store, mut marks) = setup();
+        let (bytes, blobs) = july(); // fixtures without platform annotations
+        let source = memory_source(&bytes, &blobs);
+        let policy = InstallPolicy {
+            now: "2026-08-07T00:00:00Z",
+            staleness_threshold_days: 90,
+            platform: "any-platform-at-all",
+        };
+        assert!(
+            install(
+                &pin("2026.07.0"),
+                &source,
+                &AcceptAll,
+                &store,
+                &mut marks,
+                &policy
+            )
+            .is_ok()
+        );
     }
 
     // rivet: verifies REQ-PIN-001

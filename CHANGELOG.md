@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.6.0 — 2026-08-07
+
+The adoption arc: shims, the platform dimension, and the public registry
+(REQ-SHIM-001 + REQ-PLATFORM-001 + REQ-REGISTRY-001 verified).
+
+- `varve shim install`: thin dispatchers in `$VARVE_ROOT/shims` that
+  re-resolve the pin from the invocation's working directory and exec with
+  the provenance environment — switching toolchains is `cd`, proven by a
+  test running the same shim from two projects pinning different layers;
+  a pinless directory fails closed
+- Platform dimension: deposit stamps a target triple per entry
+  (`NAME@VERSION@PLATFORM=PATH`); install and verify select host-matching
+  entries only (foreign blobs are never even fetched); a fully-stamped
+  layer with nothing for the host fails closed; unstamped entries remain
+  platform-independent, so existing layers keep working
+- Registry source: anonymous OCI-distribution pull (`install --from
+  oci://ghcr.io/...`) — token dance, artifact manifest by tag, blobs by
+  digest with transport-level digest fail-fast. Tags are discovery only;
+  the kill-criterion now spans registry, archive, and directory transports
+  (identical accept AND reject verdicts, tested against an in-process
+  registry double over real TCP). Publishing stays CI-side with standard
+  tooling, outside the client trust path
+
 ## v0.5.0 — 2026-08-07
 
 Known-problems evidence, self-verification, and the closed provenance

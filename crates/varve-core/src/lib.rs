@@ -29,6 +29,8 @@ pub mod layer;
 pub mod linestatus;
 pub mod manifest;
 pub mod pin;
+pub mod platform;
+pub mod registry;
 pub mod resolve;
 pub mod reverify;
 pub mod rollback;
@@ -49,6 +51,8 @@ pub use linestatus::{
 };
 pub use manifest::{LayerManifest, ManifestError};
 pub use pin::{Channel, Pin, PinError};
+pub use platform::host_platform;
+pub use registry::{RegistryRef, RegistrySource};
 pub use resolve::{ResolveError, Resolved, resolve};
 pub use reverify::{ReverifyError, verify_installed};
 pub use rollback::{HighWaterMarks, RollbackError, RollbackVerdict, staleness_warning};

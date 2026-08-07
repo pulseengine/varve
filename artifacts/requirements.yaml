@@ -537,3 +537,75 @@ artifacts:
         own machinery is the strongest end-to-end exercise of the DSSE chain
         we can run (the dogfooding argument from pulseengine.eu#157).
     tags: [architecture, security]
+
+  # ─────────────────────────────────────────────────────────────────────
+  # v0.6.0 — the adoption arc: shims, the platform dimension, and the
+  # public-registry source. Scoped 2026-08-07 after the v0.1..v0.5 plan
+  # completed; the driving act is the first real deposit (dogfood).
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-SHIM-001
+    type: requirement
+    title: Shims on PATH resolve the pin per invocation and exec, never fall back
+    status: verified
+    release: v0.6.0
+    description: >
+      varve shim install shall write, into a dedicated shim directory, one
+      executable per tool of the pinned layer; each shim resolves the pin by
+      walking up from the invocation's working directory, execs the resolved
+      binary with the provenance environment set, and fails closed with the
+      corrective command when the pin is missing or the layer absent —
+      identical semantics to varve run, minus the typing. Switching projects
+      is cd. Completes DD-006's ergonomics half.
+    tags: [core, ergonomics]
+    links:
+      - type: traces-to
+        target: DD-006
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-PLATFORM-001
+    type: requirement
+    title: Layers carry a platform dimension; resolution is host-filtered
+    status: verified
+    release: v0.6.0
+    description: >
+      Deposit shall record a platform annotation (target triple) on every
+      manifest entry, and install shall select only entries matching the
+      host platform (with an explicit override flag for cross-platform
+      workflows). A layer carrying no entry for the host platform fails
+      closed at install — never a wrong-architecture binary on disk. The
+      index's own per-platform mechanism, per DD-001, not a substitution
+      language.
+    tags: [core]
+    links:
+      - type: traces-to
+        target: DD-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-REGISTRY-001
+    type: requirement
+    title: A layer installs by pin from a public OCI registry, verification unchanged
+    status: verified
+    release: v0.6.0
+    description: >
+      varve shall install a pinned layer from an anonymous public OCI
+      registry (GHCR) through the LayerSource seam: manifest and blobs
+      fetched over the OCI distribution API, then the same pipeline — DSSE
+      signature against the trust root, digest checks, anti-rollback —
+      decides acceptance. The kill-criterion extends to this path: identical
+      bytes through registry, archive, and directory sources yield identical
+      verdicts. Publishing is not client scope: CI pushes the standard
+      oci-layout with standard tooling, which never joins the trust path.
+    tags: [core, security]
+    links:
+      - type: satisfies
+        target: SC-002
+      - type: traces-to
+        target: DD-003
+    fields:
+      priority: must
+      category: functional

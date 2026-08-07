@@ -51,6 +51,7 @@ pub fn verify_installed(
     store: &Store,
     layer: &InstalledLayer,
     verifier: &dyn ManifestVerifier,
+    platform: &str,
 ) -> Result<usize, ReverifyError> {
     let io = |path: &std::path::Path, source: std::io::Error| ReverifyError::Io {
         path: path.display().to_string(),
@@ -81,6 +82,15 @@ pub fn verify_installed(
     let manifest = LayerManifest::parse(&payload)?;
     let mut checked = 0;
     for entry in &manifest.entries {
+        if !crate::platform::entry_matches(
+            entry
+                .annotations
+                .get(crate::platform::ANN_PLATFORM)
+                .map(String::as_str),
+            platform,
+        ) {
+            continue;
+        }
         let Some(tool) = entry.annotations.get("eu.pulseengine.tool") else {
             continue;
         };
@@ -144,6 +154,7 @@ mod tests {
         let policy = InstallPolicy {
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
+            platform: "test-platform",
         };
         let outcome = install(&pin, &source, &verifier, &store, &mut marks, &policy).unwrap();
         let layer = store.get(&outcome.digest).unwrap().unwrap();
@@ -159,7 +170,8 @@ mod tests {
     #[test]
     fn a_freshly_installed_layer_reverifies() {
         let ctx = installed_layer();
-        let checked = verify_installed(&ctx.store, &ctx.layer, &ctx.verifier).unwrap();
+        let checked =
+            verify_installed(&ctx.store, &ctx.layer, &ctx.verifier, "test-platform").unwrap();
         assert_eq!(checked, 1);
     }
 
@@ -178,7 +190,8 @@ mod tests {
     fn an_altered_tool_binary_is_detected() {
         let ctx = installed_layer();
         std::fs::write(ctx.layer.root.join("bin/synth"), b"EVIL").unwrap();
-        let err = verify_installed(&ctx.store, &ctx.layer, &ctx.verifier).unwrap_err();
+        let err =
+            verify_installed(&ctx.store, &ctx.layer, &ctx.verifier, "test-platform").unwrap_err();
         assert!(
             matches!(err, ReverifyError::ToolDigestMismatch { ref tool, .. } if tool == "synth"),
             "got: {err}"
@@ -193,7 +206,8 @@ mod tests {
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.extend_from_slice(b" ");
         std::fs::write(&path, bytes).unwrap();
-        let err = verify_installed(&ctx.store, &ctx.layer, &ctx.verifier).unwrap_err();
+        let err =
+            verify_installed(&ctx.store, &ctx.layer, &ctx.verifier, "test-platform").unwrap_err();
         assert!(matches!(err, ReverifyError::PayloadMismatch), "got: {err}");
     }
 
@@ -202,7 +216,8 @@ mod tests {
     fn a_missing_envelope_is_its_own_loud_verdict() {
         let ctx = installed_layer();
         std::fs::remove_file(ctx.layer.root.join(ENVELOPE_FILE)).unwrap();
-        let err = verify_installed(&ctx.store, &ctx.layer, &ctx.verifier).unwrap_err();
+        let err =
+            verify_installed(&ctx.store, &ctx.layer, &ctx.verifier, "test-platform").unwrap_err();
         assert!(
             matches!(err, ReverifyError::NoEnvelope { .. }),
             "got: {err}"
