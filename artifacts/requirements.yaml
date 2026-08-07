@@ -630,3 +630,29 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  - id: REQ-UPDATE-001
+    type: requirement
+    title: varve updates itself only as an explicit, verified, fail-closed act
+    status: verified
+    release: v0.8.0
+    description: >
+      varve self-update shall check the latest release, download the host
+      platform's archive plus its varve-native signed sums envelope, verify
+      the archive with the RUNNING binary against the pinned trust root
+      (old-verifies-new — the update chain), and replace the binary
+      atomically, reporting old -> new. Any verification failure refuses,
+      never warns. varve self-update --check reports without changing
+      anything. No passive network calls ever: varve makes no request the
+      user did not explicitly command (no phone-home staleness beacon); the
+      explicit --check is the staleness answer. Until the root ceremony,
+      release sums are signed with the PROVISIONAL rolling key, explicitly
+      labeled; the ceremony release will be dual-signed so the
+      old-verifies-new chain migrates without a flag day.
+    tags: [security, ergonomics]
+    links:
+      - type: traces-to
+        target: DD-009
+    fields:
+      priority: should
+      category: security
