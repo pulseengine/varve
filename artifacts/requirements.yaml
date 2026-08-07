@@ -207,7 +207,7 @@ artifacts:
   - id: REQ-KP-001
     type: requirement
     title: Known-problems, support-window and yank metadata ship and are surfaced
-    status: approved
+    status: verified
     release: v0.5.0
     description: >
       A layer shall be able to carry signed known-problems entries
@@ -231,7 +231,7 @@ artifacts:
   - id: REQ-SELF-001
     type: requirement
     title: varve verifies its own releases the way it verifies layers
-    status: approved
+    status: verified
     release: v0.5.0
     description: >
       varve's own release artifacts shall be cosign-signed and varve shall be
@@ -477,3 +477,63 @@ artifacts:
         must exclude. Stamping at the shim keeps the change in one place
         instead of ten tools.
     tags: [architecture, traceability]
+
+  - id: DD-008
+    type: design-decision
+    title: Line-status documents — signed, updatable evidence beside immutable layers
+    status: accepted
+    release: v0.5.0
+    description: >
+      Known-problems entries, the support window, and yank markers for a
+      release line live in ONE per-line "line status" document — a DSSE
+      envelope (payload type …varve.line-status.v1+json) signed with the
+      PulseEngine root, carrying its own monotonic counter + issued-at so
+      freshness is checkable with the same high-water-mark machinery as
+      layers. It is distributed beside layers (a blob in archives, a
+      referrer on registries) precisely because it must be updatable after
+      deposit without changing any layer digest. varve caches the newest
+      verified document per line at install and `varve status` reports from
+      the cache offline. A yanked layer warns loudly but remains
+      installable — the consumer owns the freeze decision.
+    links:
+      - type: satisfies
+        target: REQ-KP-001
+    fields:
+      rationale: >
+        The Ferrocene known-problems schema (description, scope, workaround,
+        detection, mitigation, affected releases) is the audit-accepted
+        no-patch mitigation path; criticalup designed support-expiry and
+        yank metadata in its v2 schema and never shipped it. Making the
+        document per-line and separately signed keeps layers immutable
+        (their digest IS their identity) while evidence stays current —
+        the referrer property from DD-001, applied to advisories.
+    tags: [architecture, qualification]
+
+  - id: DD-009
+    type: design-decision
+    title: Self-verification dogfoods the varve trust root, not cosign-in-library
+    status: accepted
+    release: v0.5.0
+    description: >
+      varve's own releases gain a varve-native signature: a DSSE envelope
+      over SHA256SUMS.txt (payload type …varve.release-sums.v1+json) signed
+      with the same root key deposit already requires in CI. `varve
+      self-verify` checks a candidate archive against the envelope + sums
+      with the pinned root, fully offline — failing closed, including when
+      the envelope asset is absent. cosign/SLSA signing remains (Track A);
+      this is additive. Production signing of the release asset activates
+      when the root ceremony provisions the key (v1.0 gate); the machinery,
+      tests, and workflow wiring land now.
+    links:
+      - type: satisfies
+        target: REQ-SELF-001
+    fields:
+      rationale: >
+        sigil's wsc cannot verify Sigstore bundles in-library today
+        (sigil#219) and shelling out to a cosign binary would put an
+        unpinned external tool in varve's own trust path. The root key is
+        already a CI secret by REQ-DEPOSIT-001's design, so signing the sums
+        adds no new trust exposure — and varve verifying varve with varve's
+        own machinery is the strongest end-to-end exercise of the DSSE chain
+        we can run (the dogfooding argument from pulseengine.eu#157).
+    tags: [architecture, security]

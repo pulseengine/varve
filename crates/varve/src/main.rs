@@ -100,6 +100,51 @@ enum Cmd {
         #[arg(long = "tool", value_name = "NAME@VERSION=PATH")]
         tools: Vec<String>,
     },
+    /// Support window, yank state and known problems for the pinned layer,
+    /// from the newest verified line-status document.
+    Status {
+        /// Ingest a status envelope first: verify, cache (monotonic), then
+        /// report. Without it, report from the local cache.
+        #[arg(long = "from-file", value_name = "ENVELOPE")]
+        from_file: Option<PathBuf>,
+    },
+    /// (CI) Validate and sign a line-status document into a DSSE envelope.
+    SignStatus {
+        /// The status document JSON (see docs: line, counter, issued-at,
+        /// support-until, yanked, known-problems).
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// File holding the hex-encoded ed25519 root SECRET key.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        #[arg(long, default_value = "varve-root-1")]
+        key_id: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// (CI) Sign a release SHA256SUMS.txt into the DSSE envelope
+    /// `self-verify` consumes — the producing half of DD-009.
+    SignSums {
+        #[arg(long, value_name = "FILE")]
+        sums: PathBuf,
+        /// File holding the hex-encoded ed25519 root SECRET key.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        #[arg(long, default_value = "varve-root-1")]
+        key_id: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Verify a varve release file against its signed SHA256SUMS envelope —
+    /// the tool that gates the toolchain clearing its own gate.
+    SelfVerify {
+        /// The release file to check (e.g. a downloaded varve tar.gz).
+        #[arg(long, value_name = "FILE")]
+        archive: PathBuf,
+        /// The SHA256SUMS.txt.dsse.json envelope from the same release.
+        #[arg(long, value_name = "FILE")]
+        envelope: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -137,7 +182,123 @@ fn run() -> anyhow::Result<()> {
         } => deposit_cmd(
             &layer, &channel, counter, &issued_at, &key, &key_id, &out, &tools,
         ),
+        Cmd::Status { from_file } => status(&store, from_file.as_deref()),
+        Cmd::SignStatus {
+            file,
+            key,
+            key_id,
+            out,
+        } => sign_status(&file, &key, &key_id, &out),
+        Cmd::SignSums {
+            sums,
+            key,
+            key_id,
+            out,
+        } => sign_sums(&sums, &key, &key_id, &out),
+        Cmd::SelfVerify { archive, envelope } => self_verify(&archive, &envelope),
     }
+}
+
+fn sign_sums(
+    sums: &std::path::Path,
+    key: &std::path::Path,
+    key_id: &str,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let bytes = std::fs::read(sums).with_context(|| format!("cannot read {}", sums.display()))?;
+    let hex_key = std::fs::read_to_string(key)
+        .with_context(|| format!("cannot read signing key {}", key.display()))?;
+    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    let envelope = varve_core::sign_release_sums(&bytes, &sk, key_id)?;
+    std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
+    println!("signed release sums -> {}", out.display());
+    Ok(())
+}
+
+fn status(store: &Store, from_file: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let pin = load_pin()?;
+    let root_pk = trust_root_bytes()?;
+    let line = pin.layer.line().clone();
+    let cache = varve_core::StatusCache::at_root(store.root());
+
+    if let Some(path) = from_file {
+        let envelope = std::fs::read(path)
+            .with_context(|| format!("cannot read status envelope {}", path.display()))?;
+        let doc = varve_core::LineStatus::verify_and_parse(&envelope, &root_pk)?;
+        if doc.line != line.to_string() {
+            bail!(
+                "status document covers line {} but this project pins line {line}",
+                doc.line
+            );
+        }
+        cache.update(&line, &envelope, &doc)?;
+    }
+
+    let Some(doc) = cache.load(&line, &root_pk)? else {
+        bail!(
+            "no line-status document cached for line {line} — ingest one with `varve status --from-file <envelope>`"
+        );
+    };
+    let report = doc.report_for(&pin.layer);
+    println!(
+        "layer {} (line {line}, status document #{})",
+        pin.layer, doc.counter
+    );
+    match &report.yanked_reason {
+        Some(reason) => println!("  YANKED: {reason}"),
+        None => println!("  not yanked"),
+    }
+    match &report.support_until {
+        Some(until) => println!("  supported until {until}"),
+        None => println!("  no stated support window"),
+    }
+    println!(
+        "  {} known problem(s) affect this layer, {} with workarounds",
+        report.problems_total, report.problems_with_workaround
+    );
+    Ok(())
+}
+
+fn sign_status(
+    file: &std::path::Path,
+    key: &std::path::Path,
+    key_id: &str,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let bytes = std::fs::read(file)
+        .with_context(|| format!("cannot read status document {}", file.display()))?;
+    // Validate through the typed model before signing: CI must not be able
+    // to sign a malformed advisory.
+    let doc: varve_core::LineStatus =
+        serde_json::from_slice(&bytes).context("status document does not match the schema")?;
+    let hex_key = std::fs::read_to_string(key)
+        .with_context(|| format!("cannot read signing key {}", key.display()))?;
+    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    let envelope = doc.sign(&sk, key_id)?;
+    std::fs::write(out, envelope)
+        .with_context(|| format!("cannot write envelope {}", out.display()))?;
+    println!(
+        "signed line-status #{} for line {} -> {}",
+        doc.counter,
+        doc.line,
+        out.display()
+    );
+    Ok(())
+}
+
+fn self_verify(archive: &std::path::Path, envelope: &std::path::Path) -> anyhow::Result<()> {
+    let root_pk = trust_root_bytes()?;
+    let name = archive
+        .file_name()
+        .context("archive path has no file name")?
+        .to_string_lossy();
+    let bytes =
+        std::fs::read(archive).with_context(|| format!("cannot read {}", archive.display()))?;
+    let env_bytes =
+        std::fs::read(envelope).with_context(|| format!("cannot read {}", envelope.display()))?;
+    let digest = varve_core::verify_release_file(&name, &bytes, &env_bytes, &root_pk)?;
+    println!("{name} verified against the signed release sums ({digest})");
+    Ok(())
 }
 
 fn run_tool(
@@ -267,6 +428,11 @@ fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result
 /// there is deliberately no built-in default while the root ceremony is
 /// pending.
 fn trust_root() -> anyhow::Result<varve_core::PinnedKeyVerifier> {
+    varve_core::PinnedKeyVerifier::from_public_key_bytes(&trust_root_bytes()?)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn trust_root_bytes() -> anyhow::Result<Vec<u8>> {
     let Some(path) = std::env::var_os("VARVE_TRUST_ROOT") else {
         bail!(
             "no trust root configured — set VARVE_TRUST_ROOT to the file holding the \
@@ -276,9 +442,8 @@ fn trust_root() -> anyhow::Result<varve_core::PinnedKeyVerifier> {
     let path = PathBuf::from(path);
     let hex_key = std::fs::read_to_string(&path)
         .with_context(|| format!("cannot read trust root {}", path.display()))?;
-    let bytes = hex_decode(hex_key.trim())
-        .with_context(|| format!("trust root {} is not valid hex", path.display()))?;
-    varve_core::PinnedKeyVerifier::from_public_key_bytes(&bytes).map_err(|e| anyhow::anyhow!("{e}"))
+    hex_decode(hex_key.trim())
+        .with_context(|| format!("trust root {} is not valid hex", path.display()))
 }
 
 fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {

@@ -474,6 +474,212 @@ fn deposit_creates_a_layer_the_standard_pipeline_installs() {
         .success();
 }
 
+fn status_doc_json(line: &str, counter: u64) -> String {
+    format!(
+        r#"{{
+  "line": "{line}",
+  "counter": {counter},
+  "issued-at": "2026-08-07T00:00:00Z",
+  "support-until": "2028-07-31",
+  "yanked": {{ "{line}.0": "CVE-2026-0001 in synth" }},
+  "known-problems": [
+    {{ "id": "KP-1", "title": "fusion regression", "severity": "medium",
+       "affected": ["{line}.0"], "workaround": "disable mla fusion" }}
+  ]
+}}"#
+    )
+}
+
+// rivet: verifies REQ-KP-001
+#[test]
+fn status_reports_yank_and_known_problems_from_attached_evidence() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+
+    // CI signs a status document…
+    let (sk_path, doc_path, env_path) = (
+        parent.join("status-root.key"),
+        parent.join("status.json"),
+        parent.join("status.dsse.json"),
+    );
+    // …with the SAME root the layer was signed by: reuse the fixture's key
+    // is not possible (it is internal), so re-sign layer + status with one
+    // key here instead.
+    let (sk, pk) = varve_core::generate_root_keypair();
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust = parent.join("one-root.pub");
+    std::fs::write(&trust, hex::encode(&pk)).unwrap();
+    std::fs::write(&doc_path, status_doc_json("2026.07", 1)).unwrap();
+    varve(&fx)
+        .args(["sign-status", "--file"])
+        .arg(&doc_path)
+        .args(["--key"])
+        .arg(&sk_path)
+        .args(["--out"])
+        .arg(&env_path)
+        .assert()
+        .success();
+
+    // status ingests the envelope, caches it, and reports for the pin.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["status", "--from-file"])
+        .arg(&env_path)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("YANKED")
+                .and(predicate::str::contains("CVE-2026-0001"))
+                .and(predicate::str::contains("1 known problem"))
+                .and(predicate::str::contains("2028-07-31")),
+        );
+
+    // Cached: no --from-file needed on the second ask.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("YANKED"));
+}
+
+// rivet: verifies REQ-KP-001
+#[test]
+fn status_refuses_a_stale_document_and_keeps_the_newer_cache() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("k.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust = parent.join("k.pub");
+    std::fs::write(&trust, hex::encode(&pk)).unwrap();
+
+    let sign = |counter: u64, out: &std::path::Path| {
+        let doc = parent.join(format!("doc-{counter}.json"));
+        std::fs::write(&doc, status_doc_json("2026.07", counter)).unwrap();
+        varve(&fx)
+            .args(["sign-status", "--file"])
+            .arg(&doc)
+            .args(["--key"])
+            .arg(&sk_path)
+            .args(["--out"])
+            .arg(out)
+            .assert()
+            .success();
+    };
+    let newer = parent.join("newer.dsse.json");
+    sign(3, &newer);
+    let older = parent.join("older.dsse.json");
+    sign(2, &older);
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["status", "--from-file"])
+        .arg(&newer)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["status", "--from-file"])
+        .arg(&older)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("stale"));
+}
+
+// rivet: verifies REQ-SELF-001
+#[test]
+fn self_verify_accepts_a_signed_release_file_and_refuses_a_tampered_one() {
+    let fx = fixture(None, &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust = parent.join("release-root.pub");
+    std::fs::write(&trust, hex::encode(&pk)).unwrap();
+
+    let archive = parent.join("varve-v9.9.9-x.tar.gz");
+    std::fs::write(&archive, b"tarball-bytes").unwrap();
+    let digest = varve_core::manifest_digest(b"tarball-bytes");
+    let sums = format!(
+        "{}  ./varve-v9.9.9-x.tar.gz\n",
+        digest.strip_prefix("sha256:").unwrap()
+    );
+    let envelope = varve_core::sign_release_sums(sums.as_bytes(), &sk, "k").unwrap();
+    let env_path = parent.join("SHA256SUMS.txt.dsse.json");
+    std::fs::write(&env_path, envelope).unwrap();
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["self-verify", "--archive"])
+        .arg(&archive)
+        .args(["--envelope"])
+        .arg(&env_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("verified"));
+
+    std::fs::write(&archive, b"tampered!").unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["self-verify", "--archive"])
+        .arg(&archive)
+        .args(["--envelope"])
+        .arg(&env_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not match"));
+}
+
+// rivet: verifies REQ-SELF-001
+#[test]
+fn sign_sums_produces_an_envelope_self_verify_accepts() {
+    let fx = fixture(None, &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("r.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust = parent.join("r.pub");
+    std::fs::write(&trust, hex::encode(&pk)).unwrap();
+
+    let archive = parent.join("varve-v9.9.9-y.tar.gz");
+    std::fs::write(&archive, b"bytes").unwrap();
+    let digest = varve_core::manifest_digest(b"bytes");
+    let sums_path = parent.join("SHA256SUMS.txt");
+    std::fs::write(
+        &sums_path,
+        format!(
+            "{}  ./varve-v9.9.9-y.tar.gz\n",
+            digest.strip_prefix("sha256:").unwrap()
+        ),
+    )
+    .unwrap();
+    let env_path = parent.join("SHA256SUMS.txt.dsse.json");
+
+    varve(&fx)
+        .args(["sign-sums", "--sums"])
+        .arg(&sums_path)
+        .args(["--key"])
+        .arg(&sk_path)
+        .args(["--out"])
+        .arg(&env_path)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["self-verify", "--archive"])
+        .arg(&archive)
+        .args(["--envelope"])
+        .arg(&env_path)
+        .assert()
+        .success();
+}
+
 // rivet: verifies REQ-COEXIST-001
 #[test]
 fn list_with_an_empty_core_succeeds_and_says_so() {

@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased (v0.5.0 — tag held on REQ-PROV-001 / sigil#221)
+
+Known-problems evidence and self-verification (REQ-KP-001 + REQ-SELF-001
+verified, DD-008 + DD-009 accepted; the release gate holds until
+REQ-PROV-001's attestation half lands via pulseengine/sigil#221).
+
+- Line-status documents (DD-008): per-line signed advisories — known
+  problems in the Ferrocene shape (workaround/detection/mitigation/affected),
+  support window, yank markers — DSSE envelopes under their own payload type
+  with their own monotonic counter; attachable to an existing oci-layout
+  WITHOUT touching any layer blob or digest (tested byte-for-byte); cached
+  per line; a stale advisory cannot replace a newer one
+- `varve status [--from-file]`: "layer 2026.07.0: YANKED …, supported until …,
+  N known problems, M with workarounds" — offline, from the verified cache
+- `varve sign-status` (CI): validates through the typed schema before signing
+- Self-verification (DD-009): releases gain `SHA256SUMS.txt.dsse.json`
+  signed with the varve root; `varve self-verify --archive --envelope`
+  checks a downloaded release offline against the pinned root, failing
+  closed (absent envelope, tampered file, impostor key, wrong payload type
+  all refused). `varve sign-sums` is the producing half — the same code the
+  verifier tests against. Release workflow signs when the root ceremony
+  provisions VARVE_ROOT_KEY (v1.0 gate); until then the asset is visibly
+  absent, never silently skipped
+
 ## v0.4.0 — 2026-08-07
 
 Deposit and dispatch (`rivet release status v0.4.0`: cuttable —
