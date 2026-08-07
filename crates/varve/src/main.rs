@@ -153,6 +153,17 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
+    /// Update varve itself: check the latest release, verify it with the
+    /// RUNNING binary against the trust root (old-verifies-new), replace
+    /// atomically. Explicit act only — varve never phones home.
+    SelfUpdate {
+        /// Report what is available without changing anything.
+        #[arg(long)]
+        check: bool,
+        /// Install destination (default: the running binary).
+        #[arg(long, value_name = "PATH")]
+        to: Option<PathBuf>,
+    },
     /// Verify a varve release file against its signed SHA256SUMS envelope —
     /// the tool that gates the toolchain clearing its own gate.
     SelfVerify {
@@ -232,6 +243,7 @@ fn run() -> anyhow::Result<()> {
             key_id,
             out,
         } => sign_sums(&sums, &key, &key_id, &out),
+        Cmd::SelfUpdate { check, to } => self_update(check, to.as_deref()),
         Cmd::SelfVerify { archive, envelope } => self_verify(&archive, &envelope),
     }
 }
@@ -387,6 +399,39 @@ fn sign_status(
         doc.counter,
         doc.line,
         out.display()
+    );
+    Ok(())
+}
+
+fn self_update(check: bool, to: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    // The API endpoint decides AVAILABILITY only; acceptance is the signed
+    // sums against the pinned root. Overridable for mirrors and tests.
+    let api = std::env::var("VARVE_UPDATE_API").unwrap_or_else(|_| {
+        "https://api.github.com/repos/pulseengine/varve/releases/latest".to_string()
+    });
+    let platform = varve_core::host_platform();
+    let Some(plan) = varve_core::update::check_latest(&api, current, &platform)? else {
+        println!("varve {current} is current");
+        return Ok(());
+    };
+    if check {
+        println!(
+            "varve {current} installed; {} available — run `varve self-update` to install (verified)",
+            plan.latest
+        );
+        return Ok(());
+    }
+    let root_pk = trust_root_bytes()?;
+    let dest = match to {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_exe().context("cannot locate the running varve binary")?,
+    };
+    let digest = varve_core::update::perform(&plan, &root_pk, &dest)?;
+    println!(
+        "varve {current} -> {} installed at {} ({digest})",
+        plan.latest,
+        dest.display()
     );
     Ok(())
 }

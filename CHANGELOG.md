@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.8.0 — 2026-08-07
+
+Updating the updater (REQ-UPDATE-001 verified): explicit, verified,
+fail-closed — never automatic, never phoning home.
+
+- `varve self-update [--check] [--to PATH]`: check the latest release,
+  download the host platform's archive + its varve-native signed sums,
+  verify with the RUNNING binary against the pinned trust root
+  (old-verifies-new, the TUF-rotation shape), replace atomically,
+  report old → new. Unsigned releases, impostor signatures, and
+  unparseable versions all refuse; a refused update leaves the current
+  binary untouched (tested, mutation-checked)
+- No passive network calls: varve makes no request the user did not
+  explicitly command; `--check` is the staleness answer
+- Release sums are now signed with the PROVISIONAL rolling root
+  (labeled in the workflow) until the ceremony provisions the
+  qualified root; the ceremony release will be dual-signed so the
+  old-verifies-new chain migrates without a flag day
+- `VARVE_UPDATE_API` overrides the release endpoint (mirrors,
+  air-gapped relays) — availability only, never acceptance
+
 ## v0.7.0 — 2026-08-07
 
 Environment integration (REQ-ENV-001 verified): varve sets up its own

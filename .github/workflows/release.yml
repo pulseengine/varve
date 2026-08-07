@@ -215,22 +215,32 @@ jobs:
       - name: Sign SHA256SUMS with the varve root (DSSE)
         env:
           VARVE_ROOT_KEY: ${{ secrets.VARVE_ROOT_KEY }}
+          VARVE_ROLLING_KEY: ${{ secrets.VARVE_ROLLING_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${VARVE_ROOT_KEY:-}" ]; then
-            echo "::warning::VARVE_ROOT_KEY not provisioned — release ships without \
-          SHA256SUMS.txt.dsse.json; varve self-verify will fail closed on this release \
-          (root ceremony pending, see DD-009)."
+          if [ -n "${VARVE_ROOT_KEY:-}" ]; then
+            SIGNING_KEY="$VARVE_ROOT_KEY"; KEY_ID=varve-root-1
+          elif [ -n "${VARVE_ROLLING_KEY:-}" ]; then
+            # PROVISIONAL (REQ-UPDATE-001): the rolling root signs varve's own
+            # releases until the ceremony provisions VARVE_ROOT_KEY. The
+            # ceremony release will be dual-signed so old-verifies-new
+            # migrates without a flag day.
+            SIGNING_KEY="$VARVE_ROLLING_KEY"; KEY_ID=varve-rolling-1
+            echo "::notice::release sums signed with the PROVISIONAL rolling root (ceremony pending)"
+          else
+            echo "::warning::no signing key provisioned — release ships without \
+          SHA256SUMS.txt.dsse.json; varve self-update/self-verify will fail closed on it."
             exit 0
           fi
           cargo build --release -p varve
-          printf '%s' "$VARVE_ROOT_KEY" > /tmp/varve-root.key
+          printf '%s' "$SIGNING_KEY" > /tmp/varve-root.key
           cd release-assets
           # The signing code is the same sign_release_sums the verifier
           # tests against — producer and consumer cannot drift.
           ../target/release/varve sign-sums \
             --sums SHA256SUMS.txt \
             --key /tmp/varve-root.key \
+            --key-id "$KEY_ID" \
             --out SHA256SUMS.txt.dsse.json
           rm -f /tmp/varve-root.key
           ls -la SHA256SUMS.txt.dsse.json

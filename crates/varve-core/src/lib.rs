@@ -37,6 +37,7 @@ pub mod rollback;
 pub mod selfverify;
 pub mod source;
 pub mod store;
+pub mod update;
 pub mod verify;
 
 pub use archive::{ArchiveError, OciLayoutSource, export as export_archive};
