@@ -110,8 +110,8 @@ artifacts:
   - id: REQ-PROV-001
     type: requirement
     title: Build outputs record the layer that produced them
-    status: approved
-    release: v0.4.0
+    status: implemented
+    release: v0.5.0
     description: >
       varve shall stamp the layer identity (name and manifest digest) into the
       provenance an artifact carries, so that "which toolchain produced this?"
@@ -253,7 +253,7 @@ artifacts:
   - id: REQ-DEPOSIT-001
     type: requirement
     title: A layer is assembled, signed and published by CI in one auditable step
-    status: approved
+    status: verified
     release: v0.4.0
     description: >
       varve deposit shall assemble a layer manifest (OCI image index) from the
@@ -456,7 +456,7 @@ artifacts:
   - id: DD-007
     type: design-decision
     title: Provenance stamping extends wsc-attestation ToolInfo, not the tools
-    status: approved
+    status: accepted
     release: v0.4.0
     description: >
       The layer identity (name + manifest digest) enters build provenance via

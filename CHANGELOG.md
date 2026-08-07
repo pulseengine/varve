@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.4.0 — 2026-08-07
+
+Deposit and dispatch (`rivet release status v0.4.0`: cuttable —
+REQ-DEPOSIT-001 verified, DD-007 accepted).
+
+- `varve deposit` (CI): assemble the layer manifest from per-tool binaries,
+  embed line/counter/issued-at in the signed payload, sign into a DSSE
+  envelope, and write the same OCI image layout `archive` produces — a fresh
+  deposit and an archived core are byte-compatible, and deposits install
+  through the one verified pipeline. Deterministic: identical specs yield
+  identical digests. Empty or duplicate tool lists refused
+- `varve run [--varve LAYER] -- <tool> …`: exec the pinned layer's tool with
+  the layer identity in the environment (`VARVE_LAYER`,
+  `VARVE_LAYER_MANIFEST_DIGEST`) — the dispatch half of the provenance
+  contract; exit codes propagate; `--varve` is a one-off that never touches
+  the checked-in pin
+- Upstream: pulseengine/sigil#221 adds `toolchain` +
+  `toolchain_manifest_digest` to wsc-attestation ToolInfo and populates them
+  from the varve dispatch environment (implements sigil#217)
+- Scope move (logged): REQ-PROV-001 → v0.5.0; its varve half (dispatch env)
+  ships here, the attestation half rides sigil#221
+
 ## v0.3.0 — 2026-08-07
 
 The offline core (REQ-OFFLINE-001 verified; `rivet release status v0.3.0`:
