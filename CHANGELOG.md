@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.7.0 — 2026-08-07
+
+Environment integration (REQ-ENV-001 verified): varve sets up its own
+environment; users source it, never hand-edit PATH.
+
+- `varve env [--shell sh|fish]`: idempotent shell code putting the shim
+  directory on PATH — `eval "$(varve env)"`; double evaluation cannot
+  stack duplicate entries (tested)
+- `varve shim install` now writes a sourceable `$VARVE_ROOT/env`
+  (rustup-style) and prints the one-liner instead of a hand-edit
+  instruction
+- `varve completions <shell>`: zsh/bash/fish (and friends) completion
+  scripts via clap_complete
+
 ## v0.6.1 — 2026-08-07
 
 Patch: registry pulls of real-sized tool binaries.

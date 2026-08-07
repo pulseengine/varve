@@ -609,3 +609,24 @@ artifacts:
     fields:
       priority: must
       category: functional
+
+  - id: REQ-ENV-001
+    type: requirement
+    title: varve sets up its own environment; users source it, never hand-edit
+    status: verified
+    release: v0.7.0
+    description: >
+      varve env shall emit idempotent shell code that puts the shim directory
+      on PATH (evaluable via eval "$(varve env)" and written as a sourceable
+      $VARVE_ROOT/env file at shim install, the rustup pattern), and varve
+      completions <shell> shall emit completion scripts for zsh, bash and
+      fish. Setup is one sourced line; instructing users to hand-edit PATH
+      is the anti-pattern this requirement retires. Evaluating the
+      environment twice must not stack duplicate PATH entries.
+    tags: [ergonomics]
+    links:
+      - type: traces-to
+        target: DD-006
+    fields:
+      priority: should
+      category: functional

@@ -751,6 +751,98 @@ fn shims_resolve_per_invocation_so_switching_projects_is_cd() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("varve.toml"));
 }
 
+// rivet: verifies REQ-ENV-001
+#[cfg(unix)]
+#[test]
+fn env_is_evaluable_and_idempotent() {
+    let fx = fixture(None, &[]);
+    let out = varve(&fx).arg("env").output().unwrap();
+    assert!(out.status.success());
+    let script = String::from_utf8(out.stdout).unwrap();
+    let shims = fx.root.join("shims");
+    assert!(script.contains(shims.to_str().unwrap()), "{script}");
+
+    // Evaluating twice must not stack duplicate PATH entries.
+    let shell = format!(
+        "eval \"$VARVE_ENV\"; eval \"$VARVE_ENV\"; printf '%s' \"$PATH\" | tr ':' '\\n' | grep -cx '{}'",
+        shims.display()
+    );
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&shell)
+        .env("VARVE_ENV", &script)
+        .env("PATH", std::env::var("PATH").unwrap())
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "1",
+        "shim dir must appear exactly once after double eval"
+    );
+}
+
+// rivet: verifies REQ-ENV-001
+#[cfg(unix)]
+#[test]
+fn shim_install_writes_a_sourceable_env_file() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let store = varve_core::Store::at(&fx.root);
+    let script = "#!/bin/sh\necho from-the-layer\n";
+    store
+        .lay_down(MANIFEST_JULY.as_bytes(), &[("probe", script.as_bytes())])
+        .unwrap();
+    varve(&fx)
+        .args(["shim", "install"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("env"));
+    let env_file = fx.root.join("env");
+    assert!(
+        env_file.is_file(),
+        "shim install must write {}",
+        env_file.display()
+    );
+
+    // Sourcing the file makes the shim resolvable and runnable.
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            ". '{}' && cd '{}' && probe",
+            env_file.display(),
+            fx.project.display()
+        ))
+        .env("VARVE_ROOT", &fx.root)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("from-the-layer"),
+        "stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// rivet: verifies REQ-ENV-001
+#[test]
+fn completions_emit_per_shell_scripts() {
+    let fx = fixture(None, &[]);
+    varve(&fx)
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("#compdef varve"));
+    varve(&fx)
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("complete"));
+    varve(&fx)
+        .args(["completions", "fish"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("complete -c varve"));
+}
+
 // rivet: verifies REQ-COEXIST-001
 #[test]
 fn list_with_an_empty_core_succeeds_and_says_so() {
