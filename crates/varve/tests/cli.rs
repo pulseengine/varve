@@ -680,6 +680,77 @@ fn sign_sums_produces_an_envelope_self_verify_accepts() {
         .success();
 }
 
+// rivet: verifies REQ-SHIM-001
+#[cfg(unix)]
+#[test]
+fn shims_resolve_per_invocation_so_switching_projects_is_cd() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    // Two layers, each with a `probe` tool that names itself.
+    let store = varve_core::Store::at(&fx.root);
+    for (layer, marker) in [("2026.07.0", "i-am-july"), ("2026.09.0", "i-am-september")] {
+        let manifest = MANIFEST_JULY.replace("2026.07.0", layer);
+        let script = format!("#!/bin/sh\necho {marker} layer=$VARVE_LAYER\n");
+        store
+            .lay_down(manifest.as_bytes(), &[("probe", script.as_bytes())])
+            .unwrap();
+    }
+    // Two projects pinning different layers.
+    let parent = fx.project.parent().unwrap();
+    let project_sep = parent.join("project-sep");
+    std::fs::create_dir_all(&project_sep).unwrap();
+    std::fs::write(
+        project_sep.join("varve.toml"),
+        PIN_JULY.replace("2026.07.0", "2026.09.0"),
+    )
+    .unwrap();
+
+    // Install shims once, from the July project.
+    varve(&fx)
+        .args(["shim", "install"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("shims"));
+    let shim = fx.root.join("shims").join("probe");
+    assert!(shim.is_file(), "shim written at {}", shim.display());
+
+    // The SAME shim binary, invoked from each project dir, runs that
+    // project's layer — switching toolchains is cd.
+    let run_shim = |dir: &std::path::Path| {
+        let out = std::process::Command::new(&shim)
+            .current_dir(dir)
+            .env("VARVE_ROOT", &fx.root)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        )
+    };
+    let (ok_july, out_july) = run_shim(&fx.project);
+    assert!(ok_july, "july project shim run failed: {out_july}");
+    assert!(
+        out_july.contains("i-am-july") && out_july.contains("layer=2026.07.0"),
+        "{out_july}"
+    );
+    let (ok_sep, out_sep) = run_shim(&project_sep);
+    assert!(ok_sep, "september project shim run failed: {out_sep}");
+    assert!(
+        out_sep.contains("i-am-september") && out_sep.contains("layer=2026.09.0"),
+        "{out_sep}"
+    );
+
+    // No pin, no fallback: from a pinless directory the shim fails closed.
+    let bare = parent.join("no-pin-here");
+    std::fs::create_dir_all(&bare).unwrap();
+    let out = std::process::Command::new(&shim)
+        .current_dir(&bare)
+        .env("VARVE_ROOT", &fx.root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a pinless dir must not resolve");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("varve.toml"));
+}
+
 // rivet: verifies REQ-COEXIST-001
 #[test]
 fn list_with_an_empty_core_succeeds_and_says_so() {

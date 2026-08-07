@@ -254,6 +254,7 @@ mod tests {
         InstallPolicy {
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
+            platform: "test-platform",
         }
     }
 
@@ -368,7 +369,9 @@ mod tests {
         assert_eq!(outcome.digest, manifest_digest(&payload));
         // And the reinstalled layer re-verifies offline, envelope retained.
         let entry = fresh_store.get(&outcome.digest).unwrap().unwrap();
-        let checked = crate::reverify::verify_installed(&fresh_store, &entry, &verifier).unwrap();
+        let checked =
+            crate::reverify::verify_installed(&fresh_store, &entry, &verifier, "test-platform")
+                .unwrap();
         assert_eq!(checked, 1);
     }
 

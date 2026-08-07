@@ -207,6 +207,7 @@ mod tests {
         let policy = InstallPolicy {
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
+            platform: "test-platform",
         };
         let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
 

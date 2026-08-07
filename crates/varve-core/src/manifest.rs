@@ -99,6 +99,55 @@ impl LayerManifest {
 
 #[cfg(test)]
 pub(crate) mod fixtures {
+    /// Entries with an optional per-entry platform annotation
+    /// (REQ-PLATFORM-001 fixtures).
+    pub fn manifest_with_platform_tools(
+        layer: &str,
+        channel: &str,
+        counter: u64,
+        issued_at: &str,
+        tools: &[(&str, &str, Option<&str>)],
+    ) -> Vec<u8> {
+        let entries = tools
+            .iter()
+            .map(|(name, digest, platform)| {
+                let platform_ann = platform
+                    .map(|p| format!(",\n        \"eu.pulseengine.platform\": \"{p}\""))
+                    .unwrap_or_default();
+                format!(
+                    r#"    {{
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "{digest}",
+      "size": 0,
+      "annotations": {{
+        "eu.pulseengine.tool": "{name}"{platform_ann}
+      }}
+    }}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!(
+            r#"{{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "artifactType": "application/vnd.pulseengine.varve.layer.v1+json",
+  "annotations": {{
+    "eu.pulseengine.varve.layer": "{layer}",
+    "eu.pulseengine.varve.line": "{line}",
+    "eu.pulseengine.varve.channel": "{channel}",
+    "eu.pulseengine.varve.counter": "{counter}",
+    "org.opencontainers.image.created": "{issued_at}"
+  }},
+  "manifests": [
+{entries}
+  ]
+}}"#,
+            line = &layer[..layer.rfind('.').unwrap()],
+        )
+        .into_bytes()
+    }
+
     /// An acceptance-grade manifest whose entries reference tools by blob
     /// digest — the shape `install` consumes.
     pub fn manifest_with_tools(

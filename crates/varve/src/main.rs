@@ -38,11 +38,15 @@ enum Cmd {
     /// Resolve this project's pin, fetch, verify against the trust root, and
     /// lay the layer down in the core.
     Install {
-        /// Source to fetch from: a directory-shaped archive
-        /// (`manifests/` + `blobs/`). The public-registry source lands with
-        /// `varve deposit`; until then a source must be given explicitly.
-        #[arg(long, value_name = "DIR")]
-        from: PathBuf,
+        /// Source to fetch from: an OCI registry reference
+        /// (`oci://ghcr.io/org/repo`), an oci-layout archive directory, or a
+        /// plain `manifests/`+`blobs/` directory.
+        #[arg(long, value_name = "SOURCE")]
+        from: String,
+        /// Override the host platform (target triple) — cross-platform
+        /// workflows only; the default is this machine.
+        #[arg(long, value_name = "TRIPLE")]
+        platform: Option<String>,
     },
     /// Re-verify the pinned layer against its retained signature and the
     /// signed digests — the install-time verdict, repeated offline.
@@ -122,6 +126,10 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
+    /// Shims on PATH: thin dispatchers that resolve the pin from the
+    /// invocation's working directory and exec — switching projects is cd.
+    #[command(subcommand)]
+    Shim(ShimCmd),
     /// (CI) Sign a release SHA256SUMS.txt into the DSSE envelope
     /// `self-verify` consumes — the producing half of DD-009.
     SignSums {
@@ -147,6 +155,18 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ShimCmd {
+    /// Write shims for the pinned layer's tools into the shim directory
+    /// (`$VARVE_ROOT/shims`). Add that directory to PATH once; each shim
+    /// re-resolves the pin on every invocation, exactly like `varve run`.
+    Install {
+        /// Additional tool names to shim beyond the pinned layer's tools.
+        #[arg(long = "tool", value_name = "NAME")]
+        extra_tools: Vec<String>,
+    },
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -163,7 +183,7 @@ fn run() -> anyhow::Result<()> {
     match cli.command {
         Cmd::Which { tool } => which(&store, &tool),
         Cmd::List => list(&store),
-        Cmd::Install { from } => install(&store, &from),
+        Cmd::Install { from, platform } => install(&store, &from, platform),
         Cmd::Verify { all } => verify(&store, all),
         Cmd::Archive { layer, dest } => archive(&store, &layer, &dest),
         Cmd::Run {
@@ -189,6 +209,7 @@ fn run() -> anyhow::Result<()> {
             key_id,
             out,
         } => sign_status(&file, &key, &key_id, &out),
+        Cmd::Shim(ShimCmd::Install { extra_tools }) => shim_install(&store, &extra_tools),
         Cmd::SignSums {
             sums,
             key,
@@ -197,6 +218,46 @@ fn run() -> anyhow::Result<()> {
         } => sign_sums(&sums, &key, &key_id, &out),
         Cmd::SelfVerify { archive, envelope } => self_verify(&archive, &envelope),
     }
+}
+
+fn shim_install(store: &Store, extra_tools: &[String]) -> anyhow::Result<()> {
+    // Tool names come from the currently-pinned layer (plus explicit
+    // extras); the names are only entry points — every invocation
+    // re-resolves the pin from its own working directory.
+    let pin = load_pin()?;
+    let resolved = resolve(&pin, store)?;
+    let mut names: Vec<String> = resolved.tools.iter().map(|(n, _)| n.clone()).collect();
+    names.extend(extra_tools.iter().cloned());
+    names.sort();
+    names.dedup();
+    if names.contains(&"varve".to_string()) {
+        bail!("refusing to shim 'varve' itself — a shim that resolves through itself recurses");
+    }
+
+    let varve_exe = std::env::current_exe().context("cannot locate the varve binary")?;
+    let shim_dir = store.root().join("shims");
+    std::fs::create_dir_all(&shim_dir)
+        .with_context(|| format!("cannot create {}", shim_dir.display()))?;
+    for name in &names {
+        let path = shim_dir.join(name);
+        let script = format!(
+            "#!/bin/sh\n# varve shim: resolves this project's pin on every invocation.\nexec \"{}\" run -- {name} \"$@\"\n",
+            varve_exe.display()
+        );
+        std::fs::write(&path, script)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    println!(
+        "installed {} shim(s) in {} — add it to PATH; switching projects is cd",
+        names.len(),
+        shim_dir.display()
+    );
+    Ok(())
 }
 
 fn sign_sums(
@@ -364,14 +425,20 @@ fn deposit_cmd(
         let (name_version, path) = spec
             .split_once('=')
             .with_context(|| format!("--tool '{spec}' is not NAME@VERSION=PATH"))?;
-        let (name, version) = name_version
-            .split_once('@')
-            .with_context(|| format!("--tool '{spec}' is not NAME@VERSION=PATH"))?;
+        // NAME@VERSION[@PLATFORM]=PATH — platform optional for
+        // platform-independent entries; new deposits should stamp it.
+        let mut parts = name_version.split('@');
+        let name = parts.next().unwrap_or_default();
+        let version = parts
+            .next()
+            .with_context(|| format!("--tool '{spec}' is not NAME@VERSION[@PLATFORM]=PATH"))?;
+        let platform = parts.next();
         let bytes =
             std::fs::read(path).with_context(|| format!("cannot read tool binary {path}"))?;
         deposit_tools.push(varve_core::DepositTool {
             name: name.to_string(),
             version: version.to_string(),
+            platform: platform.map(str::to_string),
             bytes,
         });
     }
@@ -478,23 +545,33 @@ fn today_rfc3339() -> String {
     format!("{y:04}-{m:02}-{d:02}T00:00:00Z")
 }
 
-fn install(store: &Store, from: &std::path::Path) -> anyhow::Result<()> {
+fn install(store: &Store, from: &str, platform: Option<String>) -> anyhow::Result<()> {
+    let platform = platform.unwrap_or_else(varve_core::host_platform);
     let pin = load_pin()?;
     let verifier = trust_root()?;
-    // Auto-detect the archive shape: a standard OCI image layout (the
-    // `varve archive` output) or the plain manifests/+blobs/ directory.
-    // Either way the same pipeline and the same trust root decide.
-    let source: Box<dyn varve_core::LayerSource> = if from.join("oci-layout").is_file() {
-        Box::new(varve_core::OciLayoutSource::at(from))
-    } else {
-        Box::new(varve_core::DirSource::at(from))
-    };
+    // Auto-detect the source shape: an oci:// registry reference, a standard
+    // OCI image layout (the `varve archive`/`deposit` output), or the plain
+    // manifests/+blobs/ directory. Either way the same pipeline and the same
+    // trust root decide — the source shape changes availability, never
+    // acceptance.
+    let source: Box<dyn varve_core::LayerSource> =
+        if from.starts_with("oci://") || from.starts_with("oci+http://") {
+            Box::new(varve_core::RegistrySource::parse(from)?)
+        } else {
+            let path = std::path::Path::new(from);
+            if path.join("oci-layout").is_file() {
+                Box::new(varve_core::OciLayoutSource::at(path))
+            } else {
+                Box::new(varve_core::DirSource::at(path))
+            }
+        };
     let source = &*source;
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let now = today_rfc3339();
     let policy = varve_core::InstallPolicy {
         now: &now,
         staleness_threshold_days: 90,
+        platform: &platform,
     };
     let outcome = varve_core::install(&pin, source, &verifier, store, &mut marks, &policy)?;
     println!(
@@ -523,7 +600,8 @@ fn verify(store: &Store, all: bool) -> anyhow::Result<()> {
         bail!("nothing to verify — no layers installed");
     }
     for layer in layers {
-        let checked = varve_core::verify_installed(store, &layer, &verifier)?;
+        let checked =
+            varve_core::verify_installed(store, &layer, &verifier, &varve_core::host_platform())?;
         println!(
             "layer {} {} verified: signature OK, {checked} tool(s) match their signed digests",
             layer.layer, layer.digest
