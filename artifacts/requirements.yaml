@@ -15,7 +15,7 @@ artifacts:
   - id: REQ-PIN-001
     type: requirement
     title: A pinned layer resolves exactly, or the command fails
-    status: approved
+    status: verified
     release: v0.1.0
     description: >
       varve shall resolve the pinned layer by walking up from the working
@@ -58,7 +58,7 @@ artifacts:
   - id: REQ-COEXIST-001
     type: requirement
     title: Layers coexist; switching is by directory
-    status: approved
+    status: verified
     release: v0.1.0
     description: >
       varve shall keep layers in a content-addressed core keyed by manifest
@@ -91,7 +91,7 @@ artifacts:
   - id: REQ-NOUPDATE-001
     type: requirement
     title: varve never moves a project between layers on its own
-    status: approved
+    status: verified
     release: v0.1.0
     description: >
       varve shall not contain any mechanism that changes the layer a project
@@ -131,7 +131,7 @@ artifacts:
   - id: REQ-SCOPE-001
     type: requirement
     title: varve selects and verifies; it never transforms code
-    status: approved
+    status: verified
     release: v0.1.0
     description: >
       varve shall not compile, fuse, optimise, instrument or otherwise
@@ -180,7 +180,7 @@ artifacts:
   - id: REQ-PATCH-001
     type: requirement
     title: A frozen line can receive a patch without moving the consumer off it
-    status: approved
+    status: verified
     release: v0.1.0
     description: >
       The layer identifier shall be three-part from the first deposit —
@@ -276,7 +276,7 @@ artifacts:
   - id: DD-001
     type: design-decision
     title: Distribute layers as OCI image indexes rather than a bespoke format
-    status: approved
+    status: accepted
     release: v0.1.0
     description: >
       An OCI image index gives content-addressed digests (pinning is native),
@@ -310,7 +310,7 @@ artifacts:
   - id: DD-002
     type: design-decision
     title: varve is a separate tool, outside the layer it installs
-    status: approved
+    status: accepted
     release: v0.1.0
     description: >
       sigil is a member of the toolchain bundle. A tool that installs a set
@@ -365,7 +365,7 @@ artifacts:
   - id: DD-004
     type: design-decision
     title: "Layer identifiers are three-part from day one: YYYY.MM.P, frozen-line patch model"
-    status: approved
+    status: accepted
     release: v0.1.0
     description: >
       A layer is always YYYY.MM.P — 2026.07.0 is the initial deposit of the
@@ -429,7 +429,7 @@ artifacts:
   - id: DD-006
     type: design-decision
     title: Resolution is walk-up discovery plus shims that exec, never fall back
-    status: approved
+    status: accepted
     release: v0.1.0
     description: >
       The pin (varve.toml) is discovered by walking up from the working

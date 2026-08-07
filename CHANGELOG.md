@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.1.0 — 2026-08-07
+
+Local resolution and the core, fail-closed. First implemented release; the
+v0.1.0 scope in rivet is fully `verified`/`accepted` (`rivet release status
+v0.1.0`).
+
+- `varve-core`: three-part layer identifiers (`YYYY.MM.P`, DD-004 grammar,
+  two-part rejected with corrective guidance), strict `varve.toml` pin parsing
+  (unknown keys/channels, malformed digests, empty tools all hard errors),
+  walk-up pin discovery, content-addressed core store (`core/sha256-…/`),
+  pure fail-closed resolution — no PATH fallback, no partial layers, digest
+  wins over name, ambiguity refuses
+- `varve` CLI: `which` (resolved binary + layer + digest), `list`
+- 37 tests, each carrying a `// rivet: verifies REQ-…` marker; resolution and
+  listing proven read-only against the core (REQ-SCOPE-001)
+- Falsification: a pin whose layer is absent, partial, ambiguous, or
+  digest-mismatched CANNOT resolve — the error type has no fallback variant
+
 ## Unreleased
 
 Design decisions closed and the release plan landed in rivet. Still design
