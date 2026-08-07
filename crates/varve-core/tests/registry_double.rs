@@ -290,3 +290,73 @@ fn an_unknown_tag_is_not_found_never_invented() {
         "{err}"
     );
 }
+
+// rivet: verifies REQ-REGISTRY-001
+#[test]
+fn blobs_larger_than_ten_mib_pull_cleanly() {
+    // Real toolchain binaries are tens of MB; the transport must not cap
+    // response bodies (caught live: ureq's 10 MiB default rejected a 31 MB
+    // tool blob on the first real GHCR pull).
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let tool: Vec<u8> = (0..12_000_000u32).map(|i| (i % 251) as u8).collect();
+    let tool_digest = manifest_digest(&tool);
+    let host = varve_core::host_platform();
+    let payload = format!(
+        r#"{{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "artifactType": "application/vnd.pulseengine.varve.layer.v1+json",
+  "annotations": {{
+    "eu.pulseengine.varve.layer": "2026.09.0",
+    "eu.pulseengine.varve.line": "2026.09",
+    "eu.pulseengine.varve.channel": "rolling",
+    "eu.pulseengine.varve.counter": "1",
+    "org.opencontainers.image.created": "2026-08-07T00:00:00Z"
+  }},
+  "manifests": [
+    {{
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "{tool_digest}",
+      "size": 12000000,
+      "annotations": {{ "eu.pulseengine.tool": "bigtool", "eu.pulseengine.platform": "{host}" }}
+    }}
+  ]
+}}"#
+    )
+    .into_bytes();
+    let payload_digest = manifest_digest(&payload);
+    let envelope = varve_core::sign_layer_manifest(&payload, &sk, "test-root").unwrap();
+
+    let mut blobs = BTreeMap::new();
+    blobs.insert(
+        manifest_digest(envelope.as_bytes()),
+        envelope.as_bytes().to_vec(),
+    );
+    blobs.insert(payload_digest.clone(), payload.clone());
+    blobs.insert(tool_digest.clone(), tool);
+    let mut manifests = BTreeMap::new();
+    manifests.insert(
+        "2026.09.0".to_string(),
+        oci_artifact_manifest(envelope.as_bytes(), &payload_digest, &[]),
+    );
+    let reference = serve(RegistryContent { manifests, blobs });
+
+    let source = varve_core::RegistrySource::parse(&reference).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let store = Store::at(&root);
+    let mut marks = HighWaterMarks::load(&root).unwrap();
+    let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+    let policy = InstallPolicy {
+        now: "2026-08-07T00:00:00Z",
+        staleness_threshold_days: 90,
+        platform: &varve_core::host_platform(),
+    };
+    let pin = Pin::parse(
+        "manifest-version = 1\n[toolchain]\nchannel = \"rolling\"\nlayer = \"2026.09.0\"\n",
+        "varve.toml",
+    )
+    .unwrap();
+    let outcome = install(&pin, &source, &verifier, &store, &mut marks, &policy).unwrap();
+    assert_eq!(outcome.digest, payload_digest);
+}
