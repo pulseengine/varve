@@ -1,0 +1,278 @@
+//! Anti-rollback and staleness verdicts (REQ-ROLLBACK-001, DD-005).
+//!
+//! The SUIT/Uptane discipline: the client persists, per release line, the
+//! highest release counter it has ever accepted — the high-water mark — and
+//! hard-rejects any layer below it. Counters are scoped *per line*, so a
+//! consumer frozen on 2026.07 keeps rollback protection inside that line
+//! without ever being pressured toward 2026.08.
+//!
+//! Time is an input, never sampled here: staleness verdicts are pure
+//! functions of (issued-at, now, threshold), so they are testable and the
+//! trusted base stays free of clock-reading policy.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use crate::layer::Line;
+use crate::manifest::LayerManifest;
+
+/// Outcome of the anti-rollback check for one manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RollbackVerdict {
+    /// Counter at or above the recorded mark (or first contact): acceptable.
+    Accept,
+    /// Counter strictly below the recorded high-water mark: rejected.
+    Rollback {
+        line: String,
+        presented: u64,
+        high_water: u64,
+    },
+}
+
+/// Persisted high-water marks, one per release line, stored under the varve
+/// root (NOT inside the core — the core holds evidence, this is client state).
+#[derive(Debug)]
+pub struct HighWaterMarks {
+    path: PathBuf,
+    marks: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RollbackError {
+    #[error("io error at {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "{path}: high-water-mark state is corrupt: {reason} — refusing to guess; repair or remove the file"
+    )]
+    Corrupt { path: String, reason: String },
+}
+
+impl HighWaterMarks {
+    /// Load the marks stored under `root` (missing file = first contact).
+    pub fn load(root: &Path) -> Result<Self, RollbackError> {
+        let path = root.join("state").join("high-water-marks.json");
+        let marks = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| RollbackError::Corrupt {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(source) => {
+                return Err(RollbackError::Io {
+                    path: path.display().to_string(),
+                    source,
+                });
+            }
+        };
+        Ok(HighWaterMarks { path, marks })
+    }
+
+    /// The recorded mark for a line, if any.
+    pub fn mark(&self, line: &Line) -> Option<u64> {
+        self.marks.get(&line.to_string()).copied()
+    }
+
+    /// Check a manifest against the marks. `Accept` does NOT advance the
+    /// mark — call [`Self::advance`] after the layer is fully verified and
+    /// laid down, so a failed install cannot burn the mark.
+    pub fn check(&self, manifest: &LayerManifest) -> RollbackVerdict {
+        let line = manifest.layer.line().to_string();
+        match self.marks.get(&line) {
+            Some(&high_water) if manifest.counter < high_water => RollbackVerdict::Rollback {
+                line,
+                presented: manifest.counter,
+                high_water,
+            },
+            _ => RollbackVerdict::Accept,
+        }
+    }
+
+    /// Record acceptance of a manifest: raise the line's mark to the
+    /// manifest's counter (never lowers) and persist.
+    pub fn advance(&mut self, manifest: &LayerManifest) -> Result<(), RollbackError> {
+        let line = manifest.layer.line().to_string();
+        let mark = self.marks.entry(line).or_insert(0);
+        *mark = (*mark).max(manifest.counter);
+        let io = |path: &Path, source: std::io::Error| RollbackError::Io {
+            path: path.display().to_string(),
+            source,
+        };
+        let dir = self.path.parent().expect("state file has a parent");
+        std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+        let bytes = serde_json::to_vec_pretty(&self.marks).expect("marks serialize");
+        std::fs::write(&self.path, bytes).map_err(|e| io(&self.path, e))?;
+        Ok(())
+    }
+}
+
+/// Staleness verdict: how old is the layer's issued-at relative to `now`?
+/// Both are RFC 3339 strings; `threshold_days` is policy supplied by the
+/// caller. Returns `Some(age_days)` when the layer is older than the
+/// threshold — a warning, never a rejection: a frozen consumer's layer aging
+/// is expected, staying silently ignorant of it is not.
+pub fn staleness_warning(issued_at: &str, now: &str, threshold_days: u32) -> Option<i64> {
+    let age = epoch_days(now)? - epoch_days(issued_at)?;
+    (age > i64::from(threshold_days)).then_some(age)
+}
+
+/// Days since the civil epoch for the date part of an RFC 3339 timestamp.
+/// Day resolution is deliberate: staleness policy is measured in days, so
+/// sub-day precision would only manufacture spurious boundary cases.
+fn epoch_days(rfc3339: &str) -> Option<i64> {
+    let date = rfc3339.get(..10)?;
+    let mut parts = date.split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next()?.parse().ok()?;
+    let d: i64 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Howard Hinnant's days_from_civil.
+    let y = y - i64::from(m <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::{LayerManifest, fixtures};
+
+    fn manifest(layer: &str, counter: u64) -> LayerManifest {
+        LayerManifest::parse(&fixtures::manifest(
+            layer,
+            "qualified",
+            counter,
+            "2026-07-31T09:14:00Z",
+        ))
+        .unwrap()
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn first_contact_accepts_and_advance_records_the_mark() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut hwm = HighWaterMarks::load(tmp.path()).unwrap();
+        let m = manifest("2026.07.0", 3);
+        assert_eq!(hwm.check(&m), RollbackVerdict::Accept);
+        assert_eq!(hwm.mark(m.layer.line()), None, "check must not advance");
+        hwm.advance(&m).unwrap();
+        assert_eq!(hwm.mark(m.layer.line()), Some(3));
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn a_counter_below_the_mark_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut hwm = HighWaterMarks::load(tmp.path()).unwrap();
+        hwm.advance(&manifest("2026.07.1", 4)).unwrap();
+        let verdict = hwm.check(&manifest("2026.07.0", 3));
+        assert_eq!(
+            verdict,
+            RollbackVerdict::Rollback {
+                line: "2026.07".into(),
+                presented: 3,
+                high_water: 4
+            }
+        );
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn an_equal_counter_reinstalls_cleanly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut hwm = HighWaterMarks::load(tmp.path()).unwrap();
+        hwm.advance(&manifest("2026.07.0", 3)).unwrap();
+        assert_eq!(
+            hwm.check(&manifest("2026.07.0", 3)),
+            RollbackVerdict::Accept
+        );
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn counters_are_scoped_per_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut hwm = HighWaterMarks::load(tmp.path()).unwrap();
+        hwm.advance(&manifest("2026.08.0", 9)).unwrap();
+        // The August line's mark must not embargo the July line: wohl stays
+        // frozen on July without being pressured forward.
+        assert_eq!(
+            hwm.check(&manifest("2026.07.0", 1)),
+            RollbackVerdict::Accept
+        );
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn marks_survive_a_new_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let mut hwm = HighWaterMarks::load(tmp.path()).unwrap();
+            hwm.advance(&manifest("2026.07.1", 5)).unwrap();
+        }
+        let hwm = HighWaterMarks::load(tmp.path()).unwrap();
+        assert_eq!(
+            hwm.check(&manifest("2026.07.0", 2)),
+            RollbackVerdict::Rollback {
+                line: "2026.07".into(),
+                presented: 2,
+                high_water: 5
+            }
+        );
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn advance_never_lowers_a_mark() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut hwm = HighWaterMarks::load(tmp.path()).unwrap();
+        hwm.advance(&manifest("2026.07.1", 5)).unwrap();
+        hwm.advance(&manifest("2026.07.0", 2)).unwrap();
+        assert_eq!(hwm.mark(manifest("2026.07.0", 2).layer.line()), Some(5));
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn corrupt_state_is_an_error_not_a_reset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("high-water-marks.json"), b"{ nope").unwrap();
+        // A silent reset would reopen the rollback window; refuse instead.
+        assert!(matches!(
+            HighWaterMarks::load(tmp.path()),
+            Err(RollbackError::Corrupt { .. })
+        ));
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn staleness_is_a_pure_function_of_issued_at_now_and_threshold() {
+        // 100 days old, threshold 90: warn with the age.
+        assert_eq!(
+            staleness_warning("2026-04-01T00:00:00Z", "2026-07-10T00:00:00Z", 90),
+            Some(100)
+        );
+        // 10 days old, threshold 90: quiet.
+        assert_eq!(
+            staleness_warning("2026-06-30T00:00:00Z", "2026-07-10T00:00:00Z", 90),
+            None
+        );
+        // Unparseable issued-at: warn conservatively? No — the manifest
+        // parser already rejected it; here both inputs are trusted RFC 3339.
+        // Clock skew (issued-at in the future) is quiet, not negative-aged.
+        assert_eq!(
+            staleness_warning("2026-08-01T00:00:00Z", "2026-07-10T00:00:00Z", 90),
+            None
+        );
+    }
+}

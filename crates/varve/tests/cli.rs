@@ -120,6 +120,184 @@ fn list_shows_every_installed_layer() {
     );
 }
 
+/// Signed-layer fixture material for the install/verify tests.
+struct SignedLayer {
+    archive: std::path::PathBuf,
+    trust_root: std::path::PathBuf,
+    wrong_root: std::path::PathBuf,
+}
+
+fn signed_layer_fixture(fx: &Fixture, layer: &str, counter: u64) -> SignedLayer {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let (_, wrong_pk) = varve_core::generate_root_keypair();
+    let tool_bytes = format!("{layer}-synth-binary").into_bytes();
+    let blob_digest = varve_core::manifest_digest(&tool_bytes);
+    let line = &layer[..layer.rfind('.').unwrap()];
+    let payload = format!(
+        r#"{{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "artifactType": "application/vnd.pulseengine.varve.layer.v1+json",
+  "annotations": {{
+    "eu.pulseengine.varve.layer": "{layer}",
+    "eu.pulseengine.varve.line": "{line}",
+    "eu.pulseengine.varve.channel": "qualified",
+    "eu.pulseengine.varve.counter": "{counter}",
+    "org.opencontainers.image.created": "2026-07-31T09:14:00Z"
+  }},
+  "manifests": [
+    {{
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "{blob_digest}",
+      "size": 0,
+      "annotations": {{ "eu.pulseengine.tool": "synth" }}
+    }}
+  ]
+}}"#
+    );
+    let envelope = varve_core::sign_layer_manifest(payload.as_bytes(), &sk, "test-root").unwrap();
+    let archive = fx
+        .project
+        .parent()
+        .unwrap()
+        .join(format!("archive-{layer}-{counter}"));
+    let dir = varve_core::DirSource::at(&archive);
+    dir.put(
+        envelope.as_bytes(),
+        &[(blob_digest.as_str(), tool_bytes.as_slice())],
+    )
+    .unwrap();
+    let trust_root = fx
+        .project
+        .parent()
+        .unwrap()
+        .join(format!("root-{layer}-{counter}.pub"));
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    let wrong_root = fx
+        .project
+        .parent()
+        .unwrap()
+        .join(format!("wrong-{layer}-{counter}.pub"));
+    std::fs::write(&wrong_root, hex::encode(&wrong_pk)).unwrap();
+    SignedLayer {
+        archive,
+        trust_root,
+        wrong_root,
+    }
+}
+
+// rivet: verifies REQ-VERIFY-001
+#[test]
+fn install_verifies_lays_down_and_verify_repeats_the_verdict() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2026.07.0"));
+    varve(&fx)
+        .args(["which", "synth"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bin/synth"));
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("verified"));
+}
+
+// rivet: verifies REQ-VERIFY-001
+#[test]
+fn install_refuses_a_layer_signed_by_the_wrong_root() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.wrong_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("signature"));
+    varve(&fx)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no layers"));
+}
+
+// rivet: verifies REQ-VERIFY-001
+#[test]
+fn install_without_a_trust_root_fails_closed() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("trust root"));
+}
+
+// rivet: verifies REQ-VERIFY-001
+#[test]
+fn verify_detects_a_tampered_binary() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    // Corrupt the installed tool, then re-verify.
+    let core = fx.root.join("core");
+    let entry = std::fs::read_dir(&core)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(entry.join("bin/synth"), b"EVIL").unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("synth"));
+}
+
+// rivet: verifies REQ-ROLLBACK-001
+#[test]
+fn a_rolled_back_layer_is_refused_by_the_cli() {
+    // Install the patched layer (counter 2) first…
+    let fx = fixture(
+        Some("manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.1\"\n"),
+        &[],
+    );
+    let newer = signed_layer_fixture(&fx, "2026.07.1", 2);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &newer.trust_root)
+        .args(["install", "--from"])
+        .arg(&newer.archive)
+        .assert()
+        .success();
+    // …then repoint the pin at the base layer (counter 1): refused as rollback.
+    std::fs::write(fx.project.join("varve.toml"), PIN_JULY).unwrap();
+    let older = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &older.trust_root)
+        .args(["install", "--from"])
+        .arg(&older.archive)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("rollback").or(predicate::str::contains("high-water")));
+}
+
 // rivet: verifies REQ-COEXIST-001
 #[test]
 fn list_with_an_empty_core_succeeds_and_says_so() {

@@ -37,7 +37,7 @@ artifacts:
   - id: REQ-VERIFY-001
     type: requirement
     title: Verification is independent of where the bytes came from
-    status: approved
+    status: verified
     release: v0.2.0
     description: >
       varve shall verify the layer manifest signature and every artifact digest
@@ -156,7 +156,7 @@ artifacts:
   - id: REQ-ROLLBACK-001
     type: requirement
     title: A stale but validly-signed layer cannot be passed off as current
-    status: approved
+    status: verified
     release: v0.2.0
     description: >
       varve shall reject a layer whose release counter is lower than the
@@ -339,7 +339,7 @@ artifacts:
   - id: DD-003
     type: design-decision
     title: Access is pluggable; acceptance is not
-    status: approved
+    status: accepted
     release: v0.2.0
     description: >
       Fetch goes through a source abstraction from the first commit, with a
@@ -393,7 +393,7 @@ artifacts:
   - id: DD-005
     type: design-decision
     title: "Anti-rollback: monotonic per-line release counters in signed metadata; tuf-on-ci as upgrade path"
-    status: approved
+    status: accepted
     release: v0.2.0
     description: >
       Every layer manifest carries a release counter (monotonic per release

@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.2.0 — 2026-08-07
+
+Verified install and anti-rollback. `rivet release status v0.2.0`: cuttable
+(REQ-VERIFY-001 + REQ-ROLLBACK-001 verified, DD-003 + DD-005 accepted).
+
+- Layer manifests travel as DSSE envelopes signed with the PulseEngine root
+  ed25519 key (sigil's `wsc` library); acceptance authenticates payload AND
+  payload type. Only the verified payload reaches disk — the envelope is
+  retained beside it for offline re-verification
+- `LayerSource` trait (DD-003): access is pluggable (`DirSource` archive,
+  in-memory double), acceptance is not — the kill-criterion test runs the
+  same bytes through two transports and asserts identical verdicts, and a
+  tampering source is caught by the signed digests
+- Anti-rollback (DD-005): monotonic per-line counters + issued-at inside the
+  signed manifest; persisted per-line high-water marks; a lower counter is
+  refused at install; corrupt state refuses rather than resets; failed
+  installs never advance the mark; staleness surfaced as a warning
+- `varve install --from <archive>` (fetch → verify signature → cross-check
+  pin → anti-rollback → verify blob digests → lay down → advance mark) and
+  `varve verify [--all]` (repeat the install-time verdict offline)
+- Trust root via `VARVE_TRUST_ROOT` (hex ed25519 public key); no built-in
+  default, no acceptance without it
+- Falsification: bytes not signed by the trust root, or a counter below the
+  line's high-water mark, CANNOT reach the core through any source
+- Friction filed upstream: sigil#218 (dsse dependency weight), sigil#219
+  (airgapped keyless verifier is a stub), sigil#220 (crates.io publish stale
+  at 0.9.0); scope note: the OCI-registry source lands with deposit (v0.4)
+
 ## v0.1.0 — 2026-08-07
 
 Local resolution and the core, fail-closed. First implemented release; the
