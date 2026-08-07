@@ -141,28 +141,68 @@ jobs:
         run: |
           set -euo pipefail
           oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
-          # Assemble the push set: envelope + payload + tool blobs, with the
-          # role annotations RegistrySource discovers by.
+          # Explicit publish: stream every blob with `oras blob push` (no
+          # metadata size limits), then push a hand-built artifact manifest —
+          # the exact shape RegistrySource consumes (envelope/payload role
+          # annotations on layers[]).
+          REPO="ghcr.io/pulseengine/varve/layers"
           SIG_TYPE='application/vnd.pulseengine.varve.signature.v1+json'
           mkdir -p push && cd push
           PAYLOAD_DIGEST=$(jq -r --arg t "$SIG_TYPE" \
             '[.manifests[] | select(.artifactType != $t)][0].digest' ../layer-layout/index.json)
           ENVELOPE_DIGEST=$(jq -r --arg t "$SIG_TYPE" \
             '[.manifests[] | select(.artifactType == $t)][0].digest' ../layer-layout/index.json)
-          cp "../layer-layout/blobs/sha256/${PAYLOAD_DIGEST#sha256:}" payload.json
-          cp "../layer-layout/blobs/sha256/${ENVELOPE_DIGEST#sha256:}" envelope.dsse.json
-          printf '%s' '{"envelope.dsse.json":{"eu.pulseengine.varve.role":"envelope"},"payload.json":{"eu.pulseengine.varve.role":"payload"}}' > annotations.json
-          FILES=(envelope.dsse.json:application/json payload.json:application/vnd.oci.image.index.v1+json)
-          i=0
-          for digest in $(jq -r '.manifests[].digest' payload.json); do
-            cp "../layer-layout/blobs/sha256/${digest#sha256:}" "blob-$i"
-            FILES+=("blob-$i:application/octet-stream")
-            i=$((i+1))
+          PAYLOAD_FILE="../layer-layout/blobs/sha256/${PAYLOAD_DIGEST#sha256:}"
+          ENVELOPE_FILE="../layer-layout/blobs/sha256/${ENVELOPE_DIGEST#sha256:}"
+
+          # 1. Push every blob: config, envelope, payload, tools.
+          printf '{}' > empty-config.json
+          oras blob push "$REPO" empty-config.json
+          oras blob push "$REPO" "$ENVELOPE_FILE"
+          oras blob push "$REPO" "$PAYLOAD_FILE"
+          for digest in $(jq -r '.manifests[].digest' "$PAYLOAD_FILE"); do
+            oras blob push "$REPO" "../layer-layout/blobs/sha256/${digest#sha256:}"
           done
-          oras push "ghcr.io/pulseengine/varve/layers:$LAYER" \
-            --artifact-type application/vnd.pulseengine.varve.layer.v1+json \
-            --annotation-file annotations.json \
-            "${FILES[@]}"
+
+          # 2. Build the artifact manifest.
+          jq -n \
+            --arg sig_type "$SIG_TYPE" \
+            --arg env_digest "$ENVELOPE_DIGEST" \
+            --argjson env_size "$(stat -c%s "$ENVELOPE_FILE")" \
+            --arg payload_digest "$PAYLOAD_DIGEST" \
+            --argjson payload_size "$(stat -c%s "$PAYLOAD_FILE")" \
+            --slurpfile payload "$PAYLOAD_FILE" \
+            '{
+              schemaVersion: 2,
+              mediaType: "application/vnd.oci.image.manifest.v1+json",
+              artifactType: "application/vnd.pulseengine.varve.layer.v1+json",
+              config: {
+                mediaType: "application/vnd.oci.empty.v1+json",
+                digest: "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                size: 2
+              },
+              layers: ([
+                {
+                  mediaType: "application/json",
+                  digest: $env_digest,
+                  size: $env_size,
+                  annotations: {"eu.pulseengine.varve.role": "envelope"}
+                },
+                {
+                  mediaType: "application/vnd.oci.image.index.v1+json",
+                  digest: $payload_digest,
+                  size: $payload_size,
+                  annotations: {"eu.pulseengine.varve.role": "payload"}
+                }
+              ] + [ $payload[0].manifests[] |
+                    { mediaType: "application/octet-stream",
+                      digest: .digest,
+                      size: .size } ])
+            }' > artifact-manifest.json
+          jq . artifact-manifest.json | head -30
+
+          # 3. Push the manifest under the layer tag.
+          oras manifest push "$REPO:$LAYER" artifact-manifest.json
 
       - name: Upload the oci-layout (artifact of record)
         uses: actions/upload-artifact@v7
