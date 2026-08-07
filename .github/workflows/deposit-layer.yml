@@ -1,0 +1,172 @@
+name: Deposit layer
+
+# The bundle assembler (REQ-DEPOSIT-001, the produce half of the #157
+# architecture): download the pinned per-tool releases, VERIFY each one
+# against its own repo's cosign identity, deposit them as one signed layer,
+# and publish — registry (GHCR) + the oci-layout as the artifact of record.
+#
+# Rolling channel only until the root ceremony: signs with the PROVISIONAL
+# rolling root (trust-roots/rolling.pub / secret VARVE_ROLLING_KEY).
+
+on:
+  workflow_dispatch:
+    inputs:
+      layer:
+        description: "Layer identifier (YYYY.MM.P), e.g. 2026.08.0"
+        required: true
+        type: string
+      counter:
+        description: "Monotonic per-line release counter"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # The layer's contents: bump deliberately, in a reviewed diff.
+  RIVET_VERSION: v0.32.0
+  SYNTH_VERSION: v0.54.0
+  WSC_VERSION: v0.10.0
+
+jobs:
+  deposit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable as of 2026-08-07
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2 as of 2026-08-07
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3 as of 2026-08-07
+      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1 as of 2026-08-07
+
+      - name: Build varve
+        run: cargo build --release -p varve
+
+      - name: Fetch and verify the tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p tools
+          verify_release() { # repo version identity_path
+            local repo="$1" version="$2"
+            local dir="downloads/${repo##*/}"
+            mkdir -p "$dir"
+            gh release download "$version" --repo "$repo" \
+              -p 'SHA256SUMS.txt' -p 'SHA256SUMS.txt.cosign.bundle' -D "$dir"
+            cosign verify-blob \
+              --bundle "$dir/SHA256SUMS.txt.cosign.bundle" \
+              --certificate-identity-regexp "https://github.com/$repo/" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$dir/SHA256SUMS.txt"
+          }
+          fetch_asset() { # repo version asset
+            local repo="$1" version="$2" asset="$3"
+            local dir="downloads/${repo##*/}"
+            gh release download "$version" --repo "$repo" -p "$asset" -D "$dir"
+            (cd "$dir" && grep -E "[ /]$asset\$" SHA256SUMS.txt | sed 's# \./# #' | sha256sum -c -)
+          }
+
+          PLATFORMS="aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu"
+
+          verify_release pulseengine/rivet "$RIVET_VERSION"
+          verify_release pulseengine/synth "$SYNTH_VERSION"
+          verify_release pulseengine/sigil "$WSC_VERSION"
+
+          for platform in $PLATFORMS; do
+            # rivet + synth ship tarballs per triple
+            for tool in rivet synth; do
+              repo="pulseengine/$tool"
+              version_var="$(echo "$tool" | tr a-z A-Z)_VERSION"
+              version="${!version_var}"
+              asset="$tool-$version-$platform.tar.gz"
+              fetch_asset "$repo" "$version" "$asset"
+              mkdir -p "extract/$tool-$platform"
+              tar xzf "downloads/$tool/$asset" -C "extract/$tool-$platform"
+              cp "extract/$tool-$platform/$tool" "tools/$tool-$platform"
+            done
+            # wsc ships raw per-platform binaries with its own naming
+            case "$platform" in
+              aarch64-apple-darwin)     wsc_asset="wsc-macos-aarch64";;
+              x86_64-apple-darwin)      wsc_asset="wsc-macos-x86_64";;
+              aarch64-unknown-linux-gnu) wsc_asset="wsc-linux-aarch64";;
+              x86_64-unknown-linux-gnu)  wsc_asset="wsc-linux-x86_64";;
+            esac
+            fetch_asset pulseengine/sigil "$WSC_VERSION" "$wsc_asset"
+            cp "downloads/sigil/$wsc_asset" "tools/wsc-$platform"
+          done
+          ls -la tools/
+
+      - name: Deposit the layer
+        env:
+          VARVE_ROLLING_KEY: ${{ secrets.VARVE_ROLLING_KEY }}
+          LAYER: ${{ inputs.layer }}
+          COUNTER: ${{ inputs.counter }}
+        run: |
+          set -euo pipefail
+          test -n "$VARVE_ROLLING_KEY" || { echo "::error::VARVE_ROLLING_KEY not provisioned"; exit 1; }
+          printf '%s' "$VARVE_ROLLING_KEY" > /tmp/rolling.key
+          ISSUED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          BARE_RIVET="${RIVET_VERSION#v}"; BARE_SYNTH="${SYNTH_VERSION#v}"; BARE_WSC="${WSC_VERSION#v}"
+          TOOL_ARGS=()
+          for platform in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            TOOL_ARGS+=(--tool "rivet@$BARE_RIVET@$platform=tools/rivet-$platform")
+            TOOL_ARGS+=(--tool "synth@$BARE_SYNTH@$platform=tools/synth-$platform")
+            TOOL_ARGS+=(--tool "wsc@$BARE_WSC@$platform=tools/wsc-$platform")
+          done
+          ./target/release/varve deposit \
+            --layer "$LAYER" --channel rolling \
+            --counter "$COUNTER" --issued-at "$ISSUED_AT" \
+            --key /tmp/rolling.key --key-id varve-rolling-1 \
+            --out layer-layout "${TOOL_ARGS[@]}"
+          rm -f /tmp/rolling.key
+          # Sanity: the deposit installs and verifies on THIS runner before
+          # anything is published.
+          mkdir -p sanity-project
+          printf 'manifest-version = 1\n[toolchain]\nchannel = "rolling"\nlayer = "%s"\n' "$LAYER" > sanity-project/varve.toml
+          ( cd sanity-project && \
+            VARVE_ROOT="$RUNNER_TEMP/sanity-root" \
+            VARVE_TRUST_ROOT="$GITHUB_WORKSPACE/trust-roots/rolling.pub" \
+            "$GITHUB_WORKSPACE/target/release/varve" install --from "$GITHUB_WORKSPACE/layer-layout" && \
+            VARVE_ROOT="$RUNNER_TEMP/sanity-root" \
+            VARVE_TRUST_ROOT="$GITHUB_WORKSPACE/trust-roots/rolling.pub" \
+            "$GITHUB_WORKSPACE/target/release/varve" verify )
+
+      - name: Publish to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LAYER: ${{ inputs.layer }}
+        run: |
+          set -euo pipefail
+          oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+          # Assemble the push set: envelope + payload + tool blobs, with the
+          # role annotations RegistrySource discovers by.
+          SIG_TYPE='application/vnd.pulseengine.varve.signature.v1+json'
+          mkdir -p push && cd push
+          PAYLOAD_DIGEST=$(jq -r --arg t "$SIG_TYPE" \
+            '[.manifests[] | select(.artifactType != $t)][0].digest' ../layer-layout/index.json)
+          ENVELOPE_DIGEST=$(jq -r --arg t "$SIG_TYPE" \
+            '[.manifests[] | select(.artifactType == $t)][0].digest' ../layer-layout/index.json)
+          cp "../layer-layout/blobs/sha256/${PAYLOAD_DIGEST#sha256:}" payload.json
+          cp "../layer-layout/blobs/sha256/${ENVELOPE_DIGEST#sha256:}" envelope.dsse.json
+          printf '%s' '{"envelope.dsse.json":{"eu.pulseengine.varve.role":"envelope"},"payload.json":{"eu.pulseengine.varve.role":"payload"}}' > annotations.json
+          FILES=(envelope.dsse.json:application/json payload.json:application/vnd.oci.image.index.v1+json)
+          i=0
+          for digest in $(jq -r '.manifests[].digest' payload.json); do
+            cp "../layer-layout/blobs/sha256/${digest#sha256:}" "blob-$i"
+            FILES+=("blob-$i:application/octet-stream")
+            i=$((i+1))
+          done
+          oras push "ghcr.io/pulseengine/varve/layers:$LAYER" \
+            --artifact-type application/vnd.pulseengine.varve.layer.v1+json \
+            --annotation-file annotations.json \
+            "${FILES[@]}"
+
+      - name: Upload the oci-layout (artifact of record)
+        uses: actions/upload-artifact@v7
+        with:
+          name: layer-${{ inputs.layer }}-oci-layout
+          path: layer-layout
+          retention-days: 90
