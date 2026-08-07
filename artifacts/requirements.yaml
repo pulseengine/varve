@@ -110,7 +110,7 @@ artifacts:
   - id: REQ-PROV-001
     type: requirement
     title: Build outputs record the layer that produced them
-    status: implemented
+    status: verified
     release: v0.5.0
     description: >
       varve shall stamp the layer identity (name and manifest digest) into the
