@@ -59,6 +59,47 @@ enum Cmd {
         /// Destination directory for the oci-layout.
         dest: PathBuf,
     },
+    /// Dispatch a tool from the pinned layer, with the layer identity in the
+    /// environment (VARVE_LAYER, VARVE_LAYER_MANIFEST_DIGEST) so provenance
+    /// tooling can record which qualified set produced the output.
+    Run {
+        /// One-off layer override — runs another installed layer WITHOUT
+        /// touching the checked-in pin.
+        #[arg(long, value_name = "LAYER")]
+        varve: Option<String>,
+        /// Tool and its arguments, after `--`.
+        #[arg(trailing_var_arg = true, required = true)]
+        tool_and_args: Vec<String>,
+    },
+    /// (CI) Assemble, sign and publish a layer — the only way a layer comes
+    /// into being. Writes the same OCI image layout `archive` produces.
+    Deposit {
+        /// Layer identifier, e.g. `2026.08.0`.
+        #[arg(long)]
+        layer: String,
+        /// `qualified` or `rolling`.
+        #[arg(long)]
+        channel: String,
+        /// Monotonic per-line release counter — the depositor owns
+        /// monotonicity; clients enforce it.
+        #[arg(long)]
+        counter: u64,
+        /// RFC 3339 issued-at timestamp.
+        #[arg(long, value_name = "RFC3339")]
+        issued_at: String,
+        /// File holding the hex-encoded ed25519 root SECRET key.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        /// Key identifier recorded in the signature.
+        #[arg(long, default_value = "varve-root-1")]
+        key_id: String,
+        /// Destination directory for the oci-layout.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// Tool to include, as `name@version=path`. Repeatable.
+        #[arg(long = "tool", value_name = "NAME@VERSION=PATH")]
+        tools: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -80,7 +121,118 @@ fn run() -> anyhow::Result<()> {
         Cmd::Install { from } => install(&store, &from),
         Cmd::Verify { all } => verify(&store, all),
         Cmd::Archive { layer, dest } => archive(&store, &layer, &dest),
+        Cmd::Run {
+            varve,
+            tool_and_args,
+        } => run_tool(&store, varve.as_deref(), &tool_and_args),
+        Cmd::Deposit {
+            layer,
+            channel,
+            counter,
+            issued_at,
+            key,
+            key_id,
+            out,
+            tools,
+        } => deposit_cmd(
+            &layer, &channel, counter, &issued_at, &key, &key_id, &out, &tools,
+        ),
     }
+}
+
+fn run_tool(
+    store: &Store,
+    override_layer: Option<&str>,
+    tool_and_args: &[String],
+) -> anyhow::Result<()> {
+    let (tool, args) = tool_and_args
+        .split_first()
+        .context("no tool named — usage: varve run [--varve LAYER] -- <tool> [args…]")?;
+    let mut pin = load_pin()?;
+    if let Some(layer) = override_layer {
+        // A one-off: resolve another layer for this invocation only. The
+        // checked-in pin is not read past this point and never written.
+        pin.layer = layer.parse()?;
+        pin.digest = None;
+    }
+    let resolved = resolve(&pin, store)?;
+    let Some((_, path)) = resolved.tools.iter().find(|(name, _)| name == tool) else {
+        bail!(
+            "tool '{tool}' is not part of layer {} — it exposes: {}",
+            resolved.layer.layer,
+            resolved
+                .tools
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    };
+    let mut cmd = std::process::Command::new(path);
+    cmd.args(args)
+        .env("VARVE_LAYER", resolved.layer.layer.to_string())
+        .env("VARVE_LAYER_MANIFEST_DIGEST", &resolved.layer.digest);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec: varve leaves the picture entirely; the tool IS the process.
+        Err(anyhow::Error::from(cmd.exec()).context(format!("failed to exec {tool}")))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = cmd
+            .status()
+            .with_context(|| format!("failed to run {tool}"))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deposit_cmd(
+    layer: &str,
+    channel: &str,
+    counter: u64,
+    issued_at: &str,
+    key: &std::path::Path,
+    key_id: &str,
+    out: &std::path::Path,
+    tools: &[String],
+) -> anyhow::Result<()> {
+    let mut deposit_tools = Vec::new();
+    for spec in tools {
+        let (name_version, path) = spec
+            .split_once('=')
+            .with_context(|| format!("--tool '{spec}' is not NAME@VERSION=PATH"))?;
+        let (name, version) = name_version
+            .split_once('@')
+            .with_context(|| format!("--tool '{spec}' is not NAME@VERSION=PATH"))?;
+        let bytes =
+            std::fs::read(path).with_context(|| format!("cannot read tool binary {path}"))?;
+        deposit_tools.push(varve_core::DepositTool {
+            name: name.to_string(),
+            version: version.to_string(),
+            bytes,
+        });
+    }
+    let hex_key = std::fs::read_to_string(key)
+        .with_context(|| format!("cannot read signing key {}", key.display()))?;
+    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    let spec = varve_core::DepositSpec {
+        layer: layer.parse()?,
+        channel: channel.to_string(),
+        counter,
+        issued_at: issued_at.to_string(),
+        tools: deposit_tools,
+    };
+    let outcome = varve_core::deposit(&spec, &sk, key_id, out)?;
+    println!(
+        "deposited layer {} (counter {}) {} at {}",
+        outcome.layer,
+        outcome.counter,
+        outcome.digest,
+        out.display()
+    );
+    Ok(())
 }
 
 fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result<()> {

@@ -75,20 +75,45 @@ pub fn export(store: &Store, layer: &InstalledLayer, dest: &Path) -> Result<(), 
             blobs.push((entry.digest.clone(), bytes));
         }
     }
-    let payload_digest = manifest_digest(&payload);
-    let envelope_digest = manifest_digest(&envelope);
+    write_oci_layout(
+        &payload,
+        &envelope,
+        &blobs,
+        &manifest.layer.to_string(),
+        &manifest.channel,
+        dest,
+    )
+    .map_err(|(path, source)| ArchiveError::Io { path, source })?;
+    let _ = store; // reads go through the layer's recorded root; the store itself is untouched
+    Ok(())
+}
 
-    // Lay out the archive: oci-layout, blobs/sha256/<hex>, index.json.
+/// Write the canonical directory-shaped OCI image layout shared by `archive`
+/// (exporting an installed layer) and `deposit` (creating one): `oci-layout`,
+/// `blobs/sha256/<hex>` for payload + envelope + tools, and an `index.json`
+/// referencing the manifest and its signature blob. Errors as (path, io).
+pub(crate) fn write_oci_layout(
+    payload: &[u8],
+    envelope: &[u8],
+    blobs: &[(String, Vec<u8>)],
+    layer_name: &str,
+    channel: &str,
+    dest: &Path,
+) -> Result<(), (String, std::io::Error)> {
+    let io = |path: &Path, source: std::io::Error| (path.display().to_string(), source);
+    let payload_digest = manifest_digest(payload);
+    let envelope_digest = manifest_digest(envelope);
+
     let blob_dir = dest.join("blobs").join("sha256");
     std::fs::create_dir_all(&blob_dir).map_err(|e| io(&blob_dir, e))?;
-    let write_blob = |digest: &str, bytes: &[u8]| -> Result<(), ArchiveError> {
+    let write_blob = |digest: &str, bytes: &[u8]| -> Result<(), (String, std::io::Error)> {
         let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
         let path = blob_dir.join(hex);
         std::fs::write(&path, bytes).map_err(|e| io(&path, e))
     };
-    write_blob(&payload_digest, &payload)?;
-    write_blob(&envelope_digest, &envelope)?;
-    for (digest, bytes) in &blobs {
+    write_blob(&payload_digest, payload)?;
+    write_blob(&envelope_digest, envelope)?;
+    for (digest, bytes) in blobs {
         write_blob(digest, bytes)?;
     }
 
@@ -105,8 +130,8 @@ pub fn export(store: &Store, layer: &InstalledLayer, dest: &Path) -> Result<(), 
                 "digest": payload_digest,
                 "size": payload.len(),
                 "annotations": {
-                    "eu.pulseengine.varve.layer": manifest.layer.to_string(),
-                    "eu.pulseengine.varve.channel": manifest.channel,
+                    "eu.pulseengine.varve.layer": layer_name,
+                    "eu.pulseengine.varve.channel": channel,
                 }
             },
             {
@@ -124,7 +149,6 @@ pub fn export(store: &Store, layer: &InstalledLayer, dest: &Path) -> Result<(), 
         serde_json::to_vec_pretty(&index).expect("index serializes"),
     )
     .map_err(|e| io(&index_path, e))?;
-    let _ = store; // reads go through the layer's recorded root; the store itself is untouched
     Ok(())
 }
 

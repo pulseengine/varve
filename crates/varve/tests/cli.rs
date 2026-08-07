@@ -356,6 +356,124 @@ fn archive_of_an_uninstalled_layer_fails_with_guidance() {
         .stderr(predicate::str::contains("2026.07.0"));
 }
 
+/// Lay down a layer whose "tool" is a script that prints the provenance
+/// environment and exits with a chosen code.
+fn probe_layer(fx: &Fixture, layer: &str, exit: u8) -> String {
+    let script = format!(
+        "#!/bin/sh\necho \"layer=$VARVE_LAYER digest=$VARVE_LAYER_MANIFEST_DIGEST\"\nexit {exit}\n"
+    );
+    let manifest = MANIFEST_JULY.replace("2026.07.0", layer);
+    let store = varve_core::Store::at(&fx.root);
+    store
+        .lay_down(manifest.as_bytes(), &[("probe", script.as_bytes())])
+        .unwrap()
+}
+
+// rivet: partially-verifies REQ-PROV-001
+#[test]
+fn run_dispatches_with_the_layer_identity_in_the_environment() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let digest = probe_layer(&fx, "2026.07.0", 0);
+    varve(&fx)
+        .args(["run", "--", "probe"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("layer=2026.07.0")
+                .and(predicate::str::contains(format!("digest={digest}"))),
+        );
+}
+
+// rivet: partially-verifies REQ-PROV-001
+#[test]
+fn run_propagates_the_tool_exit_code() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    probe_layer(&fx, "2026.07.0", 7);
+    let output = varve(&fx).args(["run", "--", "probe"]).output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "the tool's exit code is varve's"
+    );
+}
+
+// rivet: verifies REQ-NOUPDATE-001
+#[test]
+fn run_with_an_explicit_layer_override_does_not_touch_the_pin() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    probe_layer(&fx, "2026.07.0", 0);
+    probe_layer(&fx, "2026.09.0", 0);
+    // One-off override runs the other layer…
+    varve(&fx)
+        .args(["run", "--varve", "2026.09.0", "--", "probe"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("layer=2026.09.0"));
+    // …while the pin, and plain run, remain on July.
+    varve(&fx)
+        .args(["run", "--", "probe"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("layer=2026.07.0"));
+    let pin = std::fs::read_to_string(fx.project.join("varve.toml")).unwrap();
+    assert!(pin.contains("2026.07.0"), "the checked-in pin is untouched");
+}
+
+// rivet: verifies REQ-PIN-001
+#[test]
+fn run_fails_closed_like_everything_else() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    varve(&fx)
+        .args(["run", "--", "probe"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("varve install"));
+}
+
+// rivet: verifies REQ-DEPOSIT-001
+#[test]
+fn deposit_creates_a_layer_the_standard_pipeline_installs() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    // Root keypair on disk, as CI would hold it.
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    // A tool binary to deposit.
+    let tool_path = parent.join("synth-bin");
+    std::fs::write(&tool_path, b"deposited-synth").unwrap();
+    let dest = parent.join("deposited");
+
+    varve(&fx)
+        .args(["deposit", "--layer", "2026.07.0", "--channel", "qualified"])
+        .args(["--counter", "1", "--issued-at", "2026-08-07T00:00:00Z"])
+        .args(["--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&dest)
+        .args(["--tool"])
+        .arg(format!("synth@0.45.0={}", tool_path.display()))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sha256:"));
+
+    // The deposit installs through the very same pipeline.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&dest)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2026.07.0"));
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+}
+
 // rivet: verifies REQ-COEXIST-001
 #[test]
 fn list_with_an_empty_core_succeeds_and_says_so() {
