@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.1 — 2026-08-07
+
+Patch: registry pulls of real-sized tool binaries.
+
+- The transport read limit rejected blobs over 10 MiB (ureq default) —
+  caught on the first real GHCR pull of layer 2026.08.0, whose tools are
+  tens of MB. Raised to an 8 GiB sanity bound; the signed digests remain
+  the actual acceptance criterion. Regression-tested with a 12 MB blob
+  through the in-process registry double
+
 ## v0.6.0 — 2026-08-07
 
 The adoption arc: shims, the platform dimension, and the public registry

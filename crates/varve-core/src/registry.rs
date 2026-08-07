@@ -123,6 +123,11 @@ impl RegistrySource {
         match request.call() {
             Ok(mut resp) => resp
                 .body_mut()
+                .with_config()
+                // Tool binaries are tens of MB; ureq's 10 MiB default would
+                // reject them (caught on the first real GHCR pull). 8 GiB is
+                // a sanity bound, not a promise — digests still decide.
+                .limit(8 * 1024 * 1024 * 1024)
                 .read_to_vec()
                 .map_err(|e| SourceError::Transport(e.to_string())),
             Err(ureq::Error::StatusCode(404)) => Err(SourceError::NotFound(url.to_string())),
