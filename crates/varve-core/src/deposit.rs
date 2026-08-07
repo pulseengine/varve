@@ -39,6 +39,25 @@ pub struct DepositTool {
     /// platform-independence (scripts, data). New deposits should stamp it.
     pub platform: Option<String>,
     pub bytes: Vec<u8>,
+    /// Where the bytes came from — recorded INSIDE the signed payload so
+    /// downstream lockfiles (Bazel registries) inherit the signature anchor
+    /// (REQ-BAZEL-001).
+    pub source: Option<ToolSource>,
+}
+
+/// Upstream provenance of a deposited tool.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSource {
+    /// e.g. "pulseengine/rivet"
+    pub repo: String,
+    /// e.g. "v0.32.0"
+    pub release: String,
+    /// The release asset AS DOWNLOADED, e.g. "rivet-v0.32.0-<triple>.tar.gz"
+    pub asset: String,
+    /// sha256 of that asset (the bytes Bazel will hash), bare hex or
+    /// sha256:-prefixed.
+    pub sha256: String,
 }
 
 /// A completed deposit.
@@ -50,8 +69,39 @@ pub struct DepositOutcome {
     pub counter: u64,
 }
 
+/// A deposit described as a file (CI-authored TOML) rather than flags —
+/// the shape the deposit workflow and the Bazel extension both read.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DepositFileSpec {
+    pub layer: String,
+    pub channel: String,
+    pub counter: u64,
+    #[serde(default, rename = "tool")]
+    pub tools: Vec<SpecTool>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecTool {
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// Binary path, absolute or relative to the spec file's directory.
+    pub path: String,
+    #[serde(default)]
+    pub source: Option<ToolSource>,
+}
+
+pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositError> {
+    toml::from_str(toml_text).map_err(|e| DepositError::Spec(e.to_string()))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DepositError {
+    #[error("deposit spec is not valid: {0}")]
+    Spec(String),
     #[error("deposit has no tools — an empty layer is not a toolchain")]
     NoTools,
     #[error("duplicate tool name '{0}' in deposit")]
@@ -101,6 +151,24 @@ pub fn deposit(
                 annotations.insert(
                     crate::platform::ANN_PLATFORM.into(),
                     platform.clone().into(),
+                );
+            }
+            if let Some(source) = &tool.source {
+                annotations.insert(
+                    crate::bazel::ANN_SRC_REPO.into(),
+                    source.repo.clone().into(),
+                );
+                annotations.insert(
+                    crate::bazel::ANN_SRC_RELEASE.into(),
+                    source.release.clone().into(),
+                );
+                annotations.insert(
+                    crate::bazel::ANN_SRC_ASSET.into(),
+                    source.asset.clone().into(),
+                );
+                annotations.insert(
+                    crate::bazel::ANN_SRC_SHA256.into(),
+                    source.sha256.clone().into(),
                 );
             }
             serde_json::json!({
@@ -170,12 +238,14 @@ mod tests {
                     version: "0.45.0".into(),
                     platform: None,
                     bytes: b"synth-bytes".to_vec(),
+                    source: None,
                 },
                 DepositTool {
                     name: "rivet".into(),
                     version: "0.32.0".into(),
                     platform: None,
                     bytes: b"rivet-bytes".to_vec(),
+                    source: None,
                 },
             ],
         }

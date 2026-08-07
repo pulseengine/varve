@@ -843,6 +843,101 @@ fn completions_emit_per_shell_scripts() {
         .stdout(predicate::str::contains("complete -c varve"));
 }
 
+// rivet: verifies REQ-BAZEL-001
+#[test]
+fn spec_deposit_then_export_bazel_compiles_a_signature_anchored_registry() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust = parent.join("root.pub");
+    std::fs::write(&trust, hex::encode(&pk)).unwrap();
+
+    // Tool binary + a deposit spec carrying its source provenance.
+    let host = varve_core::host_platform();
+    let tool_path = parent.join("rivet-bin");
+    std::fs::write(&tool_path, b"rivet-binary-bytes").unwrap();
+    let spec_path = parent.join("deposit.toml");
+    std::fs::write(
+        &spec_path,
+        format!(
+            r#"layer = "2026.07.0"
+channel = "qualified"
+counter = 1
+
+[[tool]]
+name = "rivet"
+version = "0.32.0"
+platform = "{host}"
+path = "{tool}"
+
+[tool.source]
+repo = "pulseengine/rivet"
+release = "v0.32.0"
+asset = "rivet-v0.32.0-{host}.tar.gz"
+sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+"#,
+            tool = tool_path.display()
+        ),
+    )
+    .unwrap();
+
+    let dest = parent.join("spec-deposit");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec_path)
+        .args(["--issued-at", "2026-08-07T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--out"])
+        .arg(&dest)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2026.07.0"));
+
+    // Install, then compile the Bazel registry from the verified layer.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["install", "--from"])
+        .arg(&dest)
+        .assert()
+        .success();
+    let out_dir = parent.join("bazel-registry");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["export-bazel", "--layer", "2026.07.0", "--out"])
+        .arg(&out_dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rivet.json"));
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out_dir.join("rivet.json")).unwrap()).unwrap();
+    assert_eq!(json["github_repo"], "pulseengine/rivet");
+    let key = varve_core::bazel::bazel_platform_key(&host).unwrap();
+    assert_eq!(
+        json["versions"]["0.32.0"]["platforms"][key]["sha256"],
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    );
+    assert!(
+        json["_generated_by"]
+            .as_str()
+            .unwrap()
+            .contains("Do not hand-edit")
+    );
+}
+
+// rivet: verifies REQ-BAZEL-001
+#[test]
+fn export_bazel_refuses_without_a_trust_root() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    varve(&fx)
+        .args(["export-bazel", "--layer", "2026.07.0", "--out"])
+        .arg(fx.project.parent().unwrap().join("nowhere"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("trust root"));
+}
+
 // rivet: verifies REQ-COEXIST-001
 #[test]
 fn list_with_an_empty_core_succeeds_and_says_so() {

@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.9.0 — 2026-08-07
+
+Bazel interop groundwork (REQ-BAZEL-001 verified): Bazel uses varve,
+never reimplements it.
+
+- Deposits record source provenance INSIDE the signed payload — upstream
+  repo, release, asset name, and the sha256 of the asset AS DOWNLOADED
+  (the bytes Bazel hashes) — via `[[tool]] [tool.source]` in the new
+  deposit spec file (`varve deposit --spec deposit.toml`)
+- `varve export-bazel --layer <id> --out <dir>`: compiles
+  rules_wasm_component-shaped checksum registries from a verified
+  installed layer (trust root required, re-verified before export;
+  platform keys mapped to the rules vocabulary; tools without
+  provenance skipped loudly). Every hash Bazel enforces becomes a
+  transcription from the signed, counter-protected manifest instead of
+  trust-on-first-use — the fallback path for consumers without varve;
+  the primary integration (a varve module extension so one pin governs
+  terminal AND Bazel) lands in rules_wasm_component
+
 ## v0.8.0 — 2026-08-07
 
 Updating the updater (REQ-UPDATE-001 verified): explicit, verified,
