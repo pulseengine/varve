@@ -212,3 +212,13 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod negative_control {
+    // Deliberately failing test: proves the CI gate can go red.
+    // This branch must NEVER merge.
+    #[test]
+    fn gate_potency_negative_control() {
+        assert_eq!(1 + 1, 3, "if this merges, the gate is vacuous");
+    }
+}
