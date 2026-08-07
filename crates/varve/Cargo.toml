@@ -1,0 +1,10 @@
+[package]
+name = "varve"
+description = "The PulseEngine toolchain layer manager — pinned, signed, dated toolchain bundles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+varve-core.workspace = true

@@ -1,0 +1,248 @@
+artifacts:
+  # ─────────────────────────────────────────────────────────────────────
+  # The invariants. These are not features — they are the properties that
+  # make a pin trustworthy. Every one of them is meant to be mechanically
+  # checked, per oracle-gate-a-change; none may be discharged by prose.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-PIN-001
+    type: requirement
+    title: A pinned layer resolves exactly, or the command fails
+    status: draft
+    description: >
+      varve shall resolve the pinned layer by walking up from the working
+      directory, and shall fail with the corrective install command when the
+      pin is missing, unresolvable, or incompletely installed. It shall never
+      fall back to another layer or to binaries already on PATH.
+
+      Rationale: silent fallback reintroduces the exact failure this project
+      exists to remove — an artifact produced by an unpinned toolchain that
+      looks fine. A consumer frozen on a qualified layer must stay frozen.
+    tags: [core, safety]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-VERIFY-001
+    type: requirement
+    title: Verification is independent of where the bytes came from
+    status: draft
+    description: >
+      varve shall verify the layer manifest signature and every artifact digest
+      against the PulseEngine trust root on every path — anonymous registry
+      pull, authenticated pull, or archived core — before any byte is used.
+
+      Kill-criterion: running the same layer through two different sources
+      yields different accept/reject verdicts. If a source can influence
+      acceptance, it has joined the trusted base and the design is broken.
+    tags: [core, security]
+    fields:
+      priority: must
+      category: security
+
+  - id: REQ-COEXIST-001
+    type: requirement
+    title: Layers coexist; switching is by directory
+    status: draft
+    description: >
+      varve shall keep layers in a content-addressed core keyed by manifest
+      digest, so that several layers are installed simultaneously and selecting
+      one costs no download. Driving case: relay and jess on the August layer
+      while wohl remains on July, on one machine, the same day.
+    tags: [core, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-OFFLINE-001
+    type: requirement
+    title: An archived core installs with no registry and no network
+    status: draft
+    description: >
+      varve shall export a layer as a directory-shaped oci-layout archive, and
+      shall install from that archive with no registry reachable, with
+      verification unchanged.
+
+      Rationale: a registry is a cache, not an archive. A qualified line must
+      remain reconstructible after retention policies have forgotten it — this
+      is the artifact of record for the safety case.
+    tags: [core, safety]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-NOUPDATE-001
+    type: requirement
+    title: varve never moves a project between layers on its own
+    status: draft
+    description: >
+      varve shall not contain any mechanism that changes the layer a project
+      resolves to without an edit to a checked-in file. No background update,
+      no implicit upgrade on install, no "latest" resolution for a qualified
+      channel.
+
+      Rationale: consumers freeze because re-qualification costs money. Moving
+      them silently destroys evidence they paid for. A background updater in
+      this tool is a defect, not a feature.
+    tags: [core, safety]
+    fields:
+      priority: must
+      category: constraint
+
+  - id: REQ-PROV-001
+    type: requirement
+    title: Build outputs record the layer that produced them
+    status: draft
+    description: >
+      varve shall stamp the layer identity (name and manifest digest) into the
+      provenance an artifact carries, so that "which toolchain produced this?"
+      is answerable from the artifact alone, offline, with no lookup.
+      Implemented as an addition to the existing wsc-attestation ToolInfo, so
+      individual tools need no awareness of layers.
+    tags: [traceability]
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-SCOPE-001
+    type: requirement
+    title: varve selects and verifies; it never transforms code
+    status: draft
+    description: >
+      varve shall not compile, fuse, optimise, instrument or otherwise
+      transform any user artifact. Its qualification scope is limited to
+      selecting a layer, verifying it, and dispatching to the tools within it.
+
+      Rationale: this boundary is what keeps varve's qualification scope small
+      and separable from the qualified toolchain it delivers — and it is why
+      varve is not part of the layer it installs.
+    tags: [core, qualification]
+    fields:
+      priority: must
+      category: constraint
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Open — both shape the manifest format, so both are cheap now and
+  # expensive once consumers have frozen against the first format.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-ROLLBACK-001
+    type: requirement
+    title: A stale but validly-signed layer cannot be passed off as current
+    status: draft
+    description: >
+      OPEN. Digest pinning protects a project that already pins a digest; it
+      does not protect a fresh consumer handed an older, still-valid layer.
+      Consuming Sigstore's TUF root gives no snapshot/timestamp role over the
+      PulseEngine release stream. Needs a decision before the first qualified
+      deposit.
+    tags: [security, open-question]
+    fields:
+      priority: must
+      category: security
+
+  - id: REQ-PATCH-001
+    type: requirement
+    title: A frozen line can receive a patch without moving the consumer off it
+    status: draft
+    description: >
+      OPEN. A serious defect in the July layer cannot be answered with "move to
+      August" — that is precisely the cost the consumer froze to avoid. A
+      patched layer (2026.07.1) must be expressible, with the qualification
+      delta scoped to what changed.
+
+      This decides whether a layer identifier is two-part or three-part, so it
+      must be settled before the first qualified deposit. Without it, freezing
+      becomes a trap the first time a serious defect lands.
+    tags: [qualification, open-question]
+    fields:
+      priority: must
+      category: functional
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Decisions already taken (see pulseengine.eu#157 for the full thread).
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: DD-001
+    type: design-decision
+    title: Distribute layers as OCI image indexes rather than a bespoke format
+    status: draft
+    description: >
+      An OCI image index gives content-addressed digests (pinning is native),
+      one-index-to-N-artifacts (the bundle shape), per-platform selection
+      (no substitution language to invent), referrers for attestations and
+      qualification evidence, registry authentication as the access-control
+      seam, and oci-layout export for the offline core.
+
+      Precedent in-house: relay already publishes cosign-signed OCI artifacts
+      with the Component Model media type; sigil already carries the OCI
+      container, cosign, digest and referrer machinery.
+    links:
+      - type: satisfies
+        target: REQ-OFFLINE-001
+      - type: satisfies
+        target: REQ-VERIFY-001
+      - type: satisfies
+        target: REQ-COEXIST-001
+    fields:
+      rationale: >
+        Content-addressed digests make pinning native; one index to N artifacts
+        is the bundle shape; per-platform selection is the index's own mechanism;
+        referrers carry attestations and qualification evidence; registry
+        authentication becomes the access seam with no service to write; and
+        oci-layout export yields the offline core. A bespoke format would have to
+        reinvent every one of those, and relay + sigil already run this stack.
+    tags: [architecture]
+
+  - id: DD-002
+    type: design-decision
+    title: varve is a separate tool, outside the layer it installs
+    status: draft
+    description: >
+      sigil is a member of the toolchain bundle. A tool that installs a set
+      containing sigil cannot itself be sigil — it must be obtainable before
+      any layer exists. varve also has a different audience and lifecycle from
+      the toolchain, and a qualification scope statement that must stand alone
+      ("selects and verifies; does not transform code").
+
+      Same reasoning Ferrocene applies in keeping criticalup outside the
+      Ferrocene toolchain.
+    links:
+      - type: satisfies
+        target: REQ-SCOPE-001
+      - type: satisfies
+        target: REQ-NOUPDATE-001
+    fields:
+      rationale: >
+        sigil is a member of the layer varve installs, so varve cannot be sigil
+        without a bootstrap loop — it must exist before any layer does. Its
+        audience and lifecycle differ from the toolchain's, and its qualification
+        scope statement must stand alone rather than being folded into a tool
+        that is itself qualified. Ferrocene keeps criticalup outside the Ferrocene
+        toolchain for the same reason.
+    tags: [architecture]
+
+  - id: DD-003
+    type: design-decision
+    title: Access is pluggable; acceptance is not
+    status: draft
+    description: >
+      Fetch goes through a source abstraction from the first commit, with a
+      public-registry implementation as the only one shipped. An entitlement
+      plug-in — should a non-public layer ever exist — is registry
+      authentication, not a service we write.
+
+      Verification is wired to the trust root, never to the source. See
+      REQ-VERIFY-001 for the kill-criterion that enforces this.
+    links:
+      - type: satisfies
+        target: REQ-VERIFY-001
+    fields:
+      rationale: >
+        Access and acceptance are different questions. A registry may decide
+        whether bytes are obtainable; it must never influence whether they are
+        accepted, or it has joined the trusted base. Shipping the source
+        abstraction from the first commit keeps a future entitlement plug-in from
+        requiring a redesign, while the single public implementation keeps today
+        simple.
+    tags: [architecture, security]

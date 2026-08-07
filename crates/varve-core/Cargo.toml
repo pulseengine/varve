@@ -1,0 +1,7 @@
+[package]
+name = "varve-core"
+description = "Layer manifests, resolution, the core store, and verification wiring for varve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
