@@ -1,0 +1,573 @@
+//! The verified install pipeline (REQ-VERIFY-001, REQ-ROLLBACK-001).
+//!
+//! Order is the security argument, so it is fixed here and tested:
+//!
+//! 1. fetch manifest bytes (by pin digest if pinned, else by name)
+//! 2. **verify the manifest signature** against the trust root
+//! 3. parse strictly; cross-check layer name, channel, pinned digest
+//! 4. anti-rollback check against the per-line high-water mark
+//! 5. fetch each blob; **verify each digest** against the signed manifest
+//! 6. lay down in the core
+//! 7. only now advance the high-water mark
+//!
+//! Nothing a source returns reaches the core unverified, and a failed
+//! install leaves both the core and the high-water marks untouched. The
+//! kill-criterion (REQ-VERIFY-001): running the same bytes through two
+//! different sources yields identical verdicts — a source that could
+//! influence acceptance has joined the trusted base, and the design is broken.
+
+use crate::layer::LayerId;
+use crate::manifest::{LayerManifest, ManifestError};
+use crate::pin::Pin;
+use crate::rollback::{HighWaterMarks, RollbackError, RollbackVerdict};
+use crate::source::{LayerRef, LayerSource, SourceError};
+use crate::store::{Store, StoreError, manifest_digest};
+
+/// Signature verification over fetched manifest bytes, against the
+/// PulseEngine trust root. Returns the *authenticated payload* (the layer
+/// manifest itself) — for DSSE-enveloped transport the fetched bytes and the
+/// trusted bytes differ, and everything downstream must use only the latter.
+/// Implementations carry the trust root; callers cannot relax it per-source —
+/// the pipeline takes exactly one verifier for all sources.
+pub trait ManifestVerifier {
+    fn verify(&self, fetched_bytes: &[u8]) -> Result<Vec<u8>, VerifyError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("manifest signature verification failed: {0}")]
+pub struct VerifyError(pub String);
+
+/// A successful install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallOutcome {
+    pub digest: String,
+    pub layer: LayerId,
+    pub counter: u64,
+    /// `Some(age_days)` when the accepted layer is older than the staleness
+    /// threshold — surfaced, never fatal.
+    pub staleness_days: Option<i64>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InstallError {
+    #[error(transparent)]
+    Source(#[from] SourceError),
+    #[error(transparent)]
+    Verify(#[from] VerifyError),
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
+    #[error(
+        "source returned manifest {got} where the pin demands {pinned} — refusing (the digest is the artifact)"
+    )]
+    DigestMismatch { pinned: String, got: String },
+    #[error("manifest is for layer {got}, the pin names {pinned} — refusing")]
+    LayerMismatch { pinned: String, got: String },
+    #[error("manifest is on channel '{got}', the pin selects '{pinned}' — refusing")]
+    ChannelMismatch { pinned: String, got: String },
+    #[error(
+        "rollback refused: layer presents counter {presented} but the {line} line's high-water mark is {high_water} — a stale, validly-signed layer cannot be passed off as current"
+    )]
+    Rollback {
+        line: String,
+        presented: u64,
+        high_water: u64,
+    },
+    #[error("blob {digest} fetched for tool '{tool}' does not match its signed digest — refusing")]
+    BlobDigestMismatch { tool: String, digest: String },
+    #[error("manifest entry {digest} is missing the eu.pulseengine.tool annotation")]
+    UnnamedEntry { digest: String },
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    State(#[from] RollbackError),
+}
+
+/// Policy inputs the caller supplies; time is data, not something the
+/// pipeline samples.
+pub struct InstallPolicy<'a> {
+    /// RFC 3339 "now" for the staleness verdict.
+    pub now: &'a str,
+    pub staleness_threshold_days: u32,
+}
+
+pub fn install(
+    pin: &Pin,
+    source: &dyn LayerSource,
+    verifier: &dyn ManifestVerifier,
+    store: &Store,
+    marks: &mut HighWaterMarks,
+    policy: &InstallPolicy<'_>,
+) -> Result<InstallOutcome, InstallError> {
+    // 1. Fetch.
+    let layer_ref = match &pin.digest {
+        Some(digest) => LayerRef::Digest(digest.clone()),
+        None => LayerRef::Name(pin.layer.clone()),
+    };
+    let fetched = source.fetch_manifest(&layer_ref)?;
+
+    // 2. Signature first: nothing else is read from unverified bytes, and no
+    // blob is fetched on the strength of an unverified manifest. Only the
+    // authenticated payload the verifier returns is used from here on.
+    let bytes = verifier.verify(&fetched)?;
+
+    // 3. Strict parse + cross-checks against the pin.
+    let manifest = LayerManifest::parse(&bytes)?;
+    let digest = manifest_digest(&bytes);
+    if let Some(pinned) = &pin.digest
+        && &digest != pinned
+    {
+        return Err(InstallError::DigestMismatch {
+            pinned: pinned.clone(),
+            got: digest,
+        });
+    }
+    if manifest.layer != pin.layer {
+        return Err(InstallError::LayerMismatch {
+            pinned: pin.layer.to_string(),
+            got: manifest.layer.to_string(),
+        });
+    }
+    let pinned_channel = match pin.channel {
+        crate::pin::Channel::Qualified => "qualified",
+        crate::pin::Channel::Rolling => "rolling",
+    };
+    if manifest.channel != pinned_channel {
+        return Err(InstallError::ChannelMismatch {
+            pinned: pinned_channel.to_string(),
+            got: manifest.channel.clone(),
+        });
+    }
+
+    // 4. Anti-rollback, before any blob moves.
+    if let RollbackVerdict::Rollback {
+        line,
+        presented,
+        high_water,
+    } = marks.check(&manifest)
+    {
+        return Err(InstallError::Rollback {
+            line,
+            presented,
+            high_water,
+        });
+    }
+
+    // 5. Fetch blobs; each is accepted only if it matches its signed digest.
+    let mut tools: Vec<(String, Vec<u8>)> = Vec::new();
+    for entry in &manifest.entries {
+        let tool = entry
+            .annotations
+            .get("eu.pulseengine.tool")
+            .ok_or_else(|| InstallError::UnnamedEntry {
+                digest: entry.digest.clone(),
+            })?
+            .clone();
+        let blob = source.fetch_blob(&entry.digest)?;
+        if manifest_digest(&blob) != entry.digest {
+            return Err(InstallError::BlobDigestMismatch {
+                tool,
+                digest: entry.digest.clone(),
+            });
+        }
+        tools.push((tool, blob));
+    }
+
+    // 6. Lay down.
+    let tool_refs: Vec<(&str, &[u8])> = tools
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let stored_digest = store.lay_down(&bytes, &tool_refs)?;
+    debug_assert_eq!(stored_digest, digest);
+
+    // Retain the signature envelope beside the payload, so `varve verify`
+    // can repeat the install-time verdict offline, forever. (When transport
+    // was already the bare payload — test doubles — there is nothing to keep.)
+    if fetched != bytes
+        && let Some(entry) = store.get(&digest)?
+    {
+        let path = entry.root.join(crate::reverify::ENVELOPE_FILE);
+        std::fs::write(&path, &fetched).map_err(|source| StoreError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+    }
+
+    // 7. Only a fully landed layer advances the high-water mark.
+    marks.advance(&manifest)?;
+
+    let staleness_days = crate::rollback::staleness_warning(
+        &manifest.issued_at,
+        policy.now,
+        policy.staleness_threshold_days,
+    );
+    Ok(InstallOutcome {
+        digest,
+        layer: manifest.layer.clone(),
+        counter: manifest.counter,
+        staleness_days,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::fixtures::manifest_with_tools;
+    use crate::pin::Pin;
+    use crate::rollback::HighWaterMarks;
+    use crate::source::{DirSource, MemorySource};
+
+    struct AcceptAll;
+    impl ManifestVerifier for AcceptAll {
+        fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {
+            Ok(fetched.to_vec())
+        }
+    }
+
+    struct RejectAll;
+    impl ManifestVerifier for RejectAll {
+        fn verify(&self, _: &[u8]) -> Result<Vec<u8>, VerifyError> {
+            Err(VerifyError("untrusted signature (test)".into()))
+        }
+    }
+
+    fn pin(layer: &str) -> Pin {
+        Pin::parse(
+            &format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"{layer}\"\n"
+            ),
+            "varve.toml",
+        )
+        .unwrap()
+    }
+
+    fn policy() -> InstallPolicy<'static> {
+        InstallPolicy {
+            now: "2026-08-07T00:00:00Z",
+            staleness_threshold_days: 90,
+        }
+    }
+
+    /// One layer's worth of test material: manifest bytes + blobs.
+    fn july() -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
+        let synth = b"july-synth".to_vec();
+        let rivet = b"july-rivet".to_vec();
+        let blobs = vec![
+            (manifest_digest(&synth), synth),
+            (manifest_digest(&rivet), rivet),
+        ];
+        let bytes = manifest_with_tools(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[("synth", &blobs[0].0), ("rivet", &blobs[1].0)],
+        );
+        (bytes, blobs)
+    }
+
+    fn memory_source(manifest: &[u8], blobs: &[(String, Vec<u8>)]) -> MemorySource {
+        let mut source = MemorySource::new().with_manifest(manifest);
+        for (digest, bytes) in blobs {
+            source = source.with_blob(digest, bytes);
+        }
+        source
+    }
+
+    fn setup() -> (tempfile::TempDir, Store, HighWaterMarks) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("varve-root");
+        let store = Store::at(&root);
+        let marks = HighWaterMarks::load(&root).unwrap();
+        (tmp, store, marks)
+    }
+
+    // rivet: verifies REQ-VERIFY-001
+    #[test]
+    fn installs_a_verified_layer_end_to_end() {
+        let (_tmp, store, mut marks) = setup();
+        let (bytes, blobs) = july();
+        let source = memory_source(&bytes, &blobs);
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap();
+        assert_eq!(outcome.layer.to_string(), "2026.07.0");
+        assert_eq!(outcome.digest, manifest_digest(&bytes));
+        // The layer is resolvable afterwards — install feeds resolution.
+        let entry = store.get(&outcome.digest).unwrap().unwrap();
+        assert!(store.tool_path(&entry, "synth").is_some());
+        assert!(store.tool_path(&entry, "rivet").is_some());
+    }
+
+    // rivet: verifies REQ-VERIFY-001
+    #[test]
+    fn kill_criterion_two_sources_one_verdict() {
+        // The same bytes through two different transports must produce
+        // identical verdicts — accept AND reject cases.
+        let (bytes, blobs) = july();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = DirSource::at(tmp.path().join("archive"));
+        dir.put(
+            &bytes,
+            &blobs
+                .iter()
+                .map(|(d, b)| (d.as_str(), b.as_slice()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let mem = memory_source(&bytes, &blobs);
+
+        let run = |source: &dyn LayerSource, verifier: &dyn ManifestVerifier| {
+            let (_t, store, mut marks) = setup();
+            install(
+                &pin("2026.07.0"),
+                source,
+                verifier,
+                &store,
+                &mut marks,
+                &policy(),
+            )
+            .map_err(|e| e.to_string())
+        };
+
+        let accept_mem = run(&mem, &AcceptAll).unwrap();
+        let accept_dir = run(&dir, &AcceptAll).unwrap();
+        assert_eq!(accept_mem, accept_dir, "same bytes, same acceptance");
+
+        let reject_mem = run(&mem, &RejectAll).unwrap_err();
+        let reject_dir = run(&dir, &RejectAll).unwrap_err();
+        assert_eq!(reject_mem, reject_dir, "same bytes, same rejection");
+    }
+
+    // rivet: verifies REQ-VERIFY-001
+    #[test]
+    fn an_unverified_manifest_fetches_no_blobs_and_installs_nothing() {
+        struct CountingSource {
+            inner: MemorySource,
+            blob_fetches: std::cell::Cell<usize>,
+        }
+        impl LayerSource for CountingSource {
+            fn fetch_manifest(&self, layer: &LayerRef) -> Result<Vec<u8>, SourceError> {
+                self.inner.fetch_manifest(layer)
+            }
+            fn fetch_blob(&self, digest: &str) -> Result<Vec<u8>, SourceError> {
+                self.blob_fetches.set(self.blob_fetches.get() + 1);
+                self.inner.fetch_blob(digest)
+            }
+        }
+        let (_tmp, store, mut marks) = setup();
+        let (bytes, blobs) = july();
+        let source = CountingSource {
+            inner: memory_source(&bytes, &blobs),
+            blob_fetches: std::cell::Cell::new(0),
+        };
+        let err = install(
+            &pin("2026.07.0"),
+            &source,
+            &RejectAll,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, InstallError::Verify(_)), "got: {err}");
+        assert_eq!(
+            source.blob_fetches.get(),
+            0,
+            "no blob leaves the source before the signature verdict"
+        );
+        assert!(store.list().unwrap().is_empty(), "nothing laid down");
+    }
+
+    // rivet: verifies REQ-VERIFY-001
+    #[test]
+    fn a_source_that_alters_a_blob_is_caught_by_the_signed_digest() {
+        let (_tmp, store, mut marks) = setup();
+        let (bytes, blobs) = july();
+        // Serve the right manifest but tamper with one blob.
+        let mut source = MemorySource::new().with_manifest(&bytes);
+        source = source.with_blob(&blobs[0].0, b"EVIL");
+        source = source.with_blob(&blobs[1].0, &blobs[1].1);
+        let err = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, InstallError::BlobDigestMismatch { .. }),
+            "got: {err}"
+        );
+        assert!(
+            store.list().unwrap().is_empty(),
+            "tampered layer must not land"
+        );
+    }
+
+    // rivet: verifies REQ-VERIFY-001
+    #[test]
+    fn a_source_that_answers_a_digest_request_with_other_bytes_is_caught() {
+        struct LyingSource(Vec<u8>);
+        impl LayerSource for LyingSource {
+            fn fetch_manifest(&self, _: &LayerRef) -> Result<Vec<u8>, SourceError> {
+                Ok(self.0.clone())
+            }
+            fn fetch_blob(&self, digest: &str) -> Result<Vec<u8>, SourceError> {
+                Err(SourceError::NotFound(digest.into()))
+            }
+        }
+        let (_tmp, store, mut marks) = setup();
+        // Pin a digest that is NOT the digest of what the source returns.
+        let (bytes, _) = july();
+        let other = manifest_with_tools("2026.07.0", "qualified", 1, "2026-07-31T09:14:00Z", &[]);
+        let pinned = manifest_digest(&other);
+        let hex = pinned.strip_prefix("sha256:").unwrap();
+        let p = Pin::parse(
+            &format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\ndigest = \"sha256:{hex}\"\n"
+            ),
+            "varve.toml",
+        )
+        .unwrap();
+        let err = install(
+            &p,
+            &LyingSource(bytes),
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, InstallError::DigestMismatch { .. }),
+            "got: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn a_rolled_back_layer_is_refused_at_install() {
+        let (_tmp, store, mut marks) = setup();
+        // The line's high-water mark is already at 5.
+        let newer = manifest_with_tools("2026.07.2", "qualified", 5, "2026-08-01T00:00:00Z", &[]);
+        marks
+            .advance(&LayerManifest::parse(&newer).unwrap())
+            .unwrap();
+        let (bytes, blobs) = july(); // counter 1 < 5
+        let source = memory_source(&bytes, &blobs);
+        let err = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                InstallError::Rollback {
+                    presented: 1,
+                    high_water: 5,
+                    ..
+                }
+            ),
+            "got: {err}"
+        );
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn a_failed_install_does_not_advance_the_high_water_mark() {
+        let (_tmp, store, mut marks) = setup();
+        let (bytes, blobs) = july();
+        // Source is missing one blob: install fails after the rollback check.
+        let source = MemorySource::new()
+            .with_manifest(&bytes)
+            .with_blob(&blobs[0].0, &blobs[0].1);
+        let err = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, InstallError::Source(SourceError::NotFound(_))),
+            "got: {err}"
+        );
+        let m = LayerManifest::parse(&bytes).unwrap();
+        assert_eq!(
+            marks.mark(m.layer.line()),
+            None,
+            "failed install must not burn the mark"
+        );
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn staleness_is_surfaced_on_an_accepted_layer() {
+        let (_tmp, store, mut marks) = setup();
+        let (bytes, blobs) = july(); // issued 2026-07-31
+        let source = memory_source(&bytes, &blobs);
+        let policy = InstallPolicy {
+            now: "2026-12-01T00:00:00Z",
+            staleness_threshold_days: 90,
+        };
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(outcome.staleness_days, Some(123));
+    }
+
+    // rivet: verifies REQ-PIN-001
+    #[test]
+    fn channel_and_layer_mismatches_are_refused() {
+        let (_tmp, store, mut marks) = setup();
+        // Manifest says rolling; pin says qualified.
+        let synth = b"s".to_vec();
+        let d = manifest_digest(&synth);
+        let bytes = manifest_with_tools(
+            "2026.07.0",
+            "rolling",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[("synth", &d)],
+        );
+        let source = MemorySource::new()
+            .with_manifest(&bytes)
+            .with_blob(&d, &synth);
+        let err = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, InstallError::ChannelMismatch { .. }),
+            "got: {err}"
+        );
+    }
+}

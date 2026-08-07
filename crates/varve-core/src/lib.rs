@@ -22,12 +22,28 @@
 #![forbid(unsafe_code)]
 
 pub mod discover;
+pub mod install;
 pub mod layer;
+pub mod manifest;
 pub mod pin;
 pub mod resolve;
+pub mod reverify;
+pub mod rollback;
+pub mod source;
 pub mod store;
+pub mod verify;
 
+pub use install::{
+    InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
+};
 pub use layer::{LayerId, LayerIdError, Line};
+pub use manifest::{LayerManifest, ManifestError};
 pub use pin::{Channel, Pin, PinError};
 pub use resolve::{ResolveError, Resolved, resolve};
+pub use reverify::{ReverifyError, verify_installed};
+pub use rollback::{HighWaterMarks, RollbackError, RollbackVerdict, staleness_warning};
+pub use source::{DirSource, LayerRef, LayerSource, MemorySource, SourceError};
 pub use store::{InstalledLayer, Store, StoreError, manifest_digest};
+pub use verify::{
+    LAYER_PAYLOAD_TYPE, PinnedKeyVerifier, generate_root_keypair, sign_layer_manifest,
+};
