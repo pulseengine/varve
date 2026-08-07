@@ -12,10 +12,12 @@
 
 ---
 
-> **Status: design.** Nothing is implemented yet. The architecture is settled
-> ([pulseengine.eu#157](https://github.com/pulseengine/pulseengine.eu/issues/157));
-> two decisions are open (see [Open questions](#open-questions)). Do not depend on
-> anything here yet.
+> **Status: design complete, planned.** Nothing is implemented yet. The
+> architecture is settled
+> ([pulseengine.eu#157](https://github.com/pulseengine/pulseengine.eu/issues/157))
+> and the two formerly-open decisions are now taken (see
+> [Decisions](#decisions-formerly-open-questions)). The release plan lives in
+> rivet (`rivet release status v0.1.0`). Do not depend on anything here yet.
 
 ## The problem
 
@@ -112,16 +114,24 @@ archived core. **Whether they are accepted is not.** Signature and digest checks
 against our trust root on every path, and swapping the source must never change a
 verdict.
 
-## Open questions
+## Decisions (formerly open questions)
 
-Both shape the manifest format, so both are cheap now and expensive later:
+Both shaped the manifest format, so both were settled before it freezes
+(2026-08-07, after a research pass over criticalup/Ferrocene, TUF, Uptane,
+SUIT/RFC 9019, DO-330 and qualified-vendor patch practice — the evidence lives
+in the rivet artifacts, DD-004/DD-005 and CA-*/AR-*):
 
-1. **Anti-rollback.** Nothing yet prevents serving an older, validly-signed layer.
-   Consuming Sigstore's TUF root does not give us snapshot/timestamp roles over our
-   own release stream.
-2. **Patching a frozen line.** A serious defect in the July layer cannot be answered
-   with *"move to August"* — that is precisely the cost the consumer froze to avoid.
-   `2026.07.1` must be expressible, with the qualification delta scoped to what changed.
+1. **Anti-rollback → monotonic per-line counters.** Every layer manifest carries a
+   release counter and issued-at timestamp inside the signed payload; the client
+   keeps a high-water mark per line and rejects anything below it, warning past a
+   staleness threshold. The SUIT/Uptane pattern: works on static hosting and in
+   air gaps, survives registry compromise, no re-signing treadmill. tuf-on-ci is
+   the recorded upgrade path if a connected freshness channel is ever needed.
+2. **Patching a frozen line → three-part identifiers.** A layer is always
+   `YYYY.MM.P` — `2026.07.0` deposits the July line, `2026.07.1` patches it *in
+   place*, carrying a signed qualification-delta attestation scoped to what
+   changed, plus known-problems referrers as the no-patch mitigation path. The
+   frozen-line model every qualified-tool vendor converges on, made mechanical.
 
 ## Related
 

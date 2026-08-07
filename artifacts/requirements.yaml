@@ -3,12 +3,20 @@ artifacts:
   # The invariants. These are not features — they are the properties that
   # make a pin trustworthy. Every one of them is meant to be mechanically
   # checked, per oracle-gate-a-change; none may be discharged by prose.
+  #
+  # Release plan (rivet release status <v> is the readiness query):
+  #   v0.1.0  resolution + the core, purely local
+  #   v0.2.0  verified install from a registry
+  #   v0.3.0  the offline core / archive
+  #   v0.4.0  deposit (CI) + provenance stamping
+  #   v0.5.0  known-problems / support-window metadata + self-verification
   # ─────────────────────────────────────────────────────────────────────
 
   - id: REQ-PIN-001
     type: requirement
     title: A pinned layer resolves exactly, or the command fails
-    status: draft
+    status: approved
+    release: v0.1.0
     description: >
       varve shall resolve the pinned layer by walking up from the working
       directory, and shall fail with the corrective install command when the
@@ -19,6 +27,9 @@ artifacts:
       exists to remove — an artifact produced by an unpinned toolchain that
       looks fine. A consumer frozen on a qualified layer must stay frozen.
     tags: [core, safety]
+    links:
+      - type: satisfies
+        target: SC-003
     fields:
       priority: must
       category: functional
@@ -26,7 +37,8 @@ artifacts:
   - id: REQ-VERIFY-001
     type: requirement
     title: Verification is independent of where the bytes came from
-    status: draft
+    status: approved
+    release: v0.2.0
     description: >
       varve shall verify the layer manifest signature and every artifact digest
       against the PulseEngine trust root on every path — anonymous registry
@@ -36,6 +48,9 @@ artifacts:
       yields different accept/reject verdicts. If a source can influence
       acceptance, it has joined the trusted base and the design is broken.
     tags: [core, security]
+    links:
+      - type: satisfies
+        target: SC-002
     fields:
       priority: must
       category: security
@@ -43,7 +58,8 @@ artifacts:
   - id: REQ-COEXIST-001
     type: requirement
     title: Layers coexist; switching is by directory
-    status: draft
+    status: approved
+    release: v0.1.0
     description: >
       varve shall keep layers in a content-addressed core keyed by manifest
       digest, so that several layers are installed simultaneously and selecting
@@ -57,7 +73,8 @@ artifacts:
   - id: REQ-OFFLINE-001
     type: requirement
     title: An archived core installs with no registry and no network
-    status: draft
+    status: approved
+    release: v0.3.0
     description: >
       varve shall export a layer as a directory-shaped oci-layout archive, and
       shall install from that archive with no registry reachable, with
@@ -74,7 +91,8 @@ artifacts:
   - id: REQ-NOUPDATE-001
     type: requirement
     title: varve never moves a project between layers on its own
-    status: draft
+    status: approved
+    release: v0.1.0
     description: >
       varve shall not contain any mechanism that changes the layer a project
       resolves to without an edit to a checked-in file. No background update,
@@ -92,14 +110,20 @@ artifacts:
   - id: REQ-PROV-001
     type: requirement
     title: Build outputs record the layer that produced them
-    status: draft
+    status: approved
+    release: v0.4.0
     description: >
       varve shall stamp the layer identity (name and manifest digest) into the
       provenance an artifact carries, so that "which toolchain produced this?"
       is answerable from the artifact alone, offline, with no lookup.
       Implemented as an addition to the existing wsc-attestation ToolInfo, so
-      individual tools need no awareness of layers.
+      individual tools need no awareness of layers. The cross-repo ToolInfo
+      extension is tracked as a sigil issue so it can land upstream on its own
+      cadence before v0.4.0 needs it.
     tags: [traceability]
+    links:
+      - type: satisfies
+        target: SC-004
     fields:
       priority: should
       category: functional
@@ -107,7 +131,8 @@ artifacts:
   - id: REQ-SCOPE-001
     type: requirement
     title: varve selects and verifies; it never transforms code
-    status: draft
+    status: approved
+    release: v0.1.0
     description: >
       varve shall not compile, fuse, optimise, instrument or otherwise
       transform any user artifact. Its qualification scope is limited to
@@ -122,21 +147,32 @@ artifacts:
       category: constraint
 
   # ─────────────────────────────────────────────────────────────────────
-  # Open — both shape the manifest format, so both are cheap now and
-  # expensive once consumers have frozen against the first format.
+  # Formerly open — both decided 2026-08-07 after a research pass over
+  # criticalup/Ferrocene, TUF, Uptane, SUIT (RFC 9019), DO-330 and the
+  # qualified-tool vendor practice (AdaCore, IAR, Wind River). See DD-004,
+  # DD-005 and the research artifacts (CA-*, AR-*) they cite.
   # ─────────────────────────────────────────────────────────────────────
 
   - id: REQ-ROLLBACK-001
     type: requirement
     title: A stale but validly-signed layer cannot be passed off as current
-    status: draft
+    status: approved
+    release: v0.2.0
     description: >
-      OPEN. Digest pinning protects a project that already pins a digest; it
-      does not protect a fresh consumer handed an older, still-valid layer.
-      Consuming Sigstore's TUF root gives no snapshot/timestamp role over the
-      PulseEngine release stream. Needs a decision before the first qualified
-      deposit.
-    tags: [security, open-question]
+      varve shall reject a layer whose release counter is lower than the
+      highest counter it has accepted for that release line, and shall surface
+      a staleness warning when a layer's signed issued-at timestamp exceeds a
+      configurable age. The counter and issued-at live inside the signed layer
+      metadata (never in mutable tag state); the client persists a high-water
+      mark per line. Decided per DD-005 — the SUIT/Uptane monotonic-counter
+      model; tuf-on-ci is the recorded upgrade path should a connected
+      freshness channel be needed.
+    tags: [security]
+    links:
+      - type: satisfies
+        target: SC-001
+      - type: traces-to
+        target: DD-005
     fields:
       priority: must
       category: security
@@ -144,29 +180,104 @@ artifacts:
   - id: REQ-PATCH-001
     type: requirement
     title: A frozen line can receive a patch without moving the consumer off it
-    status: draft
+    status: approved
+    release: v0.1.0
     description: >
-      OPEN. A serious defect in the July layer cannot be answered with "move to
-      August" — that is precisely the cost the consumer froze to avoid. A
-      patched layer (2026.07.1) must be expressible, with the qualification
-      delta scoped to what changed.
-
-      This decides whether a layer identifier is two-part or three-part, so it
-      must be settled before the first qualified deposit. Without it, freezing
-      becomes a trap the first time a serious defect lands.
-    tags: [qualification, open-question]
+      The layer identifier shall be three-part from the first deposit —
+      YYYY.MM.P, with .0 for the initial deposit of a line (2026.07.0). A
+      patch (2026.07.1) stays inside the frozen line and carries a signed
+      qualification-delta attestation referencing its baseline, scoped to what
+      changed. Decided per DD-004 — the identifier grammar freezes with
+      manifest-version 1, so it lands in v0.1.0 even though the first patch
+      deposit is far away.
+    tags: [qualification]
+    links:
+      - type: traces-to
+        target: DD-004
     fields:
       priority: must
       category: functional
 
   # ─────────────────────────────────────────────────────────────────────
-  # Decisions already taken (see pulseengine.eu#157 for the full thread).
+  # v0.5.0 — the criticalup gaps worth owning (see CA-CRITICALUP):
+  # metadata that their v2 schema designed but never shipped, and the
+  # self-verification story their CLI only recently gained.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-KP-001
+    type: requirement
+    title: Known-problems, support-window and yank metadata ship and are surfaced
+    status: approved
+    release: v0.5.0
+    description: >
+      A layer shall be able to carry signed known-problems entries
+      (description, scope, workaround, detection, mitigation, affected
+      releases), a stated support window, and a yanked marker — attached as
+      OCI referrers so they can be added after deposit without changing the
+      layer digest. varve status shall surface them for the pinned layer
+      ("2026.07.0: 3 known problems, 2 with workarounds; supported until
+      2028-07"). A yanked layer warns loudly but remains installable — the
+      consumer owns the freeze decision.
+
+      Rationale: the industry's default answer to a defect in a frozen line is
+      a known-problems list, not a forced move (Ferrocene, AdaCore, IAR).
+      criticalup designed exactly this metadata in its v2 schema and never
+      shipped it.
+    tags: [qualification, differentiator]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-SELF-001
+    type: requirement
+    title: varve verifies its own releases the way it verifies layers
+    status: approved
+    release: v0.5.0
+    description: >
+      varve's own release artifacts shall be cosign-signed and varve shall be
+      able to verify a candidate varve binary/archive against the PulseEngine
+      trust root before it replaces itself or is first trusted — failing
+      closed. The tool that gates the toolchain must clear its own gate.
+
+      Rationale: varve sits outside the layer it installs (DD-002), so nothing
+      else verifies it. Dogfooding the attestation chain on ourselves is the
+      strongest end-to-end test of the supply-chain story we can run.
+    tags: [security, differentiator]
+    links:
+      - type: traces-to
+        target: DD-002
+    fields:
+      priority: must
+      category: security
+
+  - id: REQ-DEPOSIT-001
+    type: requirement
+    title: A layer is assembled, signed and published by CI in one auditable step
+    status: approved
+    release: v0.4.0
+    description: >
+      varve deposit shall assemble a layer manifest (OCI image index) from the
+      pinned per-tool release artifacts, embed the release counter and
+      issued-at, sign it by digest via sigil, attach referrers, and publish —
+      producing the same bundle whether it lands on a registry or in an
+      oci-layout archive. Deposit is the only way a layer comes into being;
+      hand-edited layer manifests do not exist.
+    tags: [core, ci]
+    fields:
+      priority: must
+      category: functional
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Decisions. DD-001..003 were taken in the pulseengine.eu#157 thread;
+  # DD-004..007 were taken 2026-08-07 with the research artifacts as
+  # evidence. All approved.
   # ─────────────────────────────────────────────────────────────────────
 
   - id: DD-001
     type: design-decision
     title: Distribute layers as OCI image indexes rather than a bespoke format
-    status: draft
+    status: approved
+    release: v0.1.0
     description: >
       An OCI image index gives content-addressed digests (pinning is native),
       one-index-to-N-artifacts (the bundle shape), per-platform selection
@@ -184,6 +295,8 @@ artifacts:
         target: REQ-VERIFY-001
       - type: satisfies
         target: REQ-COEXIST-001
+      - type: satisfies
+        target: REQ-DEPOSIT-001
     fields:
       rationale: >
         Content-addressed digests make pinning native; one index to N artifacts
@@ -197,7 +310,8 @@ artifacts:
   - id: DD-002
     type: design-decision
     title: varve is a separate tool, outside the layer it installs
-    status: draft
+    status: approved
+    release: v0.1.0
     description: >
       sigil is a member of the toolchain bundle. A tool that installs a set
       containing sigil cannot itself be sigil — it must be obtainable before
@@ -225,7 +339,8 @@ artifacts:
   - id: DD-003
     type: design-decision
     title: Access is pluggable; acceptance is not
-    status: draft
+    status: approved
+    release: v0.2.0
     description: >
       Fetch goes through a source abstraction from the first commit, with a
       public-registry implementation as the only one shipped. An entitlement
@@ -246,3 +361,119 @@ artifacts:
         requiring a redesign, while the single public implementation keeps today
         simple.
     tags: [architecture, security]
+
+  - id: DD-004
+    type: design-decision
+    title: "Layer identifiers are three-part from day one: YYYY.MM.P, frozen-line patch model"
+    status: approved
+    release: v0.1.0
+    description: >
+      A layer is always YYYY.MM.P — 2026.07.0 is the initial deposit of the
+      July line, 2026.07.1 a patch inside it. Patches stay minimal (critical
+      fixes only) and carry a signed qualification-delta attestation
+      referencing the baseline (the DO-330 change-impact-analysis mechanism).
+      Known-problems entries attach as signed referrers per REQ-KP-001, so the
+      no-patch mitigation path is tooling, not folklore. The identifier
+      grammar is part of manifest-version 1 and never migrates.
+    links:
+      - type: satisfies
+        target: REQ-PATCH-001
+    fields:
+      rationale: >
+        Ferrocene reserves exactly this shape (YY.MM.patch) for its qualified
+        line; AdaCore sustained branches, IAR frozen service packs and Wind
+        River legacy branches all patch frozen lines rather than forcing a
+        jump; DO-330 sanctions qualification reuse via change impact analysis.
+        A two-part identifier becomes ambiguous the day the first patch
+        exists — exactly the resolution ambiguity a qualified pin must not
+        have. Deciding now is cheap; migrating a manifest format consumers
+        have frozen against is not.
+    tags: [architecture, qualification]
+
+  - id: DD-005
+    type: design-decision
+    title: "Anti-rollback: monotonic per-line release counters in signed metadata; tuf-on-ci as upgrade path"
+    status: approved
+    release: v0.2.0
+    description: >
+      Every layer manifest carries a release counter (monotonic per release
+      line) and an issued-at timestamp inside the signed payload. The client
+      persists a high-water mark per line and hard-rejects any layer below it;
+      issued-at drives staleness warnings with a configurable threshold. Tags
+      are discovery-only — trust lives in digest + signature + counter.
+      Counters are scoped per line, so a consumer frozen on 2026.07 gets
+      rollback protection within the line without ever being pressured toward
+      2026.08. If a connected freshness channel is ever needed, tuf-on-ci
+      (static-file TUF, KMS-signed timestamp/snapshot on CI) is the recorded
+      upgrade path; full TUF is not stood up before varve has users.
+    links:
+      - type: satisfies
+        target: REQ-ROLLBACK-001
+    fields:
+      rationale: >
+        The SUIT manifest (RFC 9019 family) makes a monotonic sequence number
+        a REQUIRED, MUST-reject field for offline/constrained verifiers;
+        Uptane's release counters deliver rollback protection that survives
+        compromise of the online half because they sit in offline-signed
+        metadata plus persisted client state. Both are designed for exactly
+        varve's constraints: static hosting, air-gap, no server. Sigstore
+        machinery proves authenticity at time of signing, never currency, so
+        counters close a gap signatures cannot. criticalup has no rollback or
+        freshness protection at all — this is a differentiator we own.
+        Regulations (UNECE R156, IEC 62443-4-2, RFC 9019) require downgrade
+        control and version identification but mandate no specific framework;
+        a documented signed-counter scheme satisfies them without TUF's
+        re-signing treadmill.
+    tags: [architecture, security]
+
+  - id: DD-006
+    type: design-decision
+    title: Resolution is walk-up discovery plus shims that exec, never fall back
+    status: approved
+    release: v0.1.0
+    description: >
+      The pin (varve.toml) is discovered by walking up from the working
+      directory, the rust-toolchain.toml reflex. Shims on PATH resolve the pin
+      on every invocation and exec the real binary from the content-addressed
+      core; a missing or partial layer is a hard error carrying the corrective
+      install command. Switching projects is cd. varve which answers "which
+      binary would actually run, and why".
+    links:
+      - type: satisfies
+        target: REQ-PIN-001
+      - type: satisfies
+        target: REQ-COEXIST-001
+    fields:
+      rationale: >
+        rustup and criticalup both converge on per-project manifest + shims —
+        the mechanism developers already trust. Resolving on every invocation
+        makes the drift check free (the shim knows pin and resolution), and
+        exec keeps varve out of the data path per REQ-SCOPE-001. The
+        fail-closed rule is load-bearing: silent fallback would contaminate an
+        output rather than waste an afternoon.
+    tags: [architecture, ergonomics]
+
+  - id: DD-007
+    type: design-decision
+    title: Provenance stamping extends wsc-attestation ToolInfo, not the tools
+    status: approved
+    release: v0.4.0
+    description: >
+      The layer identity (name + manifest digest) enters build provenance via
+      two optional fields on wsc-attestation's ToolInfo (toolchain,
+      toolchain-manifest-digest), populated at dispatch time from what the
+      shim already knows. Individual tools stay layer-unaware. The field
+      addition lives in the sigil repo and is filed there now so it lands
+      upstream before varve v0.4.0 consumes it.
+    links:
+      - type: satisfies
+        target: REQ-PROV-001
+    fields:
+      rationale: >
+        wsc-attestation already records per-transformation ToolInfo inside the
+        signed artifact (custom sections are covered by the signature), so one
+        field addition makes every meld/loom/synth hop carry the qualified-set
+        identity — catching the mixed-toolchain hazard a qualification review
+        must exclude. Stamping at the shim keeps the change in one place
+        instead of ten tools.
+    tags: [architecture, traceability]
