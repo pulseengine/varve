@@ -20,3 +20,14 @@
 //! See `docs/manifest-format.md`. Nothing here is implemented yet.
 
 #![forbid(unsafe_code)]
+
+pub mod discover;
+pub mod layer;
+pub mod pin;
+pub mod resolve;
+pub mod store;
+
+pub use layer::{LayerId, LayerIdError, Line};
+pub use pin::{Channel, Pin, PinError};
+pub use resolve::{ResolveError, Resolved, resolve};
+pub use store::{InstalledLayer, Store, StoreError, manifest_digest};
