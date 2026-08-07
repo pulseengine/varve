@@ -1,10 +1,17 @@
 # Changelog
 
-## Unreleased (v0.5.0 — tag held on REQ-PROV-001 / sigil#221)
+## v0.5.0 — 2026-08-07
 
-Known-problems evidence and self-verification (REQ-KP-001 + REQ-SELF-001
-verified, DD-008 + DD-009 accepted; the release gate holds until
-REQ-PROV-001's attestation half lands via pulseengine/sigil#221).
+Known-problems evidence, self-verification, and the closed provenance
+contract (REQ-KP-001 + REQ-SELF-001 + REQ-PROV-001 verified, DD-008 +
+DD-009 accepted — the full v0.1..v0.5 plan is now delivered).
+
+- Provenance closed end-to-end: sigil#221 merged and released as wsc 0.10.0;
+  wsc-attestation ToolInfo now carries `toolchain` +
+  `toolchain_manifest_digest`, populated from the environment `varve run`
+  exports. An integration test pins both halves to the same contract
+  (mutation-checked: renaming a variable on either side goes red)
+- varve-core's wsc dependency bumped 0.9.0 → 0.10.0
 
 - Line-status documents (DD-008): per-line signed advisories — known
   problems in the Ferrocene shape (workaround/detection/mitigation/affected),
