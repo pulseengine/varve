@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 pub mod archive;
+pub mod bazel;
 pub mod deposit;
 pub mod discover;
 pub mod install;
@@ -41,7 +42,10 @@ pub mod update;
 pub mod verify;
 
 pub use archive::{ArchiveError, OciLayoutSource, export as export_archive};
-pub use deposit::{DepositError, DepositOutcome, DepositSpec, DepositTool, deposit};
+pub use deposit::{
+    DepositError, DepositFileSpec, DepositOutcome, DepositSpec, DepositTool, ToolSource, deposit,
+    parse_deposit_spec,
+};
 pub use install::{
     InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
 };

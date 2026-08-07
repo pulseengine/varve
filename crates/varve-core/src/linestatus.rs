@@ -407,6 +407,7 @@ mod tests {
                 version: "1".into(),
                 platform: None,
                 bytes: b"t".to_vec(),
+                source: None,
             }],
         };
         let outcome = deposit(&spec, &sk, "k", &dest).unwrap();

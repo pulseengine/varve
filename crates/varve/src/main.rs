@@ -78,16 +78,20 @@ enum Cmd {
     /// (CI) Assemble, sign and publish a layer — the only way a layer comes
     /// into being. Writes the same OCI image layout `archive` produces.
     Deposit {
+        /// Deposit spec file (TOML: layer/channel/counter + [[tool]] with
+        /// source provenance). Alternative to the individual flags below.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["layer", "channel", "counter", "tools"])]
+        spec: Option<PathBuf>,
         /// Layer identifier, e.g. `2026.08.0`.
-        #[arg(long)]
-        layer: String,
+        #[arg(long, required_unless_present = "spec")]
+        layer: Option<String>,
         /// `qualified` or `rolling`.
-        #[arg(long)]
-        channel: String,
+        #[arg(long, required_unless_present = "spec")]
+        channel: Option<String>,
         /// Monotonic per-line release counter — the depositor owns
         /// monotonicity; clients enforce it.
-        #[arg(long)]
-        counter: u64,
+        #[arg(long, required_unless_present = "spec")]
+        counter: Option<u64>,
         /// RFC 3339 issued-at timestamp.
         #[arg(long, value_name = "RFC3339")]
         issued_at: String,
@@ -103,6 +107,17 @@ enum Cmd {
         /// Tool to include, as `name@version=path`. Repeatable.
         #[arg(long = "tool", value_name = "NAME@VERSION=PATH")]
         tools: Vec<String>,
+    },
+    /// Compile a Bazel checksum registry (rules_wasm_component schema) from
+    /// a verified installed layer — every hash Bazel enforces becomes a
+    /// transcription from the signed manifest instead of TOFU.
+    ExportBazel {
+        /// Layer to export, e.g. `2026.08.0`.
+        #[arg(long)]
+        layer: String,
+        /// Output directory for the per-tool JSON registries.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
     },
     /// Support window, yank state and known problems for the pinned layer,
     /// from the newest verified line-status document.
@@ -212,6 +227,7 @@ fn run() -> anyhow::Result<()> {
             tool_and_args,
         } => run_tool(&store, varve.as_deref(), &tool_and_args),
         Cmd::Deposit {
+            spec,
             layer,
             channel,
             counter,
@@ -221,8 +237,17 @@ fn run() -> anyhow::Result<()> {
             out,
             tools,
         } => deposit_cmd(
-            &layer, &channel, counter, &issued_at, &key, &key_id, &out, &tools,
+            spec.as_deref(),
+            layer.as_deref(),
+            channel.as_deref(),
+            counter,
+            &issued_at,
+            &key,
+            &key_id,
+            &out,
+            &tools,
         ),
+        Cmd::ExportBazel { layer, out } => export_bazel(&store, &layer, &out),
         Cmd::Status { from_file } => status(&store, from_file.as_deref()),
         Cmd::SignStatus {
             file,
@@ -498,17 +523,81 @@ fn run_tool(
     }
 }
 
+fn export_bazel(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Result<()> {
+    // Trust first: exporting registries from an unverifiable layer would
+    // launder unanchored hashes into Bazel.
+    let verifier = trust_root()?;
+    let wanted: varve_core::LayerId = layer.parse()?;
+    let entry = store
+        .list()?
+        .into_iter()
+        .find(|e| e.layer == wanted)
+        .with_context(|| format!("layer {layer} is not installed — varve install it first"))?;
+    varve_core::verify_installed(store, &entry, &verifier, &varve_core::host_platform())?;
+    let payload = std::fs::read(entry.root.join("layer.json"))?;
+    let manifest = varve_core::LayerManifest::parse(&payload)?;
+    let export = varve_core::bazel::export(&manifest);
+    std::fs::create_dir_all(out)?;
+    for (tool, json) in &export.registries {
+        let path = out.join(format!("{tool}.json"));
+        std::fs::write(&path, serde_json::to_vec_pretty(json)?)?;
+        println!("wrote {}", path.display());
+    }
+    for (tool, platform, reason) in &export.skipped {
+        eprintln!("skipped {tool} ({platform}): {reason}");
+    }
+    if export.registries.is_empty() {
+        bail!("nothing exported — no entry in layer {layer} carries source provenance");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn deposit_cmd(
-    layer: &str,
-    channel: &str,
-    counter: u64,
+    spec: Option<&std::path::Path>,
+    layer: Option<&str>,
+    channel: Option<&str>,
+    counter: Option<u64>,
     issued_at: &str,
     key: &std::path::Path,
     key_id: &str,
     out: &std::path::Path,
     tools: &[String],
 ) -> anyhow::Result<()> {
+    if let Some(spec_path) = spec {
+        let text = std::fs::read_to_string(spec_path)
+            .with_context(|| format!("cannot read spec {}", spec_path.display()))?;
+        let file_spec = varve_core::parse_deposit_spec(&text)?;
+        let base = spec_path.parent().unwrap_or(std::path::Path::new("."));
+        let mut deposit_tools = Vec::new();
+        for tool in file_spec.tools {
+            let path = base.join(&tool.path);
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("cannot read tool binary {}", path.display()))?;
+            deposit_tools.push(varve_core::DepositTool {
+                name: tool.name,
+                version: tool.version,
+                platform: tool.platform,
+                bytes,
+                source: tool.source,
+            });
+        }
+        return run_deposit(
+            &file_spec.layer,
+            &file_spec.channel,
+            file_spec.counter,
+            issued_at,
+            key,
+            key_id,
+            out,
+            deposit_tools,
+        );
+    }
+    let (layer, channel, counter) = (
+        layer.context("--layer required without --spec")?,
+        channel.context("--channel required without --spec")?,
+        counter.context("--counter required without --spec")?,
+    );
     let mut deposit_tools = Vec::new();
     for spec in tools {
         let (name_version, path) = spec
@@ -529,8 +618,32 @@ fn deposit_cmd(
             version: version.to_string(),
             platform: platform.map(str::to_string),
             bytes,
+            source: None,
         });
     }
+    run_deposit(
+        layer,
+        channel,
+        counter,
+        issued_at,
+        key,
+        key_id,
+        out,
+        deposit_tools,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_deposit(
+    layer: &str,
+    channel: &str,
+    counter: u64,
+    issued_at: &str,
+    key: &std::path::Path,
+    key_id: &str,
+    out: &std::path::Path,
+    deposit_tools: Vec<varve_core::DepositTool>,
+) -> anyhow::Result<()> {
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
     let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;

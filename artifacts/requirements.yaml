@@ -656,3 +656,30 @@ artifacts:
     fields:
       priority: should
       category: security
+
+  - id: REQ-BAZEL-001
+    type: requirement
+    title: Bazel checksum registries compile from signed layers, never from TOFU
+    status: verified
+    release: v0.9.0
+    description: >
+      Deposits shall record, inside the signed payload, each tool's source
+      provenance — upstream repo, release tag, asset name, and the sha256 of
+      the asset AS DOWNLOADED (the bytes Bazel will hash) — and varve
+      export-bazel shall compile, from a verified layer, the
+      rules_wasm_component checksum-registry JSON (tool/version/platform ->
+      url_suffix + sha256, their platform-key vocabulary). Bazel's fetch
+      path stays pure sha256-pinned download; what changes is who authors
+      the hashes: transcribed from a signed, counter-protected manifest
+      instead of hashed off whatever a release page served. Tools without
+      source provenance are skipped loudly, never silently. The consuming
+      CI gate lives in rules_wasm_component and is tracked there.
+    tags: [security, integration]
+    links:
+      - type: satisfies
+        target: SC-002
+      - type: traces-to
+        target: DD-001
+    fields:
+      priority: should
+      category: functional
