@@ -205,6 +205,36 @@ jobs:
           echo "::notice::SHA256SUMS signed via Sigstore keyless flow."
           ls -la ./*
 
+      # ── varve-native release signature (DD-009 / REQ-SELF-001) ─────────
+      # A DSSE envelope over SHA256SUMS.txt with the PulseEngine root key,
+      # so `varve self-verify` can check a release offline against the same
+      # pinned root that verifies layers. Activates when the root ceremony
+      # provisions the VARVE_ROOT_KEY secret (the v1.0 gate); until then the
+      # step reports loudly that the asset is absent — a missing artifact is
+      # visible to consumers, unlike a silently-skipped gate.
+      - name: Sign SHA256SUMS with the varve root (DSSE)
+        env:
+          VARVE_ROOT_KEY: ${{ secrets.VARVE_ROOT_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VARVE_ROOT_KEY:-}" ]; then
+            echo "::warning::VARVE_ROOT_KEY not provisioned — release ships without \
+          SHA256SUMS.txt.dsse.json; varve self-verify will fail closed on this release \
+          (root ceremony pending, see DD-009)."
+            exit 0
+          fi
+          cargo build --release -p varve
+          printf '%s' "$VARVE_ROOT_KEY" > /tmp/varve-root.key
+          cd release-assets
+          # The signing code is the same sign_release_sums the verifier
+          # tests against — producer and consumer cannot drift.
+          ../target/release/varve sign-sums \
+            --sums SHA256SUMS.txt \
+            --key /tmp/varve-root.key \
+            --out SHA256SUMS.txt.dsse.json
+          rm -f /tmp/varve-root.key
+          ls -la SHA256SUMS.txt.dsse.json
+
       - name: Capture build environment
         run: |
           set -euo pipefail

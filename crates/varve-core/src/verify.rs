@@ -35,40 +35,73 @@ impl PinnedKeyVerifier {
 
 impl ManifestVerifier for PinnedKeyVerifier {
     fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {
-        let text = std::str::from_utf8(fetched)
-            .map_err(|_| VerifyError("fetched manifest is not UTF-8 DSSE JSON".into()))?;
-        let envelope = DsseEnvelope::from_json(text)
-            .map_err(|e| VerifyError(format!("not a DSSE envelope: {e}")))?;
-        if envelope.payload_type != LAYER_PAYLOAD_TYPE {
-            return Err(VerifyError(format!(
-                "envelope payload type is '{}', expected '{LAYER_PAYLOAD_TYPE}' — refusing to \
-                 accept a signed non-manifest as a manifest",
-                envelope.payload_type
-            )));
-        }
-        envelope.verify_all(&self.verifier).map_err(|e| {
-            VerifyError(format!(
-                "signature does not verify against the trust root: {e}"
-            ))
-        })
+        verify_with(&self.verifier, fetched, LAYER_PAYLOAD_TYPE)
     }
 }
 
-/// Sign layer-manifest payload bytes into a DSSE envelope (JSON). The
-/// producing half — used by `varve deposit` (v0.4) and by tests; it lives
-/// here so the signing and verifying sides can never drift apart.
-pub fn sign_layer_manifest(
+/// Verify a DSSE envelope of a specific payload type against a pinned root
+/// public key, returning the authenticated payload. The one verification
+/// path shared by layer manifests, line-status documents (DD-008) and
+/// release sums (DD-009) — different payload types, one trust root, so the
+/// type check is what keeps signed documents from posing as each other.
+pub fn dsse_verify_typed(
+    envelope: &[u8],
+    expected_payload_type: &str,
+    root_public_key: &[u8],
+) -> Result<Vec<u8>, VerifyError> {
+    let verifier = Ed25519DsseVerifier::from_bytes(root_public_key)
+        .map_err(|e| VerifyError(format!("invalid trust-root public key: {e}")))?;
+    verify_with(&verifier, envelope, expected_payload_type)
+}
+
+fn verify_with(
+    verifier: &Ed25519DsseVerifier,
+    envelope: &[u8],
+    expected_payload_type: &str,
+) -> Result<Vec<u8>, VerifyError> {
+    let text = std::str::from_utf8(envelope)
+        .map_err(|_| VerifyError("fetched bytes are not UTF-8 DSSE JSON".into()))?;
+    let envelope = DsseEnvelope::from_json(text)
+        .map_err(|e| VerifyError(format!("not a DSSE envelope: {e}")))?;
+    if envelope.payload_type != expected_payload_type {
+        return Err(VerifyError(format!(
+            "envelope payload type is '{}', expected '{expected_payload_type}' — refusing to \
+             accept a signed document as something it is not",
+            envelope.payload_type
+        )));
+    }
+    envelope.verify_all(verifier).map_err(|e| {
+        VerifyError(format!(
+            "signature does not verify against the trust root: {e}"
+        ))
+    })
+}
+
+/// Sign a payload of a given type into a DSSE envelope (JSON) — the
+/// producing half, shared by deposit, line-status and release-sums signing
+/// so the two sides can never drift apart.
+pub fn dsse_sign_typed(
     payload: &[u8],
+    payload_type: &str,
     secret_key: &[u8],
     key_id: &str,
 ) -> Result<String, VerifyError> {
     let signer = Ed25519DsseSigner::from_bytes(secret_key, Some(key_id.to_string()))
         .map_err(|e| VerifyError(format!("invalid signing key: {e}")))?;
-    let envelope = DsseEnvelope::sign(payload, LAYER_PAYLOAD_TYPE, &signer)
+    let envelope = DsseEnvelope::sign(payload, payload_type, &signer)
         .map_err(|e| VerifyError(format!("signing failed: {e}")))?;
     envelope
         .to_json_pretty()
         .map_err(|e| VerifyError(format!("envelope serialization failed: {e}")))
+}
+
+/// Sign layer-manifest payload bytes into a DSSE envelope (JSON).
+pub fn sign_layer_manifest(
+    payload: &[u8],
+    secret_key: &[u8],
+    key_id: &str,
+) -> Result<String, VerifyError> {
+    dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)
 }
 
 /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).

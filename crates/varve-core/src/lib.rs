@@ -26,11 +26,13 @@ pub mod deposit;
 pub mod discover;
 pub mod install;
 pub mod layer;
+pub mod linestatus;
 pub mod manifest;
 pub mod pin;
 pub mod resolve;
 pub mod reverify;
 pub mod rollback;
+pub mod selfverify;
 pub mod source;
 pub mod store;
 pub mod verify;
@@ -41,11 +43,18 @@ pub use install::{
     InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
 };
 pub use layer::{LayerId, LayerIdError, Line};
+pub use linestatus::{
+    KnownProblem, LayerStatusReport, LineStatus, LineStatusError, StatusCache,
+    attach_to_layout as attach_status_to_layout, read_from_layout as read_status_from_layout,
+};
 pub use manifest::{LayerManifest, ManifestError};
 pub use pin::{Channel, Pin, PinError};
 pub use resolve::{ResolveError, Resolved, resolve};
 pub use reverify::{ReverifyError, verify_installed};
 pub use rollback::{HighWaterMarks, RollbackError, RollbackVerdict, staleness_warning};
+pub use selfverify::{
+    RELEASE_SUMS_PAYLOAD_TYPE, SelfVerifyError, sign_release_sums, verify_release_file,
+};
 pub use source::{DirSource, LayerRef, LayerSource, MemorySource, SourceError};
 pub use store::{InstalledLayer, Store, StoreError, manifest_digest};
 pub use verify::{
