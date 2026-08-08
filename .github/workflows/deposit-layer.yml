@@ -115,7 +115,14 @@ jobs:
               fetch_asset "$repo" "$version" "$asset"
               mkdir -p "extract/$tool-$platform"
               tar xzf "downloads/$tool/$asset" -C "extract/$tool-$platform"
-              cp "extract/$tool-$platform/$tool" "tools/$tool-$platform"
+              # Layouts differ per repo (flat vs versioned subdir): locate
+              # the binary by name anywhere in the extraction.
+              bin="$(find "extract/$tool-$platform" -type f -name "$tool" | head -1)"
+              if [ -z "$bin" ]; then
+                echo "::error::$asset contains no '$tool' binary; contents:"; tar tzf "downloads/$tool/$asset" | head -20
+                exit 1
+              fi
+              cp "$bin" "tools/$tool-$platform"
               add_tool "$tool" "$bare" "$platform" "tools/$tool-$platform" "$repo" "$version" "$asset" "$sha"
             done
           done
