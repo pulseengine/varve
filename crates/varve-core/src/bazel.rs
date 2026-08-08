@@ -21,6 +21,10 @@ pub const ANN_SRC_RELEASE: &str = "eu.pulseengine.source.release";
 pub const ANN_SRC_ASSET: &str = "eu.pulseengine.source.asset";
 pub const ANN_SRC_SHA256: &str = "eu.pulseengine.source.sha256";
 
+pub const ANN_RUNNER: &str = "eu.pulseengine.runner";
+pub const ANN_RUNNER_ARGS: &str = "eu.pulseengine.runner-args";
+pub const ANN_RUNNER_ARG_PREFIX: &str = "eu.pulseengine.runner-arg-prefix";
+
 /// Map a target triple to rules_wasm_component's platform-key vocabulary.
 pub fn bazel_platform_key(triple: &str) -> Option<&'static str> {
     match triple {

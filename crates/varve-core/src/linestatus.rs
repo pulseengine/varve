@@ -408,6 +408,7 @@ mod tests {
                 platform: None,
                 bytes: b"t".to_vec(),
                 source: None,
+                runner: None,
             }],
         };
         let outcome = deposit(&spec, &sk, "k", &dest).unwrap();

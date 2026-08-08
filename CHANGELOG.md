@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.11.0 — 2026-08-08
+
+Portable wasm entries + layer runners (REQ-RUNNER-001 verified).
+
+- Entries whose platform is a wasm32 target are PORTABLE — they ride to
+  every host with zero per-platform gaps
+- A wasm entry may carry, inside the signed payload, a runner contract:
+  `[tool.runner]` in the deposit spec — the layer tool that executes it,
+  prefix args, and an optional per-user-argument flag (kilnd's
+  --wasi-arg shape). `varve run` and the shims dispatch through the
+  runner FROM THE SAME VERIFIED LAYER, never from PATH; a missing
+  runner fails closed (mutation-checked e2e)
+- First real payload: scry via kilnd, pending the meld↔kilnd
+  entry-point contract (kiln#480; scry#118 asks for a pre-fused core
+  artifact) — a one-line roster addition once resolved
+
 ## v0.10.0 — 2026-08-08
 
 Realms (REQ-REALM-001 verified): the pin names its trust universe;

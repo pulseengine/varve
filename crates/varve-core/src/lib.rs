@@ -44,8 +44,8 @@ pub mod verify;
 
 pub use archive::{ArchiveError, OciLayoutSource, export as export_archive};
 pub use deposit::{
-    DepositError, DepositFileSpec, DepositOutcome, DepositSpec, DepositTool, ToolSource, deposit,
-    parse_deposit_spec,
+    DepositError, DepositFileSpec, DepositOutcome, DepositSpec, DepositTool, RunnerSpec,
+    ToolSource, deposit, parse_deposit_spec,
 };
 pub use install::{
     InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
@@ -60,7 +60,7 @@ pub use pin::{Channel, Pin, PinError};
 pub use platform::host_platform;
 pub use realm::{Realm, RealmError, resolve_realm};
 pub use registry::{RegistryRef, RegistrySource};
-pub use resolve::{ResolveError, Resolved, resolve};
+pub use resolve::{ResolveError, Resolved, RunnerContract, resolve};
 pub use reverify::{ReverifyError, verify_installed};
 pub use rollback::{HighWaterMarks, RollbackError, RollbackVerdict, staleness_warning};
 pub use selfverify::{

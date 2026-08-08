@@ -710,3 +710,26 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  - id: REQ-RUNNER-001
+    type: requirement
+    title: Portable wasm entries execute through a runner from the same layer
+    status: verified
+    release: v0.11.0
+    description: >
+      A layer entry whose platform is a wasm32 target is PORTABLE — it
+      matches every host — and may carry, inside the signed payload, a
+      runner contract: the name of another tool in the same layer that
+      executes it, prefix arguments, and an optional per-argument flag
+      (kilnd's --wasi-arg shape). varve run and the shims dispatch such
+      entries through their runner, resolved from the same verified layer —
+      never from PATH. A runnered entry whose runner is absent from the
+      layer fails closed. This is how wasm-only tools (scry, once kiln#480
+      resolves) join layers with zero per-platform gaps.
+    tags: [core]
+    links:
+      - type: traces-to
+        target: DD-006
+    fields:
+      priority: should
+      category: functional
