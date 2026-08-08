@@ -977,7 +977,7 @@ artifacts:
   - id: REQ-FUZZ-001
     type: requirement
     title: Untrusted-input parsers are fuzzed continuously
-    status: approved
+    status: verified
     release: v0.13.0
     description: >
       cargo-fuzz targets shall cover the DSSE envelope path, layer-manifest
@@ -992,14 +992,14 @@ artifacts:
   - id: REQ-PROP-001
     type: requirement
     title: Core invariants hold under property-based and model-checked exploration
-    status: approved
+    status: verified
     release: v0.13.0
     description: >
       proptest properties shall cover grammar round-trips, rollback verdict
-      monotonicity, and platform-match totality; Kani harnesses shall prove
-      the high-water mark never decreases and the two-part-identifier
-      rejection holds for all inputs (advisory first, required at v1.0 —
-      the scry pattern).
+      monotonicity (accept iff counter >= mark), advance-never-lowers, and
+      platform-match totality — the laws that must hold across the whole
+      input space, not just chosen examples. (Machine-checked Kani proofs of
+      the same laws are tracked separately as REQ-KANI-001.)
     tags: [security]
     fields:
       priority: should
@@ -1008,7 +1008,7 @@ artifacts:
   - id: REQ-MATRIX-001
     type: requirement
     title: Tests run where releases run
-    status: approved
+    status: verified
     release: v0.13.0
     description: >
       The CI test matrix shall cover linux and macos (the released
@@ -1235,3 +1235,20 @@ artifacts:
         agreement is evidence, not an echo. Recorded verdicts make the
         independence auditable; gating makes it non-optional.
     tags: [process, independence]
+
+  - id: REQ-KANI-001
+    type: requirement
+    title: Core trust invariants are machine-checked by bounded model checking
+    status: approved
+    release: v1.0.0
+    description: >
+      Kani harnesses shall prove, over the bounded input space, the
+      invariants proptest exercises by sampling: the high-water mark never
+      decreases across advance, the rollback verdict is Accept iff the
+      presented counter is >= the mark, and the layer grammar rejects every
+      two-part identifier. Advisory when introduced, a required gate at the
+      v1.0 qualification (the scry pattern: proofs advisory pre-1.0).
+    tags: [security]
+    fields:
+      priority: should
+      category: non-functional
