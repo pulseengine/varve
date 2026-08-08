@@ -938,6 +938,113 @@ fn export_bazel_refuses_without_a_trust_root() {
         .stderr(predicate::str::contains("trust root"));
 }
 
+// rivet: verifies REQ-REALM-001
+#[cfg(unix)]
+#[test]
+fn two_realms_same_layer_name_zero_cross_talk() {
+    let fx = fixture(None, &[]);
+    let parent = fx.project.parent().unwrap();
+
+    // Two universes: same layer name and counter, different roots, and a
+    // `probe` tool that names its universe.
+    let mut realms_toml = String::new();
+    let mut archives = std::collections::BTreeMap::new();
+    for org in ["pulseengine", "acme"] {
+        let (sk, pk) = varve_core::generate_root_keypair();
+        let tool = format!("#!/bin/sh\necho universe={org} layer=$VARVE_LAYER\n");
+        let digest = varve_core::manifest_digest(tool.as_bytes());
+        let host = varve_core::host_platform();
+        let payload = format!(
+            r#"{{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "annotations": {{
+    "eu.pulseengine.varve.layer": "2026.08.0",
+    "eu.pulseengine.varve.line": "2026.08",
+    "eu.pulseengine.varve.channel": "rolling",
+    "eu.pulseengine.varve.counter": "5",
+    "org.opencontainers.image.created": "2026-08-07T00:00:00Z"
+  }},
+  "manifests": [
+    {{ "mediaType": "application/vnd.oci.image.manifest.v1+json",
+       "digest": "{digest}", "size": 0,
+       "annotations": {{ "eu.pulseengine.tool": "probe", "eu.pulseengine.platform": "{host}" }} }}
+  ]
+}}"#
+        );
+        let envelope = varve_core::sign_layer_manifest(payload.as_bytes(), &sk, "k").unwrap();
+        let archive = parent.join(format!("archive-{org}"));
+        varve_core::DirSource::at(&archive)
+            .put(envelope.as_bytes(), &[(digest.as_str(), tool.as_bytes())])
+            .unwrap();
+        archives.insert(org.to_string(), archive);
+        realms_toml.push_str(&format!(
+            "[realm.{org}]\nregistry = \"oci://example.invalid/{org}\"\ntrust-root = \"{}\"\n\n",
+            hex::encode(&pk)
+        ));
+    }
+    std::fs::write(parent.join("varve-realms.toml"), realms_toml).unwrap();
+
+    // Two projects pinning the SAME layer name in DIFFERENT realms.
+    for org in ["pulseengine", "acme"] {
+        let proj = parent.join(format!("proj-{org}"));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nrealm = \"{org}\"\nchannel = \"rolling\"\nlayer = \"2026.08.0\"\n"
+            ),
+        )
+        .unwrap();
+        // Install from each realm's archive; NO VARVE_TRUST_ROOT env — the
+        // realm is authoritative and self-contained.
+        let mut cmd = Command::cargo_bin("varve").unwrap();
+        cmd.env("VARVE_ROOT", &fx.root)
+            .env_remove("VARVE_TRUST_ROOT")
+            .current_dir(&proj)
+            .args(["install", "--from"])
+            .arg(&archives[org])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("2026.08.0"));
+    }
+
+    // One shim serves both universes: per-invocation resolution.
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("VARVE_ROOT", &fx.root)
+        .current_dir(parent.join("proj-pulseengine"))
+        .args(["shim", "install"])
+        .assert()
+        .success();
+    let shim = fx.root.join("shims").join("probe");
+    for (org, expect) in [
+        ("pulseengine", "universe=pulseengine"),
+        ("acme", "universe=acme"),
+    ] {
+        let out = std::process::Command::new(&shim)
+            .current_dir(parent.join(format!("proj-{org}")))
+            .env("VARVE_ROOT", &fx.root)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains(expect),
+            "{org}: {stdout}"
+        );
+    }
+
+    // Cross-acceptance impossible: acme's archive can NEVER install into the
+    // pulseengine project (realm root refuses the signature).
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("VARVE_ROOT", &fx.root)
+        .current_dir(parent.join("proj-pulseengine"))
+        .args(["install", "--from"])
+        .arg(&archives["acme"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("signature"));
+}
+
 // rivet: verifies REQ-COEXIST-001
 #[test]
 fn list_with_an_empty_core_succeeds_and_says_so() {

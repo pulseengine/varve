@@ -31,6 +31,7 @@ pub mod linestatus;
 pub mod manifest;
 pub mod pin;
 pub mod platform;
+pub mod realm;
 pub mod registry;
 pub mod resolve;
 pub mod reverify;
@@ -57,6 +58,7 @@ pub use linestatus::{
 pub use manifest::{LayerManifest, ManifestError};
 pub use pin::{Channel, Pin, PinError};
 pub use platform::host_platform;
+pub use realm::{Realm, RealmError, resolve_realm};
 pub use registry::{RegistryRef, RegistrySource};
 pub use resolve::{ResolveError, Resolved, resolve};
 pub use reverify::{ReverifyError, verify_installed};

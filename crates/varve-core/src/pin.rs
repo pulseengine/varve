@@ -30,6 +30,9 @@ pub enum Channel {
 /// A parsed, validated pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pin {
+    /// Optional trust universe (REQ-REALM-001). When named, the realm's
+    /// registry and trust root are AUTHORITATIVE for this project.
+    pub realm: Option<String>,
     pub channel: Channel,
     pub layer: LayerId,
     /// Optional exact manifest digest. When present it wins over the name:
@@ -83,6 +86,8 @@ struct RawPin {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawToolchain {
+    #[serde(default)]
+    realm: Option<String>,
     channel: Channel,
     layer: String,
     digest: Option<String>,
@@ -129,6 +134,7 @@ impl Pin {
             });
         }
         Ok(Pin {
+            realm: raw.toolchain.realm,
             channel: raw.toolchain.channel,
             layer,
             digest: raw.toolchain.digest,

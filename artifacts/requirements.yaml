@@ -683,3 +683,30 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  - id: REQ-REALM-001
+    type: requirement
+    title: A pin names its trust universe; realms are isolated by construction
+    status: verified
+    release: v0.10.0
+    description: >
+      varve.toml may name a realm; a committed varve-realms.toml (discovered
+      by the same walk-up as the pin, so trust travels with the code) defines
+      each realm's registry and trust root (inline hex key or a file relative
+      to the realms file). When a realm is named it is AUTHORITATIVE — the
+      ambient environment cannot substitute a different trust root — and all
+      per-realm state (core, high-water marks, status cache) lives under an
+      effective root namespaced by the trust-root fingerprint, so two realms
+      cannot cross-talk even with identical layer names and counters. One
+      shim directory serves every realm: resolution is per-invocation, so cd
+      between projects of different realms switches tool universes. A pin
+      naming an undefined realm fails closed with the corrective guidance.
+    tags: [core, security]
+    links:
+      - type: satisfies
+        target: SC-002
+      - type: traces-to
+        target: DD-003
+    fields:
+      priority: should
+      category: functional
