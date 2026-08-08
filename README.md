@@ -12,12 +12,14 @@
 
 ---
 
-> **Status: design complete, planned.** Nothing is implemented yet. The
-> architecture is settled
-> ([pulseengine.eu#157](https://github.com/pulseengine/pulseengine.eu/issues/157))
-> and the two formerly-open decisions are now taken (see
-> [Decisions](#decisions-formerly-open-questions)). The release plan lives in
-> rivet (`rivet release status v0.1.0`). Do not depend on anything here yet.
+> **Status: implemented, rolling channel.** varve is released (see the
+> [releases](https://github.com/pulseengine/varve/releases)) and dogfooded —
+> the PulseEngine toolchain ships as signed layers on
+> `ghcr.io/pulseengine/varve/layers`. The **qualified** channel is not open
+> yet: it awaits the trust-root ceremony (the v1.0 gate), so today's layers
+> are signed with a provisional rolling key and make no qualification
+> promise. The release plan lives in rivet (`rivet release status`); see
+> [SECURITY.md](SECURITY.md) for the current trust posture and its limits.
 
 ## The problem
 

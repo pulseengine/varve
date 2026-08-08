@@ -87,6 +87,14 @@ impl LayerManifest {
                 ),
             })?;
         let issued_at = ann(ANN_ISSUED_AT)?.clone();
+        // Reject a malformed issued-at at parse (F2): the staleness verdict
+        // must never silently fail open on a signed-but-undated manifest.
+        if crate::rollback::epoch_days(&issued_at).is_none() {
+            return Err(ManifestError::BadAnnotation {
+                ann: ANN_ISSUED_AT,
+                reason: format!("'{issued_at}' is not an RFC 3339 date"),
+            });
+        }
         Ok(LayerManifest {
             layer,
             channel,
@@ -286,6 +294,35 @@ mod tests {
             matches!(err, ManifestError::MissingAnnotation(ANN_ISSUED_AT)),
             "got: {err}"
         );
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn a_non_date_issued_at_is_refused_not_silently_undated() {
+        // F2 (2026-08-08 audit): a signed manifest with a malformed
+        // issued-at must be REJECTED at parse — otherwise the staleness
+        // verdict silently fails open (epoch_days returns None → no
+        // warning), voiding SH-002's bound.
+        for bad in [
+            "unknown",
+            "2026-08",
+            "2026-13-01T00:00:00Z",
+            "2026-02-31T00:00:00Z",
+            "",
+        ] {
+            let bytes = fixtures::manifest("2026.07.0", "qualified", 1, bad);
+            let err = LayerManifest::parse(&bytes).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ManifestError::BadAnnotation {
+                        ann: ANN_ISSUED_AT,
+                        ..
+                    }
+                ),
+                "issued-at {bad:?} must be refused, got: {err:?}"
+            );
+        }
     }
 
     // rivet: verifies REQ-VERIFY-001

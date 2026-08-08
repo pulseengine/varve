@@ -122,13 +122,44 @@ pub fn staleness_warning(issued_at: &str, now: &str, threshold_days: u32) -> Opt
 /// Days since the civil epoch for the date part of an RFC 3339 timestamp.
 /// Day resolution is deliberate: staleness policy is measured in days, so
 /// sub-day precision would only manufacture spurious boundary cases.
-fn epoch_days(rfc3339: &str) -> Option<i64> {
+// Public so the manifest parser can reject a malformed issued-at at parse
+// time (F2, 2026-08-08 audit) — the producer and the staleness verdict must
+// agree on what a valid date is, so there is one function.
+pub(crate) fn epoch_days(rfc3339: &str) -> Option<i64> {
+    // Require the exact YYYY-MM-DD prefix shape, not just any 10 chars.
     let date = rfc3339.get(..10)?;
+    if rfc3339.len() > 10 && !rfc3339[10..].starts_with('T') {
+        return None;
+    }
     let mut parts = date.split('-');
-    let y: i64 = parts.next()?.parse().ok()?;
-    let m: i64 = parts.next()?.parse().ok()?;
-    let d: i64 = parts.next()?.parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    let (yy, mm, dd) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() || yy.len() != 4 || mm.len() != 2 || dd.len() != 2 {
+        return None;
+    }
+    let y: i64 = yy.parse().ok()?;
+    let m: i64 = mm.parse().ok()?;
+    let d: i64 = dd.parse().ok()?;
+    if !(1..=12).contains(&m) {
+        return None;
+    }
+    // Real days-per-month incl. the Gregorian leap rule — Feb 31 is not a
+    // date (the old 1..=31 check let impossible days through).
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let dim = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if d < 1 || d > dim[(m - 1) as usize] {
         return None;
     }
     // Howard Hinnant's days_from_civil.
