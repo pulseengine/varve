@@ -1,0 +1,49 @@
+[package]
+name = "varve-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+varve-core = { path = "../crates/varve-core" }
+
+[[bin]]
+name = "layer_id"
+path = "fuzz_targets/layer_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dsse_verify"
+path = "fuzz_targets/dsse_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pin"
+path = "fuzz_targets/pin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "realms"
+path = "fuzz_targets/realms.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

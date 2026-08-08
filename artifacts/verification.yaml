@@ -364,3 +364,46 @@ artifacts:
     links:
       - type: verifies
         target: REQ-CLAIM-001
+
+  - id: VER-FUZZ-001
+    type: verification
+    title: Fuzz targets on the untrusted-input parsers (found + fixed a real bug)
+    status: verified
+    release: v0.13.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core non_canonical_leading_zero_patches_are_rejected
+        - run: cargo test -p varve-core a_non_date_issued_at_is_refused_not_silently_undated
+    links:
+      - type: verifies
+        target: REQ-FUZZ-001
+
+  - id: VER-PROP-001
+    type: verification
+    title: Property-based invariants — round-trip, rollback monotonicity, platform totality
+    status: verified
+    release: v0.13.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core --test properties layer_id_parse_display_round_trips
+        - run: cargo test -p varve-core --test properties rollback_is_monotone
+        - run: cargo test -p varve-core --test properties advance_never_lowers_the_mark
+        - run: cargo test -p varve-core --test properties platform_matching_is_total_and_wasm_is_universal
+    links:
+      - type: verifies
+        target: REQ-PROP-001
+
+  - id: VER-MATRIX-001
+    type: verification
+    title: MSRV build + multi-OS test matrix + coverage evidence
+    status: verified
+    release: v0.13.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo build --workspace --locked
+    links:
+      - type: verifies
+        target: REQ-MATRIX-001

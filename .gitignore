@@ -3,3 +3,7 @@
 # Cargo.lock tracked (26262-8 config-management: releases must rebuild from VCS)
 .DS_Store
 /dist
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/Cargo.lock

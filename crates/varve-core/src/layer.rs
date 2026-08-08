@@ -71,8 +71,13 @@ impl FromStr for LayerId {
                 let year: u16 = year.parse().map_err(|_| malformed())?;
                 let month: u8 = month.parse().map_err(|_| malformed())?;
                 // Patch is a plain number, no fixed width — but no signs,
-                // whitespace, or leading emptiness.
+                // whitespace, or leading emptiness, and CANONICAL: no leading
+                // zeros (else "2026.07.052" and "2026.07.52" would be two
+                // pin strings for one identity — found by fuzzing).
                 if !patch.chars().all(|c| c.is_ascii_digit()) {
+                    return Err(malformed());
+                }
+                if patch.len() > 1 && patch.starts_with('0') {
                     return Err(malformed());
                 }
                 let patch: u16 = patch.parse().map_err(|_| malformed())?;
@@ -170,6 +175,22 @@ mod tests {
             msg.contains("2026.07.0"),
             "message must show the fix: {msg}"
         );
+    }
+
+    // rivet: verifies REQ-PATCH-001
+    #[test]
+    fn non_canonical_leading_zero_patches_are_rejected() {
+        // Found by fuzzing: "2212.05.052" parsed to patch 52 but Displayed
+        // as "2212.05.52" — two pin strings for one identity. Canonical
+        // form only; "0" itself stays valid.
+        for bad in ["2212.05.052", "2026.07.00", "2026.07.01", "2026.07.007"] {
+            assert_eq!(
+                bad.parse::<LayerId>().unwrap_err(),
+                LayerIdError::Malformed(bad.into()),
+                "leading-zero patch {bad:?} must be rejected"
+            );
+        }
+        assert_eq!("2026.07.0".parse::<LayerId>().unwrap().patch(), 0);
     }
 
     // rivet: verifies REQ-PATCH-001

@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.13.0 — 2026-08-08
+
+Adversarial inputs (REQ-FUZZ-001 + REQ-PROP-001 + REQ-MATRIX-001 verified).
+
+- **Fuzzing**: five cargo-fuzz targets on the untrusted-input parsers
+  (layer-id grammar, layer-manifest JSON, DSSE envelope, varve.toml,
+  varve-realms.toml); PR smoke + nightly campaign (`fuzz.yml`). It earned
+  its keep on the first run — found a real canonicalization bug: the
+  layer-id grammar accepted leading-zero patches (`2026.07.052` parsed to
+  patch 52 but Displayed as `2026.07.52` — two pin strings for one
+  identity). Fixed, regression-seeded, re-fuzzed clean past 1.6M runs
+- **Property tests**: proptest laws across the whole input space — layer-id
+  round-trip, rollback verdict monotonicity (accept iff counter >= mark),
+  advance-never-lowers, platform-match totality + wasm universality
+- **Matrix**: CI now tests linux AND macos (was ubuntu-only while shipping
+  4 platforms), pins an MSRV (1.89) build, and publishes cargo-llvm-cov
+  coverage as advisory evidence
+- Kani proofs of the same invariants split to REQ-KANI-001 (v1.0, the
+  scry advisory→required pattern) — not claimed here
+
 ## v0.12.1 — 2026-08-08
 
 Audit hardening. Independent ASPICE/ISO-26262 and cybersecurity audits

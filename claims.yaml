@@ -44,6 +44,11 @@ claims:
       - { kind: workflow, ref: "implemented", file: README.md }
       - { kind: file, ref: SECURITY.md }
 
+  - claim: "Untrusted-input parsers are continuously fuzzed"
+    evidence:
+      - { kind: file, ref: fuzz/Cargo.toml }
+      - { kind: workflow, ref: "cargo fuzz", file: .github/workflows/fuzz.yml }
+
   - claim: "The requirement-to-test graph is mechanically audited"
     evidence:
       - { kind: file, ref: artifacts/verification.yaml }
