@@ -69,7 +69,9 @@ jobs:
           }
           asset_sha() { # repo asset -> hash from the VERIFIED sums (empty if absent)
             local dir="downloads/${1##*/}"
-            grep -E "[ /]$2\$" "$dir/SHA256SUMS.txt" | awk '{print $1}' | head -1
+            # pipefail-safe: a missing asset is an EXPECTED empty answer, not
+            # an error — the caller skips it with a notice.
+            { grep -E "[ /]$2\$" "$dir/SHA256SUMS.txt" || true; } | awk '{print $1}' | head -1
           }
           fetch_asset() { # repo version asset
             local repo="$1" version="$2" asset="$3"
