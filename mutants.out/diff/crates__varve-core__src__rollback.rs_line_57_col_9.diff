@@ -1,0 +1,35 @@
+--- crates/varve-core/src/rollback.rs
++++ replace HighWaterMarks::load -> Result<Self, RollbackError> with Ok(Default::default())
+@@ -49,31 +49,17 @@
+         "{path}: high-water-mark state is corrupt: {reason} — refusing to guess; repair or remove the file"
+     )]
+     Corrupt { path: String, reason: String },
+ }
+ 
+ impl HighWaterMarks {
+     /// Load the marks stored under `root` (missing file = first contact).
+     pub fn load(root: &Path) -> Result<Self, RollbackError> {
+-        let path = root.join("state").join("high-water-marks.json");
+-        let marks = match std::fs::read(&path) {
+-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| RollbackError::Corrupt {
+-                path: path.display().to_string(),
+-                reason: e.to_string(),
+-            })?,
+-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+-            Err(source) => {
+-                return Err(RollbackError::Io {
+-                    path: path.display().to_string(),
+-                    source,
+-                });
+-            }
+-        };
+-        Ok(HighWaterMarks { path, marks })
++        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// The recorded mark for a line, if any.
+     pub fn mark(&self, line: &Line) -> Option<u64> {
+         self.marks.get(&line.to_string()).copied()
+     }
+ 
+     /// Check a manifest against the marks. `Accept` does NOT advance the

@@ -122,13 +122,42 @@ pub fn staleness_warning(issued_at: &str, now: &str, threshold_days: u32) -> Opt
 /// Days since the civil epoch for the date part of an RFC 3339 timestamp.
 /// Day resolution is deliberate: staleness policy is measured in days, so
 /// sub-day precision would only manufacture spurious boundary cases.
-fn epoch_days(rfc3339: &str) -> Option<i64> {
-    let date = rfc3339.get(..10)?;
-    let mut parts = date.split('-');
-    let y: i64 = parts.next()?.parse().ok()?;
-    let m: i64 = parts.next()?.parse().ok()?;
-    let d: i64 = parts.next()?.parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+// Public so the manifest parser can reject a malformed issued-at at parse
+// time (F2, 2026-08-08 audit) — the producer and the staleness verdict must
+// agree on what a valid date is, so there is one function.
+pub(crate) fn epoch_days(rfc3339: &str) -> Option<i64> {
+    // Accept "YYYY-MM-DD", optionally followed by "T…" (the time part is not
+    // used at day resolution). The date must be exactly 10 chars with dashes
+    // at positions 4 and 7 — each guard independently reachable.
+    let date = rfc3339.split_once('T').map_or(rfc3339, |(d, _)| d);
+    let b = date.as_bytes();
+    if date.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let y: i64 = date[0..4].parse().ok()?;
+    let m: i64 = date[5..7].parse().ok()?;
+    let d: i64 = date[8..10].parse().ok()?;
+    if !(1..=12).contains(&m) {
+        return None;
+    }
+    // Real days-per-month incl. the Gregorian leap rule — Feb 31 is not a
+    // date (the old 1..=31 check let impossible days through).
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let dim = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if d < 1 || d > dim[(m - 1) as usize] {
         return None;
     }
     // Howard Hinnant's days_from_civil.
@@ -287,6 +316,48 @@ mod tests {
         ] {
             assert_eq!(epoch_days(bad), None, "{bad}");
         }
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn epoch_days_enforces_the_exact_yyyy_mm_dd_t_shape() {
+        // A bare 10-char date (no time) is valid; anything after must be 'T'.
+        assert_eq!(epoch_days("2026-08-07"), Some(20672));
+        assert_eq!(epoch_days("2026-08-07 00:00:00Z"), None, "space, not T");
+        assert_eq!(epoch_days("2026-08-07X"), None, "non-T separator");
+        // Field widths are exact; extra dash-fields rejected.
+        for bad in [
+            "2026-08-7T00:00:00Z",  // date part only 9 chars -> len != 10
+            "2026X08-07T00:00:00Z", // dash-at-4 missing
+            "2026-08X07T00:00:00Z", // dash-at-7 missing
+            "202608-07T00:00:00Z",  // shifted, both dashes wrong
+        ] {
+            assert_eq!(epoch_days(bad), None, "{bad}");
+        }
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn epoch_days_applies_the_full_gregorian_leap_rule() {
+        // Feb 29 valid only on real leap years — exercises %4, %100, %400
+        // independently so no single leap-condition mutant survives.
+        assert!(epoch_days("2024-02-29T00:00:00Z").is_some(), "2024 %4 leap");
+        assert_eq!(epoch_days("2023-02-29T00:00:00Z"), None, "2023 non-leap");
+        assert_eq!(
+            epoch_days("1900-02-29T00:00:00Z"),
+            None,
+            "1900 %100 non-leap"
+        );
+        assert!(
+            epoch_days("2000-02-29T00:00:00Z").is_some(),
+            "2000 %400 leap"
+        );
+        // And Feb 28 is always valid, Feb 30 never.
+        assert!(epoch_days("2023-02-28T00:00:00Z").is_some());
+        assert_eq!(epoch_days("2024-02-30T00:00:00Z"), None);
+        // 30-day month boundary.
+        assert!(epoch_days("2026-04-30T00:00:00Z").is_some());
+        assert_eq!(epoch_days("2026-04-31T00:00:00Z"), None, "April has 30");
     }
 
     // rivet: verifies REQ-ROLLBACK-001

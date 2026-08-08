@@ -1,0 +1,22 @@
+--- crates/varve-core/src/rollback.rs
++++ replace staleness_warning -> Option<i64> with Some(-1)
+@@ -110,18 +110,17 @@
+ }
+ 
+ /// Staleness verdict: how old is the layer's issued-at relative to `now`?
+ /// Both are RFC 3339 strings; `threshold_days` is policy supplied by the
+ /// caller. Returns `Some(age_days)` when the layer is older than the
+ /// threshold — a warning, never a rejection: a frozen consumer's layer aging
+ /// is expected, staying silently ignorant of it is not.
+ pub fn staleness_warning(issued_at: &str, now: &str, threshold_days: u32) -> Option<i64> {
+-    let age = epoch_days(now)? - epoch_days(issued_at)?;
+-    (age > i64::from(threshold_days)).then_some(age)
++    Some(-1) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Days since the civil epoch for the date part of an RFC 3339 timestamp.
+ /// Day resolution is deliberate: staleness policy is measured in days, so
+ /// sub-day precision would only manufacture spurious boundary cases.
+ // Public so the manifest parser can reject a malformed issued-at at parse
+ // time (F2, 2026-08-08 audit) — the producer and the staleness verdict must
+ // agree on what a valid date is, so there is one function.

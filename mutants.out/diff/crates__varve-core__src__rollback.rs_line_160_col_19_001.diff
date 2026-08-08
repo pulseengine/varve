@@ -1,0 +1,21 @@
+--- crates/varve-core/src/rollback.rs
++++ replace > with < in epoch_days
+@@ -152,17 +152,17 @@
+         30,
+         31,
+         31,
+         30,
+         31,
+         30,
+         31,
+     ];
+-    if d < 1 || d > dim[(m - 1) as usize] {
++    if d < 1 || d < /* ~ changed by cargo-mutants ~ */ dim[(m - 1) as usize] {
+         return None;
+     }
+     // Howard Hinnant's days_from_civil.
+     let y = y - i64::from(m <= 2);
+     let era = if y >= 0 { y } else { y - 399 } / 400;
+     let yoe = y - era * 400;
+     let mp = (m + 9) % 12;
+     let doy = (153 * mp + 2) / 5 + d - 1;

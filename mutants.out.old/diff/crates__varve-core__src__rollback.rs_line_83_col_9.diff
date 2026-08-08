@@ -1,0 +1,29 @@
+--- crates/varve-core/src/rollback.rs
++++ replace HighWaterMarks::check -> RollbackVerdict with Default::default()
+@@ -75,25 +75,17 @@
+     pub fn mark(&self, line: &Line) -> Option<u64> {
+         self.marks.get(&line.to_string()).copied()
+     }
+ 
+     /// Check a manifest against the marks. `Accept` does NOT advance the
+     /// mark — call [`Self::advance`] after the layer is fully verified and
+     /// laid down, so a failed install cannot burn the mark.
+     pub fn check(&self, manifest: &LayerManifest) -> RollbackVerdict {
+-        let line = manifest.layer.line().to_string();
+-        match self.marks.get(&line) {
+-            Some(&high_water) if manifest.counter < high_water => RollbackVerdict::Rollback {
+-                line,
+-                presented: manifest.counter,
+-                high_water,
+-            },
+-            _ => RollbackVerdict::Accept,
+-        }
++        Default::default() /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Record acceptance of a manifest: raise the line's mark to the
+     /// manifest's counter (never lowers) and persist.
+     pub fn advance(&mut self, manifest: &LayerManifest) -> Result<(), RollbackError> {
+         let line = manifest.layer.line().to_string();
+         let mark = self.marks.entry(line).or_insert(0);
+         *mark = (*mark).max(manifest.counter);

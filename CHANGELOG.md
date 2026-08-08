@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.12.1 — 2026-08-08
+
+Audit hardening. Independent ASPICE/ISO-26262 and cybersecurity audits
+(2026-08-08) found honesty, potency, and one fail-open defect; fixed here.
+
+- **F2 fail-open fixed (security)**: a signed manifest with a malformed
+  `issued-at` parsed fine and silently disabled the staleness warning
+  (voiding SH-002). issued-at is now validated as a real RFC 3339 date at
+  parse — malformed is refused; `epoch_days` rejects impossible dates
+  (Feb 31 no longer accepted). One shared validator for producer + verdict
+- **Potency fixed**: the cargo-mutants trust-critical gate and strict
+  policy are now REQUIRED merge checks — REQ-MUTATE-001's "verified" status
+  finally matches enforcement (the audit found it bypassable)
+- **Honesty fixed**: README no longer says "Nothing is implemented yet"
+  (false against 13 releases); claim-check now covers the status banner
+- **SECURITY.md** added — disclosure policy + the invariants a report
+  should target + the current provisional-trust limitations (the DM
+  practice the audit scored near zero, and varve's own criticalup critique)
+- **Two unmodeled hazards named**: SH-005 (root-key compromise — single
+  online key, no rotation/revocation/threshold) + SH-006 (deposit-pipeline
+  compromise), with SC-005/SC-006; both discharged at the v1.0 ceremony
+- **Supply-chain**: Cargo.lock now tracked, releases build `--locked`;
+  cargo-deny in CI (advisories/licenses/sources); `cross` pinned to a tag;
+  ci.yml + release.yml actions SHA-pinned; the rivet cosign identity
+  regexp anchored (`^https://…/rivet/`, was matching `rivet-evil`)
+
 ## v0.12.0 — 2026-08-08
 
 Close the graph, make claims mechanical (REQ-VGATE-001 + REQ-MUTATE-001

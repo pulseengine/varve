@@ -157,3 +157,74 @@ artifacts:
     links:
       - type: prevents-sec-hazard
         target: SH-004
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Added 2026-08-08 after the independent security audit: the two hazards
+  # the STPA-Sec seed did not name. Both are real and currently only
+  # partially mitigated — honest status, not aspirational.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: SH-005
+    type: sec-hazard
+    title: The signing root key is compromised or lost
+    status: approved
+    description: >
+      One online ed25519 key (the provisional rolling root, a CI secret)
+      currently signs layers, line-status advisories, AND release sums. Its
+      compromise is silent and unbounded — an attacker can sign malicious
+      layers, forge advisories, and even burn a line's counter to u64::MAX
+      (a rollback denial-of-service with no in-band recovery). There is no
+      rotation, revocation, expiry, threshold, or transparency log today.
+    links:
+      - type: leads-to-sec-loss
+        target: SL-001
+      - type: leads-to-sec-loss
+        target: SL-002
+    fields:
+      cia-impact: [integrity, availability]
+      severity: critical
+
+  - id: SH-006
+    type: sec-hazard
+    title: The deposit pipeline is subverted to sign attacker-chosen bytes
+    status: approved
+    description: >
+      CI assembles varve and the layer and signs whatever it assembles;
+      there is no two-person rule and, on the release path, unpinned
+      third-party build tooling shares a job with the signing/attestation
+      steps — a compromised build dependency could mint valid provenance or
+      a validly-signed layer without touching the key directly.
+    links:
+      - type: leads-to-sec-loss
+        target: SL-001
+    fields:
+      cia-impact: [integrity]
+      severity: high
+
+  - id: SC-005
+    type: sec-constraint
+    title: Root-key compromise must be bounded, detectable, and recoverable
+    status: approved
+    description: >
+      The trust root must have a rotation and revocation path, an expiry or
+      transparency mechanism so a compromise is detectable, and — for the
+      qualified channel — must not rest on a single online key. The v1.0
+      root ceremony (DD-009/DD-014) is where this is discharged; until then
+      the provisional posture is documented in SECURITY.md and the qualified
+      channel stays closed.
+    links:
+      - type: prevents-sec-hazard
+        target: SH-005
+
+  - id: SC-006
+    type: sec-constraint
+    title: The deposit/release path must not let one compromised step sign for the whole
+    status: approved
+    description: >
+      Signing and provenance steps must be isolated from unpinned
+      third-party tooling; build inputs must be pinned (actions by SHA,
+      build tools by digest/rev, dependencies via a committed lock built
+      --locked). Reduces SH-006 toward SLSA build L3.
+    links:
+      - type: prevents-sec-hazard
+        target: SH-006

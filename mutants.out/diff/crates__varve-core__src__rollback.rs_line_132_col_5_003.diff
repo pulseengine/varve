@@ -1,0 +1,59 @@
+--- crates/varve-core/src/rollback.rs
++++ replace epoch_days -> Option<i64> with Some(-1)
+@@ -124,55 +124,17 @@
+ /// sub-day precision would only manufacture spurious boundary cases.
+ // Public so the manifest parser can reject a malformed issued-at at parse
+ // time (F2, 2026-08-08 audit) — the producer and the staleness verdict must
+ // agree on what a valid date is, so there is one function.
+ pub(crate) fn epoch_days(rfc3339: &str) -> Option<i64> {
+     // Accept "YYYY-MM-DD", optionally followed by "T…" (the time part is not
+     // used at day resolution). The date must be exactly 10 chars with dashes
+     // at positions 4 and 7 — each guard independently reachable.
+-    let date = rfc3339.split_once('T').map_or(rfc3339, |(d, _)| d);
+-    let b = date.as_bytes();
+-    if date.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+-        return None;
+-    }
+-    let y: i64 = date[0..4].parse().ok()?;
+-    let m: i64 = date[5..7].parse().ok()?;
+-    let d: i64 = date[8..10].parse().ok()?;
+-    if !(1..=12).contains(&m) {
+-        return None;
+-    }
+-    // Real days-per-month incl. the Gregorian leap rule — Feb 31 is not a
+-    // date (the old 1..=31 check let impossible days through).
+-    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+-    let dim = [
+-        31,
+-        if leap { 29 } else { 28 },
+-        31,
+-        30,
+-        31,
+-        30,
+-        31,
+-        31,
+-        30,
+-        31,
+-        30,
+-        31,
+-    ];
+-    if d < 1 || d > dim[(m - 1) as usize] {
+-        return None;
+-    }
+-    // Howard Hinnant's days_from_civil.
+-    let y = y - i64::from(m <= 2);
+-    let era = if y >= 0 { y } else { y - 399 } / 400;
+-    let yoe = y - era * 400;
+-    let mp = (m + 9) % 12;
+-    let doy = (153 * mp + 2) / 5 + d - 1;
+-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+-    Some(era * 146_097 + doe - 719_468)
++    Some(-1) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+     use crate::manifest::{LayerManifest, fixtures};
+ 
+     fn manifest(layer: &str, counter: u64) -> LayerManifest {

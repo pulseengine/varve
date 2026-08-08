@@ -1,0 +1,21 @@
+--- crates/varve-core/src/rollback.rs
++++ replace match guard e.kind() == std::io::ErrorKind::NotFound with true in HighWaterMarks::load
+@@ -55,17 +55,17 @@
+     /// Load the marks stored under `root` (missing file = first contact).
+     pub fn load(root: &Path) -> Result<Self, RollbackError> {
+         let path = root.join("state").join("high-water-marks.json");
+         let marks = match std::fs::read(&path) {
+             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| RollbackError::Corrupt {
+                 path: path.display().to_string(),
+                 reason: e.to_string(),
+             })?,
+-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
++            Err(e) if true /* ~ changed by cargo-mutants ~ */ => BTreeMap::new(),
+             Err(source) => {
+                 return Err(RollbackError::Io {
+                     path: path.display().to_string(),
+                     source,
+                 });
+             }
+         };
+         Ok(HighWaterMarks { path, marks })

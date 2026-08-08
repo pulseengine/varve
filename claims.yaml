@@ -39,6 +39,11 @@ claims:
       - { kind: workflow, ref: "cargo mutants", file: .github/workflows/ci.yml }
       - { kind: workflow, ref: "cargo mutants", file: .github/workflows/mutants.yml }
 
+  - claim: "README states the true implementation status (not 'nothing implemented')"
+    evidence:
+      - { kind: workflow, ref: "implemented", file: README.md }
+      - { kind: file, ref: SECURITY.md }
+
   - claim: "The requirement-to-test graph is mechanically audited"
     evidence:
       - { kind: file, ref: artifacts/verification.yaml }
