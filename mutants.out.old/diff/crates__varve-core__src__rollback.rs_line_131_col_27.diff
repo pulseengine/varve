@@ -1,0 +1,21 @@
+--- crates/varve-core/src/rollback.rs
++++ replace && with || in epoch_days
+@@ -123,17 +123,17 @@
+ /// Day resolution is deliberate: staleness policy is measured in days, so
+ /// sub-day precision would only manufacture spurious boundary cases.
+ // Public so the manifest parser can reject a malformed issued-at at parse
+ // time (F2, 2026-08-08 audit) — the producer and the staleness verdict must
+ // agree on what a valid date is, so there is one function.
+ pub(crate) fn epoch_days(rfc3339: &str) -> Option<i64> {
+     // Require the exact YYYY-MM-DD prefix shape, not just any 10 chars.
+     let date = rfc3339.get(..10)?;
+-    if rfc3339.len() > 10 && !rfc3339[10..].starts_with('T') {
++    if rfc3339.len() > 10 || /* ~ changed by cargo-mutants ~ */ !rfc3339[10..].starts_with('T') {
+         return None;
+     }
+     let mut parts = date.split('-');
+     let (yy, mm, dd) = (parts.next()?, parts.next()?, parts.next()?);
+     if parts.next().is_some() || yy.len() != 4 || mm.len() != 2 || dd.len() != 2 {
+         return None;
+     }
+     let y: i64 = yy.parse().ok()?;

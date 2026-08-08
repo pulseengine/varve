@@ -1,0 +1,32 @@
+--- crates/varve-core/src/rollback.rs
++++ replace HighWaterMarks::advance -> Result<(), RollbackError> with Ok(())
+@@ -89,28 +89,17 @@
+             },
+             _ => RollbackVerdict::Accept,
+         }
+     }
+ 
+     /// Record acceptance of a manifest: raise the line's mark to the
+     /// manifest's counter (never lowers) and persist.
+     pub fn advance(&mut self, manifest: &LayerManifest) -> Result<(), RollbackError> {
+-        let line = manifest.layer.line().to_string();
+-        let mark = self.marks.entry(line).or_insert(0);
+-        *mark = (*mark).max(manifest.counter);
+-        let io = |path: &Path, source: std::io::Error| RollbackError::Io {
+-            path: path.display().to_string(),
+-            source,
+-        };
+-        let dir = self.path.parent().expect("state file has a parent");
+-        std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+-        let bytes = serde_json::to_vec_pretty(&self.marks).expect("marks serialize");
+-        std::fs::write(&self.path, bytes).map_err(|e| io(&self.path, e))?;
+-        Ok(())
++        Ok(()) /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ /// Staleness verdict: how old is the layer's issued-at relative to `now`?
+ /// Both are RFC 3339 strings; `threshold_days` is policy supplied by the
+ /// caller. Returns `Some(age_days)` when the layer is older than the
+ /// threshold — a warning, never a rejection: a frozen consumer's layer aging
+ /// is expected, staying silently ignorant of it is not.

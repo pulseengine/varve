@@ -1,0 +1,63 @@
+--- crates/varve-core/src/rollback.rs
++++ replace epoch_days -> Option<i64> with None
+@@ -122,59 +122,17 @@
+ /// Days since the civil epoch for the date part of an RFC 3339 timestamp.
+ /// Day resolution is deliberate: staleness policy is measured in days, so
+ /// sub-day precision would only manufacture spurious boundary cases.
+ // Public so the manifest parser can reject a malformed issued-at at parse
+ // time (F2, 2026-08-08 audit) — the producer and the staleness verdict must
+ // agree on what a valid date is, so there is one function.
+ pub(crate) fn epoch_days(rfc3339: &str) -> Option<i64> {
+     // Require the exact YYYY-MM-DD prefix shape, not just any 10 chars.
+-    let date = rfc3339.get(..10)?;
+-    if rfc3339.len() > 10 && !rfc3339[10..].starts_with('T') {
+-        return None;
+-    }
+-    let mut parts = date.split('-');
+-    let (yy, mm, dd) = (parts.next()?, parts.next()?, parts.next()?);
+-    if parts.next().is_some() || yy.len() != 4 || mm.len() != 2 || dd.len() != 2 {
+-        return None;
+-    }
+-    let y: i64 = yy.parse().ok()?;
+-    let m: i64 = mm.parse().ok()?;
+-    let d: i64 = dd.parse().ok()?;
+-    if !(1..=12).contains(&m) {
+-        return None;
+-    }
+-    // Real days-per-month incl. the Gregorian leap rule — Feb 31 is not a
+-    // date (the old 1..=31 check let impossible days through).
+-    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+-    let dim = [
+-        31,
+-        if leap { 29 } else { 28 },
+-        31,
+-        30,
+-        31,
+-        30,
+-        31,
+-        31,
+-        30,
+-        31,
+-        30,
+-        31,
+-    ];
+-    if d < 1 || d > dim[(m - 1) as usize] {
+-        return None;
+-    }
+-    // Howard Hinnant's days_from_civil.
+-    let y = y - i64::from(m <= 2);
+-    let era = if y >= 0 { y } else { y - 399 } / 400;
+-    let yoe = y - era * 400;
+-    let mp = (m + 9) % 12;
+-    let doy = (153 * mp + 2) / 5 + d - 1;
+-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+-    Some(era * 146_097 + doe - 719_468)
++    None /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+     use crate::manifest::{LayerManifest, fixtures};
+ 
+     fn manifest(layer: &str, counter: u64) -> LayerManifest {

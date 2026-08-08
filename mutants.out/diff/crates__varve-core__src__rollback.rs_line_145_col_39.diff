@@ -1,0 +1,21 @@
+--- crates/varve-core/src/rollback.rs
++++ replace != with == in epoch_days
+@@ -137,17 +137,17 @@
+     let y: i64 = date[0..4].parse().ok()?;
+     let m: i64 = date[5..7].parse().ok()?;
+     let d: i64 = date[8..10].parse().ok()?;
+     if !(1..=12).contains(&m) {
+         return None;
+     }
+     // Real days-per-month incl. the Gregorian leap rule — Feb 31 is not a
+     // date (the old 1..=31 check let impossible days through).
+-    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
++    let leap = (y % 4 == 0 && y % 100 == /* ~ changed by cargo-mutants ~ */ 0) || y % 400 == 0;
+     let dim = [
+         31,
+         if leap { 29 } else { 28 },
+         31,
+         30,
+         31,
+         30,
+         31,
