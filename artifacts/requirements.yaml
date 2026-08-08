@@ -53,7 +53,7 @@ artifacts:
         target: SC-002
     fields:
       priority: must
-      category: security
+      category: non-functional
 
   - id: REQ-COEXIST-001
     type: requirement
@@ -175,7 +175,7 @@ artifacts:
         target: DD-005
     fields:
       priority: must
-      category: security
+      category: non-functional
 
   - id: REQ-PATCH-001
     type: requirement
@@ -248,7 +248,7 @@ artifacts:
         target: DD-002
     fields:
       priority: must
-      category: security
+      category: non-functional
 
   - id: REQ-DEPOSIT-001
     type: requirement
@@ -506,7 +506,7 @@ artifacts:
         yank metadata in its v2 schema and never shipped it. Making the
         document per-line and separately signed keeps layers immutable
         (their digest IS their identity) while evidence stays current —
-        the referrer property from DD-001, applied to advisories.
+        the referrer property (see the OCI distribution decision), applied to advisories.
     tags: [architecture, qualification]
 
   - id: DD-009
@@ -655,7 +655,7 @@ artifacts:
         target: DD-009
     fields:
       priority: should
-      category: security
+      category: non-functional
 
   - id: REQ-BAZEL-001
     type: requirement
@@ -733,3 +733,319 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  # ─────────────────────────────────────────────────────────────────────
+  # v0.12.0 debt payment: the eight decisions v0.6..v0.11 shipped without
+  # DD artifacts, reconstructed from their actual in-session rationale.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: DD-010
+    type: design-decision
+    title: Shims are per-invocation dispatchers generated from the pinned layer
+    status: accepted
+    release: v0.12.0
+    description: >
+      A shim is a two-line exec wrapper around `varve run` written into one
+      global shim directory; every invocation re-resolves the pin (and its
+      realm) from the working directory. Names are entry points only —
+      resolution decides reality — so one directory serves every project
+      and every realm, and stale shims cannot pin stale layers.
+    links:
+      - type: satisfies
+        target: REQ-SHIM-001
+    fields:
+      rationale: >
+        rustup and criticalup both converge on shims; generating them from
+        the resolved layer keeps varve out of the dispatch path (exec, not
+        wrap), and per-invocation resolution makes cd the universe switch —
+        no activation state to forget or leak between projects.
+    tags: [architecture, ergonomics]
+
+  - id: DD-011
+    type: design-decision
+    title: Platform is a per-entry annotation filtered at install, not a store dimension
+    status: accepted
+    release: v0.12.0
+    description: >
+      Entries carry a target triple; install filters BEFORE any blob fetch;
+      unstamped entries are platform-independent for backward compatibility;
+      a fully-stamped layer with nothing for the host fails closed. The
+      store stays single-platform per machine — the manifest, not the
+      store, is multi-platform.
+    links:
+      - type: satisfies
+        target: REQ-PLATFORM-001
+      - type: traces-to
+        target: DD-001
+    fields:
+      rationale: >
+        The OCI index's own per-platform mechanism (DD-001) extended to
+        varve entries: filtering at install keeps foreign binaries from
+        ever landing (wrong-arch cannot look installed), while unstamped
+        compatibility avoided a flag-day for layers deposited before the
+        dimension existed.
+    tags: [architecture]
+
+  - id: DD-012
+    type: design-decision
+    title: Registry client is pull-only, native, and out of the publish path
+    status: accepted
+    release: v0.12.0
+    description: >
+      A minimal OCI-distribution client (anonymous token dance, manifest by
+      tag, blobs by digest, transport-level digest fail-fast) implements
+      LayerSource; publishing uses standard tooling (oras) in CI only. Tags
+      are discovery; trust remains digest + signature + counter.
+    links:
+      - type: satisfies
+        target: REQ-REGISTRY-001
+    fields:
+      rationale: >
+        Pull-only keeps the client's trusted base small and auditable; the
+        publish side never joins the client trust path, so its tooling can
+        be swapped freely. The kill-criterion extends across transports,
+        which is the property that matters — not the HTTP library.
+    tags: [architecture, security]
+
+  - id: DD-013
+    type: design-decision
+    title: Environment setup is emitted by varve and sourced, never hand-edited
+    status: accepted
+    release: v0.12.0
+    description: >
+      varve env emits idempotent shell code; shim install writes a
+      sourceable env file (rustup pattern); completions ship from the tool.
+      Double evaluation cannot stack PATH entries.
+    links:
+      - type: satisfies
+        target: REQ-ENV-001
+    fields:
+      rationale: >
+        Instructing users to edit PATH is ambient state by another name —
+        the class of manual step varve exists to remove. One sourced line
+        is reviewable, idempotent, and uninstallable.
+    tags: [ergonomics]
+
+  - id: DD-014
+    type: design-decision
+    title: Self-update rides the old-verifies-new chain under the deposit root
+    status: accepted
+    release: v0.12.0
+    description: >
+      The running binary verifies its successor against the pinned trust
+      root before an atomic replace; unsigned, impostor-signed, and
+      unparseable candidates refuse and leave the current binary untouched.
+      No passive network calls — --check is the staleness answer. Release
+      sums are signed with the provisional rolling key until the ceremony;
+      the ceremony release will be dual-signed.
+    links:
+      - type: satisfies
+        target: REQ-UPDATE-001
+    fields:
+      rationale: >
+        The TUF-rotation shape without TUF's re-signing treadmill: the only
+        TOFU moment is the first install, established out-of-band via
+        cosign + provenance. Reusing the deposit signing key adds no new
+        trust exposure — the secret already lives in CI by REQ-DEPOSIT-001's
+        design.
+    tags: [architecture, security]
+
+  - id: DD-015
+    type: design-decision
+    title: Bazel consumes varve; registries compile from signed layers as fallback
+    status: accepted
+    release: v0.12.0
+    description: >
+      Primary: a module extension bootstraps a sha256-pinned varve and lets
+      it verify-and-install the pinned layer into a hermetic repo-local
+      root (rules_wasm_component#606). Fallback for consumers without
+      varve: export-bazel compiles checksum registries from a verified
+      layer, anchoring every hash in the signature chain. Deposits record
+      source-asset provenance inside the signed payload to make that
+      compilation possible.
+    links:
+      - type: satisfies
+        target: REQ-BAZEL-001
+    fields:
+      rationale: >
+        Neither system reimplements the other: Bazel contributes
+        hermeticity, caching and toolchain wiring; varve remains the single
+        verifier. The extension can change availability, never acceptance.
+        The one TOFU root (the varve binary pin) is transcribed from
+        cosign-verified sums and lives in one reviewed file.
+    tags: [architecture, integration]
+
+  - id: DD-016
+    type: design-decision
+    title: Realms bind trust universes to names; isolation is by root fingerprint
+    status: accepted
+    release: v0.12.0
+    description: >
+      A committed varve-realms.toml maps realm names to (registry, trust
+      root); the pin names the realm; per-realm state lives under
+      realms/<trust-root-fingerprint>/. A named realm is authoritative over
+      ambient environment. Realmless pins keep the legacy layout.
+    links:
+      - type: satisfies
+        target: REQ-REALM-001
+    fields:
+      rationale: >
+        Namespacing by the trust root's own fingerprint makes cross-realm
+        collision impossible by construction rather than by convention, and
+        committing realm definitions means trust travels with the code —
+        the same reasoning as the pin itself.
+    tags: [architecture, security]
+
+  - id: DD-017
+    type: design-decision
+    title: Wasm entries are portable and execute via signed runner contracts
+    status: accepted
+    release: v0.12.0
+    description: >
+      wasm32-platform entries match every host; a runner contract in the
+      signed payload (tool from the same layer, prefix args, optional
+      per-argument flag) tells dispatch how to execute them. A runnered
+      entry without its runner fails closed. First payload: scry via kilnd,
+      pending kiln#480.
+    links:
+      - type: satisfies
+        target: REQ-RUNNER-001
+    fields:
+      rationale: >
+        Portability eliminates the per-platform gap class entirely for
+        wasm tools; putting the invocation contract inside the signed
+        payload keeps "how this tool runs" as tamper-evident as "what this
+        tool is"; requiring the runner from the same layer keeps PATH out
+        of the dispatch trust path.
+    tags: [architecture]
+
+  # ─────────────────────────────────────────────────────────────────────
+  # v0.12.0 / v0.13.0 — the hardening plan from the 2026-08-08 audit:
+  # bring varve's proof surface to the org bar (relay/witness/rivet/sigil
+  # practice), technique by technique.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-VGATE-001
+    type: requirement
+    title: The requirement-to-test graph is closed and mechanically audited
+    status: verified
+    release: v0.12.0
+    description: >
+      Every requirement shall carry a verification artifact with a
+      `verifies` link naming its concrete test functions, and CI shall run
+      `rivet check verification-evidence` so a renamed or deleted test goes
+      red instead of leaving a requirement silently "verified". Source
+      markers remain the per-test map; the graph is what release gates and
+      dashboards count.
+    tags: [process]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-MUTATE-001
+    type: requirement
+    title: Mutation testing is a reproducible gate, not a session anecdote
+    status: verified
+    release: v0.12.0
+    description: >
+      cargo-mutants shall run as a per-PR gate over the trust-critical
+      modules (verify, rollback, layer, pin, platform, realm) with zero
+      surviving mutants, and nightly over the full workspace (advisory,
+      org template). Every "mutation-checked" claim in the docs must be
+      reproducible from these runs.
+    tags: [process, security]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-CLAIM-001
+    type: requirement
+    title: Load-bearing documentation claims are gated against evidence
+    status: verified
+    release: v0.12.0
+    description: >
+      A committed claims file shall bind each load-bearing claim in the
+      README/CHANGELOG ("fail-closed", "mutation-checked", "cryptographically
+      impossible", "old-verifies-new") to checkable evidence (named tests,
+      config files, workflow steps), and CI shall fail when a claim's
+      evidence disappears — the witness claim-check discipline.
+    tags: [process]
+    fields:
+      priority: should
+      category: non-functional
+
+  - id: REQ-FUZZ-001
+    type: requirement
+    title: Untrusted-input parsers are fuzzed continuously
+    status: approved
+    release: v0.13.0
+    description: >
+      cargo-fuzz targets shall cover the DSSE envelope path, layer-manifest
+      JSON, layer-identifier grammar, oci-layout index handling, and
+      pin/realms TOML parsing — a PR smoke pass and a nightly campaign,
+      following sigil's target list for the shared input classes.
+    tags: [security]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-PROP-001
+    type: requirement
+    title: Core invariants hold under property-based and model-checked exploration
+    status: approved
+    release: v0.13.0
+    description: >
+      proptest properties shall cover grammar round-trips, rollback verdict
+      monotonicity, and platform-match totality; Kani harnesses shall prove
+      the high-water mark never decreases and the two-part-identifier
+      rejection holds for all inputs (advisory first, required at v1.0 —
+      the scry pattern).
+    tags: [security]
+    fields:
+      priority: should
+      category: non-functional
+
+  - id: REQ-MATRIX-001
+    type: requirement
+    title: Tests run where releases run
+    status: approved
+    release: v0.13.0
+    description: >
+      The CI test matrix shall cover linux and macos (the released
+      platforms), pin an MSRV job, and publish coverage evidence
+      (cargo-llvm-cov, advisory) — varve releases four platforms and must
+      not test only one.
+    tags: [process]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: DD-018
+    type: design-decision
+    title: Adopt the org verification stack — graph, mutation, claims
+    status: accepted
+    release: v0.12.0
+    description: >
+      varve adopts the three org-signature verification disciplines it
+      lacked (2026-08-08 audit): relay/witness-style verification artifacts
+      with `verifies` links audited by `rivet check verification-evidence`;
+      rivet's cargo-mutants two-tier profile (per-PR zero-survivor gate on
+      the six trust-critical modules, nightly full-workspace advisory);
+      witness-style claim-check binding load-bearing doc claims to
+      checkable evidence. Fuzzing/proptest/Kani follow in v0.13.0.
+    links:
+      - type: satisfies
+        target: REQ-VGATE-001
+      - type: satisfies
+        target: REQ-MUTATE-001
+      - type: satisfies
+        target: REQ-CLAIM-001
+    fields:
+      rationale: >
+        The audit's decisive finding: varve's REQ-to-test link was prose
+        and its "mutation-checked" claims were session anecdotes. The very
+        first gated mutation run proved the point — 31 surviving mutants
+        in modules claimed mutation-checked, including the entire
+        civil-date arithmetic of the staleness check. All killed; the gate
+        keeps it that way.
+    tags: [process]

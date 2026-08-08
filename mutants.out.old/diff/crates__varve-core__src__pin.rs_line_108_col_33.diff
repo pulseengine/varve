@@ -1,0 +1,21 @@
+--- crates/varve-core/src/pin.rs
++++ replace != with == in Pin::parse
+@@ -100,17 +100,17 @@
+ impl Pin {
+     /// Parse and validate pin content. `origin` names the source (a path, in
+     /// diagnostics) — errors must tell the reader *which* file is wrong.
+     pub fn parse(content: &str, origin: &str) -> Result<Self, PinError> {
+         let raw: RawPin = toml::from_str(content).map_err(|source| PinError::Toml {
+             path: origin.to_string(),
+             source: Box::new(source),
+         })?;
+-        if raw.manifest_version != 1 {
++        if raw.manifest_version == /* ~ changed by cargo-mutants ~ */ 1 {
+             return Err(PinError::UnsupportedManifestVersion {
+                 path: origin.to_string(),
+                 found: raw.manifest_version,
+             });
+         }
+         let layer = LayerId::from_str(&raw.toolchain.layer).map_err(|source| PinError::Layer {
+             path: origin.to_string(),
+             source,

@@ -56,5 +56,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - name: rivet validate
         run: rivet validate
+      - name: rivet check verification-evidence (anti-rot)
+        # A renamed or deleted test named in a verification artifact goes
+        # red here instead of leaving a requirement silently "verified"
+        # (REQ-VGATE-001).
+        run: rivet check verification-evidence
+      - name: claim-check
+        # Load-bearing doc claims must keep their evidence (REQ-CLAIM-001).
+        run: python3 tools/claim-check.py
       - name: coverage report (informational)
         run: rivet coverage || true
+
+  mutants:
+    name: cargo mutants (trust-critical gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mutants
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants
+      - name: Mutate the trust-critical modules — zero survivors required
+        # The org gate (REQ-MUTATE-001, rivet's mutants-cli pattern): the
+        # modules that hold the trust decisions must kill every mutant.
+        # The nightly workflow covers the full workspace, advisory.
+        run: |
+          cargo mutants --no-shuffle             -f crates/varve-core/src/rollback.rs             -f crates/varve-core/src/layer.rs             -f crates/varve-core/src/platform.rs             -f crates/varve-core/src/verify.rs             -f crates/varve-core/src/pin.rs             -f crates/varve-core/src/realm.rs

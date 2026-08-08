@@ -1,0 +1,21 @@
+--- crates/varve-core/src/verify.rs
++++ replace != with == in verify_with
+@@ -58,17 +58,17 @@
+     verifier: &Ed25519DsseVerifier,
+     envelope: &[u8],
+     expected_payload_type: &str,
+ ) -> Result<Vec<u8>, VerifyError> {
+     let text = std::str::from_utf8(envelope)
+         .map_err(|_| VerifyError("fetched bytes are not UTF-8 DSSE JSON".into()))?;
+     let envelope = DsseEnvelope::from_json(text)
+         .map_err(|e| VerifyError(format!("not a DSSE envelope: {e}")))?;
+-    if envelope.payload_type != expected_payload_type {
++    if envelope.payload_type == /* ~ changed by cargo-mutants ~ */ expected_payload_type {
+         return Err(VerifyError(format!(
+             "envelope payload type is '{}', expected '{expected_payload_type}' — refusing to \
+              accept a signed document as something it is not",
+             envelope.payload_type
+         )));
+     }
+     envelope.verify_all(verifier).map_err(|e| {
+         VerifyError(format!(

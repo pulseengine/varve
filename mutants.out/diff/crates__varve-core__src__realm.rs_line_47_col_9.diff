@@ -1,0 +1,21 @@
+--- crates/varve-core/src/realm.rs
++++ replace Realm::effective_root -> PathBuf with Default::default()
+@@ -39,17 +39,17 @@
+         crate::store::manifest_digest(&self.trust_root)
+             .strip_prefix("sha256:")
+             .expect("digest shape")[..16]
+             .to_string()
+     }
+ 
+     /// The per-realm effective root under which core/state/status live.
+     pub fn effective_root(&self, varve_root: &Path) -> PathBuf {
+-        varve_root.join("realms").join(self.fingerprint())
++        Default::default() /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ #[derive(Debug, thiserror::Error)]
+ pub enum RealmError {
+     #[error(
+         "no {REALMS_FILE} found walking up from {start} — the pin names realm '{realm}' but no realm definitions exist; commit a {REALMS_FILE} defining it"
+     )]

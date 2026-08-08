@@ -1,0 +1,2719 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 13.43476275,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 1.8660309590000002,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/pin.rs:104:9: replace Pin::parse -> Result<Self, PinError> with Ok(Default::default())",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/pin.rs",
+          "function": {
+            "function_name": "Pin::parse",
+            "return_type": "-> Result<Self, PinError>",
+            "span": {
+              "start": {
+                "line": 101,
+                "column": 5
+              },
+              "end": {
+                "line": 146,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 104,
+              "column": 9
+            },
+            "end": {
+              "line": 145,
+              "column": 11
+            }
+          },
+          "replacement": "Ok(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__varve-core__src__pin.rs_line_104_col_9.log",
+      "diff_path": "diff/crates__varve-core__src__pin.rs_line_104_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.361341125,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/pin.rs:108:33: replace != with == in Pin::parse",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/pin.rs",
+          "function": {
+            "function_name": "Pin::parse",
+            "return_type": "-> Result<Self, PinError>",
+            "span": {
+              "start": {
+                "line": 101,
+                "column": 5
+              },
+              "end": {
+                "line": 146,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 108,
+              "column": 33
+            },
+            "end": {
+              "line": 108,
+              "column": 35
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__pin.rs_line_108_col_33.log",
+      "diff_path": "diff/crates__varve-core__src__pin.rs_line_108_col_33.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.807107041,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.453391,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/pin.rs:125:32: replace || with && in Pin::parse",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/pin.rs",
+          "function": {
+            "function_name": "Pin::parse",
+            "return_type": "-> Result<Self, PinError>",
+            "span": {
+              "start": {
+                "line": 101,
+                "column": 5
+              },
+              "end": {
+                "line": 146,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 125,
+              "column": 32
+            },
+            "end": {
+              "line": 125,
+              "column": 34
+            }
+          },
+          "replacement": "&&",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__pin.rs_line_125_col_32.log",
+      "diff_path": "diff/crates__varve-core__src__pin.rs_line_125_col_32.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.848678375,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.971437875,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/pin.rs:125:26: replace != with == in Pin::parse",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/pin.rs",
+          "function": {
+            "function_name": "Pin::parse",
+            "return_type": "-> Result<Self, PinError>",
+            "span": {
+              "start": {
+                "line": 101,
+                "column": 5
+              },
+              "end": {
+                "line": 146,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 125,
+              "column": 26
+            },
+            "end": {
+              "line": 125,
+              "column": 28
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__pin.rs_line_125_col_26.log",
+      "diff_path": "diff/crates__varve-core__src__pin.rs_line_125_col_26.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.828717208,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.496146,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/pin.rs:125:35: delete ! in Pin::parse",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/pin.rs",
+          "function": {
+            "function_name": "Pin::parse",
+            "return_type": "-> Result<Self, PinError>",
+            "span": {
+              "start": {
+                "line": 101,
+                "column": 5
+              },
+              "end": {
+                "line": 146,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 125,
+              "column": 35
+            },
+            "end": {
+              "line": 125,
+              "column": 36
+            }
+          },
+          "replacement": "",
+          "genre": "UnaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__pin.rs_line_125_col_35.log",
+      "diff_path": "diff/crates__varve-core__src__pin.rs_line_125_col_35.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.869810333,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.510542541,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/pin.rs:133:13: replace && with || in Pin::parse",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/pin.rs",
+          "function": {
+            "function_name": "Pin::parse",
+            "return_type": "-> Result<Self, PinError>",
+            "span": {
+              "start": {
+                "line": 101,
+                "column": 5
+              },
+              "end": {
+                "line": 146,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 133,
+              "column": 13
+            },
+            "end": {
+              "line": 133,
+              "column": 15
+            }
+          },
+          "replacement": "||",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__varve-core__src__pin.rs_line_133_col_13.log",
+      "diff_path": "diff/crates__varve-core__src__pin.rs_line_133_col_13.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.292054334,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/pin.rs:150:9: replace Pin::load -> Result<Self, PinError> with Ok(Default::default())",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/pin.rs",
+          "function": {
+            "function_name": "Pin::load",
+            "return_type": "-> Result<Self, PinError>",
+            "span": {
+              "start": {
+                "line": 148,
+                "column": 5
+              },
+              "end": {
+                "line": 155,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 150,
+              "column": 9
+            },
+            "end": {
+              "line": 154,
+              "column": 59
+            }
+          },
+          "replacement": "Ok(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__varve-core__src__pin.rs_line_150_col_9.log",
+      "diff_path": "diff/crates__varve-core__src__pin.rs_line_150_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.348162167,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/realm.rs:39:9: replace Realm::fingerprint -> String with String::new()",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/realm.rs",
+          "function": {
+            "function_name": "Realm::fingerprint",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 35,
+                "column": 5
+              },
+              "end": {
+                "line": 43,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 39,
+              "column": 9
+            },
+            "end": {
+              "line": 42,
+              "column": 25
+            }
+          },
+          "replacement": "String::new()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__realm.rs_line_39_col_9.log",
+      "diff_path": "diff/crates__varve-core__src__realm.rs_line_39_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.881955417,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.5326035,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/realm.rs:39:9: replace Realm::fingerprint -> String with \"xyzzy\".into()",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/realm.rs",
+          "function": {
+            "function_name": "Realm::fingerprint",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 35,
+                "column": 5
+              },
+              "end": {
+                "line": 43,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 39,
+              "column": 9
+            },
+            "end": {
+              "line": 42,
+              "column": 25
+            }
+          },
+          "replacement": "\"xyzzy\".into()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__realm.rs_line_39_col_9_001.log",
+      "diff_path": "diff/crates__varve-core__src__realm.rs_line_39_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.839293625,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.520383958,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/realm.rs:47:9: replace Realm::effective_root -> PathBuf with Default::default()",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/realm.rs",
+          "function": {
+            "function_name": "Realm::effective_root",
+            "return_type": "-> PathBuf",
+            "span": {
+              "start": {
+                "line": 45,
+                "column": 5
+              },
+              "end": {
+                "line": 48,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 47,
+              "column": 9
+            },
+            "end": {
+              "line": 47,
+              "column": 59
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__realm.rs_line_47_col_9.log",
+      "diff_path": "diff/crates__varve-core__src__realm.rs_line_47_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.866355583,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.517688583,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/realm.rs:102:5: replace find_realms_file -> Option<PathBuf> with None",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/realm.rs",
+          "function": {
+            "function_name": "find_realms_file",
+            "return_type": "-> Option<PathBuf>",
+            "span": {
+              "start": {
+                "line": 100,
+                "column": 1
+              },
+              "end": {
+                "line": 111,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 102,
+              "column": 5
+            },
+            "end": {
+              "line": 110,
+              "column": 9
+            }
+          },
+          "replacement": "None",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__realm.rs_line_102_col_5.log",
+      "diff_path": "diff/crates__varve-core__src__realm.rs_line_102_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.856301,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.506724875,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/realm.rs:102:5: replace find_realms_file -> Option<PathBuf> with Some(Default::default())",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/realm.rs",
+          "function": {
+            "function_name": "find_realms_file",
+            "return_type": "-> Option<PathBuf>",
+            "span": {
+              "start": {
+                "line": 100,
+                "column": 1
+              },
+              "end": {
+                "line": 111,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 102,
+              "column": 5
+            },
+            "end": {
+              "line": 110,
+              "column": 9
+            }
+          },
+          "replacement": "Some(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__realm.rs_line_102_col_5_001.log",
+      "diff_path": "diff/crates__varve-core__src__realm.rs_line_102_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.863519167,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.468218958,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/realm.rs:115:5: replace resolve_realm -> Result<Realm, RealmError> with Ok(Default::default())",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/realm.rs",
+          "function": {
+            "function_name": "resolve_realm",
+            "return_type": "-> Result<Realm, RealmError>",
+            "span": {
+              "start": {
+                "line": 113,
+                "column": 1
+              },
+              "end": {
+                "line": 176,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 115,
+              "column": 5
+            },
+            "end": {
+              "line": 175,
+              "column": 7
+            }
+          },
+          "replacement": "Ok(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__varve-core__src__realm.rs_line_115_col_5.log",
+      "diff_path": "diff/crates__varve-core__src__realm.rs_line_115_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.40107275,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/realm.rs:162:28: replace || with && in resolve_realm",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/realm.rs",
+          "function": {
+            "function_name": "resolve_realm",
+            "return_type": "-> Result<Realm, RealmError>",
+            "span": {
+              "start": {
+                "line": 113,
+                "column": 1
+              },
+              "end": {
+                "line": 176,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 162,
+              "column": 28
+            },
+            "end": {
+              "line": 162,
+              "column": 30
+            }
+          },
+          "replacement": "&&",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__realm.rs_line_162_col_28.log",
+      "diff_path": "diff/crates__varve-core__src__realm.rs_line_162_col_28.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.877710833,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.526795417,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/realm.rs:162:22: replace != with == in resolve_realm",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/realm.rs",
+          "function": {
+            "function_name": "resolve_realm",
+            "return_type": "-> Result<Realm, RealmError>",
+            "span": {
+              "start": {
+                "line": 113,
+                "column": 1
+              },
+              "end": {
+                "line": 176,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 162,
+              "column": 22
+            },
+            "end": {
+              "line": 162,
+              "column": 24
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__realm.rs_line_162_col_22.log",
+      "diff_path": "diff/crates__varve-core__src__realm.rs_line_162_col_22.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.872229541,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.519048625,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/realm.rs:162:31: delete ! in resolve_realm",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/realm.rs",
+          "function": {
+            "function_name": "resolve_realm",
+            "return_type": "-> Result<Realm, RealmError>",
+            "span": {
+              "start": {
+                "line": 113,
+                "column": 1
+              },
+              "end": {
+                "line": 176,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 162,
+              "column": 31
+            },
+            "end": {
+              "line": 162,
+              "column": 32
+            }
+          },
+          "replacement": "",
+          "genre": "UnaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__realm.rs_line_162_col_31.log",
+      "diff_path": "diff/crates__varve-core__src__realm.rs_line_162_col_31.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.874985208,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.516789833,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/realm.rs:169:51: replace + with - in resolve_realm",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/realm.rs",
+          "function": {
+            "function_name": "resolve_realm",
+            "return_type": "-> Result<Realm, RealmError>",
+            "span": {
+              "start": {
+                "line": 113,
+                "column": 1
+              },
+              "end": {
+                "line": 176,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 169,
+              "column": 51
+            },
+            "end": {
+              "line": 169,
+              "column": 52
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__realm.rs_line_169_col_51.log",
+      "diff_path": "diff/crates__varve-core__src__realm.rs_line_169_col_51.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.886084833,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.468715125,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/realm.rs:169:51: replace + with * in resolve_realm",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/realm.rs",
+          "function": {
+            "function_name": "resolve_realm",
+            "return_type": "-> Result<Realm, RealmError>",
+            "span": {
+              "start": {
+                "line": 113,
+                "column": 1
+              },
+              "end": {
+                "line": 176,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 169,
+              "column": 51
+            },
+            "end": {
+              "line": 169,
+              "column": 52
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__realm.rs_line_169_col_51_001.log",
+      "diff_path": "diff/crates__varve-core__src__realm.rs_line_169_col_51_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.873189875,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.509299292,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:30:9: replace PinnedKeyVerifier::from_public_key_bytes -> Result<Self, VerifyError> with Ok(Default::default())",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "PinnedKeyVerifier::from_public_key_bytes",
+            "return_type": "-> Result<Self, VerifyError>",
+            "span": {
+              "start": {
+                "line": 29,
+                "column": 5
+              },
+              "end": {
+                "line": 33,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 30,
+              "column": 9
+            },
+            "end": {
+              "line": 32,
+              "column": 43
+            }
+          },
+          "replacement": "Ok(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_30_col_9.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_30_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.349103584,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:38:9: replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "<impl ManifestVerifier for PinnedKeyVerifier>::verify",
+            "return_type": "-> Result<Vec<u8>, VerifyError>",
+            "span": {
+              "start": {
+                "line": 37,
+                "column": 5
+              },
+              "end": {
+                "line": 39,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 38,
+              "column": 9
+            },
+            "end": {
+              "line": 38,
+              "column": 65
+            }
+          },
+          "replacement": "Ok(vec![])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_38_col_9.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_38_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.834877625,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.4702235,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:38:9: replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![0])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "<impl ManifestVerifier for PinnedKeyVerifier>::verify",
+            "return_type": "-> Result<Vec<u8>, VerifyError>",
+            "span": {
+              "start": {
+                "line": 37,
+                "column": 5
+              },
+              "end": {
+                "line": 39,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 38,
+              "column": 9
+            },
+            "end": {
+              "line": 38,
+              "column": 65
+            }
+          },
+          "replacement": "Ok(vec![0])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_38_col_9_001.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_38_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.909039208,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.472681334,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:38:9: replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![1])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "<impl ManifestVerifier for PinnedKeyVerifier>::verify",
+            "return_type": "-> Result<Vec<u8>, VerifyError>",
+            "span": {
+              "start": {
+                "line": 37,
+                "column": 5
+              },
+              "end": {
+                "line": 39,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 38,
+              "column": 9
+            },
+            "end": {
+              "line": 38,
+              "column": 65
+            }
+          },
+          "replacement": "Ok(vec![1])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_38_col_9_002.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_38_col_9_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.915639833,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.480096375,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:52:5: replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "dsse_verify_typed",
+            "return_type": "-> Result<Vec<u8>, VerifyError>",
+            "span": {
+              "start": {
+                "line": 42,
+                "column": 1
+              },
+              "end": {
+                "line": 55,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 52,
+              "column": 5
+            },
+            "end": {
+              "line": 54,
+              "column": 60
+            }
+          },
+          "replacement": "Ok(vec![])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_52_col_5.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_52_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.932953375,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.534005333,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:52:5: replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![0])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "dsse_verify_typed",
+            "return_type": "-> Result<Vec<u8>, VerifyError>",
+            "span": {
+              "start": {
+                "line": 42,
+                "column": 1
+              },
+              "end": {
+                "line": 55,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 52,
+              "column": 5
+            },
+            "end": {
+              "line": 54,
+              "column": 60
+            }
+          },
+          "replacement": "Ok(vec![0])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_52_col_5_001.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_52_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.934813625,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.5144435,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:52:5: replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![1])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "dsse_verify_typed",
+            "return_type": "-> Result<Vec<u8>, VerifyError>",
+            "span": {
+              "start": {
+                "line": 42,
+                "column": 1
+              },
+              "end": {
+                "line": 55,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 52,
+              "column": 5
+            },
+            "end": {
+              "line": 54,
+              "column": 60
+            }
+          },
+          "replacement": "Ok(vec![1])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_52_col_5_002.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_52_col_5_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.878744958,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.517472708,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:62:5: replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "verify_with",
+            "return_type": "-> Result<Vec<u8>, VerifyError>",
+            "span": {
+              "start": {
+                "line": 57,
+                "column": 1
+              },
+              "end": {
+                "line": 78,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 62,
+              "column": 5
+            },
+            "end": {
+              "line": 77,
+              "column": 7
+            }
+          },
+          "replacement": "Ok(vec![])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_62_col_5.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_62_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.989777167,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.522308209,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:62:5: replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![0])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "verify_with",
+            "return_type": "-> Result<Vec<u8>, VerifyError>",
+            "span": {
+              "start": {
+                "line": 57,
+                "column": 1
+              },
+              "end": {
+                "line": 78,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 62,
+              "column": 5
+            },
+            "end": {
+              "line": 77,
+              "column": 7
+            }
+          },
+          "replacement": "Ok(vec![0])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_62_col_5_001.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_62_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.922374791,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.503338292,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:62:5: replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![1])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "verify_with",
+            "return_type": "-> Result<Vec<u8>, VerifyError>",
+            "span": {
+              "start": {
+                "line": 57,
+                "column": 1
+              },
+              "end": {
+                "line": 78,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 62,
+              "column": 5
+            },
+            "end": {
+              "line": 77,
+              "column": 7
+            }
+          },
+          "replacement": "Ok(vec![1])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_62_col_5_002.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_62_col_5_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.915852917,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.50923525,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:66:30: replace != with == in verify_with",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "verify_with",
+            "return_type": "-> Result<Vec<u8>, VerifyError>",
+            "span": {
+              "start": {
+                "line": 57,
+                "column": 1
+              },
+              "end": {
+                "line": 78,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 66,
+              "column": 30
+            },
+            "end": {
+              "line": 66,
+              "column": 32
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_66_col_30.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_66_col_30.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.946908459,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.514777625,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:89:5: replace dsse_sign_typed -> Result<String, VerifyError> with Ok(String::new())",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "dsse_sign_typed",
+            "return_type": "-> Result<String, VerifyError>",
+            "span": {
+              "start": {
+                "line": 80,
+                "column": 1
+              },
+              "end": {
+                "line": 96,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 89,
+              "column": 5
+            },
+            "end": {
+              "line": 95,
+              "column": 81
+            }
+          },
+          "replacement": "Ok(String::new())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_89_col_5.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_89_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.021261209,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.526961542,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:89:5: replace dsse_sign_typed -> Result<String, VerifyError> with Ok(\"xyzzy\".into())",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "dsse_sign_typed",
+            "return_type": "-> Result<String, VerifyError>",
+            "span": {
+              "start": {
+                "line": 80,
+                "column": 1
+              },
+              "end": {
+                "line": 96,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 89,
+              "column": 5
+            },
+            "end": {
+              "line": 95,
+              "column": 81
+            }
+          },
+          "replacement": "Ok(\"xyzzy\".into())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_89_col_5_001.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_89_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.958781333,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.52573775,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:104:5: replace sign_layer_manifest -> Result<String, VerifyError> with Ok(String::new())",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "sign_layer_manifest",
+            "return_type": "-> Result<String, VerifyError>",
+            "span": {
+              "start": {
+                "line": 98,
+                "column": 1
+              },
+              "end": {
+                "line": 105,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 104,
+              "column": 5
+            },
+            "end": {
+              "line": 104,
+              "column": 69
+            }
+          },
+          "replacement": "Ok(String::new())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_104_col_5.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_104_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.988704958,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.511017417,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:104:5: replace sign_layer_manifest -> Result<String, VerifyError> with Ok(\"xyzzy\".into())",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "sign_layer_manifest",
+            "return_type": "-> Result<String, VerifyError>",
+            "span": {
+              "start": {
+                "line": 98,
+                "column": 1
+              },
+              "end": {
+                "line": 105,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 104,
+              "column": 5
+            },
+            "end": {
+              "line": 104,
+              "column": 69
+            }
+          },
+          "replacement": "Ok(\"xyzzy\".into())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_104_col_5_001.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_104_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.970775375,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.510848042,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "generate_root_keypair",
+            "return_type": "-> (Vec<u8>, Vec<u8>)",
+            "span": {
+              "start": {
+                "line": 107,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 5
+            },
+            "end": {
+              "line": 112,
+              "column": 43
+            }
+          },
+          "replacement": "(vec![], vec![])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_111_col_5.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_111_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.902406875,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.515775333,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![0])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "generate_root_keypair",
+            "return_type": "-> (Vec<u8>, Vec<u8>)",
+            "span": {
+              "start": {
+                "line": 107,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 5
+            },
+            "end": {
+              "line": 112,
+              "column": 43
+            }
+          },
+          "replacement": "(vec![], vec![0])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_111_col_5_001.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_111_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.934455,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.524023917,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![1])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "generate_root_keypair",
+            "return_type": "-> (Vec<u8>, Vec<u8>)",
+            "span": {
+              "start": {
+                "line": 107,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 5
+            },
+            "end": {
+              "line": 112,
+              "column": 43
+            }
+          },
+          "replacement": "(vec![], vec![1])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_111_col_5_002.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_111_col_5_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.899551083,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.517601958,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "generate_root_keypair",
+            "return_type": "-> (Vec<u8>, Vec<u8>)",
+            "span": {
+              "start": {
+                "line": 107,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 5
+            },
+            "end": {
+              "line": 112,
+              "column": 43
+            }
+          },
+          "replacement": "(vec![0], vec![])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_111_col_5_003.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_111_col_5_003.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.990328958,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.559111,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![0])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "generate_root_keypair",
+            "return_type": "-> (Vec<u8>, Vec<u8>)",
+            "span": {
+              "start": {
+                "line": 107,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 5
+            },
+            "end": {
+              "line": 112,
+              "column": 43
+            }
+          },
+          "replacement": "(vec![0], vec![0])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_111_col_5_004.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_111_col_5_004.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.97424,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.520125417,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![1])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "generate_root_keypair",
+            "return_type": "-> (Vec<u8>, Vec<u8>)",
+            "span": {
+              "start": {
+                "line": 107,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 5
+            },
+            "end": {
+              "line": 112,
+              "column": 43
+            }
+          },
+          "replacement": "(vec![0], vec![1])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_111_col_5_005.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_111_col_5_005.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.00581225,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.535619541,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "generate_root_keypair",
+            "return_type": "-> (Vec<u8>, Vec<u8>)",
+            "span": {
+              "start": {
+                "line": 107,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 5
+            },
+            "end": {
+              "line": 112,
+              "column": 43
+            }
+          },
+          "replacement": "(vec![1], vec![])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_111_col_5_006.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_111_col_5_006.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.00009475,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.528178875,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![0])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "generate_root_keypair",
+            "return_type": "-> (Vec<u8>, Vec<u8>)",
+            "span": {
+              "start": {
+                "line": 107,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 5
+            },
+            "end": {
+              "line": 112,
+              "column": 43
+            }
+          },
+          "replacement": "(vec![1], vec![0])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_111_col_5_007.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_111_col_5_007.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.980346084,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.5099685,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![1])",
+          "package": "varve-core",
+          "file": "crates/varve-core/src/verify.rs",
+          "function": {
+            "function_name": "generate_root_keypair",
+            "return_type": "-> (Vec<u8>, Vec<u8>)",
+            "span": {
+              "start": {
+                "line": 107,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 5
+            },
+            "end": {
+              "line": 112,
+              "column": 43
+            }
+          },
+          "replacement": "(vec![1], vec![1])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__varve-core__src__verify.rs_line_111_col_5_008.log",
+      "diff_path": "diff/crates__varve-core__src__verify.rs_line_111_col_5_008.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.986143583,
+          "process_status": "Success",
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.480290416,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/r/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=varve-core@0.11.0"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 42,
+  "missed": 0,
+  "caught": 37,
+  "timeout": 0,
+  "unviable": 5,
+  "success": 0,
+  "start_time": "2026-08-08T06:39:28.36284Z",
+  "end_time": "2026-08-08T06:40:40.053483Z",
+  "cargo_mutants_version": "27.0.0"
+}

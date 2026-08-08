@@ -143,7 +143,7 @@ artifacts:
         channel emerges; not adopted now because the counter scheme covers
         varve's threat model without the treadmill.
 
-  - id: AR-DO330
+  - id: AR-330
     type: academic-reference
     title: DO-330 change impact analysis and qualified-vendor frozen-line practice
     status: approved

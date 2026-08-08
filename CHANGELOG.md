@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.12.0 — 2026-08-08
+
+Close the graph, make claims mechanical (REQ-VGATE-001 + REQ-MUTATE-001
++ REQ-CLAIM-001 verified) — the 2026-08-08 audit's findings, fixed.
+
+- The requirement→test graph is CLOSED: verification artifacts with
+  `verifies` links for all 21 requirements, each naming its concrete
+  tests; `rivet check verification-evidence` (76 named steps, all
+  audited against sources) gates CI so renamed/deleted tests go red
+- Mutation testing is a GATE: cargo-mutants per-PR over the six
+  trust-critical modules (rollback, layer, platform, verify, pin,
+  realm) with zero survivors required, nightly full-workspace advisory
+  (org template). The first run proved the audit right: 33 surviving
+  mutants found and killed — including the entire civil-date
+  arithmetic of the staleness check and wrong-length-but-pure-hex
+  key/digest acceptance in pin and realm parsing
+- Claim-check: claims.yaml binds seven load-bearing doc claims to
+  named tests/files/workflow steps; tools/claim-check.py gates CI
+- Rivet debt paid: eight missing design decisions (DD-010..017)
+  authored with their real rationale, schema-enum and id fixes —
+  `rivet validate` reached zero warnings for the first time
+- varve#7 fixed: pin errors no longer print their cause twice
+
 ## v0.11.0 — 2026-08-08
 
 Portable wasm entries + layer runners (REQ-RUNNER-001 verified).

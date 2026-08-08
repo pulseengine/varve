@@ -1,0 +1,23 @@
+--- crates/varve-core/src/verify.rs
++++ replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![1])
+@@ -44,19 +44,17 @@
+ /// path shared by layer manifests, line-status documents (DD-008) and
+ /// release sums (DD-009) — different payload types, one trust root, so the
+ /// type check is what keeps signed documents from posing as each other.
+ pub fn dsse_verify_typed(
+     envelope: &[u8],
+     expected_payload_type: &str,
+     root_public_key: &[u8],
+ ) -> Result<Vec<u8>, VerifyError> {
+-    let verifier = Ed25519DsseVerifier::from_bytes(root_public_key)
+-        .map_err(|e| VerifyError(format!("invalid trust-root public key: {e}")))?;
+-    verify_with(&verifier, envelope, expected_payload_type)
++    Ok(vec![1]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn verify_with(
+     verifier: &Ed25519DsseVerifier,
+     envelope: &[u8],
+     expected_payload_type: &str,
+ ) -> Result<Vec<u8>, VerifyError> {
+     let text = std::str::from_utf8(envelope)

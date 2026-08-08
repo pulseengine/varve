@@ -256,6 +256,66 @@ mod tests {
 
     // rivet: verifies REQ-ROLLBACK-001
     #[test]
+    fn epoch_day_arithmetic_matches_the_civil_calendar() {
+        // ABSOLUTE anchors (differences would let constant-offset mutants
+        // cancel), computed independently: epoch, leap days, century rules,
+        // and year 0000 — the one reachable negative-era branch. Kills the
+        // arithmetic mutants in the Hinnant algorithm.
+        for (ts, days) in [
+            ("1970-01-01T00:00:00Z", 0i64),
+            ("1970-01-02T00:00:00Z", 1),
+            ("1969-12-31T00:00:00Z", -1),
+            ("2000-02-29T00:00:00Z", 11016),
+            ("2026-08-07T00:00:00Z", 20672),
+            ("2026-03-01T00:00:00Z", 20513),
+            ("2024-02-29T00:00:00Z", 19782),
+            ("2100-01-01T00:00:00Z", 47482),
+            ("1900-03-01T00:00:00Z", -25508),
+            ("2026-12-31T00:00:00Z", 20818),
+            ("0000-03-01T00:00:00Z", -719468),
+            ("0000-01-01T00:00:00Z", -719528),
+            ("0000-02-29T00:00:00Z", -719469),
+        ] {
+            assert_eq!(epoch_days(ts), Some(days), "epoch_days({ts})");
+        }
+        // Out-of-range calendar fields are None, not a number.
+        for bad in [
+            "2026-13-01T00:00:00Z",
+            "2026-00-01T00:00:00Z",
+            "2026-01-32T00:00:00Z",
+            "2026-01-00T00:00:00Z",
+        ] {
+            assert_eq!(epoch_days(bad), None, "{bad}");
+        }
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn staleness_threshold_boundary_is_strictly_greater_than() {
+        // Exactly at the threshold: quiet. One past: warn.
+        assert_eq!(staleness_warning("2026-07-01T00:00:00Z", "2026-07-31T00:00:00Z", 30), None);
+        assert_eq!(
+            staleness_warning("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z", 30),
+            Some(31)
+        );
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn an_unreadable_state_file_is_an_io_error_not_first_contact() {
+        // A directory where the state file should be: reading errors with
+        // something other than NotFound — must surface, never silently
+        // reset the marks (that would reopen the rollback window).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("state/high-water-marks.json")).unwrap();
+        assert!(matches!(
+            HighWaterMarks::load(tmp.path()),
+            Err(RollbackError::Io { .. })
+        ));
+    }
+
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
     fn staleness_is_a_pure_function_of_issued_at_now_and_threshold() {
         // 100 days old, threshold 90: warn with the age.
         assert_eq!(

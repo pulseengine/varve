@@ -1,0 +1,37 @@
+crates/varve-core/src/pin.rs:108:33: replace != with == in Pin::parse
+crates/varve-core/src/pin.rs:125:32: replace || with && in Pin::parse
+crates/varve-core/src/pin.rs:125:26: replace != with == in Pin::parse
+crates/varve-core/src/pin.rs:125:35: delete ! in Pin::parse
+crates/varve-core/src/realm.rs:39:9: replace Realm::fingerprint -> String with String::new()
+crates/varve-core/src/realm.rs:39:9: replace Realm::fingerprint -> String with "xyzzy".into()
+crates/varve-core/src/realm.rs:47:9: replace Realm::effective_root -> PathBuf with Default::default()
+crates/varve-core/src/realm.rs:102:5: replace find_realms_file -> Option<PathBuf> with None
+crates/varve-core/src/realm.rs:102:5: replace find_realms_file -> Option<PathBuf> with Some(Default::default())
+crates/varve-core/src/realm.rs:162:28: replace || with && in resolve_realm
+crates/varve-core/src/realm.rs:162:22: replace != with == in resolve_realm
+crates/varve-core/src/realm.rs:162:31: delete ! in resolve_realm
+crates/varve-core/src/realm.rs:169:51: replace + with - in resolve_realm
+crates/varve-core/src/realm.rs:169:51: replace + with * in resolve_realm
+crates/varve-core/src/verify.rs:38:9: replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![])
+crates/varve-core/src/verify.rs:38:9: replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![0])
+crates/varve-core/src/verify.rs:38:9: replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![1])
+crates/varve-core/src/verify.rs:52:5: replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![])
+crates/varve-core/src/verify.rs:52:5: replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![0])
+crates/varve-core/src/verify.rs:52:5: replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![1])
+crates/varve-core/src/verify.rs:62:5: replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![])
+crates/varve-core/src/verify.rs:62:5: replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![0])
+crates/varve-core/src/verify.rs:62:5: replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![1])
+crates/varve-core/src/verify.rs:66:30: replace != with == in verify_with
+crates/varve-core/src/verify.rs:89:5: replace dsse_sign_typed -> Result<String, VerifyError> with Ok(String::new())
+crates/varve-core/src/verify.rs:89:5: replace dsse_sign_typed -> Result<String, VerifyError> with Ok("xyzzy".into())
+crates/varve-core/src/verify.rs:104:5: replace sign_layer_manifest -> Result<String, VerifyError> with Ok(String::new())
+crates/varve-core/src/verify.rs:104:5: replace sign_layer_manifest -> Result<String, VerifyError> with Ok("xyzzy".into())
+crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![])
+crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![0])
+crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![1])
+crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![])
+crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![0])
+crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![1])
+crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![])
+crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![0])
+crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![1])
