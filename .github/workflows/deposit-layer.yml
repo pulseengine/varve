@@ -28,7 +28,9 @@ env:
   # The layer's contents: bump deliberately, in a reviewed diff.
   # <tool>:<version> triples; all follow <tool>-<ver>-<triple>.tar.gz with
   # a cosign-signed SHA256SUMS.txt except wsc (raw per-platform binaries).
-  TARBALL_TOOLS: "rivet:v0.32.0 synth:v0.54.0 loom:v1.2.0 meld:v0.42.0 spar:v0.35.0 witness:v0.39.0 ordeal:v0.17.0 kiln:v0.4.4"
+  # ordeal is EXCLUDED until its releases carry cosign-signed sums
+  # (pulseengine/ordeal — Track A gap filed); fail-closed, no TOFU entries.
+  TARBALL_TOOLS: "rivet:v0.32.0 synth:v0.54.0 loom:v1.2.0 meld:v0.42.0 spar:v0.35.0 witness:v0.39.0 kiln:v0.4.4"
   WSC_VERSION: v0.10.0
 
 jobs:
