@@ -1049,3 +1049,189 @@ artifacts:
         civil-date arithmetic of the staleness check. All killed; the gate
         keeps it that way.
     tags: [process]
+
+  # ═════════════════════════════════════════════════════════════════════
+  # The full forward roadmap (planned 2026-08-08 from the two independent
+  # audits + backlog). "Plan for all we can do, as independent as possible."
+  # v0.13 adversarial inputs · v0.14 assessable graph + independence ·
+  # v0.15 durable evidence + ops · v1.0 the qualification gate.
+  # ═════════════════════════════════════════════════════════════════════
+
+  # ── v0.14.0 — make the graph assessable, and make verification independent
+  - id: REQ-INDEP-001
+    type: requirement
+    title: No requirement is verified on the author's word alone
+    status: approved
+    release: v0.14.0
+    description: >
+      A requirement shall not reach `verified` on the authoring agent's
+      assertion. Each release's scope shall undergo an INDEPENDENT clean-room
+      verification — a fresh-context reviewer with no inherited framing that
+      re-derives every claimed verdict from evidence (runs the named tests,
+      re-checks the oracles, attempts to refute) — and the reviewer identity,
+      date, and outcome shall be recorded on the artifacts (a `review`-method
+      verification linked to each requirement). The release gate refuses to
+      cut a scope whose independent review is absent or dissenting. This is
+      the strongest independence achievable without a second human and
+      directly answers the audits' one structural finding: self-assigned
+      `verified` status.
+    tags: [process, independence]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-ASPICE-001
+    type: requirement
+    title: The ASPICE V is populated so its trace rules bite non-vacuously
+    status: approved
+    release: v0.14.0
+    description: >
+      The enabled aspice schema's V-types shall carry real artifacts —
+      system requirements deriving from the STPA-Sec losses, software
+      requirements deriving from them, architecture components over the
+      actual module structure, and unit/software verification separated by
+      level — so the SWE.1↔SWE.6 / SWE.2↔SWE.5 / SWE.3↔SWE.4 rules measure a
+      non-empty set instead of passing 0/0 (the vacuous-gate finding).
+    tags: [process]
+    fields:
+      priority: should
+      category: non-functional
+
+  - id: REQ-TARA-001
+    type: requirement
+    title: The threat analysis is a full TARA, not a seed
+    status: approved
+    release: v0.14.0
+    description: >
+      The cybersecurity schema shall be enabled and populated: assets,
+      threat-scenarios with attack-vector and attack-feasibility, risk
+      assessments with explicit risk-treatment (incl. the accept decisions
+      currently implicit in prose), and cybersecurity goals with CALs. The
+      STPA-Sec back-half (control structure, sec-UCAs, loss scenarios) shall
+      be completed — the overdue v0.1.0 work item — surfacing SH-005/006 as
+      first-class analysis, not retrofitted hazards.
+    tags: [security]
+    fields:
+      priority: should
+      category: non-functional
+
+  # ── v0.15.0 — durable evidence and operational integrity
+  - id: REQ-ARCHIVE-002
+    type: requirement
+    title: The archive of record is durable, not a 90-day CI artifact
+    status: approved
+    release: v0.15.0
+    description: >
+      A deposited layer's oci-layout archive shall be published to durable,
+      verifiable storage kept independently of any registry or CI retention
+      policy (SL-002: a qualified line must stay reconstructible for the
+      safety-case lifetime). The current retention-90-days workflow artifact
+      contradicts varve's own loss and must be replaced.
+    tags: [core, safety]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-AUDITLOG-001
+    type: requirement
+    title: Client-side append-only log of installs, verifications, refusals
+    status: approved
+    release: v0.15.0
+    description: >
+      varve shall write an append-only local record of update events —
+      installs, re-verifications, refusals, staleness warnings, self-updates
+      — so the update history is auditable (R156 record-keeping, IEC 62443
+      CR 2.8), not merely the resulting state. Tamper-evidence via a hash
+      chain is preferred.
+    tags: [security]
+    fields:
+      priority: should
+      category: non-functional
+
+  - id: REQ-FIRSTCONTACT-001
+    type: requirement
+    title: A fresh consumer cannot be handed an arbitrarily old signed layer
+    status: approved
+    release: v0.15.0
+    description: >
+      The first-contact rollback window (empty high-water mark accepts any
+      counter) shall be closed: a signed per-line floor (carried in the
+      line-status document, which already has counters and the right
+      distribution channel) shall establish a minimum acceptable counter for
+      a consumer with no prior mark, so SH-001 does not depend on the
+      consumer having pinned a digest.
+    tags: [security]
+    links:
+      - type: satisfies
+        target: SC-001
+    fields:
+      priority: should
+      category: functional
+
+  # ── v1.0.0 — the qualification gate
+  - id: REQ-CEREMONY-001
+    type: requirement
+    title: A real trust-root ceremony replaces the provisional key
+    status: approved
+    release: v1.0.0
+    description: >
+      The qualified-channel root shall be generated in a documented ceremony
+      with custody, rotation, revocation, and expiry defined (discharging
+      SH-005/SC-005); one release shall be dual-signed to migrate the
+      old-verifies-new chain without a flag day; and a transparency
+      mechanism (e.g. Rekor-logging the DSSE envelopes, or tuf-on-ci) shall
+      make key compromise detectable.
+    tags: [security]
+    links:
+      - type: satisfies
+        target: SC-005
+    fields:
+      priority: must
+      category: security
+
+  - id: REQ-DOSSIER-001
+    type: requirement
+    title: The ISO 26262-8 §11 qualification dossier exists
+    status: approved
+    release: v1.0.0
+    description: >
+      A tool classification analysis (use cases, malfunction catalogue from
+      SH-*, TI/TD determination, TCL statement), a tool qualification plan,
+      a safety/user manual with numbered usage constraints, and a validation
+      report executed across all released platforms shall be authored — the
+      documents the audits found absent behind otherwise-present technical
+      substance. varve shall also run its own known-problems line-status for
+      its releases (dogfooding REQ-KP-001).
+    tags: [qualification]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: DD-019
+    type: design-decision
+    title: Independence via adversarial clean-room review, gated at release
+    status: accepted
+    release: v0.14.0
+    description: >
+      Since a second human is not always available, independence is supplied
+      by an adversarial clean-room reviewer (a fresh-context agent, no
+      inherited framing) that re-derives every claimed verdict from evidence
+      and tries to refute it, per release scope. Its verdict — reviewer id,
+      date, outcome — is recorded as a `review`-method verification linked to
+      the reviewed requirements, and `release-execution` refuses a scope
+      whose independent review is absent or dissenting. Automation is the
+      independent party the single author cannot be.
+    links:
+      - type: satisfies
+        target: REQ-INDEP-001
+    fields:
+      rationale: >
+        The audits' one finding no gate closes is self-assigned `verified`
+        status. The mutation gate already proved automation can be the
+        independent party — it killed 33 survivors behind a human's
+        "mutation-checked" claim, and blocked its own installing PR until a
+        security fix was complete. A clean-room reviewer generalizes that:
+        the reviewer inherits none of the author's assumptions, so its
+        agreement is evidence, not an echo. Recorded verdicts make the
+        independence auditable; gating makes it non-optional.
+    tags: [process, independence]
