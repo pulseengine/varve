@@ -29,10 +29,10 @@ env:
   # <tool>:<version> triples; all follow <tool>-<ver>-<triple>.tar.gz with
   # a cosign-signed SHA256SUMS.txt except wsc (raw per-platform binaries).
   # ordeal is EXCLUDED until its releases carry cosign-signed sums
-  # (pulseengine/ordeal — Track A gap filed); fail-closed, no TOFU entries.
+  # ordeal rejoined at v0.18.0 — its first cosign-signed release (ordeal#116).
   # Entry shape: repo_tool:version[:binary] — binary defaults to the tool
   # name; kiln ships its CLI as `kilnd`.
-  TARBALL_TOOLS: "rivet:v0.32.0 synth:v0.54.0 loom:v1.2.0 meld:v0.42.0 spar:v0.35.0 witness:v0.39.0 kiln:v0.4.4:kilnd"
+  TARBALL_TOOLS: "rivet:v0.32.0 synth:v0.55.0 loom:v1.2.0 meld:v0.42.0 spar:v0.35.0 witness:v0.39.0 ordeal:v0.18.0 kiln:v0.4.4:kilnd"
   WSC_VERSION: v0.10.0
 
 jobs:
