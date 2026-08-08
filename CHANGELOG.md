@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.13.1 — 2026-08-08
+
+Cold-start onboarding (REQ-ONBOARD-001) — fixes pulseengine/varve#34,
+found by an external consumer cold-starting from the tarball.
+
+- The trust root (`rolling.pub`) and a canonical `varve-realms.toml` now
+  ship as **release assets**, and the README has a **Getting started**
+  section — a consumer with only the binary can reach a verified install
+- The no-trust-root error now names the **zero-config realm path** (the
+  stronger mechanism) and where the key is published, instead of steering
+  to a bare `VARVE_TRUST_ROOT` with nowhere to get the key
+- `varve install` **auto-caches** a line-status carried in the installed
+  layout, so `varve status` works with no `--from-file` step; the status
+  error describes the real path. Registry-side line-status distribution is
+  tracked as REQ-STATUS-DIST-001 (v0.14.0)
+
 ## v0.13.0 — 2026-08-08
 
 Adversarial inputs (REQ-FUZZ-001 + REQ-PROP-001 + REQ-MATRIX-001 verified).

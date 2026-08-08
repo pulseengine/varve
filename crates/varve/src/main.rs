@@ -381,7 +381,16 @@ fn status(store: &Store, from_file: Option<&std::path::Path>) -> anyhow::Result<
 
     let Some(doc) = cache.load(&line, &root_pk)? else {
         bail!(
-            "no line-status document cached for line {line} — ingest one with `varve status --from-file <envelope>`"
+            "no line-status document cached for line {line}.\n\
+             \n\
+             Line-status carries the support window, known problems, and yank state \
+             for the line. `varve install` caches it automatically when the installed \
+             layer's oci-layout carries one; otherwise ingest a signed envelope \
+             explicitly:\n\
+             \n    varve status --from-file <line-status.dsse.json>\n\
+             \n\
+             Distribution of line-status via the registry is tracked in \
+             REQ-STATUS-DIST-001 (pulseengine/varve#34)."
         );
     };
     let report = doc.report_for(&pin.layer);
@@ -775,8 +784,17 @@ fn trust_root() -> anyhow::Result<varve_core::PinnedKeyVerifier> {
 fn trust_root_bytes() -> anyhow::Result<Vec<u8>> {
     let Some(path) = std::env::var_os("VARVE_TRUST_ROOT") else {
         bail!(
-            "no trust root configured — set VARVE_TRUST_ROOT to the file holding the \
-             hex-encoded PulseEngine root public key"
+            "no trust root configured.\n\
+             \n\
+             The zero-config path is a realm: add `realm = \"pulseengine\"` to your \
+             varve.toml and commit a varve-realms.toml naming the registry and trust \
+             root — then no environment variable is needed and the realm's root is \
+             authoritative. The canonical file ships as `varve-realms.toml` with each \
+             release (and at pulseengine/varve/trust-roots/).\n\
+             \n\
+             Or, without a realm, point VARVE_TRUST_ROOT at the published root key \
+             (`rolling.pub`, a release asset). See the Getting started section of the \
+             README."
         );
     };
     let path = PathBuf::from(path);
@@ -867,6 +885,32 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
              its line exists",
             outcome.layer
         );
+    }
+
+    // Auto-cache a line-status the source's oci-layout carries (DD-008), so
+    // `varve status` works with zero extra steps (varve#34). Verified against
+    // the same realm/trust root; a bad or stale one is a warning, never fatal
+    // to an otherwise-good install.
+    if std::path::Path::new(from).join("index.json").is_file() {
+        let line = pin.layer.line().clone();
+        match varve_core::read_status_from_layout(std::path::Path::new(from), &line) {
+            Ok(Some(envelope)) => {
+                let root_pk = ctx_root_bytes(&ctx)?;
+                match varve_core::LineStatus::verify_and_parse(&envelope, &root_pk) {
+                    Ok(doc) => {
+                        let cache = varve_core::StatusCache::at_root(store.root());
+                        if let Err(e) = cache.update(&line, &envelope, &doc) {
+                            eprintln!(
+                                "note: layer carried a line-status but it was not cached: {e}"
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!("note: layer carried an unverifiable line-status: {e}"),
+                }
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("note: could not read the layer's line-status: {e}"),
+        }
     }
     Ok(())
 }

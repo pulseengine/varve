@@ -1133,6 +1133,89 @@ arg-prefix = "--wasi-arg"
         );
 }
 
+// rivet: verifies REQ-ONBOARD-001
+#[test]
+fn install_auto_caches_a_layout_carried_line_status_so_status_just_works() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust = parent.join("root.pub");
+    std::fs::write(&trust, hex::encode(&pk)).unwrap();
+
+    // Deposit a layer, then attach a signed line-status to its oci-layout.
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let tool = parent.join("t");
+    std::fs::write(&tool, b"toolbytes").unwrap();
+    let spec = parent.join("d.toml");
+    let host = varve_core::host_platform();
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n[[tool]]\nname = \"synth\"\nversion = \"1\"\nplatform = \"{host}\"\npath = \"{}\"\n",
+            tool.display()
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-08-07T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    // Sign a line-status and attach it to the layout via the library.
+    let status_json = r#"{"line":"2026.07","counter":1,"issued-at":"2026-08-07T00:00:00Z","support-until":"2028-07-31","yanked":{},"known-problems":[]}"#;
+    let doc: varve_core::LineStatus = serde_json::from_str(status_json).unwrap();
+    let envelope = doc
+        .sign(
+            &hex::decode(std::fs::read_to_string(&sk_path).unwrap().trim()).unwrap(),
+            "k",
+        )
+        .unwrap();
+    let line = "2026.07.0"
+        .parse::<varve_core::LayerId>()
+        .unwrap()
+        .line()
+        .clone();
+    varve_core::attach_status_to_layout(&layout, &line, envelope.as_bytes()).unwrap();
+
+    // Install — and then `varve status` works with NO --from-file (varve#34).
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("supported until 2028-07-31"));
+}
+
+// rivet: verifies REQ-ONBOARD-001
+#[test]
+fn the_trust_root_error_points_to_the_realm_path() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("realm")
+                .and(predicate::str::contains("rolling.pub"))
+                .and(predicate::str::contains("Getting started")),
+        );
+}
+
 // rivet: verifies REQ-COEXIST-001
 #[test]
 fn list_with_an_empty_core_succeeds_and_says_so() {

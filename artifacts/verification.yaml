@@ -407,3 +407,17 @@ artifacts:
     links:
       - type: verifies
         target: REQ-MATRIX-001
+
+  - id: VER-ONBOARD-001
+    type: verification
+    title: Cold-start reaches verified install; status auto-works; error guides
+    status: verified
+    release: v0.13.1
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve install_auto_caches_a_layout_carried_line_status_so_status_just_works
+        - run: cargo test -p varve the_trust_root_error_points_to_the_realm_path
+    links:
+      - type: verifies
+        target: REQ-ONBOARD-001
