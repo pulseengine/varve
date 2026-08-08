@@ -43,6 +43,20 @@ pub struct DepositTool {
     /// downstream lockfiles (Bazel registries) inherit the signature anchor
     /// (REQ-BAZEL-001).
     pub source: Option<ToolSource>,
+    /// Runner contract for portable wasm entries (REQ-RUNNER-001): the tool
+    /// (from the SAME layer) that executes this entry, prefix args, and an
+    /// optional per-user-argument flag (kilnd's --wasi-arg shape).
+    pub runner: Option<RunnerSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerSpec {
+    pub tool: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(rename = "arg-prefix", default)]
+    pub arg_prefix: Option<String>,
 }
 
 /// Upstream provenance of a deposited tool.
@@ -92,6 +106,8 @@ pub struct SpecTool {
     pub path: String,
     #[serde(default)]
     pub source: Option<ToolSource>,
+    #[serde(default)]
+    pub runner: Option<RunnerSpec>,
 }
 
 pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositError> {
@@ -171,6 +187,21 @@ pub fn deposit(
                     source.sha256.clone().into(),
                 );
             }
+            if let Some(runner) = &tool.runner {
+                annotations.insert(crate::bazel::ANN_RUNNER.into(), runner.tool.clone().into());
+                if !runner.args.is_empty() {
+                    annotations.insert(
+                        crate::bazel::ANN_RUNNER_ARGS.into(),
+                        runner.args.join(" ").into(),
+                    );
+                }
+                if let Some(prefix) = &runner.arg_prefix {
+                    annotations.insert(
+                        crate::bazel::ANN_RUNNER_ARG_PREFIX.into(),
+                        prefix.clone().into(),
+                    );
+                }
+            }
             serde_json::json!({
                 "mediaType": "application/vnd.oci.image.manifest.v1+json",
                 "digest": manifest_digest(&tool.bytes),
@@ -239,6 +270,7 @@ mod tests {
                     platform: None,
                     bytes: b"synth-bytes".to_vec(),
                     source: None,
+                    runner: None,
                 },
                 DepositTool {
                     name: "rivet".into(),
@@ -246,6 +278,7 @@ mod tests {
                     platform: None,
                     bytes: b"rivet-bytes".to_vec(),
                     source: None,
+                    runner: None,
                 },
             ],
         }

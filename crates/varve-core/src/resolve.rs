@@ -22,6 +22,16 @@ pub struct Resolved {
     /// The tools this pin exposes (the pin's `tools` subset, or every tool in
     /// the layer), each with its resolved binary path.
     pub tools: Vec<(String, PathBuf)>,
+    /// Runner contracts (REQ-RUNNER-001): tool → (runner tool, prefix args,
+    /// optional per-user-arg flag), from the signed manifest annotations.
+    pub runners: std::collections::BTreeMap<String, RunnerContract>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerContract {
+    pub tool: String,
+    pub args: Vec<String>,
+    pub arg_prefix: Option<String>,
 }
 
 /// Resolution failures. Every variant carries what the user must do next.
@@ -127,7 +137,40 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
         });
     }
 
-    Ok(Resolved { layer, tools })
+    // Runner contracts from the stored manifest's entry annotations —
+    // lenient read: legacy layers without them simply have none.
+    let mut runners = std::collections::BTreeMap::new();
+    if let Ok(bytes) = std::fs::read(layer.root.join("layer.json"))
+        && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && let Some(entries) = json["manifests"].as_array()
+    {
+        for entry in entries {
+            let ann = &entry["annotations"];
+            if let (Some(tool), Some(runner)) = (
+                ann["eu.pulseengine.tool"].as_str(),
+                ann[crate::bazel::ANN_RUNNER].as_str(),
+            ) {
+                runners.insert(
+                    tool.to_string(),
+                    RunnerContract {
+                        tool: runner.to_string(),
+                        args: ann[crate::bazel::ANN_RUNNER_ARGS]
+                            .as_str()
+                            .map(|a| a.split_whitespace().map(str::to_string).collect())
+                            .unwrap_or_default(),
+                        arg_prefix: ann[crate::bazel::ANN_RUNNER_ARG_PREFIX]
+                            .as_str()
+                            .map(str::to_string),
+                    },
+                );
+            }
+        }
+    }
+    Ok(Resolved {
+        layer,
+        tools,
+        runners,
+    })
 }
 
 #[cfg(test)]

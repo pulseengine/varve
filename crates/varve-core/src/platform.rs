@@ -27,6 +27,9 @@ pub fn host_platform() -> String {
 pub fn entry_matches(entry_platform: Option<&str>, platform: &str) -> bool {
     match entry_platform {
         None => true,
+        // wasm32 targets are PORTABLE: the bytes run wherever a runner
+        // exists (REQ-RUNNER-001) — no per-platform gaps by construction.
+        Some(p) if p.starts_with("wasm32") => true,
         Some(p) => p == platform,
     }
 }
@@ -47,6 +50,17 @@ mod tests {
             Some("x86_64-unknown-linux-gnu"),
             "aarch64-apple-darwin"
         ));
+    }
+
+    // rivet: verifies REQ-RUNNER-001
+    #[test]
+    fn wasm32_entries_are_portable_to_every_host() {
+        assert!(entry_matches(Some("wasm32-wasip2"), "aarch64-apple-darwin"));
+        assert!(entry_matches(
+            Some("wasm32-wasip2"),
+            "x86_64-unknown-linux-gnu"
+        ));
+        assert!(entry_matches(Some("wasm32-unknown-unknown"), "anything"));
     }
 
     // rivet: verifies REQ-PLATFORM-001

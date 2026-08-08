@@ -1045,6 +1045,94 @@ fn two_realms_same_layer_name_zero_cross_talk() {
         .stderr(predicate::str::contains("signature"));
 }
 
+// rivet: verifies REQ-RUNNER-001
+#[cfg(unix)]
+#[test]
+fn portable_wasm_entries_dispatch_through_their_layer_runner() {
+    let fx = fixture(None, &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust = parent.join("root.pub");
+    std::fs::write(&trust, hex::encode(&pk)).unwrap();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+
+    // A "runtime" that prints exactly how it was invoked, and a "wasm" blob.
+    let runtime = parent.join("kilnd-double");
+    std::fs::write(&runtime, "#!/bin/sh\necho invoked: \"$@\"\n").unwrap();
+    let module = parent.join("scry.core.wasm");
+    std::fs::write(&module, b"fake-wasm-bytes").unwrap();
+
+    // Deposit: native runner + portable wasm entry carrying the contract.
+    let host = varve_core::host_platform();
+    let spec = parent.join("deposit.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            r#"layer = "2026.09.0"
+channel = "rolling"
+counter = 1
+
+[[tool]]
+name = "kilnd"
+version = "0.4.4"
+platform = "{host}"
+path = "{runtime}"
+
+[[tool]]
+name = "scry"
+version = "3.2.4"
+platform = "wasm32-wasip2"
+path = "{module}"
+
+[tool.runner]
+tool = "kilnd"
+args = ["--wasi", "--wasi-version", "preview2"]
+arg-prefix = "--wasi-arg"
+"#,
+            runtime = runtime.display(),
+            module = module.display()
+        ),
+    )
+    .unwrap();
+    let dest = parent.join("runner-deposit");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-08-08T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--out"])
+        .arg(&dest)
+        .assert()
+        .success();
+
+    // Install on THIS host: the wasm entry rides along (portable).
+    std::fs::write(
+        fx.project.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nchannel = \"rolling\"\nlayer = \"2026.09.0\"\n",
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["install", "--from"])
+        .arg(&dest)
+        .assert()
+        .success();
+
+    // Dispatch: varve run -- scry --version x  →  the runner receives its
+    // prefix args, then the module path, then per-arg-prefixed user args.
+    varve(&fx)
+        .args(["run", "--", "scry", "--version", "x"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::is_match(
+                r"invoked: --wasi --wasi-version preview2 .*bin/scry --wasi-arg --version --wasi-arg x",
+            )
+            .unwrap(),
+        );
+}
+
 // rivet: verifies REQ-COEXIST-001
 #[test]
 fn list_with_an_empty_core_succeeds_and_says_so() {

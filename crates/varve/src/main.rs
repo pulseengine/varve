@@ -508,9 +508,31 @@ fn run_tool(
                 .join(", ")
         );
     };
-    let mut cmd = std::process::Command::new(path);
-    cmd.args(args)
-        .env("VARVE_LAYER", resolved.layer.layer.to_string())
+    // Runnered entries (portable wasm) execute through their runner — from
+    // the SAME verified layer, never from PATH (REQ-RUNNER-001).
+    let mut cmd = if let Some(contract) = resolved.runners.get(tool) {
+        let Some((_, runner_path)) = resolved.tools.iter().find(|(n, _)| n == &contract.tool)
+        else {
+            bail!(
+                "tool '{tool}' runs via '{runner}' but the layer does not expose it — refusing",
+                runner = contract.tool
+            );
+        };
+        let mut cmd = std::process::Command::new(runner_path);
+        cmd.args(&contract.args).arg(path);
+        for arg in args {
+            if let Some(prefix) = &contract.arg_prefix {
+                cmd.arg(prefix);
+            }
+            cmd.arg(arg);
+        }
+        cmd
+    } else {
+        let mut cmd = std::process::Command::new(path);
+        cmd.args(args);
+        cmd
+    };
+    cmd.env("VARVE_LAYER", resolved.layer.layer.to_string())
         .env("VARVE_LAYER_MANIFEST_DIGEST", &resolved.layer.digest);
     #[cfg(unix)]
     {
@@ -584,6 +606,7 @@ fn deposit_cmd(
                 platform: tool.platform,
                 bytes,
                 source: tool.source,
+                runner: tool.runner,
             });
         }
         return run_deposit(
@@ -623,6 +646,7 @@ fn deposit_cmd(
             platform: platform.map(str::to_string),
             bytes,
             source: None,
+            runner: None,
         });
     }
     run_deposit(
