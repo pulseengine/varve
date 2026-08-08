@@ -293,7 +293,10 @@ mod tests {
     #[test]
     fn staleness_threshold_boundary_is_strictly_greater_than() {
         // Exactly at the threshold: quiet. One past: warn.
-        assert_eq!(staleness_warning("2026-07-01T00:00:00Z", "2026-07-31T00:00:00Z", 30), None);
+        assert_eq!(
+            staleness_warning("2026-07-01T00:00:00Z", "2026-07-31T00:00:00Z", 30),
+            None
+        );
         assert_eq!(
             staleness_warning("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z", 30),
             Some(31)
