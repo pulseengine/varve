@@ -1,0 +1,16 @@
+# cargo-mutants configuration — adapted from pulseengine/rivet's
+# templates/cargo-mutants (the org profile). Two tiers:
+#   - CI gate (ci.yml): --file-scoped to the trust-critical modules below,
+#     zero surviving mutants required (REQ-MUTATE-001)
+#   - nightly (mutants.yml): full workspace, advisory
+minimum_test_timeout = 60
+
+exclude_globs = [
+    "target/**",
+    "crates/varve/tests/**",
+    "crates/varve-core/tests/**",
+]
+
+# Kill criteria come from the fast lib tests; e2e suites are too slow as
+# mutant filters and are excluded above.
+additional_cargo_test_args = ["--workspace", "--lib"]

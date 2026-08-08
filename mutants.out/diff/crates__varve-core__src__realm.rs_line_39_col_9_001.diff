@@ -1,0 +1,24 @@
+--- crates/varve-core/src/realm.rs
++++ replace Realm::fingerprint -> String with "xyzzy".into()
+@@ -31,20 +31,17 @@
+     pub trust_root: Vec<u8>,
+ }
+ 
+ impl Realm {
+     /// Short fingerprint of the trust root — the store namespace. Sixteen
+     /// hex chars of sha256(pubkey): collision-safe for a namespace while
+     /// staying readable in paths.
+     pub fn fingerprint(&self) -> String {
+-        crate::store::manifest_digest(&self.trust_root)
+-            .strip_prefix("sha256:")
+-            .expect("digest shape")[..16]
+-            .to_string()
++        "xyzzy".into() /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// The per-realm effective root under which core/state/status live.
+     pub fn effective_root(&self, varve_root: &Path) -> PathBuf {
+         varve_root.join("realms").join(self.fingerprint())
+     }
+ }
+ 

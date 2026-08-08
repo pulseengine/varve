@@ -1,0 +1,29 @@
+--- crates/varve-core/src/realm.rs
++++ replace find_realms_file -> Option<PathBuf> with None
+@@ -94,25 +94,17 @@
+     trust_root: Option<String>,
+     /// …or a key file, relative to the realms file.
+     #[serde(rename = "trust-root-file", default)]
+     trust_root_file: Option<String>,
+ }
+ 
+ /// Find the realms file by walking up from `start`.
+ pub fn find_realms_file(start: &Path) -> Option<PathBuf> {
+-    let mut dir = Some(start);
+-    while let Some(d) = dir {
+-        let candidate = d.join(REALMS_FILE);
+-        if candidate.is_file() {
+-            return Some(candidate);
+-        }
+-        dir = d.parent();
+-    }
+-    None
++    None /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Load one realm by name from the realms file discovered from `start`.
+ pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
+     let Some(path) = find_realms_file(start) else {
+         return Err(RealmError::NoRealmsFile {
+             start: start.display().to_string(),
+             realm: name.to_string(),

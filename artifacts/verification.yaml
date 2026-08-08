@@ -1,0 +1,366 @@
+artifacts:
+  # ─────────────────────────────────────────────────────────────────────
+  # The right side of the V, as GRAPH rather than prose (REQ-VGATE-001).
+  # One verification artifact per requirement, each naming concrete test
+  # functions in `fields.steps[].run` — the shape `rivet check
+  # verification-evidence` mechanically audits against the Rust sources,
+  # so a renamed or deleted test goes red instead of leaving a
+  # requirement silently "verified". Source markers (// rivet: verifies)
+  # remain the fine-grained per-test map; these artifacts are the
+  # graph-level closure the org's requirement-verification rule counts.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: VER-PIN-001
+    type: verification
+    title: Fail-closed pin resolution verified at library and CLI boundaries
+    status: verified
+    release: v0.1.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core resolves_the_pinned_layer_by_name
+        - run: cargo test -p varve-core missing_layer_fails_with_the_corrective_command
+        - run: cargo test -p varve-core partial_layer_is_an_error_not_a_fallback
+        - run: cargo test -p varve-core pinned_digest_wins_and_a_mismatching_name_is_a_hard_failure
+        - run: cargo test -p varve which_fails_closed_when_the_pinned_layer_is_not_installed
+        - run: cargo test -p varve which_fails_closed_when_no_pin_exists
+    links:
+      - type: verifies
+        target: REQ-PIN-001
+
+  - id: VER-VERIFY-001
+    type: verification
+    title: Source-independent signature verification incl. the kill-criterion
+    status: verified
+    release: v0.2.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core kill_criterion_two_sources_one_verdict
+        - run: cargo test -p varve-core an_unverified_manifest_fetches_no_blobs_and_installs_nothing
+        - run: cargo test -p varve-core a_source_that_alters_a_blob_is_caught_by_the_signed_digest
+        - run: cargo test -p varve-core install_accepts_a_properly_signed_layer_and_rejects_the_same_bytes_resigned_by_an_impostor
+        - run: cargo test -p varve-core a_freshly_installed_layer_reverifies
+        - run: cargo test -p varve install_refuses_a_layer_signed_by_the_wrong_root
+    links:
+      - type: verifies
+        target: REQ-VERIFY-001
+
+  - id: VER-COEXIST-001
+    type: verification
+    title: Layer coexistence in the content-addressed core
+    status: verified
+    release: v0.1.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core two_layers_coexist_and_are_independently_addressable
+        - run: cargo test -p varve-core store_key_is_the_manifest_digest
+        - run: cargo test -p varve list_shows_every_installed_layer
+    links:
+      - type: verifies
+        target: REQ-COEXIST-001
+
+  - id: VER-OFFLINE-001
+    type: verification
+    title: Archive round-trip with verification unchanged, no registry
+    status: verified
+    release: v0.3.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core export_writes_a_standard_oci_image_layout
+        - run: cargo test -p varve-core an_archived_layer_installs_into_a_fresh_core_with_verification_unchanged
+        - run: cargo test -p varve-core export_refuses_a_layer_without_its_envelope
+        - run: cargo test -p varve archive_then_offline_install_round_trips_with_verification_unchanged
+    links:
+      - type: verifies
+        target: REQ-OFFLINE-001
+
+  - id: VER-NOUPDATE-001
+    type: verification
+    title: No mechanism moves a project between layers without a pin edit
+    status: verified
+    release: v0.1.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_newer_layer_in_the_core_cannot_change_what_a_pin_resolves_to
+        - run: cargo test -p varve-core ambiguous_name_fails_closed_instead_of_choosing
+        - run: cargo test -p varve run_with_an_explicit_layer_override_does_not_touch_the_pin
+    links:
+      - type: verifies
+        target: REQ-NOUPDATE-001
+
+  - id: VER-PROV-001
+    type: verification
+    title: Provenance contract pinned across varve run and wsc-attestation
+    status: verified
+    release: v0.5.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve --test provenance toolinfo_captures_the_layer_identity_varve_run_exports
+        - run: cargo test -p varve run_dispatches_with_the_layer_identity_in_the_environment
+    links:
+      - type: verifies
+        target: REQ-PROV-001
+
+  - id: VER-SCOPE-001
+    type: verification
+    title: Selection and reporting never mutate the core
+    status: verified
+    release: v0.1.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core resolution_and_listing_never_write_to_the_core
+    links:
+      - type: verifies
+        target: REQ-SCOPE-001
+
+  - id: VER-ROLLBACK-001
+    type: verification
+    title: Anti-rollback counters, staleness, and CLI refusal
+    status: verified
+    release: v0.2.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_counter_below_the_mark_is_rejected
+        - run: cargo test -p varve-core counters_are_scoped_per_line
+        - run: cargo test -p varve-core marks_survive_a_new_session
+        - run: cargo test -p varve-core a_rolled_back_layer_is_refused_at_install
+        - run: cargo test -p varve-core a_failed_install_does_not_advance_the_high_water_mark
+        - run: cargo test -p varve-core corrupt_state_is_an_error_not_a_reset
+        - run: cargo test -p varve a_rolled_back_layer_is_refused_by_the_cli
+    links:
+      - type: verifies
+        target: REQ-ROLLBACK-001
+
+  - id: VER-PATCH-001
+    type: verification
+    title: Three-part layer grammar with corrective guidance
+    status: verified
+    release: v0.1.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core parses_three_part_identifier_into_line_and_patch
+        - run: cargo test -p varve-core patch_stays_inside_the_frozen_line
+        - run: cargo test -p varve-core rejects_two_part_identifier_with_corrective_guidance
+        - run: cargo test -p varve-core rejects_malformed_identifiers
+    links:
+      - type: verifies
+        target: REQ-PATCH-001
+
+  - id: VER-KP-001
+    type: verification
+    title: Line-status evidence — signing, attachment, cache monotonicity, reporting
+    status: verified
+    release: v0.5.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_signed_status_document_round_trips
+        - run: cargo test -p varve-core a_layer_manifest_envelope_cannot_pose_as_a_status_document
+        - run: cargo test -p varve-core attaching_status_to_a_layout_leaves_every_layer_blob_untouched
+        - run: cargo test -p varve-core the_cache_refuses_a_counter_regression
+        - run: cargo test -p varve status_reports_yank_and_known_problems_from_attached_evidence
+        - run: cargo test -p varve status_refuses_a_stale_document_and_keeps_the_newer_cache
+    links:
+      - type: verifies
+        target: REQ-KP-001
+
+  - id: VER-SELF-001
+    type: verification
+    title: Self-verification against varve-native signed release sums
+    status: verified
+    release: v0.5.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_release_archive_verifies_against_the_signed_sums
+        - run: cargo test -p varve-core a_tampered_archive_is_refused
+        - run: cargo test -p varve-core sums_signed_by_an_untrusted_key_are_refused
+        - run: cargo test -p varve self_verify_accepts_a_signed_release_file_and_refuses_a_tampered_one
+        - run: cargo test -p varve sign_sums_produces_an_envelope_self_verify_accepts
+    links:
+      - type: verifies
+        target: REQ-SELF-001
+
+  - id: VER-DEPOSIT-001
+    type: verification
+    title: Deterministic, signed, pipeline-compatible deposits
+    status: verified
+    release: v0.4.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_deposit_round_trips_through_the_standard_install_pipeline
+        - run: cargo test -p varve-core identical_specs_deposit_identical_digests
+        - run: cargo test -p varve-core empty_and_duplicate_tool_lists_are_refused
+        - run: cargo test -p varve deposit_creates_a_layer_the_standard_pipeline_installs
+    links:
+      - type: verifies
+        target: REQ-DEPOSIT-001
+
+  - id: VER-SHIM-001
+    type: verification
+    title: Per-invocation shim resolution — switching projects is cd
+    status: verified
+    release: v0.6.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve shims_resolve_per_invocation_so_switching_projects_is_cd
+    links:
+      - type: verifies
+        target: REQ-SHIM-001
+
+  - id: VER-PLATFORM-001
+    type: verification
+    title: Host-filtered platform selection, wrong-arch fails closed
+    status: verified
+    release: v0.6.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core install_selects_only_entries_for_the_target_platform
+        - run: cargo test -p varve-core a_layer_with_nothing_for_the_host_platform_fails_closed
+        - run: cargo test -p varve-core unstamped_legacy_entries_install_on_any_platform
+    links:
+      - type: verifies
+        target: REQ-PLATFORM-001
+
+  - id: VER-REGISTRY-001
+    type: verification
+    title: Registry pulls through the OCI double, kill-criterion spanning transports
+    status: verified
+    release: v0.6.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core --test registry_double a_layer_installs_by_name_from_the_registry
+        - run: cargo test -p varve-core --test registry_double kill_criterion_registry_and_archive_agree_on_accept_and_reject
+        - run: cargo test -p varve-core --test registry_double blobs_larger_than_ten_mib_pull_cleanly
+    links:
+      - type: verifies
+        target: REQ-REGISTRY-001
+
+  - id: VER-ENV-001
+    type: verification
+    title: Idempotent sourced environment and shell completions
+    status: verified
+    release: v0.7.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve env_is_evaluable_and_idempotent
+        - run: cargo test -p varve shim_install_writes_a_sourceable_env_file
+        - run: cargo test -p varve completions_emit_per_shell_scripts
+    links:
+      - type: verifies
+        target: REQ-ENV-001
+
+  - id: VER-UPDATE-001
+    type: verification
+    title: Self-update — old verifies new, refusals leave the binary untouched
+    status: verified
+    release: v0.8.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core --test selfupdate_double the_running_binary_verifies_and_installs_its_successor
+        - run: cargo test -p varve-core --test selfupdate_double an_unsigned_release_is_refused_not_installed
+        - run: cargo test -p varve-core --test selfupdate_double a_successor_signed_by_an_impostor_is_refused_and_nothing_is_replaced
+        - run: cargo test -p varve-core version_comparison_is_strict_and_fails_closed
+    links:
+      - type: verifies
+        target: REQ-UPDATE-001
+
+  - id: VER-BAZEL-001
+    type: verification
+    title: Signature-anchored Bazel registry compilation
+    status: verified
+    release: v0.9.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core registries_compile_in_the_rules_schema_with_source_digests
+        - run: cargo test -p varve-core a_tool_without_source_provenance_is_skipped_loudly
+        - run: cargo test -p varve spec_deposit_then_export_bazel_compiles_a_signature_anchored_registry
+        - run: cargo test -p varve export_bazel_refuses_without_a_trust_root
+    links:
+      - type: verifies
+        target: REQ-BAZEL-001
+
+  - id: VER-REALM-001
+    type: verification
+    title: Realm isolation — one shim, two universes, zero cross-talk
+    status: verified
+    release: v0.10.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core realms_resolve_by_name_with_walk_up_discovery
+        - run: cargo test -p varve-core different_roots_mean_different_namespaces
+        - run: cargo test -p varve-core an_undefined_realm_fails_closed_naming_what_exists
+        - run: cargo test -p varve two_realms_same_layer_name_zero_cross_talk
+    links:
+      - type: verifies
+        target: REQ-REALM-001
+
+  - id: VER-RUNNER-001
+    type: verification
+    title: Portable wasm entries dispatch through their layer runner
+    status: verified
+    release: v0.11.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core wasm32_entries_are_portable_to_every_host
+        - run: cargo test -p varve portable_wasm_entries_dispatch_through_their_layer_runner
+    links:
+      - type: verifies
+        target: REQ-RUNNER-001
+
+  - id: VER-VGATE-001
+    type: verification
+    title: Verification-evidence check green over the closed graph
+    status: verified
+    release: v0.12.0
+    fields:
+      method: analysis
+      steps:
+        - run: rivet check verification-evidence
+    links:
+      - type: verifies
+        target: REQ-VGATE-001
+
+  - id: VER-MUTATE-001
+    type: verification
+    title: Zero surviving mutants across the six trust-critical modules
+    status: verified
+    release: v0.12.0
+    fields:
+      method: analysis
+      steps:
+        - run: cargo mutants -f crates/varve-core/src/rollback.rs -f crates/varve-core/src/layer.rs -f crates/varve-core/src/platform.rs -f crates/varve-core/src/verify.rs -f crates/varve-core/src/pin.rs -f crates/varve-core/src/realm.rs
+        - run: cargo test -p varve-core epoch_day_arithmetic_matches_the_civil_calendar
+    links:
+      - type: verifies
+        target: REQ-MUTATE-001
+
+  - id: VER-CLAIM-001
+    type: verification
+    title: Claim-check green — every claim's evidence present
+    status: verified
+    release: v0.12.0
+    fields:
+      method: analysis
+      steps:
+        - run: python3 tools/claim-check.py
+    links:
+      - type: verifies
+        target: REQ-CLAIM-001

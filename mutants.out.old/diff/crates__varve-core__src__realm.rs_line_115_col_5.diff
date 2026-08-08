@@ -1,0 +1,81 @@
+--- crates/varve-core/src/realm.rs
++++ replace resolve_realm -> Result<Realm, RealmError> with Ok(Default::default())
+@@ -107,77 +107,17 @@
+         }
+         dir = d.parent();
+     }
+     None
+ }
+ 
+ /// Load one realm by name from the realms file discovered from `start`.
+ pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
+-    let Some(path) = find_realms_file(start) else {
+-        return Err(RealmError::NoRealmsFile {
+-            start: start.display().to_string(),
+-            realm: name.to_string(),
+-        });
+-    };
+-    let text = std::fs::read_to_string(&path).map_err(|source| RealmError::Io {
+-        path: path.display().to_string(),
+-        source,
+-    })?;
+-    let raw: RawRealmsFile = toml::from_str(&text).map_err(|e| RealmError::Parse {
+-        path: path.display().to_string(),
+-        reason: e.to_string(),
+-    })?;
+-    let Some(def) = raw.realm.get(name) else {
+-        return Err(RealmError::Undefined {
+-            realm: name.to_string(),
+-            path: path.display().to_string(),
+-            defined: raw.realm.keys().cloned().collect(),
+-        });
+-    };
+-    let bad = |reason: String| RealmError::BadDefinition {
+-        realm: name.to_string(),
+-        path: path.display().to_string(),
+-        reason,
+-    };
+-    let hex_key = match (&def.trust_root, &def.trust_root_file) {
+-        (Some(_), Some(_)) => {
+-            return Err(bad(
+-                "both trust-root and trust-root-file given — pick one".into()
+-            ));
+-        }
+-        (Some(inline), None) => inline.trim().to_string(),
+-        (None, Some(file)) => {
+-            let key_path = path.parent().unwrap_or(Path::new(".")).join(file);
+-            std::fs::read_to_string(&key_path)
+-                .map_err(|e| {
+-                    bad(format!(
+-                        "cannot read trust-root-file {}: {e}",
+-                        key_path.display()
+-                    ))
+-                })?
+-                .trim()
+-                .to_string()
+-        }
+-        (None, None) => return Err(bad("no trust-root or trust-root-file".into())),
+-    };
+-    if hex_key.len() != 64 || !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
+-        return Err(bad(
+-            "trust root is not a 64-hex-char ed25519 public key".into()
+-        ));
+-    }
+-    let trust_root = (0..hex_key.len())
+-        .step_by(2)
+-        .map(|i| u8::from_str_radix(&hex_key[i..i + 2], 16).expect("checked hex"))
+-        .collect();
+-    Ok(Realm {
+-        name: name.to_string(),
+-        registry: def.registry.clone(),
+-        trust_root,
+-    })
++    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
+     fn realms_dir(content: &str) -> tempfile::TempDir {
+         let tmp = tempfile::tempdir().unwrap();

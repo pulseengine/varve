@@ -1,0 +1,62 @@
+--- crates/varve-core/src/pin.rs
++++ replace Pin::parse -> Result<Self, PinError> with Ok(Default::default())
+@@ -96,58 +96,17 @@
+     digest: Option<String>,
+     tools: Option<Vec<String>>,
+ }
+ 
+ impl Pin {
+     /// Parse and validate pin content. `origin` names the source (a path, in
+     /// diagnostics) — errors must tell the reader *which* file is wrong.
+     pub fn parse(content: &str, origin: &str) -> Result<Self, PinError> {
+-        let raw: RawPin = toml::from_str(content).map_err(|source| PinError::Toml {
+-            path: origin.to_string(),
+-            source: Box::new(source),
+-        })?;
+-        if raw.manifest_version != 1 {
+-            return Err(PinError::UnsupportedManifestVersion {
+-                path: origin.to_string(),
+-                found: raw.manifest_version,
+-            });
+-        }
+-        let layer = LayerId::from_str(&raw.toolchain.layer).map_err(|source| PinError::Layer {
+-            path: origin.to_string(),
+-            source,
+-        })?;
+-        if let Some(digest) = &raw.toolchain.digest {
+-            let hex = digest
+-                .strip_prefix("sha256:")
+-                .ok_or_else(|| PinError::MalformedDigest {
+-                    path: origin.to_string(),
+-                    found: digest.clone(),
+-                })?;
+-            if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+-                return Err(PinError::MalformedDigest {
+-                    path: origin.to_string(),
+-                    found: digest.clone(),
+-                });
+-            }
+-        }
+-        if let Some(tools) = &raw.toolchain.tools
+-            && tools.is_empty()
+-        {
+-            return Err(PinError::EmptyTools {
+-                path: origin.to_string(),
+-            });
+-        }
+-        Ok(Pin {
+-            realm: raw.toolchain.realm,
+-            channel: raw.toolchain.channel,
+-            layer,
+-            digest: raw.toolchain.digest,
+-            tools: raw.toolchain.tools,
+-        })
++        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Read and parse a pin file from disk.
+     pub fn load(path: &Path) -> Result<Self, PinError> {
+         let content = std::fs::read_to_string(path).map_err(|source| PinError::Io {
+             path: path.display().to_string(),
+             source,
+         })?;

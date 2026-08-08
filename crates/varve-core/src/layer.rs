@@ -174,6 +174,27 @@ mod tests {
 
     // rivet: verifies REQ-PATCH-001
     #[test]
+    fn patch_numbers_parse_to_their_value() {
+        assert_eq!("2026.07.1".parse::<LayerId>().unwrap().patch(), 1);
+        assert_eq!("2026.07.42".parse::<LayerId>().unwrap().patch(), 42);
+    }
+
+    // rivet: verifies REQ-PATCH-001
+    #[test]
+    fn two_part_guidance_requires_both_fields_well_formed() {
+        // Only a well-formed YYYY.MM earns the corrective MissingPatch
+        // guidance; a malformed two-parter is just malformed.
+        for bad in ["26.07", "2026.7", "abcd.07", "2026.xx"] {
+            assert_eq!(
+                bad.parse::<LayerId>().unwrap_err(),
+                LayerIdError::Malformed(bad.into()),
+                "input: {bad:?}"
+            );
+        }
+    }
+
+    // rivet: verifies REQ-PATCH-001
+    #[test]
     fn rejects_malformed_identifiers() {
         for bad in [
             "",

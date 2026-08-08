@@ -1,0 +1,5 @@
+crates/varve-core/src/pin.rs:104:9: replace Pin::parse -> Result<Self, PinError> with Ok(Default::default())
+crates/varve-core/src/pin.rs:133:13: replace && with || in Pin::parse
+crates/varve-core/src/pin.rs:150:9: replace Pin::load -> Result<Self, PinError> with Ok(Default::default())
+crates/varve-core/src/realm.rs:115:5: replace resolve_realm -> Result<Realm, RealmError> with Ok(Default::default())
+crates/varve-core/src/verify.rs:30:9: replace PinnedKeyVerifier::from_public_key_bytes -> Result<Self, VerifyError> with Ok(Default::default())

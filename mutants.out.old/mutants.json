@@ -1,0 +1,1346 @@
+[
+  {
+    "diff": "--- crates/varve-core/src/pin.rs\n+++ replace Pin::parse -> Result<Self, PinError> with Ok(Default::default())\n@@ -96,58 +96,17 @@\n     digest: Option<String>,\n     tools: Option<Vec<String>>,\n }\n \n impl Pin {\n     /// Parse and validate pin content. `origin` names the source (a path, in\n     /// diagnostics) — errors must tell the reader *which* file is wrong.\n     pub fn parse(content: &str, origin: &str) -> Result<Self, PinError> {\n-        let raw: RawPin = toml::from_str(content).map_err(|source| PinError::Toml {\n-            path: origin.to_string(),\n-            source: Box::new(source),\n-        })?;\n-        if raw.manifest_version != 1 {\n-            return Err(PinError::UnsupportedManifestVersion {\n-                path: origin.to_string(),\n-                found: raw.manifest_version,\n-            });\n-        }\n-        let layer = LayerId::from_str(&raw.toolchain.layer).map_err(|source| PinError::Layer {\n-            path: origin.to_string(),\n-            source,\n-        })?;\n-        if let Some(digest) = &raw.toolchain.digest {\n-            let hex = digest\n-                .strip_prefix(\"sha256:\")\n-                .ok_or_else(|| PinError::MalformedDigest {\n-                    path: origin.to_string(),\n-                    found: digest.clone(),\n-                })?;\n-            if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {\n-                return Err(PinError::MalformedDigest {\n-                    path: origin.to_string(),\n-                    found: digest.clone(),\n-                });\n-            }\n-        }\n-        if let Some(tools) = &raw.toolchain.tools\n-            && tools.is_empty()\n-        {\n-            return Err(PinError::EmptyTools {\n-                path: origin.to_string(),\n-            });\n-        }\n-        Ok(Pin {\n-            realm: raw.toolchain.realm,\n-            channel: raw.toolchain.channel,\n-            layer,\n-            digest: raw.toolchain.digest,\n-            tools: raw.toolchain.tools,\n-        })\n+        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Read and parse a pin file from disk.\n     pub fn load(path: &Path) -> Result<Self, PinError> {\n         let content = std::fs::read_to_string(path).map_err(|source| PinError::Io {\n             path: path.display().to_string(),\n             source,\n         })?;\n",
+    "file": "crates/varve-core/src/pin.rs",
+    "function": {
+      "function_name": "Pin::parse",
+      "return_type": "-> Result<Self, PinError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 146
+        },
+        "start": {
+          "column": 5,
+          "line": 101
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/pin.rs:104:9: replace Pin::parse -> Result<Self, PinError> with Ok(Default::default())",
+    "package": "varve-core",
+    "replacement": "Ok(Default::default())",
+    "span": {
+      "end": {
+        "column": 11,
+        "line": 145
+      },
+      "start": {
+        "column": 9,
+        "line": 104
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/pin.rs\n+++ replace != with == in Pin::parse\n@@ -100,17 +100,17 @@\n impl Pin {\n     /// Parse and validate pin content. `origin` names the source (a path, in\n     /// diagnostics) — errors must tell the reader *which* file is wrong.\n     pub fn parse(content: &str, origin: &str) -> Result<Self, PinError> {\n         let raw: RawPin = toml::from_str(content).map_err(|source| PinError::Toml {\n             path: origin.to_string(),\n             source: Box::new(source),\n         })?;\n-        if raw.manifest_version != 1 {\n+        if raw.manifest_version == /* ~ changed by cargo-mutants ~ */ 1 {\n             return Err(PinError::UnsupportedManifestVersion {\n                 path: origin.to_string(),\n                 found: raw.manifest_version,\n             });\n         }\n         let layer = LayerId::from_str(&raw.toolchain.layer).map_err(|source| PinError::Layer {\n             path: origin.to_string(),\n             source,\n",
+    "file": "crates/varve-core/src/pin.rs",
+    "function": {
+      "function_name": "Pin::parse",
+      "return_type": "-> Result<Self, PinError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 146
+        },
+        "start": {
+          "column": 5,
+          "line": 101
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/varve-core/src/pin.rs:108:33: replace != with == in Pin::parse",
+    "package": "varve-core",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 35,
+        "line": 108
+      },
+      "start": {
+        "column": 33,
+        "line": 108
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/pin.rs\n+++ replace || with && in Pin::parse\n@@ -117,17 +117,17 @@\n         })?;\n         if let Some(digest) = &raw.toolchain.digest {\n             let hex = digest\n                 .strip_prefix(\"sha256:\")\n                 .ok_or_else(|| PinError::MalformedDigest {\n                     path: origin.to_string(),\n                     found: digest.clone(),\n                 })?;\n-            if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {\n+            if hex.len() != 64 && /* ~ changed by cargo-mutants ~ */ !hex.chars().all(|c| c.is_ascii_hexdigit()) {\n                 return Err(PinError::MalformedDigest {\n                     path: origin.to_string(),\n                     found: digest.clone(),\n                 });\n             }\n         }\n         if let Some(tools) = &raw.toolchain.tools\n             && tools.is_empty()\n",
+    "file": "crates/varve-core/src/pin.rs",
+    "function": {
+      "function_name": "Pin::parse",
+      "return_type": "-> Result<Self, PinError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 146
+        },
+        "start": {
+          "column": 5,
+          "line": 101
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/varve-core/src/pin.rs:125:32: replace || with && in Pin::parse",
+    "package": "varve-core",
+    "replacement": "&&",
+    "span": {
+      "end": {
+        "column": 34,
+        "line": 125
+      },
+      "start": {
+        "column": 32,
+        "line": 125
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/pin.rs\n+++ replace != with == in Pin::parse\n@@ -117,17 +117,17 @@\n         })?;\n         if let Some(digest) = &raw.toolchain.digest {\n             let hex = digest\n                 .strip_prefix(\"sha256:\")\n                 .ok_or_else(|| PinError::MalformedDigest {\n                     path: origin.to_string(),\n                     found: digest.clone(),\n                 })?;\n-            if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {\n+            if hex.len() == /* ~ changed by cargo-mutants ~ */ 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {\n                 return Err(PinError::MalformedDigest {\n                     path: origin.to_string(),\n                     found: digest.clone(),\n                 });\n             }\n         }\n         if let Some(tools) = &raw.toolchain.tools\n             && tools.is_empty()\n",
+    "file": "crates/varve-core/src/pin.rs",
+    "function": {
+      "function_name": "Pin::parse",
+      "return_type": "-> Result<Self, PinError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 146
+        },
+        "start": {
+          "column": 5,
+          "line": 101
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/varve-core/src/pin.rs:125:26: replace != with == in Pin::parse",
+    "package": "varve-core",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 28,
+        "line": 125
+      },
+      "start": {
+        "column": 26,
+        "line": 125
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/pin.rs\n+++ delete ! in Pin::parse\n@@ -117,17 +117,17 @@\n         })?;\n         if let Some(digest) = &raw.toolchain.digest {\n             let hex = digest\n                 .strip_prefix(\"sha256:\")\n                 .ok_or_else(|| PinError::MalformedDigest {\n                     path: origin.to_string(),\n                     found: digest.clone(),\n                 })?;\n-            if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {\n+            if hex.len() != 64 ||  /* ~ changed by cargo-mutants ~ */hex.chars().all(|c| c.is_ascii_hexdigit()) {\n                 return Err(PinError::MalformedDigest {\n                     path: origin.to_string(),\n                     found: digest.clone(),\n                 });\n             }\n         }\n         if let Some(tools) = &raw.toolchain.tools\n             && tools.is_empty()\n",
+    "file": "crates/varve-core/src/pin.rs",
+    "function": {
+      "function_name": "Pin::parse",
+      "return_type": "-> Result<Self, PinError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 146
+        },
+        "start": {
+          "column": 5,
+          "line": 101
+        }
+      }
+    },
+    "genre": "UnaryOperator",
+    "name": "crates/varve-core/src/pin.rs:125:35: delete ! in Pin::parse",
+    "package": "varve-core",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 36,
+        "line": 125
+      },
+      "start": {
+        "column": 35,
+        "line": 125
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/pin.rs\n+++ replace && with || in Pin::parse\n@@ -125,17 +125,17 @@\n             if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {\n                 return Err(PinError::MalformedDigest {\n                     path: origin.to_string(),\n                     found: digest.clone(),\n                 });\n             }\n         }\n         if let Some(tools) = &raw.toolchain.tools\n-            && tools.is_empty()\n+            || /* ~ changed by cargo-mutants ~ */ tools.is_empty()\n         {\n             return Err(PinError::EmptyTools {\n                 path: origin.to_string(),\n             });\n         }\n         Ok(Pin {\n             realm: raw.toolchain.realm,\n             channel: raw.toolchain.channel,\n",
+    "file": "crates/varve-core/src/pin.rs",
+    "function": {
+      "function_name": "Pin::parse",
+      "return_type": "-> Result<Self, PinError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 146
+        },
+        "start": {
+          "column": 5,
+          "line": 101
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/varve-core/src/pin.rs:133:13: replace && with || in Pin::parse",
+    "package": "varve-core",
+    "replacement": "||",
+    "span": {
+      "end": {
+        "column": 15,
+        "line": 133
+      },
+      "start": {
+        "column": 13,
+        "line": 133
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/pin.rs\n+++ replace Pin::load -> Result<Self, PinError> with Ok(Default::default())\n@@ -142,21 +142,17 @@\n             layer,\n             digest: raw.toolchain.digest,\n             tools: raw.toolchain.tools,\n         })\n     }\n \n     /// Read and parse a pin file from disk.\n     pub fn load(path: &Path) -> Result<Self, PinError> {\n-        let content = std::fs::read_to_string(path).map_err(|source| PinError::Io {\n-            path: path.display().to_string(),\n-            source,\n-        })?;\n-        Self::parse(&content, &path.display().to_string())\n+        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     const FULL: &str = r#\"\n",
+    "file": "crates/varve-core/src/pin.rs",
+    "function": {
+      "function_name": "Pin::load",
+      "return_type": "-> Result<Self, PinError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 155
+        },
+        "start": {
+          "column": 5,
+          "line": 148
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/pin.rs:150:9: replace Pin::load -> Result<Self, PinError> with Ok(Default::default())",
+    "package": "varve-core",
+    "replacement": "Ok(Default::default())",
+    "span": {
+      "end": {
+        "column": 59,
+        "line": 154
+      },
+      "start": {
+        "column": 9,
+        "line": 150
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/realm.rs\n+++ replace Realm::fingerprint -> String with String::new()\n@@ -31,20 +31,17 @@\n     pub trust_root: Vec<u8>,\n }\n \n impl Realm {\n     /// Short fingerprint of the trust root — the store namespace. Sixteen\n     /// hex chars of sha256(pubkey): collision-safe for a namespace while\n     /// staying readable in paths.\n     pub fn fingerprint(&self) -> String {\n-        crate::store::manifest_digest(&self.trust_root)\n-            .strip_prefix(\"sha256:\")\n-            .expect(\"digest shape\")[..16]\n-            .to_string()\n+        String::new() /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// The per-realm effective root under which core/state/status live.\n     pub fn effective_root(&self, varve_root: &Path) -> PathBuf {\n         varve_root.join(\"realms\").join(self.fingerprint())\n     }\n }\n \n",
+    "file": "crates/varve-core/src/realm.rs",
+    "function": {
+      "function_name": "Realm::fingerprint",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 43
+        },
+        "start": {
+          "column": 5,
+          "line": 35
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/realm.rs:39:9: replace Realm::fingerprint -> String with String::new()",
+    "package": "varve-core",
+    "replacement": "String::new()",
+    "span": {
+      "end": {
+        "column": 25,
+        "line": 42
+      },
+      "start": {
+        "column": 9,
+        "line": 39
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/realm.rs\n+++ replace Realm::fingerprint -> String with \"xyzzy\".into()\n@@ -31,20 +31,17 @@\n     pub trust_root: Vec<u8>,\n }\n \n impl Realm {\n     /// Short fingerprint of the trust root — the store namespace. Sixteen\n     /// hex chars of sha256(pubkey): collision-safe for a namespace while\n     /// staying readable in paths.\n     pub fn fingerprint(&self) -> String {\n-        crate::store::manifest_digest(&self.trust_root)\n-            .strip_prefix(\"sha256:\")\n-            .expect(\"digest shape\")[..16]\n-            .to_string()\n+        \"xyzzy\".into() /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// The per-realm effective root under which core/state/status live.\n     pub fn effective_root(&self, varve_root: &Path) -> PathBuf {\n         varve_root.join(\"realms\").join(self.fingerprint())\n     }\n }\n \n",
+    "file": "crates/varve-core/src/realm.rs",
+    "function": {
+      "function_name": "Realm::fingerprint",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 43
+        },
+        "start": {
+          "column": 5,
+          "line": 35
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/realm.rs:39:9: replace Realm::fingerprint -> String with \"xyzzy\".into()",
+    "package": "varve-core",
+    "replacement": "\"xyzzy\".into()",
+    "span": {
+      "end": {
+        "column": 25,
+        "line": 42
+      },
+      "start": {
+        "column": 9,
+        "line": 39
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/realm.rs\n+++ replace Realm::effective_root -> PathBuf with Default::default()\n@@ -39,17 +39,17 @@\n         crate::store::manifest_digest(&self.trust_root)\n             .strip_prefix(\"sha256:\")\n             .expect(\"digest shape\")[..16]\n             .to_string()\n     }\n \n     /// The per-realm effective root under which core/state/status live.\n     pub fn effective_root(&self, varve_root: &Path) -> PathBuf {\n-        varve_root.join(\"realms\").join(self.fingerprint())\n+        Default::default() /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n #[derive(Debug, thiserror::Error)]\n pub enum RealmError {\n     #[error(\n         \"no {REALMS_FILE} found walking up from {start} — the pin names realm '{realm}' but no realm definitions exist; commit a {REALMS_FILE} defining it\"\n     )]\n",
+    "file": "crates/varve-core/src/realm.rs",
+    "function": {
+      "function_name": "Realm::effective_root",
+      "return_type": "-> PathBuf",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 48
+        },
+        "start": {
+          "column": 5,
+          "line": 45
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/realm.rs:47:9: replace Realm::effective_root -> PathBuf with Default::default()",
+    "package": "varve-core",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 59,
+        "line": 47
+      },
+      "start": {
+        "column": 9,
+        "line": 47
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/realm.rs\n+++ replace find_realms_file -> Option<PathBuf> with None\n@@ -94,25 +94,17 @@\n     trust_root: Option<String>,\n     /// …or a key file, relative to the realms file.\n     #[serde(rename = \"trust-root-file\", default)]\n     trust_root_file: Option<String>,\n }\n \n /// Find the realms file by walking up from `start`.\n pub fn find_realms_file(start: &Path) -> Option<PathBuf> {\n-    let mut dir = Some(start);\n-    while let Some(d) = dir {\n-        let candidate = d.join(REALMS_FILE);\n-        if candidate.is_file() {\n-            return Some(candidate);\n-        }\n-        dir = d.parent();\n-    }\n-    None\n+    None /* ~ changed by cargo-mutants ~ */\n }\n \n /// Load one realm by name from the realms file discovered from `start`.\n pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {\n     let Some(path) = find_realms_file(start) else {\n         return Err(RealmError::NoRealmsFile {\n             start: start.display().to_string(),\n             realm: name.to_string(),\n",
+    "file": "crates/varve-core/src/realm.rs",
+    "function": {
+      "function_name": "find_realms_file",
+      "return_type": "-> Option<PathBuf>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 111
+        },
+        "start": {
+          "column": 1,
+          "line": 100
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/realm.rs:102:5: replace find_realms_file -> Option<PathBuf> with None",
+    "package": "varve-core",
+    "replacement": "None",
+    "span": {
+      "end": {
+        "column": 9,
+        "line": 110
+      },
+      "start": {
+        "column": 5,
+        "line": 102
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/realm.rs\n+++ replace find_realms_file -> Option<PathBuf> with Some(Default::default())\n@@ -94,25 +94,17 @@\n     trust_root: Option<String>,\n     /// …or a key file, relative to the realms file.\n     #[serde(rename = \"trust-root-file\", default)]\n     trust_root_file: Option<String>,\n }\n \n /// Find the realms file by walking up from `start`.\n pub fn find_realms_file(start: &Path) -> Option<PathBuf> {\n-    let mut dir = Some(start);\n-    while let Some(d) = dir {\n-        let candidate = d.join(REALMS_FILE);\n-        if candidate.is_file() {\n-            return Some(candidate);\n-        }\n-        dir = d.parent();\n-    }\n-    None\n+    Some(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Load one realm by name from the realms file discovered from `start`.\n pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {\n     let Some(path) = find_realms_file(start) else {\n         return Err(RealmError::NoRealmsFile {\n             start: start.display().to_string(),\n             realm: name.to_string(),\n",
+    "file": "crates/varve-core/src/realm.rs",
+    "function": {
+      "function_name": "find_realms_file",
+      "return_type": "-> Option<PathBuf>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 111
+        },
+        "start": {
+          "column": 1,
+          "line": 100
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/realm.rs:102:5: replace find_realms_file -> Option<PathBuf> with Some(Default::default())",
+    "package": "varve-core",
+    "replacement": "Some(Default::default())",
+    "span": {
+      "end": {
+        "column": 9,
+        "line": 110
+      },
+      "start": {
+        "column": 5,
+        "line": 102
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/realm.rs\n+++ replace resolve_realm -> Result<Realm, RealmError> with Ok(Default::default())\n@@ -107,77 +107,17 @@\n         }\n         dir = d.parent();\n     }\n     None\n }\n \n /// Load one realm by name from the realms file discovered from `start`.\n pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {\n-    let Some(path) = find_realms_file(start) else {\n-        return Err(RealmError::NoRealmsFile {\n-            start: start.display().to_string(),\n-            realm: name.to_string(),\n-        });\n-    };\n-    let text = std::fs::read_to_string(&path).map_err(|source| RealmError::Io {\n-        path: path.display().to_string(),\n-        source,\n-    })?;\n-    let raw: RawRealmsFile = toml::from_str(&text).map_err(|e| RealmError::Parse {\n-        path: path.display().to_string(),\n-        reason: e.to_string(),\n-    })?;\n-    let Some(def) = raw.realm.get(name) else {\n-        return Err(RealmError::Undefined {\n-            realm: name.to_string(),\n-            path: path.display().to_string(),\n-            defined: raw.realm.keys().cloned().collect(),\n-        });\n-    };\n-    let bad = |reason: String| RealmError::BadDefinition {\n-        realm: name.to_string(),\n-        path: path.display().to_string(),\n-        reason,\n-    };\n-    let hex_key = match (&def.trust_root, &def.trust_root_file) {\n-        (Some(_), Some(_)) => {\n-            return Err(bad(\n-                \"both trust-root and trust-root-file given — pick one\".into()\n-            ));\n-        }\n-        (Some(inline), None) => inline.trim().to_string(),\n-        (None, Some(file)) => {\n-            let key_path = path.parent().unwrap_or(Path::new(\".\")).join(file);\n-            std::fs::read_to_string(&key_path)\n-                .map_err(|e| {\n-                    bad(format!(\n-                        \"cannot read trust-root-file {}: {e}\",\n-                        key_path.display()\n-                    ))\n-                })?\n-                .trim()\n-                .to_string()\n-        }\n-        (None, None) => return Err(bad(\"no trust-root or trust-root-file\".into())),\n-    };\n-    if hex_key.len() != 64 || !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {\n-        return Err(bad(\n-            \"trust root is not a 64-hex-char ed25519 public key\".into()\n-        ));\n-    }\n-    let trust_root = (0..hex_key.len())\n-        .step_by(2)\n-        .map(|i| u8::from_str_radix(&hex_key[i..i + 2], 16).expect(\"checked hex\"))\n-        .collect();\n-    Ok(Realm {\n-        name: name.to_string(),\n-        registry: def.registry.clone(),\n-        trust_root,\n-    })\n+    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     fn realms_dir(content: &str) -> tempfile::TempDir {\n         let tmp = tempfile::tempdir().unwrap();\n",
+    "file": "crates/varve-core/src/realm.rs",
+    "function": {
+      "function_name": "resolve_realm",
+      "return_type": "-> Result<Realm, RealmError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 176
+        },
+        "start": {
+          "column": 1,
+          "line": 113
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/realm.rs:115:5: replace resolve_realm -> Result<Realm, RealmError> with Ok(Default::default())",
+    "package": "varve-core",
+    "replacement": "Ok(Default::default())",
+    "span": {
+      "end": {
+        "column": 7,
+        "line": 175
+      },
+      "start": {
+        "column": 5,
+        "line": 115
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/realm.rs\n+++ replace || with && in resolve_realm\n@@ -154,17 +154,17 @@\n                         key_path.display()\n                     ))\n                 })?\n                 .trim()\n                 .to_string()\n         }\n         (None, None) => return Err(bad(\"no trust-root or trust-root-file\".into())),\n     };\n-    if hex_key.len() != 64 || !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {\n+    if hex_key.len() != 64 && /* ~ changed by cargo-mutants ~ */ !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {\n         return Err(bad(\n             \"trust root is not a 64-hex-char ed25519 public key\".into()\n         ));\n     }\n     let trust_root = (0..hex_key.len())\n         .step_by(2)\n         .map(|i| u8::from_str_radix(&hex_key[i..i + 2], 16).expect(\"checked hex\"))\n         .collect();\n",
+    "file": "crates/varve-core/src/realm.rs",
+    "function": {
+      "function_name": "resolve_realm",
+      "return_type": "-> Result<Realm, RealmError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 176
+        },
+        "start": {
+          "column": 1,
+          "line": 113
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/varve-core/src/realm.rs:162:28: replace || with && in resolve_realm",
+    "package": "varve-core",
+    "replacement": "&&",
+    "span": {
+      "end": {
+        "column": 30,
+        "line": 162
+      },
+      "start": {
+        "column": 28,
+        "line": 162
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/realm.rs\n+++ replace != with == in resolve_realm\n@@ -154,17 +154,17 @@\n                         key_path.display()\n                     ))\n                 })?\n                 .trim()\n                 .to_string()\n         }\n         (None, None) => return Err(bad(\"no trust-root or trust-root-file\".into())),\n     };\n-    if hex_key.len() != 64 || !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {\n+    if hex_key.len() == /* ~ changed by cargo-mutants ~ */ 64 || !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {\n         return Err(bad(\n             \"trust root is not a 64-hex-char ed25519 public key\".into()\n         ));\n     }\n     let trust_root = (0..hex_key.len())\n         .step_by(2)\n         .map(|i| u8::from_str_radix(&hex_key[i..i + 2], 16).expect(\"checked hex\"))\n         .collect();\n",
+    "file": "crates/varve-core/src/realm.rs",
+    "function": {
+      "function_name": "resolve_realm",
+      "return_type": "-> Result<Realm, RealmError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 176
+        },
+        "start": {
+          "column": 1,
+          "line": 113
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/varve-core/src/realm.rs:162:22: replace != with == in resolve_realm",
+    "package": "varve-core",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 24,
+        "line": 162
+      },
+      "start": {
+        "column": 22,
+        "line": 162
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/realm.rs\n+++ delete ! in resolve_realm\n@@ -154,17 +154,17 @@\n                         key_path.display()\n                     ))\n                 })?\n                 .trim()\n                 .to_string()\n         }\n         (None, None) => return Err(bad(\"no trust-root or trust-root-file\".into())),\n     };\n-    if hex_key.len() != 64 || !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {\n+    if hex_key.len() != 64 ||  /* ~ changed by cargo-mutants ~ */hex_key.chars().all(|c| c.is_ascii_hexdigit()) {\n         return Err(bad(\n             \"trust root is not a 64-hex-char ed25519 public key\".into()\n         ));\n     }\n     let trust_root = (0..hex_key.len())\n         .step_by(2)\n         .map(|i| u8::from_str_radix(&hex_key[i..i + 2], 16).expect(\"checked hex\"))\n         .collect();\n",
+    "file": "crates/varve-core/src/realm.rs",
+    "function": {
+      "function_name": "resolve_realm",
+      "return_type": "-> Result<Realm, RealmError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 176
+        },
+        "start": {
+          "column": 1,
+          "line": 113
+        }
+      }
+    },
+    "genre": "UnaryOperator",
+    "name": "crates/varve-core/src/realm.rs:162:31: delete ! in resolve_realm",
+    "package": "varve-core",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 32,
+        "line": 162
+      },
+      "start": {
+        "column": 31,
+        "line": 162
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/realm.rs\n+++ replace + with - in resolve_realm\n@@ -161,17 +161,17 @@\n     };\n     if hex_key.len() != 64 || !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {\n         return Err(bad(\n             \"trust root is not a 64-hex-char ed25519 public key\".into()\n         ));\n     }\n     let trust_root = (0..hex_key.len())\n         .step_by(2)\n-        .map(|i| u8::from_str_radix(&hex_key[i..i + 2], 16).expect(\"checked hex\"))\n+        .map(|i| u8::from_str_radix(&hex_key[i..i - /* ~ changed by cargo-mutants ~ */ 2], 16).expect(\"checked hex\"))\n         .collect();\n     Ok(Realm {\n         name: name.to_string(),\n         registry: def.registry.clone(),\n         trust_root,\n     })\n }\n \n",
+    "file": "crates/varve-core/src/realm.rs",
+    "function": {
+      "function_name": "resolve_realm",
+      "return_type": "-> Result<Realm, RealmError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 176
+        },
+        "start": {
+          "column": 1,
+          "line": 113
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/varve-core/src/realm.rs:169:51: replace + with - in resolve_realm",
+    "package": "varve-core",
+    "replacement": "-",
+    "span": {
+      "end": {
+        "column": 52,
+        "line": 169
+      },
+      "start": {
+        "column": 51,
+        "line": 169
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/realm.rs\n+++ replace + with * in resolve_realm\n@@ -161,17 +161,17 @@\n     };\n     if hex_key.len() != 64 || !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {\n         return Err(bad(\n             \"trust root is not a 64-hex-char ed25519 public key\".into()\n         ));\n     }\n     let trust_root = (0..hex_key.len())\n         .step_by(2)\n-        .map(|i| u8::from_str_radix(&hex_key[i..i + 2], 16).expect(\"checked hex\"))\n+        .map(|i| u8::from_str_radix(&hex_key[i..i * /* ~ changed by cargo-mutants ~ */ 2], 16).expect(\"checked hex\"))\n         .collect();\n     Ok(Realm {\n         name: name.to_string(),\n         registry: def.registry.clone(),\n         trust_root,\n     })\n }\n \n",
+    "file": "crates/varve-core/src/realm.rs",
+    "function": {
+      "function_name": "resolve_realm",
+      "return_type": "-> Result<Realm, RealmError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 176
+        },
+        "start": {
+          "column": 1,
+          "line": 113
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/varve-core/src/realm.rs:169:51: replace + with * in resolve_realm",
+    "package": "varve-core",
+    "replacement": "*",
+    "span": {
+      "end": {
+        "column": 52,
+        "line": 169
+      },
+      "start": {
+        "column": 51,
+        "line": 169
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace PinnedKeyVerifier::from_public_key_bytes -> Result<Self, VerifyError> with Ok(Default::default())\n@@ -22,19 +22,17 @@\n /// Verifies layer-manifest envelopes against a pinned ed25519 root public\n /// key (32 raw bytes).\n pub struct PinnedKeyVerifier {\n     verifier: Ed25519DsseVerifier,\n }\n \n impl PinnedKeyVerifier {\n     pub fn from_public_key_bytes(public_key: &[u8]) -> Result<Self, VerifyError> {\n-        let verifier = Ed25519DsseVerifier::from_bytes(public_key)\n-            .map_err(|e| VerifyError(format!(\"invalid trust-root public key: {e}\")))?;\n-        Ok(PinnedKeyVerifier { verifier })\n+        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl ManifestVerifier for PinnedKeyVerifier {\n     fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {\n         verify_with(&self.verifier, fetched, LAYER_PAYLOAD_TYPE)\n     }\n }\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "PinnedKeyVerifier::from_public_key_bytes",
+      "return_type": "-> Result<Self, VerifyError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 33
+        },
+        "start": {
+          "column": 5,
+          "line": 29
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:30:9: replace PinnedKeyVerifier::from_public_key_bytes -> Result<Self, VerifyError> with Ok(Default::default())",
+    "package": "varve-core",
+    "replacement": "Ok(Default::default())",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 32
+      },
+      "start": {
+        "column": 9,
+        "line": 30
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![])\n@@ -30,17 +30,17 @@\n         let verifier = Ed25519DsseVerifier::from_bytes(public_key)\n             .map_err(|e| VerifyError(format!(\"invalid trust-root public key: {e}\")))?;\n         Ok(PinnedKeyVerifier { verifier })\n     }\n }\n \n impl ManifestVerifier for PinnedKeyVerifier {\n     fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {\n-        verify_with(&self.verifier, fetched, LAYER_PAYLOAD_TYPE)\n+        Ok(vec![]) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n /// Verify a DSSE envelope of a specific payload type against a pinned root\n /// public key, returning the authenticated payload. The one verification\n /// path shared by layer manifests, line-status documents (DD-008) and\n /// release sums (DD-009) — different payload types, one trust root, so the\n /// type check is what keeps signed documents from posing as each other.\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "<impl ManifestVerifier for PinnedKeyVerifier>::verify",
+      "return_type": "-> Result<Vec<u8>, VerifyError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 39
+        },
+        "start": {
+          "column": 5,
+          "line": 37
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:38:9: replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![])",
+    "package": "varve-core",
+    "replacement": "Ok(vec![])",
+    "span": {
+      "end": {
+        "column": 65,
+        "line": 38
+      },
+      "start": {
+        "column": 9,
+        "line": 38
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![0])\n@@ -30,17 +30,17 @@\n         let verifier = Ed25519DsseVerifier::from_bytes(public_key)\n             .map_err(|e| VerifyError(format!(\"invalid trust-root public key: {e}\")))?;\n         Ok(PinnedKeyVerifier { verifier })\n     }\n }\n \n impl ManifestVerifier for PinnedKeyVerifier {\n     fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {\n-        verify_with(&self.verifier, fetched, LAYER_PAYLOAD_TYPE)\n+        Ok(vec![0]) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n /// Verify a DSSE envelope of a specific payload type against a pinned root\n /// public key, returning the authenticated payload. The one verification\n /// path shared by layer manifests, line-status documents (DD-008) and\n /// release sums (DD-009) — different payload types, one trust root, so the\n /// type check is what keeps signed documents from posing as each other.\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "<impl ManifestVerifier for PinnedKeyVerifier>::verify",
+      "return_type": "-> Result<Vec<u8>, VerifyError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 39
+        },
+        "start": {
+          "column": 5,
+          "line": 37
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:38:9: replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![0])",
+    "package": "varve-core",
+    "replacement": "Ok(vec![0])",
+    "span": {
+      "end": {
+        "column": 65,
+        "line": 38
+      },
+      "start": {
+        "column": 9,
+        "line": 38
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![1])\n@@ -30,17 +30,17 @@\n         let verifier = Ed25519DsseVerifier::from_bytes(public_key)\n             .map_err(|e| VerifyError(format!(\"invalid trust-root public key: {e}\")))?;\n         Ok(PinnedKeyVerifier { verifier })\n     }\n }\n \n impl ManifestVerifier for PinnedKeyVerifier {\n     fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {\n-        verify_with(&self.verifier, fetched, LAYER_PAYLOAD_TYPE)\n+        Ok(vec![1]) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n /// Verify a DSSE envelope of a specific payload type against a pinned root\n /// public key, returning the authenticated payload. The one verification\n /// path shared by layer manifests, line-status documents (DD-008) and\n /// release sums (DD-009) — different payload types, one trust root, so the\n /// type check is what keeps signed documents from posing as each other.\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "<impl ManifestVerifier for PinnedKeyVerifier>::verify",
+      "return_type": "-> Result<Vec<u8>, VerifyError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 39
+        },
+        "start": {
+          "column": 5,
+          "line": 37
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:38:9: replace <impl ManifestVerifier for PinnedKeyVerifier>::verify -> Result<Vec<u8>, VerifyError> with Ok(vec![1])",
+    "package": "varve-core",
+    "replacement": "Ok(vec![1])",
+    "span": {
+      "end": {
+        "column": 65,
+        "line": 38
+      },
+      "start": {
+        "column": 9,
+        "line": 38
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![])\n@@ -44,19 +44,17 @@\n /// path shared by layer manifests, line-status documents (DD-008) and\n /// release sums (DD-009) — different payload types, one trust root, so the\n /// type check is what keeps signed documents from posing as each other.\n pub fn dsse_verify_typed(\n     envelope: &[u8],\n     expected_payload_type: &str,\n     root_public_key: &[u8],\n ) -> Result<Vec<u8>, VerifyError> {\n-    let verifier = Ed25519DsseVerifier::from_bytes(root_public_key)\n-        .map_err(|e| VerifyError(format!(\"invalid trust-root public key: {e}\")))?;\n-    verify_with(&verifier, envelope, expected_payload_type)\n+    Ok(vec![]) /* ~ changed by cargo-mutants ~ */\n }\n \n fn verify_with(\n     verifier: &Ed25519DsseVerifier,\n     envelope: &[u8],\n     expected_payload_type: &str,\n ) -> Result<Vec<u8>, VerifyError> {\n     let text = std::str::from_utf8(envelope)\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "dsse_verify_typed",
+      "return_type": "-> Result<Vec<u8>, VerifyError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 55
+        },
+        "start": {
+          "column": 1,
+          "line": 42
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:52:5: replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![])",
+    "package": "varve-core",
+    "replacement": "Ok(vec![])",
+    "span": {
+      "end": {
+        "column": 60,
+        "line": 54
+      },
+      "start": {
+        "column": 5,
+        "line": 52
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![0])\n@@ -44,19 +44,17 @@\n /// path shared by layer manifests, line-status documents (DD-008) and\n /// release sums (DD-009) — different payload types, one trust root, so the\n /// type check is what keeps signed documents from posing as each other.\n pub fn dsse_verify_typed(\n     envelope: &[u8],\n     expected_payload_type: &str,\n     root_public_key: &[u8],\n ) -> Result<Vec<u8>, VerifyError> {\n-    let verifier = Ed25519DsseVerifier::from_bytes(root_public_key)\n-        .map_err(|e| VerifyError(format!(\"invalid trust-root public key: {e}\")))?;\n-    verify_with(&verifier, envelope, expected_payload_type)\n+    Ok(vec![0]) /* ~ changed by cargo-mutants ~ */\n }\n \n fn verify_with(\n     verifier: &Ed25519DsseVerifier,\n     envelope: &[u8],\n     expected_payload_type: &str,\n ) -> Result<Vec<u8>, VerifyError> {\n     let text = std::str::from_utf8(envelope)\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "dsse_verify_typed",
+      "return_type": "-> Result<Vec<u8>, VerifyError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 55
+        },
+        "start": {
+          "column": 1,
+          "line": 42
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:52:5: replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![0])",
+    "package": "varve-core",
+    "replacement": "Ok(vec![0])",
+    "span": {
+      "end": {
+        "column": 60,
+        "line": 54
+      },
+      "start": {
+        "column": 5,
+        "line": 52
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![1])\n@@ -44,19 +44,17 @@\n /// path shared by layer manifests, line-status documents (DD-008) and\n /// release sums (DD-009) — different payload types, one trust root, so the\n /// type check is what keeps signed documents from posing as each other.\n pub fn dsse_verify_typed(\n     envelope: &[u8],\n     expected_payload_type: &str,\n     root_public_key: &[u8],\n ) -> Result<Vec<u8>, VerifyError> {\n-    let verifier = Ed25519DsseVerifier::from_bytes(root_public_key)\n-        .map_err(|e| VerifyError(format!(\"invalid trust-root public key: {e}\")))?;\n-    verify_with(&verifier, envelope, expected_payload_type)\n+    Ok(vec![1]) /* ~ changed by cargo-mutants ~ */\n }\n \n fn verify_with(\n     verifier: &Ed25519DsseVerifier,\n     envelope: &[u8],\n     expected_payload_type: &str,\n ) -> Result<Vec<u8>, VerifyError> {\n     let text = std::str::from_utf8(envelope)\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "dsse_verify_typed",
+      "return_type": "-> Result<Vec<u8>, VerifyError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 55
+        },
+        "start": {
+          "column": 1,
+          "line": 42
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:52:5: replace dsse_verify_typed -> Result<Vec<u8>, VerifyError> with Ok(vec![1])",
+    "package": "varve-core",
+    "replacement": "Ok(vec![1])",
+    "span": {
+      "end": {
+        "column": 60,
+        "line": 54
+      },
+      "start": {
+        "column": 5,
+        "line": 52
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![])\n@@ -54,32 +54,17 @@\n     verify_with(&verifier, envelope, expected_payload_type)\n }\n \n fn verify_with(\n     verifier: &Ed25519DsseVerifier,\n     envelope: &[u8],\n     expected_payload_type: &str,\n ) -> Result<Vec<u8>, VerifyError> {\n-    let text = std::str::from_utf8(envelope)\n-        .map_err(|_| VerifyError(\"fetched bytes are not UTF-8 DSSE JSON\".into()))?;\n-    let envelope = DsseEnvelope::from_json(text)\n-        .map_err(|e| VerifyError(format!(\"not a DSSE envelope: {e}\")))?;\n-    if envelope.payload_type != expected_payload_type {\n-        return Err(VerifyError(format!(\n-            \"envelope payload type is '{}', expected '{expected_payload_type}' — refusing to \\\n-             accept a signed document as something it is not\",\n-            envelope.payload_type\n-        )));\n-    }\n-    envelope.verify_all(verifier).map_err(|e| {\n-        VerifyError(format!(\n-            \"signature does not verify against the trust root: {e}\"\n-        ))\n-    })\n+    Ok(vec![]) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Sign a payload of a given type into a DSSE envelope (JSON) — the\n /// producing half, shared by deposit, line-status and release-sums signing\n /// so the two sides can never drift apart.\n pub fn dsse_sign_typed(\n     payload: &[u8],\n     payload_type: &str,\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "verify_with",
+      "return_type": "-> Result<Vec<u8>, VerifyError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 78
+        },
+        "start": {
+          "column": 1,
+          "line": 57
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:62:5: replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![])",
+    "package": "varve-core",
+    "replacement": "Ok(vec![])",
+    "span": {
+      "end": {
+        "column": 7,
+        "line": 77
+      },
+      "start": {
+        "column": 5,
+        "line": 62
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![0])\n@@ -54,32 +54,17 @@\n     verify_with(&verifier, envelope, expected_payload_type)\n }\n \n fn verify_with(\n     verifier: &Ed25519DsseVerifier,\n     envelope: &[u8],\n     expected_payload_type: &str,\n ) -> Result<Vec<u8>, VerifyError> {\n-    let text = std::str::from_utf8(envelope)\n-        .map_err(|_| VerifyError(\"fetched bytes are not UTF-8 DSSE JSON\".into()))?;\n-    let envelope = DsseEnvelope::from_json(text)\n-        .map_err(|e| VerifyError(format!(\"not a DSSE envelope: {e}\")))?;\n-    if envelope.payload_type != expected_payload_type {\n-        return Err(VerifyError(format!(\n-            \"envelope payload type is '{}', expected '{expected_payload_type}' — refusing to \\\n-             accept a signed document as something it is not\",\n-            envelope.payload_type\n-        )));\n-    }\n-    envelope.verify_all(verifier).map_err(|e| {\n-        VerifyError(format!(\n-            \"signature does not verify against the trust root: {e}\"\n-        ))\n-    })\n+    Ok(vec![0]) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Sign a payload of a given type into a DSSE envelope (JSON) — the\n /// producing half, shared by deposit, line-status and release-sums signing\n /// so the two sides can never drift apart.\n pub fn dsse_sign_typed(\n     payload: &[u8],\n     payload_type: &str,\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "verify_with",
+      "return_type": "-> Result<Vec<u8>, VerifyError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 78
+        },
+        "start": {
+          "column": 1,
+          "line": 57
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:62:5: replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![0])",
+    "package": "varve-core",
+    "replacement": "Ok(vec![0])",
+    "span": {
+      "end": {
+        "column": 7,
+        "line": 77
+      },
+      "start": {
+        "column": 5,
+        "line": 62
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![1])\n@@ -54,32 +54,17 @@\n     verify_with(&verifier, envelope, expected_payload_type)\n }\n \n fn verify_with(\n     verifier: &Ed25519DsseVerifier,\n     envelope: &[u8],\n     expected_payload_type: &str,\n ) -> Result<Vec<u8>, VerifyError> {\n-    let text = std::str::from_utf8(envelope)\n-        .map_err(|_| VerifyError(\"fetched bytes are not UTF-8 DSSE JSON\".into()))?;\n-    let envelope = DsseEnvelope::from_json(text)\n-        .map_err(|e| VerifyError(format!(\"not a DSSE envelope: {e}\")))?;\n-    if envelope.payload_type != expected_payload_type {\n-        return Err(VerifyError(format!(\n-            \"envelope payload type is '{}', expected '{expected_payload_type}' — refusing to \\\n-             accept a signed document as something it is not\",\n-            envelope.payload_type\n-        )));\n-    }\n-    envelope.verify_all(verifier).map_err(|e| {\n-        VerifyError(format!(\n-            \"signature does not verify against the trust root: {e}\"\n-        ))\n-    })\n+    Ok(vec![1]) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Sign a payload of a given type into a DSSE envelope (JSON) — the\n /// producing half, shared by deposit, line-status and release-sums signing\n /// so the two sides can never drift apart.\n pub fn dsse_sign_typed(\n     payload: &[u8],\n     payload_type: &str,\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "verify_with",
+      "return_type": "-> Result<Vec<u8>, VerifyError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 78
+        },
+        "start": {
+          "column": 1,
+          "line": 57
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:62:5: replace verify_with -> Result<Vec<u8>, VerifyError> with Ok(vec![1])",
+    "package": "varve-core",
+    "replacement": "Ok(vec![1])",
+    "span": {
+      "end": {
+        "column": 7,
+        "line": 77
+      },
+      "start": {
+        "column": 5,
+        "line": 62
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace != with == in verify_with\n@@ -58,17 +58,17 @@\n     verifier: &Ed25519DsseVerifier,\n     envelope: &[u8],\n     expected_payload_type: &str,\n ) -> Result<Vec<u8>, VerifyError> {\n     let text = std::str::from_utf8(envelope)\n         .map_err(|_| VerifyError(\"fetched bytes are not UTF-8 DSSE JSON\".into()))?;\n     let envelope = DsseEnvelope::from_json(text)\n         .map_err(|e| VerifyError(format!(\"not a DSSE envelope: {e}\")))?;\n-    if envelope.payload_type != expected_payload_type {\n+    if envelope.payload_type == /* ~ changed by cargo-mutants ~ */ expected_payload_type {\n         return Err(VerifyError(format!(\n             \"envelope payload type is '{}', expected '{expected_payload_type}' — refusing to \\\n              accept a signed document as something it is not\",\n             envelope.payload_type\n         )));\n     }\n     envelope.verify_all(verifier).map_err(|e| {\n         VerifyError(format!(\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "verify_with",
+      "return_type": "-> Result<Vec<u8>, VerifyError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 78
+        },
+        "start": {
+          "column": 1,
+          "line": 57
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/varve-core/src/verify.rs:66:30: replace != with == in verify_with",
+    "package": "varve-core",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 32,
+        "line": 66
+      },
+      "start": {
+        "column": 30,
+        "line": 66
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace dsse_sign_typed -> Result<String, VerifyError> with Ok(String::new())\n@@ -81,23 +81,17 @@\n /// producing half, shared by deposit, line-status and release-sums signing\n /// so the two sides can never drift apart.\n pub fn dsse_sign_typed(\n     payload: &[u8],\n     payload_type: &str,\n     secret_key: &[u8],\n     key_id: &str,\n ) -> Result<String, VerifyError> {\n-    let signer = Ed25519DsseSigner::from_bytes(secret_key, Some(key_id.to_string()))\n-        .map_err(|e| VerifyError(format!(\"invalid signing key: {e}\")))?;\n-    let envelope = DsseEnvelope::sign(payload, payload_type, &signer)\n-        .map_err(|e| VerifyError(format!(\"signing failed: {e}\")))?;\n-    envelope\n-        .to_json_pretty()\n-        .map_err(|e| VerifyError(format!(\"envelope serialization failed: {e}\")))\n+    Ok(String::new()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Sign layer-manifest payload bytes into a DSSE envelope (JSON).\n pub fn sign_layer_manifest(\n     payload: &[u8],\n     secret_key: &[u8],\n     key_id: &str,\n ) -> Result<String, VerifyError> {\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "dsse_sign_typed",
+      "return_type": "-> Result<String, VerifyError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 96
+        },
+        "start": {
+          "column": 1,
+          "line": 80
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:89:5: replace dsse_sign_typed -> Result<String, VerifyError> with Ok(String::new())",
+    "package": "varve-core",
+    "replacement": "Ok(String::new())",
+    "span": {
+      "end": {
+        "column": 81,
+        "line": 95
+      },
+      "start": {
+        "column": 5,
+        "line": 89
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace dsse_sign_typed -> Result<String, VerifyError> with Ok(\"xyzzy\".into())\n@@ -81,23 +81,17 @@\n /// producing half, shared by deposit, line-status and release-sums signing\n /// so the two sides can never drift apart.\n pub fn dsse_sign_typed(\n     payload: &[u8],\n     payload_type: &str,\n     secret_key: &[u8],\n     key_id: &str,\n ) -> Result<String, VerifyError> {\n-    let signer = Ed25519DsseSigner::from_bytes(secret_key, Some(key_id.to_string()))\n-        .map_err(|e| VerifyError(format!(\"invalid signing key: {e}\")))?;\n-    let envelope = DsseEnvelope::sign(payload, payload_type, &signer)\n-        .map_err(|e| VerifyError(format!(\"signing failed: {e}\")))?;\n-    envelope\n-        .to_json_pretty()\n-        .map_err(|e| VerifyError(format!(\"envelope serialization failed: {e}\")))\n+    Ok(\"xyzzy\".into()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Sign layer-manifest payload bytes into a DSSE envelope (JSON).\n pub fn sign_layer_manifest(\n     payload: &[u8],\n     secret_key: &[u8],\n     key_id: &str,\n ) -> Result<String, VerifyError> {\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "dsse_sign_typed",
+      "return_type": "-> Result<String, VerifyError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 96
+        },
+        "start": {
+          "column": 1,
+          "line": 80
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:89:5: replace dsse_sign_typed -> Result<String, VerifyError> with Ok(\"xyzzy\".into())",
+    "package": "varve-core",
+    "replacement": "Ok(\"xyzzy\".into())",
+    "span": {
+      "end": {
+        "column": 81,
+        "line": 95
+      },
+      "start": {
+        "column": 5,
+        "line": 89
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace sign_layer_manifest -> Result<String, VerifyError> with Ok(String::new())\n@@ -96,17 +96,17 @@\n }\n \n /// Sign layer-manifest payload bytes into a DSSE envelope (JSON).\n pub fn sign_layer_manifest(\n     payload: &[u8],\n     secret_key: &[u8],\n     key_id: &str,\n ) -> Result<String, VerifyError> {\n-    dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)\n+    Ok(String::new()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).\n /// Test and provisioning helper — real roots are generated in a key\n /// ceremony, not on a build machine.\n pub fn generate_root_keypair() -> (Vec<u8>, Vec<u8>) {\n     let kp = wsc::KeyPair::generate();\n     (kp.sk.sk.to_vec(), kp.pk.pk.to_vec())\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "sign_layer_manifest",
+      "return_type": "-> Result<String, VerifyError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 105
+        },
+        "start": {
+          "column": 1,
+          "line": 98
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:104:5: replace sign_layer_manifest -> Result<String, VerifyError> with Ok(String::new())",
+    "package": "varve-core",
+    "replacement": "Ok(String::new())",
+    "span": {
+      "end": {
+        "column": 69,
+        "line": 104
+      },
+      "start": {
+        "column": 5,
+        "line": 104
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace sign_layer_manifest -> Result<String, VerifyError> with Ok(\"xyzzy\".into())\n@@ -96,17 +96,17 @@\n }\n \n /// Sign layer-manifest payload bytes into a DSSE envelope (JSON).\n pub fn sign_layer_manifest(\n     payload: &[u8],\n     secret_key: &[u8],\n     key_id: &str,\n ) -> Result<String, VerifyError> {\n-    dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)\n+    Ok(\"xyzzy\".into()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).\n /// Test and provisioning helper — real roots are generated in a key\n /// ceremony, not on a build machine.\n pub fn generate_root_keypair() -> (Vec<u8>, Vec<u8>) {\n     let kp = wsc::KeyPair::generate();\n     (kp.sk.sk.to_vec(), kp.pk.pk.to_vec())\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "sign_layer_manifest",
+      "return_type": "-> Result<String, VerifyError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 105
+        },
+        "start": {
+          "column": 1,
+          "line": 98
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:104:5: replace sign_layer_manifest -> Result<String, VerifyError> with Ok(\"xyzzy\".into())",
+    "package": "varve-core",
+    "replacement": "Ok(\"xyzzy\".into())",
+    "span": {
+      "end": {
+        "column": 69,
+        "line": 104
+      },
+      "start": {
+        "column": 5,
+        "line": 104
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![])\n@@ -103,18 +103,17 @@\n ) -> Result<String, VerifyError> {\n     dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)\n }\n \n /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).\n /// Test and provisioning helper — real roots are generated in a key\n /// ceremony, not on a build machine.\n pub fn generate_root_keypair() -> (Vec<u8>, Vec<u8>) {\n-    let kp = wsc::KeyPair::generate();\n-    (kp.sk.sk.to_vec(), kp.pk.pk.to_vec())\n+    (vec![], vec![]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n     use crate::install::{InstallError, InstallPolicy, install};\n     use crate::manifest::fixtures::manifest_with_tools;\n     use crate::pin::Pin;\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "generate_root_keypair",
+      "return_type": "-> (Vec<u8>, Vec<u8>)",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 107
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![])",
+    "package": "varve-core",
+    "replacement": "(vec![], vec![])",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 112
+      },
+      "start": {
+        "column": 5,
+        "line": 111
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![0])\n@@ -103,18 +103,17 @@\n ) -> Result<String, VerifyError> {\n     dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)\n }\n \n /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).\n /// Test and provisioning helper — real roots are generated in a key\n /// ceremony, not on a build machine.\n pub fn generate_root_keypair() -> (Vec<u8>, Vec<u8>) {\n-    let kp = wsc::KeyPair::generate();\n-    (kp.sk.sk.to_vec(), kp.pk.pk.to_vec())\n+    (vec![], vec![0]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n     use crate::install::{InstallError, InstallPolicy, install};\n     use crate::manifest::fixtures::manifest_with_tools;\n     use crate::pin::Pin;\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "generate_root_keypair",
+      "return_type": "-> (Vec<u8>, Vec<u8>)",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 107
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![0])",
+    "package": "varve-core",
+    "replacement": "(vec![], vec![0])",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 112
+      },
+      "start": {
+        "column": 5,
+        "line": 111
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![1])\n@@ -103,18 +103,17 @@\n ) -> Result<String, VerifyError> {\n     dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)\n }\n \n /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).\n /// Test and provisioning helper — real roots are generated in a key\n /// ceremony, not on a build machine.\n pub fn generate_root_keypair() -> (Vec<u8>, Vec<u8>) {\n-    let kp = wsc::KeyPair::generate();\n-    (kp.sk.sk.to_vec(), kp.pk.pk.to_vec())\n+    (vec![], vec![1]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n     use crate::install::{InstallError, InstallPolicy, install};\n     use crate::manifest::fixtures::manifest_with_tools;\n     use crate::pin::Pin;\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "generate_root_keypair",
+      "return_type": "-> (Vec<u8>, Vec<u8>)",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 107
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![], vec![1])",
+    "package": "varve-core",
+    "replacement": "(vec![], vec![1])",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 112
+      },
+      "start": {
+        "column": 5,
+        "line": 111
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![])\n@@ -103,18 +103,17 @@\n ) -> Result<String, VerifyError> {\n     dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)\n }\n \n /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).\n /// Test and provisioning helper — real roots are generated in a key\n /// ceremony, not on a build machine.\n pub fn generate_root_keypair() -> (Vec<u8>, Vec<u8>) {\n-    let kp = wsc::KeyPair::generate();\n-    (kp.sk.sk.to_vec(), kp.pk.pk.to_vec())\n+    (vec![0], vec![]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n     use crate::install::{InstallError, InstallPolicy, install};\n     use crate::manifest::fixtures::manifest_with_tools;\n     use crate::pin::Pin;\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "generate_root_keypair",
+      "return_type": "-> (Vec<u8>, Vec<u8>)",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 107
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![])",
+    "package": "varve-core",
+    "replacement": "(vec![0], vec![])",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 112
+      },
+      "start": {
+        "column": 5,
+        "line": 111
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![0])\n@@ -103,18 +103,17 @@\n ) -> Result<String, VerifyError> {\n     dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)\n }\n \n /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).\n /// Test and provisioning helper — real roots are generated in a key\n /// ceremony, not on a build machine.\n pub fn generate_root_keypair() -> (Vec<u8>, Vec<u8>) {\n-    let kp = wsc::KeyPair::generate();\n-    (kp.sk.sk.to_vec(), kp.pk.pk.to_vec())\n+    (vec![0], vec![0]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n     use crate::install::{InstallError, InstallPolicy, install};\n     use crate::manifest::fixtures::manifest_with_tools;\n     use crate::pin::Pin;\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "generate_root_keypair",
+      "return_type": "-> (Vec<u8>, Vec<u8>)",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 107
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![0])",
+    "package": "varve-core",
+    "replacement": "(vec![0], vec![0])",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 112
+      },
+      "start": {
+        "column": 5,
+        "line": 111
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![1])\n@@ -103,18 +103,17 @@\n ) -> Result<String, VerifyError> {\n     dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)\n }\n \n /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).\n /// Test and provisioning helper — real roots are generated in a key\n /// ceremony, not on a build machine.\n pub fn generate_root_keypair() -> (Vec<u8>, Vec<u8>) {\n-    let kp = wsc::KeyPair::generate();\n-    (kp.sk.sk.to_vec(), kp.pk.pk.to_vec())\n+    (vec![0], vec![1]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n     use crate::install::{InstallError, InstallPolicy, install};\n     use crate::manifest::fixtures::manifest_with_tools;\n     use crate::pin::Pin;\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "generate_root_keypair",
+      "return_type": "-> (Vec<u8>, Vec<u8>)",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 107
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![0], vec![1])",
+    "package": "varve-core",
+    "replacement": "(vec![0], vec![1])",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 112
+      },
+      "start": {
+        "column": 5,
+        "line": 111
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![])\n@@ -103,18 +103,17 @@\n ) -> Result<String, VerifyError> {\n     dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)\n }\n \n /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).\n /// Test and provisioning helper — real roots are generated in a key\n /// ceremony, not on a build machine.\n pub fn generate_root_keypair() -> (Vec<u8>, Vec<u8>) {\n-    let kp = wsc::KeyPair::generate();\n-    (kp.sk.sk.to_vec(), kp.pk.pk.to_vec())\n+    (vec![1], vec![]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n     use crate::install::{InstallError, InstallPolicy, install};\n     use crate::manifest::fixtures::manifest_with_tools;\n     use crate::pin::Pin;\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "generate_root_keypair",
+      "return_type": "-> (Vec<u8>, Vec<u8>)",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 107
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![])",
+    "package": "varve-core",
+    "replacement": "(vec![1], vec![])",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 112
+      },
+      "start": {
+        "column": 5,
+        "line": 111
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![0])\n@@ -103,18 +103,17 @@\n ) -> Result<String, VerifyError> {\n     dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)\n }\n \n /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).\n /// Test and provisioning helper — real roots are generated in a key\n /// ceremony, not on a build machine.\n pub fn generate_root_keypair() -> (Vec<u8>, Vec<u8>) {\n-    let kp = wsc::KeyPair::generate();\n-    (kp.sk.sk.to_vec(), kp.pk.pk.to_vec())\n+    (vec![1], vec![0]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n     use crate::install::{InstallError, InstallPolicy, install};\n     use crate::manifest::fixtures::manifest_with_tools;\n     use crate::pin::Pin;\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "generate_root_keypair",
+      "return_type": "-> (Vec<u8>, Vec<u8>)",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 107
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![0])",
+    "package": "varve-core",
+    "replacement": "(vec![1], vec![0])",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 112
+      },
+      "start": {
+        "column": 5,
+        "line": 111
+      }
+    }
+  },
+  {
+    "diff": "--- crates/varve-core/src/verify.rs\n+++ replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![1])\n@@ -103,18 +103,17 @@\n ) -> Result<String, VerifyError> {\n     dsse_sign_typed(payload, LAYER_PAYLOAD_TYPE, secret_key, key_id)\n }\n \n /// Generate an ed25519 root keypair: (secret 64 bytes, public 32 bytes).\n /// Test and provisioning helper — real roots are generated in a key\n /// ceremony, not on a build machine.\n pub fn generate_root_keypair() -> (Vec<u8>, Vec<u8>) {\n-    let kp = wsc::KeyPair::generate();\n-    (kp.sk.sk.to_vec(), kp.pk.pk.to_vec())\n+    (vec![1], vec![1]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n     use crate::install::{InstallError, InstallPolicy, install};\n     use crate::manifest::fixtures::manifest_with_tools;\n     use crate::pin::Pin;\n",
+    "file": "crates/varve-core/src/verify.rs",
+    "function": {
+      "function_name": "generate_root_keypair",
+      "return_type": "-> (Vec<u8>, Vec<u8>)",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 107
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/varve-core/src/verify.rs:111:5: replace generate_root_keypair -> (Vec<u8>, Vec<u8>) with (vec![1], vec![1])",
+    "package": "varve-core",
+    "replacement": "(vec![1], vec![1])",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 112
+      },
+      "start": {
+        "column": 5,
+        "line": 111
+      }
+    }
+  }
+]

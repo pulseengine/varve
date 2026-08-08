@@ -61,7 +61,10 @@ pub enum PinError {
     },
     #[error("{path}: manifest-version {found} is not supported (this varve understands version 1)")]
     UnsupportedManifestVersion { path: String, found: i64 },
-    #[error("{path}: {source}")]
+    // Display carries only the location; the cause prints once via the
+    // #[source] chain (varve#7 — the anyhow alternate formatter was
+    // printing it twice).
+    #[error("{path}: invalid layer identifier")]
     Layer {
         path: String,
         #[source]
@@ -217,20 +220,14 @@ tools   = ["rivet", "synth"]
             "varve.toml",
         )
         .unwrap_err();
-        let msg = err.to_string();
+        let PinError::Layer { source, .. } = &err else {
+            panic!("got: {err}");
+        };
+        assert!(matches!(source, LayerIdError::MissingPatch(_)));
+        // The guidance lives in the SOURCE (printed once via the chain).
         assert!(
-            matches!(
-                &err,
-                PinError::Layer {
-                    source: LayerIdError::MissingPatch(_),
-                    ..
-                }
-            ),
-            "got: {err}"
-        );
-        assert!(
-            msg.contains("three-part"),
-            "message must teach the grammar: {msg}"
+            source.to_string().contains("three-part"),
+            "the chain must teach the grammar: {source}"
         );
     }
 
@@ -259,7 +256,15 @@ tools   = ["rivet", "synth"]
     // rivet: verifies REQ-PIN-001
     #[test]
     fn rejects_malformed_digest() {
-        for bad in ["sha256:short", "md5:aaaa", "aaaaaaaa", "sha256:GGGG"] {
+        // Includes a wrong-length PURE-HEX digest: length and charset are
+        // independent checks and each must reject alone.
+        for bad in [
+            "sha256:short",
+            "md5:aaaa",
+            "aaaaaaaa",
+            "sha256:GGGG",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
             let toml = format!(
                 "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\ndigest = \"{bad}\"\n"
             );

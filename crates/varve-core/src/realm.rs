@@ -259,6 +259,12 @@ trust-root = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 "badkey",
                 "[realm.badkey]\nregistry = \"oci://r/x\"\ntrust-root = \"zz\"\n",
             ),
+            // Wrong-length but PURE-HEX: length and charset must each
+            // reject independently.
+            (
+                "shorthex",
+                "[realm.shorthex]\nregistry = \"oci://r/x\"\ntrust-root = \"cccccccccccccccccccccccccccccccc\"\n",
+            ),
             (
                 "bothkeys",
                 "[realm.bothkeys]\nregistry = \"oci://r/x\"\ntrust-root = \"aa\"\ntrust-root-file = \"f\"\n",
