@@ -26,8 +26,9 @@ permissions:
 
 env:
   # The layer's contents: bump deliberately, in a reviewed diff.
-  RIVET_VERSION: v0.32.0
-  SYNTH_VERSION: v0.54.0
+  # <tool>:<version> triples; all follow <tool>-<ver>-<triple>.tar.gz with
+  # a cosign-signed SHA256SUMS.txt except wsc (raw per-platform binaries).
+  TARBALL_TOOLS: "rivet:v0.32.0 synth:v0.54.0 loom:v1.2.0 meld:v0.42.0 spar:v0.35.0 witness:v0.39.0 ordeal:v0.17.0 kiln:v0.4.4"
   WSC_VERSION: v0.10.0
 
 jobs:
@@ -44,13 +45,17 @@ jobs:
       - name: Build varve
         run: cargo build --release -p varve
 
-      - name: Fetch and verify the tools
+      - name: Fetch and verify the tools, build the deposit spec
         env:
           GH_TOKEN: ${{ github.token }}
+          LAYER: ${{ inputs.layer }}
+          COUNTER: ${{ inputs.counter }}
         run: |
           set -euo pipefail
           mkdir -p tools
-          verify_release() { # repo version identity_path
+          PLATFORMS="aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu"
+
+          verify_release() { # repo version
             local repo="$1" version="$2"
             local dir="downloads/${repo##*/}"
             mkdir -p "$dir"
@@ -62,6 +67,10 @@ jobs:
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               "$dir/SHA256SUMS.txt"
           }
+          asset_sha() { # repo asset -> hash from the VERIFIED sums (empty if absent)
+            local dir="downloads/${1##*/}"
+            grep -E "[ /]$2\$" "$dir/SHA256SUMS.txt" | awk '{print $1}' | head -1
+          }
           fetch_asset() { # repo version asset
             local repo="$1" version="$2" asset="$3"
             local dir="downloads/${repo##*/}"
@@ -69,34 +78,68 @@ jobs:
             (cd "$dir" && grep -E "[ /]$asset\$" SHA256SUMS.txt | sed 's# \./# #' | sha256sum -c -)
           }
 
-          PLATFORMS="aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu"
+          SPEC=deposit-spec.toml
+          printf 'layer = "%s"\nchannel = "rolling"\ncounter = %s\n' "$LAYER" "$COUNTER" > "$SPEC"
 
-          verify_release pulseengine/rivet "$RIVET_VERSION"
-          verify_release pulseengine/synth "$SYNTH_VERSION"
-          verify_release pulseengine/sigil "$WSC_VERSION"
+          add_tool() { # name version platform path repo release asset sha
+            cat >> "$SPEC" <<TOMLEOF
 
-          for platform in $PLATFORMS; do
-            # rivet + synth ship tarballs per triple
-            for tool in rivet synth; do
-              repo="pulseengine/$tool"
-              version_var="$(echo "$tool" | tr a-z A-Z)_VERSION"
-              version="${!version_var}"
+          [[tool]]
+          name = "$1"
+          version = "$2"
+          platform = "$3"
+          path = "$4"
+
+          [tool.source]
+          repo = "$5"
+          release = "$6"
+          asset = "$7"
+          sha256 = "$8"
+          TOMLEOF
+          }
+
+          # Standard tarball tools — include every platform the release ships.
+          for entry in $TARBALL_TOOLS; do
+            tool="${entry%%:*}"; version="${entry##*:}"; bare="${version#v}"
+            repo="pulseengine/$tool"
+            verify_release "$repo" "$version"
+            for platform in $PLATFORMS; do
               asset="$tool-$version-$platform.tar.gz"
+              sha="$(asset_sha "$repo" "$asset")"
+              if [ -z "$sha" ]; then
+                echo "::notice::$tool has no asset for $platform — layer omits it there"
+                continue
+              fi
               fetch_asset "$repo" "$version" "$asset"
               mkdir -p "extract/$tool-$platform"
               tar xzf "downloads/$tool/$asset" -C "extract/$tool-$platform"
               cp "extract/$tool-$platform/$tool" "tools/$tool-$platform"
+              add_tool "$tool" "$bare" "$platform" "tools/$tool-$platform" "$repo" "$version" "$asset" "$sha"
             done
-            # wsc ships raw per-platform binaries with its own naming
+          done
+
+          # wsc: raw per-platform binaries with sigil's naming.
+          verify_release pulseengine/sigil "$WSC_VERSION"
+          BARE_WSC="${WSC_VERSION#v}"
+          for platform in $PLATFORMS; do
             case "$platform" in
-              aarch64-apple-darwin)     wsc_asset="wsc-macos-aarch64";;
-              x86_64-apple-darwin)      wsc_asset="wsc-macos-x86_64";;
+              aarch64-apple-darwin)      wsc_asset="wsc-macos-aarch64";;
+              x86_64-apple-darwin)       wsc_asset="wsc-macos-x86_64";;
               aarch64-unknown-linux-gnu) wsc_asset="wsc-linux-aarch64";;
               x86_64-unknown-linux-gnu)  wsc_asset="wsc-linux-x86_64";;
             esac
+            sha="$(asset_sha pulseengine/sigil "$wsc_asset")"
+            if [ -z "$sha" ]; then
+              echo "::notice::wsc has no asset for $platform — layer omits it there"
+              continue
+            fi
             fetch_asset pulseengine/sigil "$WSC_VERSION" "$wsc_asset"
             cp "downloads/sigil/$wsc_asset" "tools/wsc-$platform"
+            add_tool wsc "$BARE_WSC" "$platform" "tools/wsc-$platform" pulseengine/sigil "$WSC_VERSION" "$wsc_asset" "$sha"
           done
+          # Strip the heredoc indentation TOML forbids.
+          sed -i 's/^          //' "$SPEC"
+          echo "── deposit spec:"; cat "$SPEC" | head -40
           ls -la tools/
 
       - name: Deposit the layer
@@ -109,18 +152,11 @@ jobs:
           test -n "$VARVE_ROLLING_KEY" || { echo "::error::VARVE_ROLLING_KEY not provisioned"; exit 1; }
           printf '%s' "$VARVE_ROLLING_KEY" > /tmp/rolling.key
           ISSUED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          BARE_RIVET="${RIVET_VERSION#v}"; BARE_SYNTH="${SYNTH_VERSION#v}"; BARE_WSC="${WSC_VERSION#v}"
-          TOOL_ARGS=()
-          for platform in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
-            TOOL_ARGS+=(--tool "rivet@$BARE_RIVET@$platform=tools/rivet-$platform")
-            TOOL_ARGS+=(--tool "synth@$BARE_SYNTH@$platform=tools/synth-$platform")
-            TOOL_ARGS+=(--tool "wsc@$BARE_WSC@$platform=tools/wsc-$platform")
-          done
           ./target/release/varve deposit \
-            --layer "$LAYER" --channel rolling \
-            --counter "$COUNTER" --issued-at "$ISSUED_AT" \
+            --spec deposit-spec.toml \
+            --issued-at "$ISSUED_AT" \
             --key /tmp/rolling.key --key-id varve-rolling-1 \
-            --out layer-layout "${TOOL_ARGS[@]}"
+            --out layer-layout
           rm -f /tmp/rolling.key
           # Sanity: the deposit installs and verifies on THIS runner before
           # anything is published.
