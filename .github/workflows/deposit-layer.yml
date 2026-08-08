@@ -30,7 +30,9 @@ env:
   # a cosign-signed SHA256SUMS.txt except wsc (raw per-platform binaries).
   # ordeal is EXCLUDED until its releases carry cosign-signed sums
   # (pulseengine/ordeal — Track A gap filed); fail-closed, no TOFU entries.
-  TARBALL_TOOLS: "rivet:v0.32.0 synth:v0.54.0 loom:v1.2.0 meld:v0.42.0 spar:v0.35.0 witness:v0.39.0 kiln:v0.4.4"
+  # Entry shape: repo_tool:version[:binary] — binary defaults to the tool
+  # name; kiln ships its CLI as `kilnd`.
+  TARBALL_TOOLS: "rivet:v0.32.0 synth:v0.54.0 loom:v1.2.0 meld:v0.42.0 spar:v0.35.0 witness:v0.39.0 kiln:v0.4.4:kilnd"
   WSC_VERSION: v0.10.0
 
 jobs:
@@ -104,7 +106,11 @@ jobs:
 
           # Standard tarball tools — include every platform the release ships.
           for entry in $TARBALL_TOOLS; do
-            tool="${entry%%:*}"; version="${entry##*:}"; bare="${version#v}"
+            tool="${entry%%:*}"
+            rest="${entry#*:}"
+            version="${rest%%:*}"
+            binname="${rest#*:}"; [ "$binname" = "$version" ] && binname="$tool"
+            bare="${version#v}"
             repo="pulseengine/$tool"
             verify_release "$repo" "$version"
             for platform in $PLATFORMS; do
@@ -119,13 +125,13 @@ jobs:
               tar xzf "downloads/$tool/$asset" -C "extract/$tool-$platform"
               # Layouts differ per repo (flat vs versioned subdir): locate
               # the binary by name anywhere in the extraction.
-              bin="$(find "extract/$tool-$platform" -type f -name "$tool" | head -1)"
+              bin="$(find "extract/$tool-$platform" -type f -name "$binname" | head -1)"
               if [ -z "$bin" ]; then
-                echo "::error::$asset contains no '$tool' binary; contents:"; tar tzf "downloads/$tool/$asset" | head -20
+                echo "::error::$asset contains no '$binname' binary; contents:"; tar tzf "downloads/$tool/$asset" | head -20
                 exit 1
               fi
-              cp "$bin" "tools/$tool-$platform"
-              add_tool "$tool" "$bare" "$platform" "tools/$tool-$platform" "$repo" "$version" "$asset" "$sha"
+              cp "$bin" "tools/$binname-$platform"
+              add_tool "$binname" "$bare" "$platform" "tools/$binname-$platform" "$repo" "$version" "$asset" "$sha"
             done
           done
 
