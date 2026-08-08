@@ -161,6 +161,13 @@ jobs:
           echo "::notice::Toolchain SBOM written to release-assets/varve-${BARE}.cdx.json"
           ls -la release-assets/
 
+      - name: Stage onboarding assets (trust root + canonical realms)
+        run: |
+          set -euo pipefail
+          cp trust-roots/rolling.pub release-assets/rolling.pub
+          cp varve-realms.toml release-assets/varve-realms.toml
+          ls -la release-assets/
+
       - name: Generate SHA256 checksums
         run: |
           set -euo pipefail

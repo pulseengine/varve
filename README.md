@@ -21,6 +21,37 @@
 > promise. The release plan lives in rivet (`rivet release status`); see
 > [SECURITY.md](SECURITY.md) for the current trust posture and its limits.
 
+## Getting started
+
+Install one PulseEngine toolchain layer, verified, and dispatch its tools —
+the zero-config path uses a **realm**, so no environment variable is needed:
+
+```sh
+# 1. In your project, pin a layer and name the realm:
+cat > varve.toml <<'PIN'
+manifest-version = 1
+[toolchain]
+realm   = "pulseengine"
+channel = "rolling"
+layer   = "2026.08.2"
+PIN
+
+# 2. Drop in the canonical realm definitions (registry + trust root).
+#    Ships as `varve-realms.toml` with every release, and lives at
+#    trust-roots/ in this repo:
+curl -LO https://github.com/pulseengine/varve/releases/latest/download/varve-realms.toml
+
+# 3. Install (verified against the realm's root — no env var), then shim:
+varve install
+varve shim install        # then: . "$HOME/.varve/env"
+rivet --version           # dispatched from the pinned layer
+```
+
+Without a realm, point `VARVE_TRUST_ROOT` at the published root key
+(`rolling.pub`, a release asset) and pass `--from oci://ghcr.io/pulseengine/varve/layers`.
+The rolling channel is provisional and makes no qualification promise — see
+[SECURITY.md](SECURITY.md).
+
 ## The problem
 
 Three consumers, two toolchains, one afternoon:

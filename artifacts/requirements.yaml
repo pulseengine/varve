@@ -1252,3 +1252,45 @@ artifacts:
     fields:
       priority: should
       category: non-functional
+
+  - id: REQ-ONBOARD-001
+    type: requirement
+    title: A cold-start consumer can reach a verified install from the tarball alone
+    status: verified
+    release: v0.13.1
+    description: >
+      A new consumer with only a release binary shall be able to get to a
+      verified install: the trust root (rolling.pub) and the canonical
+      varve-realms.toml ship as release assets and are documented in a README
+      Getting-started section; the no-trust-root error names the zero-config
+      realm path and where the key is published (not just "set the env var");
+      and `varve install` auto-caches a line-status carried in the installed
+      layout so `varve status` works with no extra step. Found by an external
+      cold-start (pulseengine/varve#34): the error steered to the weaker
+      mechanism and the strong one was documented nowhere user-facing.
+    tags: [ergonomics]
+    links:
+      - type: satisfies
+        target: REQ-REALM-001
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-STATUS-DIST-001
+    type: requirement
+    title: Line-status is distributed with the layer over the registry
+    status: approved
+    release: v0.14.0
+    description: >
+      The deposit pipeline shall sign and attach a baseline line-status to
+      each layer, and the registry source shall fetch it, so `varve status`
+      works for a registry (oci://) install without a local layout — closing
+      the second half of pulseengine/varve#34 (v0.13.1 auto-caches only a
+      locally-carried layout's status).
+    tags: [core]
+    links:
+      - type: satisfies
+        target: REQ-KP-001
+    fields:
+      priority: should
+      category: functional
