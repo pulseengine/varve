@@ -21,6 +21,11 @@ walking up from the working directory.
 manifest-version = 1
 
 [toolchain]
+# Optional: name this project's trust universe. A committed varve-realms.toml
+# (same walk-up discovery) maps the name to (registry, trust root); the realm
+# is then authoritative — per-realm state is namespaced by the trust root's
+# fingerprint, so parallel universes cannot cross-talk (REQ-REALM-001).
+realm   = "pulseengine"
 channel = "qualified"     # "qualified" | "rolling"
 layer   = "2026.07.0"     # the dated layer this project is frozen on — always
                           # three-part: YYYY.MM.P, where .0 is the initial

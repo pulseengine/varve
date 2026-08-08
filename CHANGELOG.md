@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.10.0 — 2026-08-08
+
+Realms (REQ-REALM-001 verified): the pin names its trust universe;
+parallel toolchain universes coexist without cross-talk.
+
+- `realm = "name"` in varve.toml + a committed `varve-realms.toml`
+  (walk-up discovered, so trust travels with the code) defining each
+  realm's registry and trust root (inline hex or a relative key file)
+- A named realm is AUTHORITATIVE: its trust root applies (the ambient
+  environment cannot substitute one) and `varve install` defaults to
+  its registry — a realm project needs no --from and no env vars
+- All per-realm state (core, high-water marks, status cache) lives
+  under `$VARVE_ROOT/realms/<trust-root-fingerprint>/`: two realms
+  with identical layer names and counters are isolated by construction,
+  and cross-acceptance is cryptographically impossible (tested: one
+  shim, two projects, two universes; acme's layer refuses to install
+  into a pulseengine project)
+- Realmless pins keep the existing layout and env-based trust root
+
 ## v0.9.0 — 2026-08-07
 
 Bazel interop groundwork (REQ-BAZEL-001 verified): Bazel uses varve,

@@ -40,9 +40,10 @@ enum Cmd {
     Install {
         /// Source to fetch from: an OCI registry reference
         /// (`oci://ghcr.io/org/repo`), an oci-layout archive directory, or a
-        /// plain `manifests/`+`blobs/` directory.
+        /// plain `manifests/`+`blobs/` directory. Defaults to the pinned
+        /// realm's registry when the pin names one.
         #[arg(long, value_name = "SOURCE")]
-        from: String,
+        from: Option<String>,
         /// Override the host platform (target triple) — cross-platform
         /// workflows only; the default is this machine.
         #[arg(long, value_name = "TRIPLE")]
@@ -219,7 +220,7 @@ fn run() -> anyhow::Result<()> {
     match cli.command {
         Cmd::Which { tool } => which(&store, &tool),
         Cmd::List => list(&store),
-        Cmd::Install { from, platform } => install(&store, &from, platform),
+        Cmd::Install { from, platform } => install(&store, from.as_deref(), platform),
         Cmd::Verify { all } => verify(&store, all),
         Cmd::Archive { layer, dest } => archive(&store, &layer, &dest),
         Cmd::Run {
@@ -298,9 +299,10 @@ fn print_env(store: &Store, shell: &str) -> anyhow::Result<()> {
 fn shim_install(store: &Store, extra_tools: &[String]) -> anyhow::Result<()> {
     // Tool names come from the currently-pinned layer (plus explicit
     // extras); the names are only entry points — every invocation
-    // re-resolves the pin from its own working directory.
-    let pin = load_pin()?;
-    let resolved = resolve(&pin, store)?;
+    // re-resolves the pin (and its realm) from its own working directory,
+    // so ONE shim directory serves every realm.
+    let ctx = project_ctx(store)?;
+    let resolved = resolve(&ctx.pin, &ctx.store)?;
     let mut names: Vec<String> = resolved.tools.iter().map(|(n, _)| n.clone()).collect();
     names.extend(extra_tools.iter().cloned());
     names.sort();
@@ -358,10 +360,11 @@ fn sign_sums(
 }
 
 fn status(store: &Store, from_file: Option<&std::path::Path>) -> anyhow::Result<()> {
-    let pin = load_pin()?;
-    let root_pk = trust_root_bytes()?;
+    let ctx = project_ctx(store)?;
+    let pin = &ctx.pin;
+    let root_pk = ctx_root_bytes(&ctx)?;
     let line = pin.layer.line().clone();
-    let cache = varve_core::StatusCache::at_root(store.root());
+    let cache = varve_core::StatusCache::at_root(ctx.store.root());
 
     if let Some(path) = from_file {
         let envelope = std::fs::read(path)
@@ -484,14 +487,15 @@ fn run_tool(
     let (tool, args) = tool_and_args
         .split_first()
         .context("no tool named — usage: varve run [--varve LAYER] -- <tool> [args…]")?;
-    let mut pin = load_pin()?;
+    let ctx = project_ctx(store)?;
+    let mut pin = ctx.pin;
     if let Some(layer) = override_layer {
         // A one-off: resolve another layer for this invocation only. The
         // checked-in pin is not read past this point and never written.
         pin.layer = layer.parse()?;
         pin.digest = None;
     }
-    let resolved = resolve(&pin, store)?;
+    let resolved = resolve(&pin, &ctx.store)?;
     let Some((_, path)) = resolved.tools.iter().find(|(name, _)| name == tool) else {
         bail!(
             "tool '{tool}' is not part of layer {} — it exposes: {}",
@@ -692,6 +696,49 @@ fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result
     Ok(())
 }
 
+/// Per-project context (REQ-REALM-001): when the pin names a realm, that
+/// realm's trust root and store namespace are AUTHORITATIVE — the ambient
+/// environment cannot substitute either. Realmless pins keep the legacy
+/// layout and the env-configured trust root.
+struct ProjectCtx {
+    pin: Pin,
+    store: Store,
+    realm: Option<varve_core::Realm>,
+}
+
+fn project_ctx(base: &Store) -> anyhow::Result<ProjectCtx> {
+    let pin = load_pin()?;
+    match &pin.realm {
+        Some(name) => {
+            let cwd = std::env::current_dir().context("cannot determine working directory")?;
+            let realm = varve_core::resolve_realm(&cwd, name)?;
+            let store = Store::at(realm.effective_root(base.root()));
+            Ok(ProjectCtx {
+                pin,
+                store,
+                realm: Some(realm),
+            })
+        }
+        None => Ok(ProjectCtx {
+            pin,
+            store: base.clone(),
+            realm: None,
+        }),
+    }
+}
+
+fn ctx_root_bytes(ctx: &ProjectCtx) -> anyhow::Result<Vec<u8>> {
+    match &ctx.realm {
+        Some(realm) => Ok(realm.trust_root.clone()),
+        None => trust_root_bytes(),
+    }
+}
+
+fn ctx_verifier(ctx: &ProjectCtx) -> anyhow::Result<varve_core::PinnedKeyVerifier> {
+    varve_core::PinnedKeyVerifier::from_public_key_bytes(&ctx_root_bytes(ctx)?)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 /// Load the PulseEngine trust root: `$VARVE_TRUST_ROOT` names a file holding
 /// the hex-encoded ed25519 root public key. No trust root, no acceptance —
 /// there is deliberately no built-in default while the root ceremony is
@@ -747,10 +794,20 @@ fn today_rfc3339() -> String {
     format!("{y:04}-{m:02}-{d:02}T00:00:00Z")
 }
 
-fn install(store: &Store, from: &str, platform: Option<String>) -> anyhow::Result<()> {
+fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyhow::Result<()> {
     let platform = platform.unwrap_or_else(varve_core::host_platform);
-    let pin = load_pin()?;
-    let verifier = trust_root()?;
+    let ctx = project_ctx(store)?;
+    let from = match (from, &ctx.realm) {
+        (Some(explicit), _) => explicit.to_string(),
+        (None, Some(realm)) => realm.registry.clone(),
+        (None, None) => {
+            bail!("no source: pass --from, or name a realm in the pin so its registry applies")
+        }
+    };
+    let from = from.as_str();
+    let pin = &ctx.pin;
+    let verifier = ctx_verifier(&ctx)?;
+    let store = &ctx.store;
     // Auto-detect the source shape: an oci:// registry reference, a standard
     // OCI image layout (the `varve archive`/`deposit` output), or the plain
     // manifests/+blobs/ directory. Either way the same pipeline and the same
@@ -775,7 +832,7 @@ fn install(store: &Store, from: &str, platform: Option<String>) -> anyhow::Resul
         staleness_threshold_days: 90,
         platform: &platform,
     };
-    let outcome = varve_core::install(&pin, source, &verifier, store, &mut marks, &policy)?;
+    let outcome = varve_core::install(pin, source, &verifier, store, &mut marks, &policy)?;
     println!(
         "installed layer {} (counter {}) {}",
         outcome.layer, outcome.counter, outcome.digest
@@ -791,12 +848,13 @@ fn install(store: &Store, from: &str, platform: Option<String>) -> anyhow::Resul
 }
 
 fn verify(store: &Store, all: bool) -> anyhow::Result<()> {
-    let verifier = trust_root()?;
+    let ctx = project_ctx(store)?;
+    let verifier = ctx_verifier(&ctx)?;
+    let store = &ctx.store;
     let layers = if all {
         store.list()?
     } else {
-        let pin = load_pin()?;
-        vec![varve_core::resolve(&pin, store)?.layer]
+        vec![varve_core::resolve(&ctx.pin, store)?.layer]
     };
     if layers.is_empty() {
         bail!("nothing to verify — no layers installed");
@@ -836,8 +894,8 @@ fn load_pin() -> anyhow::Result<Pin> {
 }
 
 fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
-    let pin = load_pin()?;
-    let resolved = resolve(&pin, store)?;
+    let ctx = project_ctx(store)?;
+    let resolved = resolve(&ctx.pin, &ctx.store)?;
     let Some((_, path)) = resolved.tools.iter().find(|(name, _)| name == tool) else {
         bail!(
             "tool '{tool}' is not part of layer {} as pinned here — the pin exposes: {}",
