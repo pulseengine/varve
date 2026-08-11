@@ -31,6 +31,27 @@ impl fmt::Display for Line {
     }
 }
 
+impl FromStr for Line {
+    type Err = LayerIdError;
+
+    /// Parse a two-part `YYYY.MM` line (the shape a line-status document
+    /// carries). The same canonical grammar as a layer's line component:
+    /// four-digit year, two-digit month, month in 01..=12.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let malformed = || LayerIdError::Malformed(s.to_string());
+        let (year, month) = s.split_once('.').ok_or_else(malformed)?;
+        if !(is_digits(year, 4) && is_digits(month, 2)) {
+            return Err(malformed());
+        }
+        let year: u16 = year.parse().map_err(|_| malformed())?;
+        let month: u8 = month.parse().map_err(|_| malformed())?;
+        if !(1..=12).contains(&month) {
+            return Err(LayerIdError::MonthOutOfRange(s.to_string()));
+        }
+        Ok(Line { year, month })
+    }
+}
+
 /// A layer identifier: one dated, immutable deposit — `YYYY.MM.P`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LayerId {
@@ -241,6 +262,23 @@ mod tests {
                 err,
                 LayerIdError::MonthOutOfRange(bad.into()),
                 "input: {bad:?}"
+            );
+        }
+    }
+
+    // rivet: verifies REQ-PATCH-001
+    #[test]
+    fn line_parses_two_part_and_rejects_non_canonical() {
+        let line: Line = "2026.07".parse().unwrap();
+        assert_eq!(line.year(), 2026);
+        assert_eq!(line.month(), 7);
+        assert_eq!(line.to_string(), "2026.07");
+        // Round-trips with a layer's own line.
+        assert_eq!(&line, "2026.07.3".parse::<LayerId>().unwrap().line());
+        for bad in ["2026.7", "26.07", "2026.13", "2026.00", "2026", "2026.07.0"] {
+            assert!(
+                bad.parse::<Line>().is_err(),
+                "{bad} must not parse as a line"
             );
         }
     }

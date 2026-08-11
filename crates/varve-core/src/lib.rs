@@ -53,7 +53,11 @@ pub use install::{
 pub use layer::{LayerId, LayerIdError, Line};
 pub use linestatus::{
     KnownProblem, LayerStatusReport, LineStatus, LineStatusError, StatusCache,
-    attach_to_layout as attach_status_to_layout, read_from_layout as read_status_from_layout,
+    attach_envelope_to_layout as attach_status_envelope_to_layout,
+    attach_to_layout as attach_status_to_layout,
+    cache_baseline_from_source as cache_baseline_line_status,
+    read_any_from_layout as read_any_status_from_layout,
+    read_from_layout as read_status_from_layout,
 };
 pub use manifest::{LayerManifest, ManifestError};
 pub use pin::{Channel, Pin, PinError};

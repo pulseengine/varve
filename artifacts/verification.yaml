@@ -421,3 +421,78 @@ artifacts:
     links:
       - type: verifies
         target: REQ-ONBOARD-001
+
+  - id: VER-STATUS-DIST-001
+    type: verification
+    title: Baseline line-status rides with the layer, is re-verified, and caches at install
+    status: verified
+    release: v0.14.0
+    fields:
+      method: automated-test
+      steps:
+        # A source carries the baseline; absence is not an error.
+        - run: cargo test -p varve-core a_source_carrying_a_baseline_line_status_yields_it
+        - run: cargo test -p varve-core a_source_without_a_line_status_is_not_an_error
+        # Registry: the role-annotated layer is discovered in the artifact manifest.
+        - run: cargo test -p varve-core a_role_annotated_layer_digest_is_found_and_absence_is_none
+        # The baseline is verified against the root and cached; an impostor's is refused.
+        - run: cargo test -p varve-core a_source_baseline_is_verified_and_cached_so_status_works_offline
+        - run: cargo test -p varve-core a_baseline_signed_by_an_impostor_is_refused_not_cached
+        - run: cargo test -p varve-core a_baseline_for_the_wrong_line_is_refused_not_miscached
+        # Layout: the baseline is recoverable and attachable by envelope.
+        - run: cargo test -p varve-core a_deposit_layouts_baseline_is_readable_without_naming_the_line
+        - run: cargo test -p varve-core attaching_by_envelope_derives_the_line_from_the_document
+        # End-to-end: deposit -> sign -> attach -> install -> status works offline.
+        - run: cargo test -p varve an_attached_baseline_makes_status_work_after_an_offline_install
+    links:
+      - type: verifies
+        target: REQ-STATUS-DIST-001
+
+  - id: VER-INDEP-001
+    type: verification
+    title: The recorded-review checker catches broken records and is advisory on absence
+    status: verified
+    release: v0.14.0
+    fields:
+      method: automated-test
+      steps:
+        # The checker's own oracle: a malformed or dangling record FAILS,
+        # a coherent one PASSES, a missing one only WARNS (exit 0).
+        - run: python3 tools/review-check.py --self-test
+    links:
+      - type: verifies
+        target: REQ-INDEP-001
+
+  - id: VER-REVIEW-v0.14.0
+    type: verification
+    title: v0.14.0 scope independently reviewed by a refute-framed clean-room reviewer
+    status: verified
+    release: v0.14.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        VERDICT pass. Reviewer: clean-room agent (general-purpose, fresh
+        context, refute-framed), 2026-08-11, over the feat/v0.14.0 tree.
+        The reviewer re-ran every suite itself — cargo test -p varve-core
+        (118 then 119 after the fix), cargo test -p varve --test cli (33),
+        review-check --self-test (exit 0) — and attempted five refutations:
+        (a) tampered/unsigned bytes cannot be cached — cache_baseline_from_source
+        DSSE-verifies against the root before caching, proven across registry,
+        layout, and --from-file paths; (b) the baseline is a SEPARATE signed
+        referrer, never folded into the layer's signed payload (layer digest
+        unchanged); (c) malformed/dangling review records are caught by rivet
+        validate; (d) a missing review is advisory/non-blocking, matching
+        DD-019; (e) reviewer==author passes coherence — a DISCLOSED limitation
+        (independence recorded/advisory at v0.x, enforcement at v1.0), not an
+        overclaim. One low-severity finding — the cache load path lacked the
+        wrong-line guard the --from-file path had — was FIXED before release
+        (LineStatusError::LineMismatch across all three cache paths, regression
+        test a_baseline_for_the_wrong_line_is_refused_not_miscached). The
+        recorded independence of DD-019, made a graph node instead of a
+        parallel file.
+    links:
+      - type: verifies
+        target: REQ-STATUS-DIST-001
+      - type: verifies
+        target: REQ-INDEP-001

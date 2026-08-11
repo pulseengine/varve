@@ -284,3 +284,18 @@ jobs:
               --generate-notes \
               release-assets/*
           fi
+
+          # Surface the recorded independent-review verdict (REQ-INDEP-001,
+          # DD-019) at the top of the notes, when the release carries a
+          # `method: review` rivet artifact for this version. The verdict lives
+          # in the rivet graph (VER-REVIEW-<version>); this is a fixed-string
+          # presence check, not a parse.
+          if grep -qF "id: VER-REVIEW-${VERSION}" artifacts/verification.yaml; then
+            BODY=$(gh release view "$VERSION" --json body -q .body)
+            {
+              printf '## Independent review\n\n'
+              printf 'This release'\''s scope was independently reviewed by a fresh-context clean-room reviewer (DD-019). The recorded verdict, reviewer, and findings live in the rivet graph as `VER-REVIEW-%s` (`method: review`).\n\n---\n\n' "$VERSION"
+              printf '%s\n' "$BODY"
+            } > /tmp/notes.md
+            gh release edit "$VERSION" --notes-file /tmp/notes.md
+          fi

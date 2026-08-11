@@ -228,6 +228,13 @@ impl LayerSource for OciLayoutSource {
             Err(e) => Err(SourceError::Transport(e.to_string())),
         }
     }
+
+    fn fetch_line_status(&self, _layer: &LayerRef) -> Result<Option<Vec<u8>>, SourceError> {
+        // The archived layout carries its baseline as a line-status referrer
+        // (REQ-STATUS-DIST-001). Untrusted bytes — the caller re-verifies.
+        crate::linestatus::read_any_from_layout(&self.root)
+            .map_err(|e| SourceError::Transport(e.to_string()))
+    }
 }
 
 #[cfg(test)]

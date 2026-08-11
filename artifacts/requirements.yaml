@@ -1061,7 +1061,7 @@ artifacts:
   - id: REQ-INDEP-001
     type: requirement
     title: No requirement is verified on the author's word alone
-    status: approved
+    status: verified
     release: v0.14.0
     description: >
       A requirement shall not reach `verified` on the authoring agent's
@@ -1070,11 +1070,15 @@ artifacts:
       re-derives every claimed verdict from evidence (runs the named tests,
       re-checks the oracles, attempts to refute) — and the reviewer identity,
       date, and outcome shall be recorded on the artifacts (a `review`-method
-      verification linked to each requirement). The release gate refuses to
-      cut a scope whose independent review is absent or dissenting. This is
-      the strongest independence achievable without a second human and
-      directly answers the audits' one structural finding: self-assigned
-      `verified` status.
+      verification linked to each requirement) and surfaced in the release
+      notes. At v0.x the recorded verdict is advisory: a missing or dissenting
+      review is visible but non-blocking — the auditable trail is the
+      deliverable, not a hard gate. The refute-and-block release gate (no
+      verdict, no tag) is deferred to v1.0, where it lands with the root
+      ceremony and dossier. This directly answers the audits' one structural
+      finding — self-assigned `verified` status — by making every verdict
+      trace to a named independent reviewer, without falsely claiming the
+      gate is enforced before it is.
     tags: [process, independence]
     fields:
       priority: must
@@ -1084,7 +1088,7 @@ artifacts:
     type: requirement
     title: The ASPICE V is populated so its trace rules bite non-vacuously
     status: approved
-    release: v0.14.0
+    release: v0.15.0
     description: >
       The enabled aspice schema's V-types shall carry real artifacts —
       system requirements deriving from the STPA-Sec losses, software
@@ -1101,7 +1105,7 @@ artifacts:
     type: requirement
     title: The threat analysis is a full TARA, not a seed
     status: approved
-    release: v0.14.0
+    release: v0.15.0
     description: >
       The cybersecurity schema shall be enabled and populated: assets,
       threat-scenarios with attack-vector and attack-feasibility, risk
@@ -1120,7 +1124,7 @@ artifacts:
     type: requirement
     title: The archive of record is durable, not a 90-day CI artifact
     status: approved
-    release: v0.15.0
+    release: v0.16.0
     description: >
       A deposited layer's oci-layout archive shall be published to durable,
       verifiable storage kept independently of any registry or CI retention
@@ -1136,7 +1140,7 @@ artifacts:
     type: requirement
     title: Client-side append-only log of installs, verifications, refusals
     status: approved
-    release: v0.15.0
+    release: v0.16.0
     description: >
       varve shall write an append-only local record of update events —
       installs, re-verifications, refusals, staleness warnings, self-updates
@@ -1152,7 +1156,7 @@ artifacts:
     type: requirement
     title: A fresh consumer cannot be handed an arbitrarily old signed layer
     status: approved
-    release: v0.15.0
+    release: v0.16.0
     description: >
       The first-contact rollback window (empty high-water mark accepts any
       counter) shall be closed: a signed per-line floor (carried in the
@@ -1209,7 +1213,7 @@ artifacts:
 
   - id: DD-019
     type: design-decision
-    title: Independence via adversarial clean-room review, gated at release
+    title: Independence via adversarial clean-room review, recorded per release
     status: accepted
     release: v0.14.0
     description: >
@@ -1217,10 +1221,13 @@ artifacts:
       by an adversarial clean-room reviewer (a fresh-context agent, no
       inherited framing) that re-derives every claimed verdict from evidence
       and tries to refute it, per release scope. Its verdict — reviewer id,
-      date, outcome — is recorded as a `review`-method verification linked to
-      the reviewed requirements, and `release-execution` refuses a scope
-      whose independent review is absent or dissenting. Automation is the
-      independent party the single author cannot be.
+      date, outcome, evidence — is recorded as a `review`-method verification
+      linked to the reviewed requirements and surfaced in the release notes.
+      At v0.x the record is advisory (a dissent is visible, not blocking); the
+      refute-and-block gate is deferred to v1.0. Recording first, then gating,
+      keeps the claim honest at each stage: "independent review is recorded"
+      now, "independence is enforced" at v1.0. Automation is the independent
+      party the single author cannot be.
     links:
       - type: satisfies
         target: REQ-INDEP-001
@@ -1233,7 +1240,9 @@ artifacts:
         security fix was complete. A clean-room reviewer generalizes that:
         the reviewer inherits none of the author's assumptions, so its
         agreement is evidence, not an echo. Recorded verdicts make the
-        independence auditable; gating makes it non-optional.
+        independence auditable now; the v1.0 gate will make it non-optional.
+        Fork resolved 2026-08-11: recorded/advisory at v0.x over an immediate
+        hard gate, so the mechanism ships and proves itself before it blocks.
     tags: [process, independence]
 
   - id: REQ-KANI-001
@@ -1279,7 +1288,7 @@ artifacts:
   - id: REQ-STATUS-DIST-001
     type: requirement
     title: Line-status is distributed with the layer over the registry
-    status: approved
+    status: verified
     release: v0.14.0
     description: >
       The deposit pipeline shall sign and attach a baseline line-status to
@@ -1291,6 +1300,38 @@ artifacts:
     links:
       - type: satisfies
         target: REQ-KP-001
+      - type: traces-to
+        target: DD-020
     fields:
       priority: should
       category: functional
+
+  - id: DD-020
+    type: design-decision
+    title: The baseline line-status rides beside the layer, never inside its signed payload
+    status: accepted
+    release: v0.14.0
+    description: >
+      A layer's signed payload is its immutable identity — the digest a pin
+      freezes against. Line-status is updatable evidence with its own
+      monotonic counter and its own DSSE envelope. So the baseline distributed
+      with a layer is attached as a SEPARATE role-annotated artifact: a
+      `line-status` referrer in the oci-layout index (offline path,
+      `OciLayoutSource`) and a `eu.pulseengine.varve.role: line-status` layer
+      in the registry artifact manifest (`RegistrySource`). It is fetched by a
+      new `LayerSource::fetch_line_status`, re-verified against the trust root,
+      and cached monotonically at install — the source is never trusted to
+      have checked it. Putting the baseline inside the signed payload was
+      rejected: it would couple mutable status to immutable identity and change
+      the layer digest whenever an advisory changed.
+    links:
+      - type: satisfies
+        target: REQ-STATUS-DIST-001
+    fields:
+      rationale: >
+        The install pipeline already re-verifies every fetched byte against
+        the root (DD-003); line-status reuses that seam rather than inventing a
+        second trust path. The baseline's counter tracks the deposit counter so
+        re-installs cache cleanly and later advisories (higher counters) always
+        win.
+    tags: [core, security]

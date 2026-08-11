@@ -20,6 +20,22 @@ pub const LAYER_ARTIFACT_TYPE: &str = "application/vnd.pulseengine.varve.layer.v
 pub const ANN_ROLE: &str = "eu.pulseengine.varve.role";
 pub const ROLE_ENVELOPE: &str = "envelope";
 pub const ROLE_PAYLOAD: &str = "payload";
+/// The baseline line-status DSSE envelope carried beside a layer on the
+/// registry (REQ-STATUS-DIST-001), so `varve status` works after an
+/// `oci://` install with no local layout.
+pub const ROLE_LINE_STATUS: &str = "line-status";
+
+/// The digest of the first layer in an OCI artifact manifest carrying the
+/// given `eu.pulseengine.varve.role` annotation, if present. Pure — the
+/// unit-testable heart of registry blob discovery.
+fn layer_digest_for_role(manifest: &serde_json::Value, role: &str) -> Option<String> {
+    manifest["layers"]
+        .as_array()?
+        .iter()
+        .find(|l| l["annotations"][ANN_ROLE] == role)
+        .and_then(|l| l["digest"].as_str())
+        .map(str::to_string)
+}
 
 /// An `oci://` reference: registry host + repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,27 +151,34 @@ impl RegistrySource {
         }
     }
 
-    /// Fetch the OCI artifact manifest for a tag and return the envelope
-    /// blob it references. Untrusted discovery: the pipeline re-verifies.
-    fn envelope_for_tag(&self, tag: &str) -> Result<Vec<u8>, SourceError> {
+    /// Fetch the OCI artifact manifest for a tag. Untrusted discovery: the
+    /// pipeline re-verifies whatever blobs this points at.
+    fn artifact_manifest_for_tag(&self, tag: &str) -> Result<serde_json::Value, SourceError> {
         let manifest_bytes = self.get(
             &format!("{}/manifests/{tag}", self.base()),
             "application/vnd.oci.image.manifest.v1+json",
         )?;
-        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
-            .map_err(|e| SourceError::Transport(format!("artifact manifest: {e}")))?;
-        let envelope_digest = manifest["layers"]
-            .as_array()
-            .and_then(|layers| {
-                layers
-                    .iter()
-                    .find(|l| l["annotations"][ANN_ROLE] == ROLE_ENVELOPE)
-            })
-            .and_then(|l| l["digest"].as_str())
-            .ok_or_else(|| {
-                SourceError::NotFound(format!("tag {tag} carries no varve envelope layer"))
-            })?;
-        self.fetch_blob(envelope_digest)
+        serde_json::from_slice(&manifest_bytes)
+            .map_err(|e| SourceError::Transport(format!("artifact manifest: {e}")))
+    }
+
+    /// The envelope blob a tag's artifact manifest references.
+    fn envelope_for_tag(&self, tag: &str) -> Result<Vec<u8>, SourceError> {
+        let manifest = self.artifact_manifest_for_tag(tag)?;
+        let envelope_digest = layer_digest_for_role(&manifest, ROLE_ENVELOPE).ok_or_else(|| {
+            SourceError::NotFound(format!("tag {tag} carries no varve envelope layer"))
+        })?;
+        self.fetch_blob(&envelope_digest)
+    }
+
+    /// The baseline line-status blob a tag's artifact manifest references,
+    /// if any (REQ-STATUS-DIST-001). Absence is `Ok(None)`, not an error.
+    fn line_status_for_tag(&self, tag: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        let manifest = self.artifact_manifest_for_tag(tag)?;
+        match layer_digest_for_role(&manifest, ROLE_LINE_STATUS) {
+            Some(digest) => self.fetch_blob(&digest).map(Some),
+            None => Ok(None),
+        }
     }
 
     fn tags(&self) -> Result<Vec<String>, SourceError> {
@@ -192,6 +215,28 @@ impl LayerSource for RegistrySource {
                     }
                 }
                 Err(SourceError::NotFound(digest.clone()))
+            }
+        }
+    }
+
+    fn fetch_line_status(&self, layer: &LayerRef) -> Result<Option<Vec<u8>>, SourceError> {
+        // Resolve the tag whose artifact manifest carries the baseline.
+        // A named pin maps straight to its tag; a digest pin is located by
+        // the same tag scan fetch_manifest uses.
+        match layer {
+            LayerRef::Name(id) => self.line_status_for_tag(&id.to_string()),
+            LayerRef::Digest(digest) => {
+                for tag in self.tags()? {
+                    if let Ok(envelope) = self.envelope_for_tag(&tag)
+                        && let Ok(text) = std::str::from_utf8(&envelope)
+                        && let Ok(env) = wsc::dsse::DsseEnvelope::from_json(text)
+                        && let Ok(payload) = env.payload_bytes()
+                        && &crate::store::manifest_digest(&payload) == digest
+                    {
+                        return self.line_status_for_tag(&tag);
+                    }
+                }
+                Ok(None)
             }
         }
     }
@@ -235,5 +280,31 @@ mod tests {
         ] {
             assert!(RegistryRef::parse(bad).is_err(), "{bad} must not parse");
         }
+    }
+
+    // rivet: verifies REQ-STATUS-DIST-001
+    #[test]
+    fn a_role_annotated_layer_digest_is_found_and_absence_is_none() {
+        let manifest = serde_json::json!({
+            "layers": [
+                {"digest": "sha256:aaa", "annotations": {ANN_ROLE: ROLE_ENVELOPE}},
+                {"digest": "sha256:bbb", "annotations": {ANN_ROLE: ROLE_PAYLOAD}},
+                {"digest": "sha256:ccc", "annotations": {ANN_ROLE: ROLE_LINE_STATUS}},
+            ]
+        });
+        assert_eq!(
+            layer_digest_for_role(&manifest, ROLE_LINE_STATUS),
+            Some("sha256:ccc".to_string()),
+            "the baseline line-status layer must be found by its role"
+        );
+        assert_eq!(
+            layer_digest_for_role(&manifest, ROLE_ENVELOPE),
+            Some("sha256:aaa".to_string())
+        );
+        // A manifest with no line-status layer yields None, not an error.
+        let bare = serde_json::json!({
+            "layers": [{"digest": "sha256:aaa", "annotations": {ANN_ROLE: ROLE_ENVELOPE}}]
+        });
+        assert_eq!(layer_digest_for_role(&bare, ROLE_LINE_STATUS), None);
     }
 }
