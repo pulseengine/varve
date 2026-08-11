@@ -284,3 +284,19 @@ jobs:
               --generate-notes \
               release-assets/*
           fi
+
+          # Surface the recorded independent-review verdict (REQ-INDEP-001,
+          # DD-019) at the top of the notes, when a review record exists.
+          REVIEW="reviews/${VERSION}.yaml"
+          if [ -f "$REVIEW" ]; then
+            VERDICT=$(sed -n 's/^verdict:[[:space:]]*//p' "$REVIEW" | head -1)
+            RID=$(sed -n 's/^[[:space:]]*id:[[:space:]]*//p' "$REVIEW" | head -1)
+            RDATE=$(sed -n 's/^date:[[:space:]]*//p' "$REVIEW" | head -1)
+            BODY=$(gh release view "$VERSION" --json body -q .body)
+            {
+              printf '## Independent review: %s\n\n' "${VERDICT:-recorded}"
+              printf 'Clean-room reviewer `%s` on %s re-derived this release'\''s claims from evidence (DD-019). Record: `%s`.\n\n---\n\n' "${RID:-unknown}" "${RDATE:-?}" "$REVIEW"
+              printf '%s\n' "$BODY"
+            } > /tmp/notes.md
+            gh release edit "$VERSION" --notes-file /tmp/notes.md
+          fi

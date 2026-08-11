@@ -142,6 +142,17 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
+    /// (CI) Attach a signed line-status envelope to a deposit layout as its
+    /// baseline, so `varve status` works after an offline install and the
+    /// registry can carry it (REQ-STATUS-DIST-001).
+    AttachStatus {
+        /// The oci-layout directory produced by `varve deposit`.
+        #[arg(long, value_name = "DIR")]
+        layout: PathBuf,
+        /// The signed line-status DSSE envelope (from `varve sign-status`).
+        #[arg(long, value_name = "ENVELOPE")]
+        status: PathBuf,
+    },
     /// Shims on PATH: thin dispatchers that resolve the pin from the
     /// invocation's working directory and exec — switching projects is cd.
     #[command(subcommand)]
@@ -256,6 +267,7 @@ fn run() -> anyhow::Result<()> {
             key_id,
             out,
         } => sign_status(&file, &key, &key_id, &out),
+        Cmd::AttachStatus { layout, status } => attach_status(&layout, &status),
         Cmd::Shim(ShimCmd::Install { extra_tools }) => shim_install(&store, &extra_tools),
         Cmd::Env { shell } => print_env(&store, &shell),
         Cmd::Completions { shell } => {
@@ -393,6 +405,15 @@ fn status(store: &Store, from_file: Option<&std::path::Path>) -> anyhow::Result<
              REQ-STATUS-DIST-001 (pulseengine/varve#34)."
         );
     };
+    // Defense in depth: a cached doc is keyed and signed, but assert its own
+    // line field agrees with the pin — the same guard the --from-file path
+    // applies, so all three cache paths are consistent.
+    if doc.line != line.to_string() {
+        bail!(
+            "cached status document covers line {} but this project pins line {line}",
+            doc.line
+        );
+    }
     let report = doc.report_for(&pin.layer);
     println!(
         "layer {} (line {line}, status document #{})",
@@ -409,6 +430,17 @@ fn status(store: &Store, from_file: Option<&std::path::Path>) -> anyhow::Result<
     println!(
         "  {} known problem(s) affect this layer, {} with workarounds",
         report.problems_total, report.problems_with_workaround
+    );
+    Ok(())
+}
+
+fn attach_status(layout: &std::path::Path, status: &std::path::Path) -> anyhow::Result<()> {
+    let envelope = std::fs::read(status)
+        .with_context(|| format!("cannot read status envelope {}", status.display()))?;
+    let (line, counter) = varve_core::attach_status_envelope_to_layout(layout, &envelope)?;
+    println!(
+        "attached baseline line-status #{counter} for line {line} to {}",
+        layout.display()
     );
     Ok(())
 }
@@ -887,30 +919,25 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         );
     }
 
-    // Auto-cache a line-status the source's oci-layout carries (DD-008), so
-    // `varve status` works with zero extra steps (varve#34). Verified against
-    // the same realm/trust root; a bad or stale one is a warning, never fatal
-    // to an otherwise-good install.
-    if std::path::Path::new(from).join("index.json").is_file() {
-        let line = pin.layer.line().clone();
-        match varve_core::read_status_from_layout(std::path::Path::new(from), &line) {
-            Ok(Some(envelope)) => {
-                let root_pk = ctx_root_bytes(&ctx)?;
-                match varve_core::LineStatus::verify_and_parse(&envelope, &root_pk) {
-                    Ok(doc) => {
-                        let cache = varve_core::StatusCache::at_root(store.root());
-                        if let Err(e) = cache.update(&line, &envelope, &doc) {
-                            eprintln!(
-                                "note: layer carried a line-status but it was not cached: {e}"
-                            );
-                        }
-                    }
-                    Err(e) => eprintln!("note: layer carried an unverifiable line-status: {e}"),
-                }
-            }
-            Ok(None) => {}
-            Err(e) => eprintln!("note: could not read the layer's line-status: {e}"),
+    // Auto-cache a baseline line-status the source carries beside the layer
+    // (DD-008, REQ-STATUS-DIST-001), so `varve status` works with zero extra
+    // steps after any install — a local oci-layout OR a registry (oci://)
+    // pull (varve#34). Verified against the same realm/trust root; a bad,
+    // stale, or unfetchable one is a note, never fatal to an otherwise-good
+    // install. The consumer still owns freshness via `varve status --from-file`.
+    let line = pin.layer.line().clone();
+    let layer_ref = match &pin.digest {
+        Some(digest) => varve_core::LayerRef::Digest(digest.clone()),
+        None => varve_core::LayerRef::Name(pin.layer.clone()),
+    };
+    let root_pk = ctx_root_bytes(&ctx)?;
+    match varve_core::cache_baseline_line_status(source, &layer_ref, &line, &root_pk, store.root())
+    {
+        Ok(Some(counter)) => {
+            println!("cached baseline line-status #{counter} for line {line}");
         }
+        Ok(None) => {}
+        Err(e) => eprintln!("note: layer carried a line-status but it was not cached: {e}"),
     }
     Ok(())
 }

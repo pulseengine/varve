@@ -174,6 +174,20 @@ jobs:
             --issued-at "$ISSUED_AT" \
             --key /tmp/rolling.key --key-id varve-rolling-1 \
             --out layer-layout
+          # Sign and attach a BASELINE line-status (REQ-STATUS-DIST-001) so
+          # `varve status` works after an offline OR registry install with no
+          # --from-file. Line derived from the layer; the baseline's monotonic
+          # counter tracks the deposit counter (advisories issued later carry
+          # higher counters). Empty problems/yanked — a clean starting record.
+          LINE="${LAYER%.*}"
+          printf '{"line":"%s","counter":%s,"issued-at":"%s"}\n' \
+            "$LINE" "$COUNTER" "$ISSUED_AT" > baseline-status.json
+          ./target/release/varve sign-status \
+            --file baseline-status.json \
+            --key /tmp/rolling.key --key-id varve-rolling-1 \
+            --out baseline-status.dsse.json
+          ./target/release/varve attach-status \
+            --layout layer-layout --status baseline-status.dsse.json
           rm -f /tmp/rolling.key
           # Sanity: the deposit installs and verifies on THIS runner before
           # anything is published.
@@ -200,15 +214,20 @@ jobs:
           # annotations on layers[]).
           REPO="ghcr.io/pulseengine/varve/layers"
           SIG_TYPE='application/vnd.pulseengine.varve.signature.v1+json'
+          STATUS_TYPE='application/vnd.pulseengine.varve.line-status.v1+json'
           mkdir -p push && cd push
-          PAYLOAD_DIGEST=$(jq -r --arg t "$SIG_TYPE" \
-            '[.manifests[] | select(.artifactType != $t)][0].digest' ../layer-layout/index.json)
+          PAYLOAD_DIGEST=$(jq -r --arg t "$SIG_TYPE" --arg s "$STATUS_TYPE" \
+            '[.manifests[] | select(.artifactType != $t and .artifactType != $s)][0].digest' ../layer-layout/index.json)
           ENVELOPE_DIGEST=$(jq -r --arg t "$SIG_TYPE" \
             '[.manifests[] | select(.artifactType == $t)][0].digest' ../layer-layout/index.json)
+          # The baseline line-status referrer (REQ-STATUS-DIST-001).
+          STATUS_DIGEST=$(jq -r --arg s "$STATUS_TYPE" \
+            '[.manifests[] | select(.artifactType == $s)][0].digest // empty' ../layer-layout/index.json)
           PAYLOAD_FILE="../layer-layout/blobs/sha256/${PAYLOAD_DIGEST#sha256:}"
           ENVELOPE_FILE="../layer-layout/blobs/sha256/${ENVELOPE_DIGEST#sha256:}"
+          STATUS_FILE="../layer-layout/blobs/sha256/${STATUS_DIGEST#sha256:}"
 
-          # 1. Push every blob: config, envelope, payload, tools.
+          # 1. Push every blob: config, envelope, payload, tools, line-status.
           printf '{}' > empty-config.json
           oras blob push "$REPO" empty-config.json
           oras blob push "$REPO" "$ENVELOPE_FILE"
@@ -216,14 +235,19 @@ jobs:
           for digest in $(jq -r '.manifests[].digest' "$PAYLOAD_FILE"); do
             oras blob push "$REPO" "../layer-layout/blobs/sha256/${digest#sha256:}"
           done
+          test -n "$STATUS_DIGEST" || { echo "::error::baseline line-status missing from layout"; exit 1; }
+          oras blob push "$REPO" "$STATUS_FILE"
 
-          # 2. Build the artifact manifest.
+          # 2. Build the artifact manifest — envelope + payload + tools, plus
+          #    the baseline line-status as a role-annotated layer so
+          #    RegistrySource.fetch_line_status finds it.
           jq -n \
-            --arg sig_type "$SIG_TYPE" \
             --arg env_digest "$ENVELOPE_DIGEST" \
             --argjson env_size "$(stat -c%s "$ENVELOPE_FILE")" \
             --arg payload_digest "$PAYLOAD_DIGEST" \
             --argjson payload_size "$(stat -c%s "$PAYLOAD_FILE")" \
+            --arg status_digest "$STATUS_DIGEST" \
+            --argjson status_size "$(stat -c%s "$STATUS_FILE")" \
             --slurpfile payload "$PAYLOAD_FILE" \
             '{
               schemaVersion: 2,
@@ -246,6 +270,12 @@ jobs:
                   digest: $payload_digest,
                   size: $payload_size,
                   annotations: {"eu.pulseengine.varve.role": "payload"}
+                },
+                {
+                  mediaType: "application/json",
+                  digest: $status_digest,
+                  size: $status_size,
+                  annotations: {"eu.pulseengine.varve.role": "line-status"}
                 }
               ] + [ $payload[0].manifests[] |
                     { mediaType: "application/octet-stream",

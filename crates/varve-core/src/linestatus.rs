@@ -73,6 +73,8 @@ pub enum LineStatusError {
     Verify(#[from] VerifyError),
     #[error("line-status payload is not valid: {0}")]
     Payload(String),
+    #[error("line-status covers line {got} but line {expected} was requested")]
+    LineMismatch { expected: String, got: String },
     #[error(
         "refusing stale line-status document for {line}: presented counter {presented}, cached {cached}"
     )]
@@ -271,6 +273,106 @@ pub fn attach_to_layout(
     )
     .map_err(|e| io(&index_path, e))?;
     Ok(())
+}
+
+/// Fetch the baseline line-status a source carries beside a layer, verify it
+/// against the trust root, and cache it monotonically (REQ-STATUS-DIST-001).
+/// Returns `Ok(Some(counter))` when a baseline was cached, `Ok(None)` when the
+/// source carries none. Verification, cache, or transport failures are `Err`
+/// — the caller decides severity (the CLI downgrades them to a note, since a
+/// bad baseline never blocks an otherwise-verified install, but it is never
+/// silently cached). The untrusted bytes are re-verified here; the source is
+/// not trusted to have checked them.
+pub fn cache_baseline_from_source(
+    source: &dyn crate::source::LayerSource,
+    layer: &crate::source::LayerRef,
+    line: &Line,
+    root_pk: &[u8],
+    store_root: &Path,
+) -> Result<Option<u64>, LineStatusError> {
+    let envelope = match source
+        .fetch_line_status(layer)
+        .map_err(|e| LineStatusError::Payload(format!("fetching baseline line-status: {e}")))?
+    {
+        Some(bytes) => bytes,
+        None => return Ok(None),
+    };
+    let doc = LineStatus::verify_and_parse(&envelope, root_pk)?;
+    // A validly-signed status for a DIFFERENT line must not be cached under
+    // this one — mirror the `--from-file` guard so all cache paths agree.
+    if doc.line != line.to_string() {
+        return Err(LineStatusError::LineMismatch {
+            expected: line.to_string(),
+            got: doc.line,
+        });
+    }
+    let counter = doc.counter;
+    StatusCache::at_root(store_root).update(line, &envelope, &doc)?;
+    Ok(Some(counter))
+}
+
+/// Attach a signed line-status envelope to a deposit layout, deriving the
+/// line from the document itself (REQ-STATUS-DIST-001). Returns the line and
+/// counter attached. The payload is read to learn the line but not verified
+/// here — install re-verifies the bytes against the trust root, and the
+/// deposit pipeline produced this envelope moments earlier with its own key.
+pub fn attach_envelope_to_layout(
+    layout: &Path,
+    envelope: &[u8],
+) -> Result<(Line, u64), LineStatusError> {
+    let text = std::str::from_utf8(envelope)
+        .map_err(|e| LineStatusError::Payload(format!("envelope is not utf-8: {e}")))?;
+    let env = wsc::dsse::DsseEnvelope::from_json(text)
+        .map_err(|e| LineStatusError::Payload(format!("not a DSSE envelope: {e}")))?;
+    let payload = env
+        .payload_bytes()
+        .map_err(|e| LineStatusError::Payload(format!("envelope payload: {e}")))?;
+    let doc: LineStatus = serde_json::from_slice(&payload)
+        .map_err(|e| LineStatusError::Payload(format!("status document: {e}")))?;
+    let line: Line = doc
+        .line
+        .parse()
+        .map_err(|e| LineStatusError::Payload(format!("status line '{}': {e}", doc.line)))?;
+    attach_to_layout(layout, &line, envelope)?;
+    Ok((line, doc.counter))
+}
+
+/// Read the single baseline status envelope a deposit layout carries,
+/// without needing to name its line (REQ-STATUS-DIST-001). A deposit layout
+/// holds exactly one line-status; a consumer installing by digest may not
+/// know the line up front. Returns the first line-status referrer found.
+pub fn read_any_from_layout(layout: &Path) -> Result<Option<Vec<u8>>, LineStatusError> {
+    let index_path = layout.join("index.json");
+    let bytes = match std::fs::read(&index_path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(LineStatusError::Io {
+                path: index_path.display().to_string(),
+                source,
+            });
+        }
+    };
+    let index: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| LineStatusError::Payload(format!("index.json: {e}")))?;
+    let Some(entry) = index["manifests"].as_array().and_then(|entries| {
+        entries
+            .iter()
+            .find(|e| e["artifactType"] == LINE_STATUS_ARTIFACT_TYPE)
+    }) else {
+        return Ok(None);
+    };
+    let digest = entry["digest"]
+        .as_str()
+        .ok_or_else(|| LineStatusError::Payload("status entry has no digest".into()))?;
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    let blob_path = layout.join("blobs").join("sha256").join(hex);
+    std::fs::read(&blob_path)
+        .map(Some)
+        .map_err(|source| LineStatusError::Io {
+            path: blob_path.display().to_string(),
+            source,
+        })
 }
 
 /// Read the status envelope for a line from an OCI image layout, if carried.
@@ -485,5 +587,194 @@ mod tests {
         // The cached newer document survives and re-verifies.
         let loaded = cache.load(&line, &pk).unwrap().unwrap();
         assert_eq!(loaded.counter, 2);
+    }
+
+    // rivet: verifies REQ-STATUS-DIST-001
+    #[test]
+    fn a_source_baseline_is_verified_and_cached_so_status_works_offline() {
+        use crate::source::{LayerRef, MemorySource};
+        let (sk, pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let store_root = tmp.path();
+        let line: Line = "2026.07.0".parse::<LayerId>().unwrap().line().clone();
+        let doc = status(5);
+        let envelope = doc.sign(&sk, "k").unwrap();
+        let source = MemorySource::new().with_line_status(envelope.as_bytes());
+        let layer = LayerRef::Name("2026.07.0".parse().unwrap());
+
+        let cached = cache_baseline_from_source(&source, &layer, &line, &pk, store_root).unwrap();
+        assert_eq!(
+            cached,
+            Some(5),
+            "a carried baseline is cached at its counter"
+        );
+
+        // Now `status` works offline: the cache has it, verified.
+        let loaded = StatusCache::at_root(store_root)
+            .load(&line, &pk)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.counter, 5);
+    }
+
+    // rivet: verifies REQ-STATUS-DIST-001, REQ-VERIFY-001
+    #[test]
+    fn a_baseline_for_the_wrong_line_is_refused_not_miscached() {
+        // A root-signed status document for a DIFFERENT line must not be
+        // cached under the requested line — even validly signed. (Clean-room
+        // review finding: the --from-file path asserted this; the baseline
+        // path did not.)
+        use crate::source::{LayerRef, MemorySource};
+        let (sk, pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let requested: Line = "2026.07.0".parse::<LayerId>().unwrap().line().clone();
+        let mut doc = status(5);
+        doc.line = "2026.08".into(); // signed, but for the WRONG line
+        let envelope = doc.sign(&sk, "k").unwrap();
+        let source = MemorySource::new().with_line_status(envelope.as_bytes());
+        let err = cache_baseline_from_source(
+            &source,
+            &LayerRef::Name("2026.07.0".parse().unwrap()),
+            &requested,
+            &pk,
+            tmp.path(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, LineStatusError::LineMismatch { .. }),
+            "a baseline for the wrong line must be refused: {err}"
+        );
+        assert!(
+            StatusCache::at_root(tmp.path())
+                .load(&requested, &pk)
+                .unwrap()
+                .is_none(),
+            "nothing is cached under the requested line"
+        );
+    }
+
+    // rivet: verifies REQ-STATUS-DIST-001
+    #[test]
+    fn a_source_with_no_baseline_caches_nothing_and_does_not_error() {
+        use crate::source::{LayerRef, MemorySource};
+        let (_sk, pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let line: Line = "2026.07.0".parse::<LayerId>().unwrap().line().clone();
+        let source = MemorySource::new();
+        let cached = cache_baseline_from_source(
+            &source,
+            &LayerRef::Name("2026.07.0".parse().unwrap()),
+            &line,
+            &pk,
+            tmp.path(),
+        )
+        .unwrap();
+        assert_eq!(cached, None);
+    }
+
+    // rivet: verifies REQ-STATUS-DIST-001, REQ-VERIFY-001
+    #[test]
+    fn a_baseline_signed_by_an_impostor_is_refused_not_cached() {
+        use crate::source::{LayerRef, MemorySource};
+        let (attacker_sk, _) = generate_root_keypair();
+        let (_real_sk, real_pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let line: Line = "2026.07.0".parse::<LayerId>().unwrap().line().clone();
+        let envelope = status(5).sign(&attacker_sk, "k").unwrap();
+        let source = MemorySource::new().with_line_status(envelope.as_bytes());
+        let err = cache_baseline_from_source(
+            &source,
+            &LayerRef::Name("2026.07.0".parse().unwrap()),
+            &line,
+            &real_pk,
+            tmp.path(),
+        )
+        .unwrap_err();
+        // The impostor's baseline never reaches the cache.
+        assert!(
+            StatusCache::at_root(tmp.path())
+                .load(&line, &real_pk)
+                .unwrap()
+                .is_none(),
+            "a baseline that fails verification must not be cached: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-STATUS-DIST-001
+    #[test]
+    fn attaching_by_envelope_derives_the_line_from_the_document() {
+        use crate::deposit::{DepositSpec, DepositTool, deposit};
+        let (sk, pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("layout");
+        deposit(
+            &DepositSpec {
+                layer: "2026.07.0".parse().unwrap(),
+                channel: "qualified".into(),
+                counter: 1,
+                issued_at: "2026-08-07T00:00:00Z".into(),
+                tools: vec![DepositTool {
+                    name: "synth".into(),
+                    version: "1".into(),
+                    platform: None,
+                    bytes: b"t".to_vec(),
+                    source: None,
+                    runner: None,
+                }],
+            },
+            &sk,
+            "k",
+            &dest,
+        )
+        .unwrap();
+
+        let envelope = status(4).sign(&sk, "k").unwrap();
+        let (line, counter) = attach_envelope_to_layout(&dest, envelope.as_bytes()).unwrap();
+        assert_eq!(line.to_string(), "2026.07");
+        assert_eq!(counter, 4);
+        // The layout now carries it and it re-verifies.
+        let carried = read_any_from_layout(&dest).unwrap().unwrap();
+        assert_eq!(
+            LineStatus::verify_and_parse(&carried, &pk).unwrap().counter,
+            4
+        );
+    }
+
+    // rivet: verifies REQ-STATUS-DIST-001
+    #[test]
+    fn a_deposit_layouts_baseline_is_readable_without_naming_the_line() {
+        // A registry/layout consumer that installs by digest may not know the
+        // line up front — the baseline must be recoverable from the layout
+        // alone. A deposit layout carries exactly one line-status.
+        use crate::deposit::{DepositSpec, DepositTool, deposit};
+        let (sk, pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("layout");
+        let spec = DepositSpec {
+            layer: "2026.07.0".parse().unwrap(),
+            channel: "qualified".into(),
+            counter: 1,
+            issued_at: "2026-08-07T00:00:00Z".into(),
+            tools: vec![DepositTool {
+                name: "synth".into(),
+                version: "1".into(),
+                platform: None,
+                bytes: b"t".to_vec(),
+                source: None,
+                runner: None,
+            }],
+        };
+        deposit(&spec, &sk, "k", &dest).unwrap();
+
+        // No baseline yet -> None, not an error.
+        assert!(read_any_from_layout(&dest).unwrap().is_none());
+
+        let line: Line = "2026.07.0".parse::<LayerId>().unwrap().line().clone();
+        let envelope = status(3).sign(&sk, "k").unwrap();
+        attach_to_layout(&dest, &line, envelope.as_bytes()).unwrap();
+
+        let carried = read_any_from_layout(&dest).unwrap().unwrap();
+        let parsed = LineStatus::verify_and_parse(&carried, &pk).unwrap();
+        assert_eq!(parsed.counter, 3);
     }
 }

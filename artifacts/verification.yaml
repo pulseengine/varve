@@ -421,3 +421,63 @@ artifacts:
     links:
       - type: verifies
         target: REQ-ONBOARD-001
+
+  - id: VER-STATUS-DIST-001
+    type: verification
+    title: Baseline line-status rides with the layer, is re-verified, and caches at install
+    status: verified
+    release: v0.14.0
+    fields:
+      method: automated-test
+      steps:
+        # A source carries the baseline; absence is not an error.
+        - run: cargo test -p varve-core a_source_carrying_a_baseline_line_status_yields_it
+        - run: cargo test -p varve-core a_source_without_a_line_status_is_not_an_error
+        # Registry: the role-annotated layer is discovered in the artifact manifest.
+        - run: cargo test -p varve-core a_role_annotated_layer_digest_is_found_and_absence_is_none
+        # The baseline is verified against the root and cached; an impostor's is refused.
+        - run: cargo test -p varve-core a_source_baseline_is_verified_and_cached_so_status_works_offline
+        - run: cargo test -p varve-core a_baseline_signed_by_an_impostor_is_refused_not_cached
+        - run: cargo test -p varve-core a_baseline_for_the_wrong_line_is_refused_not_miscached
+        # Layout: the baseline is recoverable and attachable by envelope.
+        - run: cargo test -p varve-core a_deposit_layouts_baseline_is_readable_without_naming_the_line
+        - run: cargo test -p varve-core attaching_by_envelope_derives_the_line_from_the_document
+        # End-to-end: deposit -> sign -> attach -> install -> status works offline.
+        - run: cargo test -p varve an_attached_baseline_makes_status_work_after_an_offline_install
+    links:
+      - type: verifies
+        target: REQ-STATUS-DIST-001
+
+  - id: VER-INDEP-001
+    type: verification
+    title: The recorded-review checker catches broken records and is advisory on absence
+    status: verified
+    release: v0.14.0
+    fields:
+      method: automated-test
+      steps:
+        # The checker's own oracle: a malformed or dangling record FAILS,
+        # a coherent one PASSES, a missing one only WARNS (exit 0).
+        - run: python3 tools/review-check.py --self-test
+    links:
+      - type: verifies
+        target: REQ-INDEP-001
+
+  - id: VER-REVIEW-v0.14.0
+    type: verification
+    title: v0.14.0 scope independently reviewed by a refute-framed clean-room reviewer
+    status: verified
+    release: v0.14.0
+    fields:
+      method: review
+      baseline: >
+        Recorded verdict PASS — reviews/v0.14.0.yaml. A fresh-context reviewer
+        re-ran the suites (119 lib, 33 CLI, checker self-test), refuted the
+        attacker-caching and payload-coupling concerns from evidence, and found
+        one low-severity gap (missing wrong-line guard) that was fixed before
+        release. This is the recorded independence of DD-019 made a graph node.
+    links:
+      - type: verifies
+        target: REQ-STATUS-DIST-001
+      - type: verifies
+        target: REQ-INDEP-001

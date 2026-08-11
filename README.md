@@ -166,6 +166,23 @@ in the rivet artifacts, DD-004/DD-005 and CA-*/AR-*):
    changed, plus known-problems referrers as the no-patch mitigation path. The
    frozen-line model every qualified-tool vendor converges on, made mechanical.
 
+## Independent review
+
+varve is largely authored through an AI-driven feature loop, so "verified" must
+never rest on the author's own word (REQ-INDEP-001). From v0.14.0 each release
+carries a **recorded independent-review verdict**: a fresh-context clean-room
+reviewer re-derives every claimed result from evidence — runs the named tests,
+re-checks the oracles, tries to refute — and its verdict (reviewer id, date,
+outcome, evidence) is recorded in `reviews/<version>.yaml`, surfaced at the top
+of the release notes, and validated in CI by `tools/review-check.py`.
+
+The record is **advisory at v0.x** (DD-019): a malformed or dangling review
+record hard-fails the checker, but a *missing* one only warns — the auditable
+trail is the deliverable, not yet a hard gate. The refute-and-block release gate
+(no verdict, no tag) lands at v1.0 alongside the root ceremony. Recording first,
+then gating, keeps the claim honest at each stage: *independent review is
+recorded* now, *independence is enforced* at v1.0.
+
 ## Related
 
 - [pulseengine.eu#157](https://github.com/pulseengine/pulseengine.eu/issues/157) — the design thread

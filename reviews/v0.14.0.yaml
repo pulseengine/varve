@@ -1,0 +1,47 @@
+release: v0.14.0
+reviewer:
+  id: clean-room-agent (general-purpose, fresh-context, refute-framed)
+  kind: clean-room-agent
+date: 2026-08-11
+commit: feat/v0.14.0 working tree (squash-merged as the v0.14.0 release commit)
+verdict: pass
+summary: >
+  Both requirements hold under independent re-derivation; the one code finding
+  (a missing wrong-line guard on the cache path) was fixed in response before
+  release, and the remaining observations are disclosed limitations, not
+  overclaims.
+scope:
+  - REQ-STATUS-DIST-001
+  - REQ-INDEP-001
+evidence: >
+  The reviewer re-ran every piece of evidence itself, not trusting the record:
+  `cargo test -p varve-core --lib` (118 passed at review time, now 119 after
+  the finding fix), `cargo test -p varve --test cli` (33 passed), and
+  `python3 tools/review-check.py --self-test` (exit 0) plus the real-tree run
+  (exit 0, one advisory warning). It attempted five refutations: (a) can
+  tampered/unsigned bytes get cached — REFUTED, cache_baseline_from_source
+  DSSE-verifies against the root before caching, proven by the impostor test
+  across registry, layout, and --from-file paths; (b) is the baseline folded
+  into the signed layer payload — REFUTED, it is a separate DSSE envelope and
+  role-annotated referrer, layer digest unchanged; (c) can a malformed/dangling
+  review record pass — REFUTED, both hard-fail; (d) does a missing record exit
+  0 — CONFIRMED advisory/non-blocking, matching DD-019; (e) reviewer==author —
+  TRUE but disclosed: independence is recorded/advisory at v0.x, enforcement
+  deferred to v1.0, so the claim is honestly bounded.
+findings:
+  - >
+    FIXED before release — the cached-status load path (and the baseline cache
+    helper) did not re-assert doc.line == pin.line, unlike the --from-file
+    path. Low severity (a root-signed document for the wrong line — a trusted-
+    producer error, not an attacker vector), but the inconsistency was closed:
+    a new LineStatusError::LineMismatch guard now covers all three cache paths,
+    with regression test a_baseline_for_the_wrong_line_is_refused_not_miscached.
+  - >
+    DISCLOSED LIMITATION — the checker records an asserted verdict; it cannot
+    verify reviewer independence (reviewer==author passes coherence). This is
+    exactly what DD-019 scopes as recorded/advisory at v0.x; the refute-and-
+    block gate and stronger independence land at v1.0.
+  - >
+    NON-DEFECT — the v0.14.0 code was reviewed from the working tree; at review
+    time it was not yet on a v0.14.0-labelled commit. Substance was fully
+    reviewable; committed as the release commit after the review.

@@ -68,6 +68,16 @@ jobs:
       - name: claim-check
         # Load-bearing doc claims must keep their evidence (REQ-CLAIM-001).
         run: python3 tools/claim-check.py
+      - name: review-check (advisory — recorded independent review)
+        # REQ-INDEP-001 / DD-019: every recorded review verdict must be
+        # coherent (a malformed or dangling record hard-FAILS here); a missing
+        # record only WARNS. Advisory at v0.x — this step is deliberately NOT
+        # a required check, so a missing verdict does not block merge. The
+        # refute-and-block gate lands at v1.0. The self-test proves the checker
+        # itself catches broken records.
+        run: |
+          python3 tools/review-check.py --self-test
+          python3 tools/review-check.py
       - name: coverage report (informational)
         run: rivet coverage || true
 

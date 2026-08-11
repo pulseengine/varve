@@ -474,6 +474,74 @@ fn deposit_creates_a_layer_the_standard_pipeline_installs() {
         .success();
 }
 
+// rivet: verifies REQ-STATUS-DIST-001
+#[test]
+fn an_attached_baseline_makes_status_work_after_an_offline_install() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    let tool_path = parent.join("synth-bin");
+    std::fs::write(&tool_path, b"deposited-synth").unwrap();
+    let dest = parent.join("deposited");
+
+    varve(&fx)
+        .args(["deposit", "--layer", "2026.07.0", "--channel", "qualified"])
+        .args(["--counter", "1", "--issued-at", "2026-08-07T00:00:00Z"])
+        .args(["--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&dest)
+        .args(["--tool"])
+        .arg(format!("synth@0.45.0={}", tool_path.display()))
+        .assert()
+        .success();
+
+    // CI signs a baseline line-status with the SAME root and attaches it.
+    let doc_path = parent.join("baseline.json");
+    let env_path = parent.join("baseline.dsse.json");
+    std::fs::write(&doc_path, status_doc_json("2026.07", 1)).unwrap();
+    varve(&fx)
+        .args(["sign-status", "--file"])
+        .arg(&doc_path)
+        .args(["--key"])
+        .arg(&sk_path)
+        .args(["--out"])
+        .arg(&env_path)
+        .assert()
+        .success();
+    varve(&fx)
+        .args(["attach-status", "--layout"])
+        .arg(&dest)
+        .args(["--status"])
+        .arg(&env_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("attached baseline line-status #1"));
+
+    // Install from the layout — the baseline is auto-cached, no --from-file.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&dest)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cached baseline line-status #1"));
+
+    // `varve status` works OFFLINE with nothing but the install behind it.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("YANKED").and(predicate::str::contains("1 known problem")),
+        );
+}
+
 fn status_doc_json(line: &str, counter: u64) -> String {
     format!(
         r#"{{

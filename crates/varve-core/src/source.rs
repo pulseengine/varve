@@ -65,6 +65,15 @@ pub trait LayerSource {
     fn fetch_manifest(&self, layer: &LayerRef) -> Result<Vec<u8>, SourceError>;
     /// Fetch a blob (a tool binary) by its digest (`sha256:<hex>`).
     fn fetch_blob(&self, digest: &str) -> Result<Vec<u8>, SourceError>;
+    /// Fetch the baseline line-status DSSE envelope this source carries
+    /// beside the layer, if any (REQ-STATUS-DIST-001). Returns the opaque
+    /// envelope bytes — the source is *not* trusted to have verified them;
+    /// the caller re-verifies against the trust root before caching. A
+    /// source that carries no baseline returns `Ok(None)`, which is not an
+    /// error: line-status is updatable evidence, absent on some layers.
+    fn fetch_line_status(&self, _layer: &LayerRef) -> Result<Option<Vec<u8>>, SourceError> {
+        Ok(None)
+    }
 }
 
 /// In-memory source — the test double, and the reference for how little a
@@ -73,6 +82,7 @@ pub trait LayerSource {
 pub struct MemorySource {
     manifests: Vec<Vec<u8>>,
     blobs: std::collections::BTreeMap<String, Vec<u8>>,
+    line_status: Option<Vec<u8>>,
 }
 
 impl MemorySource {
@@ -87,6 +97,13 @@ impl MemorySource {
 
     pub fn with_blob(mut self, digest: &str, bytes: &[u8]) -> Self {
         self.blobs.insert(digest.to_string(), bytes.to_vec());
+        self
+    }
+
+    /// Attach a baseline line-status envelope the source carries beside the
+    /// layer (REQ-STATUS-DIST-001).
+    pub fn with_line_status(mut self, envelope: &[u8]) -> Self {
+        self.line_status = Some(envelope.to_vec());
         self
     }
 }
@@ -162,5 +179,42 @@ impl LayerSource for MemorySource {
             .get(digest)
             .cloned()
             .ok_or_else(|| SourceError::NotFound(digest.to_string()))
+    }
+
+    fn fetch_line_status(&self, _layer: &LayerRef) -> Result<Option<Vec<u8>>, SourceError> {
+        Ok(self.line_status.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // rivet: verifies REQ-STATUS-DIST-001
+    #[test]
+    fn a_source_carrying_a_baseline_line_status_yields_it() {
+        let envelope = b"an-opaque-dsse-envelope";
+        let source = MemorySource::new().with_line_status(envelope);
+        let got = source
+            .fetch_line_status(&LayerRef::Name("2026.07.0".parse().unwrap()))
+            .unwrap();
+        assert_eq!(
+            got.as_deref(),
+            Some(envelope.as_slice()),
+            "a source that carries a baseline line-status must hand it back for caching"
+        );
+    }
+
+    // rivet: verifies REQ-STATUS-DIST-001
+    #[test]
+    fn a_source_without_a_line_status_is_not_an_error() {
+        let source = MemorySource::new();
+        let got = source
+            .fetch_line_status(&LayerRef::Name("2026.07.0".parse().unwrap()))
+            .unwrap();
+        assert_eq!(
+            got, None,
+            "an absent line-status is Ok(None), never an error"
+        );
     }
 }
