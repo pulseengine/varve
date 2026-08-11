@@ -57,5 +57,5 @@ claims:
   - claim: "Each release from v0.14.0 carries a recorded independent-review verdict"
     evidence:
       - { kind: file, ref: tools/review-check.py }
-      - { kind: file, ref: reviews/v0.14.0.yaml }
+      - { kind: workflow, ref: "method: review", file: artifacts/verification.yaml }
       - { kind: workflow, ref: "review-check", file: .github/workflows/ci.yml }

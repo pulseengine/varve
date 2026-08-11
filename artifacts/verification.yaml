@@ -468,14 +468,29 @@ artifacts:
     title: v0.14.0 scope independently reviewed by a refute-framed clean-room reviewer
     status: verified
     release: v0.14.0
+    tags: [independence, review]
     fields:
       method: review
       baseline: >
-        Recorded verdict PASS — reviews/v0.14.0.yaml. A fresh-context reviewer
-        re-ran the suites (119 lib, 33 CLI, checker self-test), refuted the
-        attacker-caching and payload-coupling concerns from evidence, and found
-        one low-severity gap (missing wrong-line guard) that was fixed before
-        release. This is the recorded independence of DD-019 made a graph node.
+        VERDICT pass. Reviewer: clean-room agent (general-purpose, fresh
+        context, refute-framed), 2026-08-11, over the feat/v0.14.0 tree.
+        The reviewer re-ran every suite itself — cargo test -p varve-core
+        (118 then 119 after the fix), cargo test -p varve --test cli (33),
+        review-check --self-test (exit 0) — and attempted five refutations:
+        (a) tampered/unsigned bytes cannot be cached — cache_baseline_from_source
+        DSSE-verifies against the root before caching, proven across registry,
+        layout, and --from-file paths; (b) the baseline is a SEPARATE signed
+        referrer, never folded into the layer's signed payload (layer digest
+        unchanged); (c) malformed/dangling review records are caught by rivet
+        validate; (d) a missing review is advisory/non-blocking, matching
+        DD-019; (e) reviewer==author passes coherence — a DISCLOSED limitation
+        (independence recorded/advisory at v0.x, enforcement at v1.0), not an
+        overclaim. One low-severity finding — the cache load path lacked the
+        wrong-line guard the --from-file path had — was FIXED before release
+        (LineStatusError::LineMismatch across all three cache paths, regression
+        test a_baseline_for_the_wrong_line_is_refused_not_miscached). The
+        recorded independence of DD-019, made a graph node instead of a
+        parallel file.
     links:
       - type: verifies
         target: REQ-STATUS-DIST-001

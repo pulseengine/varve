@@ -172,16 +172,20 @@ varve is largely authored through an AI-driven feature loop, so "verified" must
 never rest on the author's own word (REQ-INDEP-001). From v0.14.0 each release
 carries a **recorded independent-review verdict**: a fresh-context clean-room
 reviewer re-derives every claimed result from evidence — runs the named tests,
-re-checks the oracles, tries to refute — and its verdict (reviewer id, date,
-outcome, evidence) is recorded in `reviews/<version>.yaml`, surfaced at the top
-of the release notes, and validated in CI by `tools/review-check.py`.
+re-checks the oracles, tries to refute — and its verdict is recorded **as a
+first-class rivet artifact**: a `method: review` verification (e.g.
+`VER-REVIEW-v0.14.0`) whose `verifies` links name the reviewed requirements and
+whose `baseline` records the reviewer, date, outcome, and findings. Because it
+lives in the rivet graph, `rivet validate` checks its coherence natively — no
+parallel file format. `tools/review-check.py` adds one advisory query over
+`rivet … --format json`: which released, verified requirements still lack a
+review.
 
-The record is **advisory at v0.x** (DD-019): a malformed or dangling review
-record hard-fails the checker, but a *missing* one only warns — the auditable
-trail is the deliverable, not yet a hard gate. The refute-and-block release gate
-(no verdict, no tag) lands at v1.0 alongside the root ceremony. Recording first,
-then gating, keeps the claim honest at each stage: *independent review is
-recorded* now, *independence is enforced* at v1.0.
+The record is **advisory at v0.x** (DD-019): a missing review only warns — the
+auditable trail is the deliverable, not yet a hard gate. The refute-and-block
+release gate (no verdict, no tag) lands at v1.0 alongside the root ceremony.
+Recording first, then gating, keeps the claim honest at each stage: *independent
+review is recorded* now, *independence is enforced* at v1.0.
 
 ## Related
 
