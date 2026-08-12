@@ -27,6 +27,17 @@ pub struct ManifestEntry {
     pub annotations: BTreeMap<String, String>,
 }
 
+impl ManifestEntry {
+    /// The payload kind this entry declares (REQ-KIND-001). Absent → `Tool`
+    /// (back-compat); an unrecognised kind is refused, never guessed.
+    pub fn kind(&self) -> Result<crate::kind::PayloadKind, crate::kind::UnknownKind> {
+        match self.annotations.get(crate::kind::ANN_KIND) {
+            Some(s) => s.parse(),
+            None => Ok(crate::kind::PayloadKind::default()),
+        }
+    }
+}
+
 /// A layer manifest accepted for installation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerManifest {
@@ -225,6 +236,24 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // rivet: verifies REQ-KIND-001
+    #[test]
+    fn an_entry_kind_defaults_to_tool_and_refuses_unknowns() {
+        use crate::kind::{ANN_KIND, PayloadKind};
+        let mut e = ManifestEntry {
+            digest: "sha256:abc".into(),
+            annotations: BTreeMap::new(),
+        };
+        // Absent kind -> tool (back-compat with pre-kind layers).
+        assert_eq!(e.kind().unwrap(), PayloadKind::Tool);
+        // Stamped kind -> that kind.
+        e.annotations.insert(ANN_KIND.into(), "crate".into());
+        assert_eq!(e.kind().unwrap(), PayloadKind::Crate);
+        // Unknown kind -> refused, not guessed.
+        e.annotations.insert(ANN_KIND.into(), "quantum-blob".into());
+        assert!(e.kind().is_err());
+    }
 
     // rivet: verifies REQ-ROLLBACK-001
     #[test]

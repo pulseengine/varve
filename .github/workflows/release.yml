@@ -29,9 +29,36 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ── Version guard (REQ-RELVER-001) ────────────────────────────────────
+  # A released binary must report the version it is tagged as. The v0.14.0
+  # release shipped binaries reporting 0.13.1 because the Cargo.toml bump was
+  # a manual step that got missed. This makes it mechanical: the tag and the
+  # workspace version must agree, or nothing builds.
+  version-guard:
+    name: Tag matches Cargo.toml version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Assert tag == workspace version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          TAG_VER="${VERSION#v}"
+          CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=$TAG_VER  Cargo.toml=$CARGO_VER"
+          if [ "$TAG_VER" != "$CARGO_VER" ]; then
+            echo "::error::release tag $VERSION does not match Cargo.toml version $CARGO_VER — bump the workspace version before tagging"
+            exit 1
+          fi
+
   # ── Cross-platform binary builds ──────────────────────────────────────
   build-binaries:
     name: Build ${{ matrix.target }}
+    needs: version-guard
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

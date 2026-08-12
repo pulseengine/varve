@@ -542,6 +542,81 @@ fn an_attached_baseline_makes_status_work_after_an_offline_install() {
         );
 }
 
+// rivet: verifies REQ-CRATE-001, REQ-KIND-001
+#[test]
+fn deposit_a_crate_kind_entry_and_export_a_cargo_registry() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    // A stand-in .crate blob (export-cargo does not parse it; the offline
+    // build oracle covers real crates). Its sha256 is the cksum Cargo checks.
+    let crate_bytes = b"a-dot-crate-tarballs-bytes";
+    let crate_path = parent.join("demo-crate.crate");
+    std::fs::write(&crate_path, crate_bytes).unwrap();
+
+    // Deposit it as a `crate`-kind entry via a spec file (only the spec path
+    // carries kind).
+    let spec = parent.join("deposit-spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"demo-crate\"\nversion = \"0.1.0\"\nkind = \"crate\"\n\
+             path = \"{}\"\n",
+            crate_path.display()
+        ),
+    )
+    .unwrap();
+    let dest = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-08-07T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&dest)
+        .assert()
+        .success();
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&dest)
+        .assert()
+        .success();
+
+    // Export a Cargo registry from the verified layer.
+    let out = parent.join("cargo-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-cargo", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 verified crate"));
+
+    // The .crate is the verified bytes; the config redirects crates.io; the
+    // index cksum is varve's signed digest.
+    assert_eq!(
+        std::fs::read(out.join("registry/demo-crate-0.1.0.crate")).unwrap(),
+        crate_bytes
+    );
+    let config = std::fs::read_to_string(out.join(".cargo/config.toml")).unwrap();
+    assert!(config.contains("replace-with = \"varve\""));
+    let idx = std::fs::read_to_string(out.join("registry/index/de/mo/demo-crate")).unwrap();
+    // A cksum is recorded (its correctness vs. real Cargo is proven by the
+    // cargo_offline oracle); here we prove the CLI wiring end to end.
+    assert!(
+        idx.contains(r#""cksum":"#) && idx.contains(r#""vers":"0.1.0""#),
+        "{idx}"
+    );
+}
+
 fn status_doc_json(line: &str, counter: u64) -> String {
     format!(
         r#"{{

@@ -1088,7 +1088,7 @@ artifacts:
     type: requirement
     title: The ASPICE V is populated so its trace rules bite non-vacuously
     status: approved
-    release: v0.15.0
+    release: v0.18.0
     description: >
       The enabled aspice schema's V-types shall carry real artifacts —
       system requirements deriving from the STPA-Sec losses, software
@@ -1105,7 +1105,7 @@ artifacts:
     type: requirement
     title: The threat analysis is a full TARA, not a seed
     status: approved
-    release: v0.15.0
+    release: v0.18.0
     description: >
       The cybersecurity schema shall be enabled and populated: assets,
       threat-scenarios with attack-vector and attack-feasibility, risk
@@ -1124,7 +1124,7 @@ artifacts:
     type: requirement
     title: The archive of record is durable, not a 90-day CI artifact
     status: approved
-    release: v0.16.0
+    release: v0.19.0
     description: >
       A deposited layer's oci-layout archive shall be published to durable,
       verifiable storage kept independently of any registry or CI retention
@@ -1140,7 +1140,7 @@ artifacts:
     type: requirement
     title: Client-side append-only log of installs, verifications, refusals
     status: approved
-    release: v0.16.0
+    release: v0.19.0
     description: >
       varve shall write an append-only local record of update events —
       installs, re-verifications, refusals, staleness warnings, self-updates
@@ -1156,7 +1156,7 @@ artifacts:
     type: requirement
     title: A fresh consumer cannot be handed an arbitrarily old signed layer
     status: approved
-    release: v0.16.0
+    release: v0.19.0
     description: >
       The first-contact rollback window (empty high-water mark accepts any
       counter) shall be closed: a signed per-line floor (carried in the
@@ -1335,3 +1335,124 @@ artifacts:
         re-installs cache cleanly and later advisories (higher counters) always
         win.
     tags: [core, security]
+
+  # ─────────────────────────────────────────────────────────────────────
+  # v0.15.0+ — varve as a general VERIFIED-ARTIFACT distributor. A tool
+  # binary is just bytes with an exec bit; source-shaped artifacts (crates,
+  # WIT, Zephyr modules, SDKs, wasm components) are also just bytes. The
+  # signed store already distributes any bytes; the work is per-consumer
+  # export adapters that wire the VERIFIED store path into each build
+  # system's native mechanism. No git server (mutable, unsigned) — the
+  # content-addressed, signed, anti-rollback path is the feature.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-KIND-001
+    type: requirement
+    title: A layer entry declares its payload kind; verification is unchanged
+    status: verified
+    release: v0.15.0
+    description: >
+      Each layer entry shall carry a payload `kind`
+      (`tool | crate | wit | zephyr-module | sdk | wasm-component`) in its
+      signed annotations, defaulting to `tool` when unstamped (back-compat
+      with pre-kind layers, as the platform stamp does). The kind selects
+      which export adapter and store layout apply; it shall NOT change how
+      bytes are verified — every kind is a signed digest over bytes, checked
+      against the trust root exactly as a tool binary is. An UNKNOWN kind is
+      refused at the boundaries that act on kind — authoring (`deposit`) and
+      each kind-consuming export — so varve never mis-handles a payload it
+      does not understand. Install is deliberately kind-AGNOSTIC: it lays down
+      the (signed) bytes uniformly without interpreting kind, so an older varve
+      still installs the entries it can handle from a layer that also carries a
+      future kind (forward-compat). Resolution and `which` filter by kind.
+    tags: [core, distribution]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-CRATE-001
+    type: requirement
+    title: A verified crate builds offline through Cargo with no git server
+    status: verified
+    release: v0.15.0
+    description: >
+      varve shall distribute Rust crates as `crate`-kind entries carrying the
+      `.crate` tarball, and `varve export-cargo` shall materialise a Cargo
+      LOCAL REGISTRY (the `.crate` files plus an index) from the verified
+      store and emit a `.cargo/config.toml` source-replacement
+      (`[source.crates-io] replace-with`), so a consumer builds fully offline
+      (`--offline`) against crates whose bytes varve signed. The out-of-band
+      trust anchor is varve's existing DSSE over the layer manifest (a
+      `.crate` is signed like any blob); Cargo's own checksum-vs-`Cargo.lock`
+      is the second integrity check. `[patch]` is explicitly NOT used — it
+      changes the dependency graph; source replacement is transparent.
+    tags: [core, distribution]
+    links:
+      - type: traces-to
+        target: REQ-KIND-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-RELVER-001
+    type: requirement
+    title: A released binary reports the version it is tagged as
+    status: verified
+    release: v0.15.0
+    description: >
+      The release pipeline shall refuse to build unless the git tag matches
+      the workspace `Cargo.toml` version. v0.14.0 shipped binaries reporting
+      0.13.1 because the version bump was a manual step that was missed; a
+      released artifact that lies about its own version is exactly the failure
+      varve exists to prevent. The guard makes the agreement mechanical: tag
+      != version → the release fails before any binary is built.
+    tags: [release, integrity]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-CORROSION-001
+    type: requirement
+    title: A varve-exported crate builds under Corrosion (CMake -> Cargo)
+    status: approved
+    release: v0.16.0
+    description: >
+      The Cargo local-registry export (REQ-CRATE-001) shall build offline under
+      Corrosion with NO new export: since Corrosion 0.3.0 the cargo invocation
+      runs from the manifest directory specifically so `.cargo/config.toml` in
+      the source tree is discovered, so varve's source-replacement is honoured.
+      This shall be proven by a real Corrosion/CMake build against an exported
+      registry (built with `FROZEN` / `CARGO_NET_OFFLINE=true`), not asserted.
+      This is the Zephyr-Rust path; a Zephyr spike is a follow-up.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-CRATE-001
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-VENDOR-001
+    type: requirement
+    title: A verified crate builds under rules_rust via a vendored-directory export
+    status: approved
+    release: v0.16.0
+    description: >
+      rules_rust's crate_universe fetches crates by URL, so a file-based Cargo
+      local-registry drives only the resolve phase, not the Bazel fetch — a
+      local-registry alone is insufficient (research 2026-08-12). varve shall
+      add `export-crates-vendor`, emitting a `cargo vendor`-shaped directory
+      (unpacked crate trees + a `.cargo-checksum.json` whose `package` field is
+      the sha256 of the `.crate` — the digest varve already signs — with
+      `files: {}`) plus the `[source.vendored-sources]` config. This directory
+      is consumed natively by bare Cargo and Corrosion too, and by rules_rust
+      via `crates_vendor` / a `cargo_config` source-replacement. A small Bazel
+      spike shall confirm crate_universe resolves from the directory source
+      with zero network before the rules_rust story is claimed supported.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-KIND-001
+    fields:
+      priority: should
+      category: functional
