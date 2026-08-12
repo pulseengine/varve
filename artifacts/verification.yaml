@@ -716,3 +716,20 @@ artifacts:
         target: REQ-CORROSION-001
       - type: verifies
         target: REQ-BRIDGE-001
+
+  - id: VER-VENDOR-002
+    type: verification
+    title: The varve distdir holds the verified crate bytes keyed for Bazel by sha256
+    status: verified
+    release: v0.17.0
+    fields:
+      method: automated-test
+      steps:
+        # varve's exported .crate bytes ARE present and their sha256 == the
+        # crate_universe pin (the --distdir join key). The end-to-end Bazel
+        # --distdir consumption was manually confirmed; an automated
+        # zero-network gate is a tracked follow-up (see REQ-VENDOR-002 scope).
+        - run: cargo test -p varve-core a_distdir_holds_the_verified_crate_bytes_keyed_for_bazel
+    links:
+      - type: verifies
+        target: REQ-VENDOR-002

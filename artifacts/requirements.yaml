@@ -1460,8 +1460,8 @@ artifacts:
 
   - id: REQ-VENDOR-002
     type: requirement
-    title: A verified crate builds under rules_rust with zero network via a varve distdir
-    status: approved
+    title: varve emits the verified Bazel distdir that is rules_rust's offline byte source
+    status: verified
     release: v0.17.0
     description: >
       Two spikes established the recipe. v0.16.0: `crate.from_cargo` fails on a
@@ -1478,12 +1478,22 @@ artifacts:
       lookup) builds fully offline with `bazel build --distdir=<varve distdir>`.
       varve emits the bytes (`export-bazel-distdir`); the join key is the sha256.
       A `from_specs` MODULE.bazel snippet is a secondary, SCORE-aligned interop
-      path (but networked, like the org's own repos). SCOPE/verification: the
-      distdir artifact (bytes + sha256==pin) is unit-verified; the end-to-end
-      ZERO-NETWORK `bazel build` is a Linux CI gate (network-namespaced), not a
-      local test — macOS cannot isolate network. varve does NOT reimplement
+      path (but networked, like the org's own repos). varve does NOT reimplement
       crate_universe's BUILD-file generation; it relocates the byte source to
       its verified store while preserving the exact pins.
+
+      VERIFICATION SCOPE (honest): the distdir artifact — the verified `.crate`
+      bytes with sha256 == the crate_universe pin — is UNIT-verified, and a real
+      `crate_universe` build consuming a varve distdir via `--distdir` was
+      MANUALLY confirmed to succeed (2026-08-12). An AIRTIGHT automated
+      zero-network oracle proved impractical and is NOT claimed: Bazel's action
+      cache makes "toolchain-present-but-crate-absent" hard to force locally,
+      and `crate_universe`'s repin reads the crates.io sparse index over its OWN
+      HTTP (not Bazel's downloader, so `--downloader_config block *` doesn't stop
+      it) — so the offline property rests on Bazel's documented `--distdir`
+      behavior plus the unit-proven byte/sha256 correctness, not a varve-run
+      network-isolated build. An automated gated CI proof (Linux `unshare -n` +
+      a pre-generated crate_universe output) is a tracked follow-up.
     tags: [distribution]
     links:
       - type: traces-to
