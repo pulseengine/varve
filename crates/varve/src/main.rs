@@ -143,6 +143,18 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
+    /// Materialise a Bazel distdir of the layer's verified `.crate` tarballs
+    /// (REQ-VENDOR-002, air-gap rules_rust). Build with a pre-generated
+    /// crate_universe output + `bazel build --distdir=<DIR>` (network off) —
+    /// each crate resolves from varve's verified bytes by sha256.
+    ExportBazelDistdir {
+        /// Layer to export, e.g. `2026.08.0`.
+        #[arg(long)]
+        layer: String,
+        /// Output distdir directory.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
     /// Support window, yank state and known problems for the pinned layer,
     /// from the newest verified line-status document.
     Status {
@@ -285,6 +297,7 @@ fn run() -> anyhow::Result<()> {
         Cmd::ExportBazel { layer, out } => export_bazel(&store, &layer, &out),
         Cmd::ExportCargo { layer, out } => export_cargo(&store, &layer, &out),
         Cmd::ExportCratesVendor { layer, out } => export_crates_vendor(&store, &layer, &out),
+        Cmd::ExportBazelDistdir { layer, out } => export_bazel_distdir(&store, &layer, &out),
         Cmd::Status { from_file } => status(&store, from_file.as_deref()),
         Cmd::SignStatus {
             file,
@@ -759,6 +772,18 @@ fn export_cargo(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Re
          .cargo/config.toml and `cargo build --offline`",
         registry_dir.display(),
         config.display()
+    );
+    Ok(())
+}
+
+fn export_bazel_distdir(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Result<()> {
+    let crates = collect_verified_crates(store, layer)?;
+    let n = varve_core::crateexport::export_distdir(&crates, out)?;
+    println!(
+        "wrote {n} verified .crate tarball(s) to the Bazel distdir {} — with a pre-generated \
+         crate_universe output, `bazel build --distdir={}` resolves them offline by sha256",
+        out.display(),
+        out.display()
     );
     Ok(())
 }
