@@ -64,6 +64,15 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
     }
 }
 
+/// Whether the running binary is already the latest release's binary, decided
+/// on ARTIFACT IDENTITY rather than self-reported version strings (varve#38).
+/// A binary that mis-reports its own version (as v0.14.0 did) would otherwise
+/// loop forever: `is_newer` stays true, every check re-installs the same bytes.
+/// Comparing digests makes a stale version string degrade to a no-op.
+pub fn already_current(running_binary: &[u8], latest_binary: &[u8]) -> bool {
+    crate::store::manifest_digest(running_binary) == crate::store::manifest_digest(latest_binary)
+}
+
 /// Ask the release API for the latest tag and locate this platform's assets.
 /// `api_latest_url` is the GitHub "latest release" endpoint (or a mirror /
 /// test double — the URL changes availability, never acceptance).
@@ -144,14 +153,14 @@ pub fn extract_tool_from_targz(bytes: &[u8], tool: &str) -> Result<Vec<u8>, Upda
     Err(UpdateError::NoBinaryInArchive)
 }
 
-/// Execute an update plan: download, VERIFY with the running binary's trust
-/// root, extract, and atomically install at `dest`. Returns the verified
-/// archive digest.
-pub fn perform(
+/// Download and verify the successor binary WITHOUT installing it — the
+/// running varve verifies its successor against the trust root. Returns the
+/// verified binary bytes and the archive digest. Splitting this from the write
+/// lets the caller decide on artifact identity before touching disk (varve#38).
+pub fn fetch_verified_binary(
     plan: &UpdatePlan,
     root_public_key: &[u8],
-    dest: &std::path::Path,
-) -> Result<String, UpdateError> {
+) -> Result<(Vec<u8>, String), UpdateError> {
     let agent = ureq::Agent::new_with_defaults();
     let fetch = |url: &str| -> Result<Vec<u8>, UpdateError> {
         agent
@@ -167,18 +176,20 @@ pub fn perform(
     };
     let envelope = fetch(&plan.envelope_url)?;
     let archive = fetch(&plan.archive_url)?;
-
-    // The trust decision: the running varve verifies its successor.
     let digest = verify_release_file(&plan.archive_name, &archive, &envelope, root_public_key)?;
-
     let binary = extract_tool_from_targz(&archive, "varve")?;
+    Ok((binary, digest))
+}
+
+/// Atomically install already-verified successor bytes at `dest`.
+pub fn install_binary(binary: &[u8], dest: &std::path::Path) -> Result<(), UpdateError> {
     let io = |path: &std::path::Path, source: std::io::Error| UpdateError::Io {
         path: path.display().to_string(),
         source,
     };
     // Atomic on the same filesystem: write beside dest, then rename over it.
     let tmp = dest.with_extension("varve-update-tmp");
-    std::fs::write(&tmp, &binary).map_err(|e| io(&tmp, e))?;
+    std::fs::write(&tmp, binary).map_err(|e| io(&tmp, e))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -186,6 +197,66 @@ pub fn perform(
             .map_err(|e| io(&tmp, e))?;
     }
     std::fs::rename(&tmp, dest).map_err(|e| io(dest, e))?;
+    Ok(())
+}
+
+/// The self-update decision, resolved on ARTIFACT IDENTITY (varve#38).
+#[derive(Debug)]
+pub enum UpdateDecision {
+    /// The API's latest is not newer by version — nothing fetched.
+    UpToDate,
+    /// The version string says newer, but the verified latest binary is
+    /// byte-identical to what is on disk. A no-op — this is what breaks the
+    /// mis-reported-version loop.
+    AlreadyCurrent { latest: String },
+    /// A genuine, verified update is available: the plan, the verified binary
+    /// bytes (ready to install), and the archive digest.
+    Available {
+        plan: UpdatePlan,
+        binary: Vec<u8>,
+        digest: String,
+    },
+}
+
+/// Resolve whether an update is needed, deciding on artifact identity rather
+/// than self-reported version strings (varve#38). `on_disk` is the current
+/// binary's bytes (None if the destination does not yet exist). Fetches and
+/// VERIFIES the candidate against the trust root before comparing or offering
+/// it, so a reported "available" is always a genuinely-verified update.
+pub fn resolve_update(
+    api_latest_url: &str,
+    current_version: &str,
+    platform: &str,
+    on_disk: Option<&[u8]>,
+    root_public_key: &[u8],
+) -> Result<UpdateDecision, UpdateError> {
+    let Some(plan) = check_latest(api_latest_url, current_version, platform)? else {
+        return Ok(UpdateDecision::UpToDate);
+    };
+    let (binary, digest) = fetch_verified_binary(&plan, root_public_key)?;
+    if let Some(current) = on_disk
+        && already_current(current, &binary)
+    {
+        return Ok(UpdateDecision::AlreadyCurrent {
+            latest: plan.latest,
+        });
+    }
+    Ok(UpdateDecision::Available {
+        plan,
+        binary,
+        digest,
+    })
+}
+
+/// Download, verify against the trust root, extract, and atomically install at
+/// `dest`. Returns the verified archive digest.
+pub fn perform(
+    plan: &UpdatePlan,
+    root_public_key: &[u8],
+    dest: &std::path::Path,
+) -> Result<String, UpdateError> {
+    let (binary, digest) = fetch_verified_binary(plan, root_public_key)?;
+    install_binary(&binary, dest)?;
     Ok(digest)
 }
 
@@ -204,6 +275,26 @@ mod tests {
         assert!(!is_newer("nightly", "0.7.0"));
         assert!(!is_newer("v0.8", "0.7.0"));
         assert!(!is_newer("0.8.0.1", "0.7.0"));
+    }
+
+    // rivet: verifies REQ-UPDATE-002
+    #[test]
+    fn a_wrong_version_string_does_not_force_an_update_when_the_bytes_match() {
+        // The varve#38 loop: a binary reporting "0.13.1" that is actually the
+        // latest release. Version strings alone say "update forever"; artifact
+        // identity says "already current" and the loop terminates.
+        let running = b"the-genuine-latest-binary";
+        let latest = b"the-genuine-latest-binary";
+        assert!(
+            is_newer("v0.14.0", "0.13.1"),
+            "version strings alone would loop"
+        );
+        assert!(
+            already_current(running, latest),
+            "identical verified bytes must read as already-current regardless of version"
+        );
+        // A genuine update has different bytes.
+        assert!(!already_current(running, b"a-newer-binary"));
     }
 
     // rivet: verifies REQ-UPDATE-001

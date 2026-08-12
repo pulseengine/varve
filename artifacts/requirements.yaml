@@ -1456,3 +1456,26 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  - id: REQ-UPDATE-002
+    type: requirement
+    title: Self-update converges on artifact identity, not self-reported version
+    status: verified
+    release: v0.15.1
+    description: >
+      `varve self-update` (and `--check`) shall decide whether an update is
+      needed by comparing the VERIFIED latest binary's bytes against what is
+      already on disk, not by self-reported version strings alone. A binary
+      that mis-reports its own version (as v0.14.0 did — reporting 0.13.1) must
+      NOT loop forever: version-string comparison stays "newer" and every run
+      re-installs identical bytes (varve#38). Deciding on digest identity makes
+      a stale version string degrade to a no-op. `--check` fetches and verifies
+      the candidate (needing the trust root) so it reports a genuinely-verified
+      update, not a phantom one.
+    tags: [core, integrity]
+    links:
+      - type: traces-to
+        target: REQ-UPDATE-001
+    fields:
+      priority: must
+      category: functional
