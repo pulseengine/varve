@@ -214,6 +214,13 @@ jobs:
           cp varve-realms.toml release-assets/varve-realms.toml
           ls -la release-assets/
 
+      # cosign is installed early: the rivet fetch below verifies rivet's
+      # release with cosign, and the later SHA256SUMS signing reuses it.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: 'v2.4.1'
+
       # Phase 6b: the safety-case travels with the release (REQ-TRACEPACK-001).
       # rivet's own traceability, exported as queryable/assessor-importable
       # evidence — generated *before* SHA256SUMS so the signed sums (and the
@@ -282,11 +289,6 @@ jobs:
       #       'https://token.actions.githubusercontent.com' \
       #     --bundle SHA256SUMS.txt.cosign.bundle \
       #     SHA256SUMS.txt
-      - name: Install cosign
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
-        with:
-          cosign-release: 'v2.4.1'
-
       - name: Sign SHA256SUMS with cosign (keyless OIDC)
         run: |
           set -euo pipefail
