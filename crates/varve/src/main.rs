@@ -492,28 +492,62 @@ fn self_update(check: bool, to: Option<&std::path::Path>) -> anyhow::Result<()> 
         "https://api.github.com/repos/pulseengine/varve/releases/latest".to_string()
     });
     let platform = varve_core::host_platform();
-    let Some(plan) = varve_core::update::check_latest(&api, current, &platform)? else {
-        println!("varve {current} is current");
-        return Ok(());
-    };
-    if check {
-        println!(
-            "varve {current} installed; {} available — run `varve self-update` to install (verified)",
-            plan.latest
-        );
-        return Ok(());
-    }
-    let root_pk = trust_root_bytes()?;
     let dest = match to {
         Some(path) => path.to_path_buf(),
         None => std::env::current_exe().context("cannot locate the running varve binary")?,
     };
-    let digest = varve_core::update::perform(&plan, &root_pk, &dest)?;
-    println!(
-        "varve {current} -> {} installed at {} ({digest})",
-        plan.latest,
-        dest.display()
-    );
+    // Decide on ARTIFACT IDENTITY, not the self-reported version string: a
+    // binary that mis-reports its own version (varve#38) must not loop forever
+    // re-installing identical bytes. resolve_update fetches and verifies the
+    // candidate against the trust root, then compares it to what is on disk.
+    let on_disk = std::fs::read(&dest).ok();
+    // A first cheap check: if the API isn't even newer by version, skip the
+    // trust-root requirement entirely so an up-to-date `--check` stays root-free.
+    if varve_core::update::check_latest(&api, current, &platform)?.is_none() {
+        println!("varve {current} is current");
+        return Ok(());
+    }
+    let root_pk = trust_root_bytes().context(
+        "self-update needs the trust root to confirm a verified update — set VARVE_TRUST_ROOT \
+         or pin a realm",
+    )?;
+    match varve_core::update::resolve_update(
+        &api,
+        current,
+        &platform,
+        on_disk.as_deref(),
+        &root_pk,
+    )? {
+        varve_core::update::UpdateDecision::UpToDate => {
+            println!("varve {current} is current");
+        }
+        varve_core::update::UpdateDecision::AlreadyCurrent { latest } => {
+            println!(
+                "varve is already the latest release bytes ({latest}); the reported version \
+                 {current} is stale but the binary is current — nothing to do"
+            );
+        }
+        varve_core::update::UpdateDecision::Available {
+            plan,
+            binary,
+            digest,
+        } => {
+            if check {
+                println!(
+                    "varve {current} installed; {} available — run `varve self-update` to install \
+                     (verified)",
+                    plan.latest
+                );
+            } else {
+                varve_core::update::install_binary(&binary, &dest)?;
+                println!(
+                    "varve {current} -> {} installed at {} ({digest})",
+                    plan.latest,
+                    dest.display()
+                );
+            }
+        }
+    }
     Ok(())
 }
 

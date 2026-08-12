@@ -543,6 +543,8 @@ artifacts:
       steps:
         # The guard job exists and asserts the agreement before any build.
         - run: grep -q "does not match Cargo.toml version" .github/workflows/release.yml
+        # Artifact-level twin (varve#38): the built binary's --version is asserted == tag.
+        - run: grep -q "built binary reports" .github/workflows/release.yml
     links:
       - type: verifies
         target: REQ-RELVER-001
@@ -580,3 +582,55 @@ artifacts:
         target: REQ-CRATE-001
       - type: verifies
         target: REQ-RELVER-001
+
+  - id: VER-UPDATE-002
+    type: verification
+    title: A wrong version string degrades to a no-op instead of an update loop
+    status: verified
+    release: v0.15.1
+    fields:
+      method: automated-test
+      steps:
+        # The pure identity anchor.
+        - run: cargo test -p varve-core a_wrong_version_string_does_not_force_an_update_when_the_bytes_match
+        # The behavioral claim, end-to-end through a release-API double: a
+        # mis-reported version resolves to AlreadyCurrent (no loop), differing
+        # bytes to Available, and an impostor is refused before being offered.
+        - run: cargo test -p varve-core --test selfupdate_double a_mis_reported_version_converges_on_artifact_identity_not_a_loop
+        - run: cargo test -p varve-core --test selfupdate_double resolve_update_verifies_before_it_offers_an_impostor
+    links:
+      - type: verifies
+        target: REQ-UPDATE-002
+
+  - id: VER-REVIEW-v0.15.1
+    type: verification
+    title: v0.15.1 self-update fix independently reviewed — dissent raised, resolved, re-confirmed
+    status: verified
+    release: v0.15.1
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Two independent clean-room reviews (fresh context, refute-framed). The
+        FIRST found the implementation sound (all five refutations failed — the
+        loop breaks, trust is preserved, digests are sound, --check's root
+        requirement is disclosed, the release version-assertion is correct) but
+        DISSENTED on one substantive ground: REQ-UPDATE-002 is a handler-level
+        requirement, yet its only evidence was a pure unit test of the
+        `already_current` helper — the handler behaviour (loop-break,
+        verify-before-compare, --check no-op) had zero coverage. Resolved before
+        release: the decision was lifted into a core `resolve_update`
+        (UpToDate/AlreadyCurrent/Available), the handler reduced to a thin
+        wrapper, and behavioural tests added through the real release-API mock
+        server (signed archive, real ed25519 verify) — a mis-reported version
+        with identical on-disk bytes resolves to AlreadyCurrent (loop
+        terminates), and an impostor is refused before ever being offered. A
+        SECOND independent review re-ran the suites (6 self-update, 128 lib, 34
+        CLI) and confirmed VERDICT pass, DISSENT CLOSED — the identity decision
+        is genuinely exercised end-to-end. Residual, non-blocking: the handler's
+        printed-message glue and --check install-gate have no test at any level
+        (cli.rs carries no self-update case); the identity decision they wrap is
+        covered. Tracked as a follow-up hardening, not a release blocker.
+    links:
+      - type: verifies
+        target: REQ-UPDATE-002

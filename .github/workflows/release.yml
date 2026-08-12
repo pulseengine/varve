@@ -102,6 +102,25 @@ jobs:
         if: matrix.cross
         run: cross build --release --locked --target ${{ matrix.target }} -p varve
 
+      - name: Assert built binary reports the tag version (REQ-RELVER-001)
+        # The artifact-level twin of the version-guard job: run the freshly
+        # built binary and confirm `--version` == the tag. This is the exact
+        # oracle varve#38 asked for — a binary that mis-reports its own version
+        # (as v0.14.0 did) fails the release here. Native targets only; a
+        # cross-built binary cannot be executed on the runner.
+        if: ${{ !matrix.cross }}
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          REPORTED=$("target/${{ matrix.target }}/release/varve" --version | awk '{print $2}')
+          echo "tag=${VERSION#v}  binary --version=$REPORTED"
+          if [ "${VERSION#v}" != "$REPORTED" ]; then
+            echo "::error::built binary reports '$REPORTED' but the release tag is $VERSION"
+            exit 1
+          fi
+
       - name: Strip binary
         if: ${{ !matrix.cross }}
         run: strip "target/${{ matrix.target }}/release/varve" 2>/dev/null || true
