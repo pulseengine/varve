@@ -131,6 +131,18 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
+    /// Materialise a `cargo vendor`-shaped directory from the layer's verified
+    /// `crate` entries — consumed offline by bare Cargo and Corrosion
+    /// (REQ-VENDOR-001). rules_rust needs BUILD files on top of this tree
+    /// (REQ-VENDOR-002), not yet emitted.
+    ExportCratesVendor {
+        /// Layer to export, e.g. `2026.08.0`.
+        #[arg(long)]
+        layer: String,
+        /// Output directory (holds `vendor/` and `.cargo/config.toml`).
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
     /// Support window, yank state and known problems for the pinned layer,
     /// from the newest verified line-status document.
     Status {
@@ -272,6 +284,7 @@ fn run() -> anyhow::Result<()> {
         ),
         Cmd::ExportBazel { layer, out } => export_bazel(&store, &layer, &out),
         Cmd::ExportCargo { layer, out } => export_cargo(&store, &layer, &out),
+        Cmd::ExportCratesVendor { layer, out } => export_crates_vendor(&store, &layer, &out),
         Cmd::Status { from_file } => status(&store, from_file.as_deref()),
         Cmd::SignStatus {
             file,
@@ -665,9 +678,14 @@ fn export_bazel(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Re
     Ok(())
 }
 
-fn export_cargo(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Result<()> {
-    // Trust first: a Cargo registry materialised from an unverified layer
-    // would launder unanchored bytes into a build.
+/// Collect the verified `crate`-kind entries of an installed layer as
+/// CrateEntry values — the shared front-half of every Cargo-facing export.
+/// Trust-first: the layer is verified, and each blob is re-hashed against its
+/// signed digest before it can leave the store.
+fn collect_verified_crates(
+    store: &Store,
+    layer: &str,
+) -> anyhow::Result<Vec<varve_core::crateexport::CrateEntry>> {
     let verifier = trust_root()?;
     let wanted: varve_core::LayerId = layer.parse()?;
     let entry = store
@@ -699,16 +717,13 @@ fn export_cargo(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Re
             .strip_prefix("sha256:")
             .with_context(|| format!("crate '{name}' digest is not sha256:<hex>"))?
             .to_string();
-        // The .crate bytes are the verified blob the store laid down.
         let bytes_path = store
             .tool_path(&entry, name)
             .with_context(|| format!("crate '{name}' blob is not present in the store"))?;
         let bytes = std::fs::read(&bytes_path)?;
-        // Defense in depth: re-hash the on-disk bytes against the signed
-        // digest ourselves, regardless of platform filtering. The cksum we
-        // hand Cargo is that signed digest, so this guarantees the .crate we
-        // write is the exact bytes the trust root anchored — we do not rely on
-        // Cargo's later checksum check as the only tie between them.
+        // Defense in depth: re-hash the on-disk bytes against the signed digest
+        // ourselves, regardless of platform filtering, so what we export is the
+        // exact bytes the trust root anchored.
         if varve_core::manifest_digest(&bytes) != e.digest {
             bail!(
                 "crate '{name}' on-disk bytes do not match the signed digest {}",
@@ -725,7 +740,11 @@ fn export_cargo(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Re
     if crates.is_empty() {
         bail!("nothing exported — layer {layer} carries no `crate` entries");
     }
+    Ok(crates)
+}
 
+fn export_cargo(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Result<()> {
+    let crates = collect_verified_crates(store, layer)?;
     let registry_dir = out.join("registry");
     let n = varve_core::crateexport::export_local_registry(&crates, &registry_dir)?;
     let cargo_dir = out.join(".cargo");
@@ -736,10 +755,30 @@ fn export_cargo(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Re
         varve_core::crateexport::cargo_config_toml(&registry_dir),
     )?;
     println!(
-        "exported {n} verified crate(s) to {} — build with:\n  \
-         CARGO_HOME unaffected; from a project, copy {} into .cargo/config.toml \
-         and `cargo build --offline`",
+        "exported {n} verified crate(s) to a local registry at {} — copy {} into \
+         .cargo/config.toml and `cargo build --offline`",
         registry_dir.display(),
+        config.display()
+    );
+    Ok(())
+}
+
+fn export_crates_vendor(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Result<()> {
+    let crates = collect_verified_crates(store, layer)?;
+    let vendor_dir = out.join("vendor");
+    let n = varve_core::crateexport::export_vendor_dir(&crates, &vendor_dir)?;
+    let cargo_dir = out.join(".cargo");
+    std::fs::create_dir_all(&cargo_dir)?;
+    let config = cargo_dir.join("config.toml");
+    std::fs::write(
+        &config,
+        varve_core::crateexport::vendored_config_toml(&vendor_dir),
+    )?;
+    println!(
+        "vendored {n} verified crate(s) to {} — a cargo-vendor tree bare Cargo and Corrosion \
+         build against offline; copy {} into .cargo/config.toml (rules_rust needs BUILD files \
+         on top — not yet emitted, REQ-VENDOR-002)",
+        vendor_dir.display(),
         config.display()
     );
     Ok(())
