@@ -1606,3 +1606,34 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  - id: REQ-TRACEPACK-001
+    type: requirement
+    title: A release carries its rivet traceability as queryable, assessor-importable evidence
+    status: verified
+    release: v0.17.0
+    description: >
+      A varve release already ships the supply-chain layer (signed sums, SLSA
+      provenance, SBOM, trust root, realms). It shall ALSO carry its safety-case
+      traceability as first-class release assets, so a consumer or assessor can
+      query it directly from the release — offline, with no repo checkout:
+        - a ReqIF export (`rivet export --format reqif`), the OMG interchange
+          format assessor tools (DOORS/Polarion/…) import directly;
+        - a browsable HTML report (`rivet export --format html --offline`) —
+          artifacts, coverage matrix, trace graph;
+        - the rivet source artifacts themselves, so `rivet trace-results`,
+          `rivet coverage`, and `rivet docs --grep --format json` run against
+          the packed evidence.
+      The traceability assets shall be covered by the same signed
+      `SHA256SUMS.txt` as the binaries (the cosign signature transitively
+      covers them), so the safety case is as tamper-evident as the code. This
+      makes rivet's embedded, queryable-docs model the release's own: the
+      release IS a queryable safety case. Composes with REQ-ATTEST-001 and the
+      Eclipse-SCORE release-manifest shape.
+    tags: [release, traceability]
+    links:
+      - type: traces-to
+        target: REQ-CLAIM-001
+    fields:
+      priority: should
+      category: functional

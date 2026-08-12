@@ -81,6 +81,11 @@ jobs:
         run: |
           python3 tools/review-check.py --self-test
           python3 tools/review-check.py
+      - name: tracepack-check (release safety-case exports are valid)
+        # REQ-TRACEPACK-001: the ReqIF (assessor-importable) + HTML exports the
+        # release packs must actually produce valid evidence. Runs the same
+        # `rivet export` the release does, so a regression goes red here first.
+        run: python3 tools/tracepack-check.py
       - name: coverage report (informational)
         run: rivet coverage || true
 

@@ -733,3 +733,22 @@ artifacts:
     links:
       - type: verifies
         target: REQ-VENDOR-002
+
+  - id: VER-TRACEPACK-001
+    type: verification
+    title: The release traceability exports (ReqIF + HTML) produce valid evidence
+    status: verified
+    release: v0.17.0
+    fields:
+      method: automated-test
+      steps:
+        # The oracle: rivet export --format reqif (well-formed, >=10 spec-objects)
+        # + html both succeed; run in CI and by the release step it mirrors.
+        - run: python3 tools/tracepack-check.py
+        # The release actually packs the three evidence assets.
+        - run: grep -q "traceability.reqif" .github/workflows/release.yml
+        - run: grep -q "traceability-html.tar.gz" .github/workflows/release.yml
+        - run: grep -q "rivet-artifacts.tar.gz" .github/workflows/release.yml
+    links:
+      - type: verifies
+        target: REQ-TRACEPACK-001
