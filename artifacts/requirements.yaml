@@ -1088,7 +1088,7 @@ artifacts:
     type: requirement
     title: The ASPICE V is populated so its trace rules bite non-vacuously
     status: approved
-    release: v0.18.0
+    release: v0.19.0
     description: >
       The enabled aspice schema's V-types shall carry real artifacts —
       system requirements deriving from the STPA-Sec losses, software
@@ -1105,7 +1105,7 @@ artifacts:
     type: requirement
     title: The threat analysis is a full TARA, not a seed
     status: approved
-    release: v0.18.0
+    release: v0.19.0
     description: >
       The cybersecurity schema shall be enabled and populated: assets,
       threat-scenarios with attack-vector and attack-feasibility, risk
@@ -1124,7 +1124,7 @@ artifacts:
     type: requirement
     title: The archive of record is durable, not a 90-day CI artifact
     status: approved
-    release: v0.19.0
+    release: v0.20.0
     description: >
       A deposited layer's oci-layout archive shall be published to durable,
       verifiable storage kept independently of any registry or CI retention
@@ -1140,7 +1140,7 @@ artifacts:
     type: requirement
     title: Client-side append-only log of installs, verifications, refusals
     status: approved
-    release: v0.19.0
+    release: v0.20.0
     description: >
       varve shall write an append-only local record of update events —
       installs, re-verifications, refusals, staleness warnings, self-updates
@@ -1156,7 +1156,7 @@ artifacts:
     type: requirement
     title: A fresh consumer cannot be handed an arbitrarily old signed layer
     status: approved
-    release: v0.19.0
+    release: v0.20.0
     description: >
       The first-contact rollback window (empty high-water mark accepts any
       counter) shall be closed: a signed per-line floor (carried in the
@@ -1414,7 +1414,7 @@ artifacts:
   - id: REQ-CORROSION-001
     type: requirement
     title: A varve-exported crate builds under Corrosion (CMake -> Cargo)
-    status: approved
+    status: verified
     release: v0.16.0
     description: >
       The Cargo local-registry export (REQ-CRATE-001) shall build offline under
@@ -1434,25 +1434,49 @@ artifacts:
 
   - id: REQ-VENDOR-001
     type: requirement
-    title: A verified crate builds under rules_rust via a vendored-directory export
-    status: approved
+    title: A verified crate is exported as a cargo-vendor tree, consumed offline by Cargo and Corrosion
+    status: verified
     release: v0.16.0
     description: >
-      rules_rust's crate_universe fetches crates by URL, so a file-based Cargo
-      local-registry drives only the resolve phase, not the Bazel fetch — a
-      local-registry alone is insufficient (research 2026-08-12). varve shall
-      add `export-crates-vendor`, emitting a `cargo vendor`-shaped directory
-      (unpacked crate trees + a `.cargo-checksum.json` whose `package` field is
-      the sha256 of the `.crate` — the digest varve already signs — with
-      `files: {}`) plus the `[source.vendored-sources]` config. This directory
-      is consumed natively by bare Cargo and Corrosion too, and by rules_rust
-      via `crates_vendor` / a `cargo_config` source-replacement. A small Bazel
-      spike shall confirm crate_universe resolves from the directory source
-      with zero network before the rules_rust story is claimed supported.
+      varve shall add `export-crates-vendor`, emitting a `cargo vendor`-shaped
+      directory (unpacked crate trees + a `.cargo-checksum.json` whose `package`
+      field is the sha256 of the `.crate` — the digest varve already signs —
+      with `files: {}`) plus the `[source.vendored-sources]` config. This tree
+      shall build fully offline under bare Cargo AND under Corrosion (CMake ->
+      Cargo, the Zephyr-Rust path), proven by real builds. NOTE (Bazel spike,
+      2026-08-12): rules_rust's `crate.from_cargo` splice requires a registry
+      INDEX, and fails ("Failed to get crate index config") against a vendored
+      directory source — so the vendor tree ALONE is not consumable by
+      rules_rust. Full rules_rust support needs varve to also emit
+      crates_vendor-style BUILD files; that is REQ-VENDOR-002 (v0.17.0). This
+      requirement is scoped to what the spike PROVED: Cargo + Corrosion.
     tags: [distribution]
     links:
       - type: traces-to
         target: REQ-KIND-001
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-VENDOR-002
+    type: requirement
+    title: rules_rust consumes the vendored export via emitted BUILD files
+    status: approved
+    release: v0.17.0
+    description: >
+      The v0.16.0 Bazel spike proved rules_rust's `crate.from_cargo` splice
+      needs a registry index and fails against a bare vendored directory. The
+      hermetic rules_rust path is generated BUILD files (the `crates_vendor`
+      output shape). varve shall either emit those BUILD files alongside the
+      vendor tree (a `crates_vendor`-consumable `crates/` dir with per-crate
+      BUILD.bazel + a defs.bzl), or ship a documented `crates_vendor` recipe
+      that points at varve's verified vendor tree — verified by a real
+      `bazel build` against a varve-vendored crate with zero network beyond
+      the rules_rust toolchain fetch.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-VENDOR-001
     fields:
       priority: should
       category: functional
@@ -1478,4 +1502,86 @@ artifacts:
         target: REQ-UPDATE-001
     fields:
       priority: must
+      category: functional
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Research-driven (2026-08-12 competitive sweep, see the campaign memory).
+  # varve's defensible niche: signed + anti-rollback + realm-scoped + offline
+  # distribution of toolchain/source artifacts for regulated/safety domains
+  # where a live transparency log is unavailable and pinned-root PKI is
+  # mandated (the space warg vacated when it archived for OCI+cosign+Rekor).
+  # These three close the gaps that sweep surfaced.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-BRIDGE-001
+    type: requirement
+    title: Export adapters preserve upstream provenance, they do not clobber it
+    status: verified
+    release: v0.16.0
+    description: >
+      When varve re-distributes an artifact, its export adapters shall PRESERVE
+      the artifact's own upstream integrity anchor rather than discard it. For a
+      `.crate`, that anchor is the tarball sha256 — which is BOTH the crates.io
+      registry cksum AND the digest varve signs — so the vendored tree's
+      `.cargo-checksum.json` `package` field carries it forward unchanged: a
+      consumer verifies both varve's pinned-root signature and Cargo's own
+      checksum against the same value. SCOPE (v0.16.0): this is proven for the
+      `.crate` sha256 anchor. Richer upstream provenance that does not yet exist
+      in a deposited artifact — TAP-16 Merkle-TUF crate signing (RFC 3724, not
+      yet shipped by crates.io) and BCR in-toto attestation bundles — is carried
+      when present; verifying those fuller chains is future work once the
+      formats are producible, tracked with the referrer-carried attestations of
+      REQ-ATTEST-001.
+    tags: [distribution, integrity]
+    links:
+      - type: traces-to
+        target: REQ-CRATE-001
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-INDEXAUTH-001
+    type: requirement
+    title: The realm authenticates the line index, not only each artifact
+    status: approved
+    release: v0.18.0
+    description: >
+      varve signs individual layer manifests and realms, but the LISTING of
+      which layers exist for a line (the index a consumer enumerates) must
+      itself be authenticated by the realm's trust root — otherwise a
+      compromised registry/index host could hide or omit a layer (a freshness
+      /availability attack) even though each artifact it does serve verifies.
+      Guix authenticates its index git-history via signed commits; varve shall
+      have the equivalent: the per-line index is signed, and the anti-rollback
+      high-water mark holds even if the index host is compromised (the Uptane
+      insight — rollback protection must survive a Director/registry
+      compromise, not just artifact tampering).
+    tags: [core, security]
+    links:
+      - type: traces-to
+        target: REQ-ROLLBACK-001
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-ATTEST-001
+    type: requirement
+    title: A layer carries its audit, provenance, and SBOM as verifiable referrers
+    status: approved
+    release: v0.18.0
+    description: >
+      varve shall be able to carry, and `varve verify` to report, third-party
+      attestations attached to a layer as OCI referrer artifacts: cargo-vet /
+      cargo-crev audit records (human review), SLSA in-toto build provenance,
+      and CycloneDX SBOMs. varve signs "authentic + current"; these add
+      "reviewed + provenanced + billed-of-materials" so one verified pull
+      yields all dimensions — an end-to-end assurance bundle no single existing
+      tool offers for source/toolchain inputs. varve does not re-attest human
+      review; it transports and integrity-binds the attestations others produce.
+    tags: [distribution, traceability]
+    links:
+      - type: traces-to
+        target: REQ-VERIFY-001
+    fields:
+      priority: should
       category: functional

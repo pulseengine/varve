@@ -11,7 +11,9 @@ use std::path::Path;
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
-use varve_core::crateexport::{CrateEntry, cargo_config_toml, export_local_registry};
+use varve_core::crateexport::{
+    CrateEntry, cargo_config_toml, export_local_registry, export_vendor_dir, vendored_config_toml,
+};
 
 fn write(path: &Path, contents: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -92,6 +94,77 @@ fn a_varve_exported_crate_builds_offline_through_cargo() {
     assert!(
         build.status.success(),
         "offline build against the varve registry failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+}
+
+// rivet: verifies REQ-VENDOR-001
+#[test]
+fn a_varve_vendored_crate_builds_offline_through_cargo() {
+    // The vendored path: a cargo-vendor-shaped directory bare Cargo (and
+    // Corrosion) consume natively. Same producer, same signed digest as the
+    // cksum — but UNPACKED trees + [source.vendored-sources].
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let cargo_home = root.join("cargo-home");
+    std::fs::create_dir_all(&cargo_home).unwrap();
+
+    let producer = root.join("wdemo");
+    write(
+        &producer.join("Cargo.toml"),
+        "[package]\nname = \"wdemo\"\nversion = \"0.2.0\"\nedition = \"2021\"\nlicense = \"MIT\"\ndescription = \"varve export-crates-vendor oracle fixture\"\n",
+    );
+    write(&producer.join("src/lib.rs"), "pub fn two() -> u32 { 2 }\n");
+    let pkg = Command::new("cargo")
+        .args(["package", "--no-verify", "--allow-dirty"])
+        .current_dir(&producer)
+        .env("CARGO_HOME", &cargo_home)
+        .output()
+        .expect("cargo package runs");
+    assert!(
+        pkg.status.success(),
+        "cargo package failed: {}",
+        String::from_utf8_lossy(&pkg.stderr)
+    );
+    let bytes = std::fs::read(producer.join("target/package/wdemo-0.2.0.crate")).unwrap();
+    let cksum = hex::encode(Sha256::digest(&bytes));
+
+    let vendor = root.join("vendor");
+    export_vendor_dir(
+        &[CrateEntry {
+            name: "wdemo".into(),
+            version: "0.2.0".into(),
+            cksum,
+            bytes,
+        }],
+        &vendor,
+    )
+    .unwrap();
+
+    let consumer = root.join("consumer");
+    write(
+        &consumer.join("Cargo.toml"),
+        "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nwdemo = \"0.2.0\"\n",
+    );
+    write(
+        &consumer.join("src/main.rs"),
+        "fn main() { assert_eq!(wdemo::two(), 2); }\n",
+    );
+    write(
+        &consumer.join(".cargo/config.toml"),
+        &vendored_config_toml(&vendor),
+    );
+
+    let build = Command::new("cargo")
+        .args(["build", "--offline"])
+        .current_dir(&consumer)
+        .env("CARGO_HOME", &cargo_home)
+        .env("CARGO_TARGET_DIR", root.join("consumer-target"))
+        .output()
+        .expect("cargo build runs");
+    assert!(
+        build.status.success(),
+        "offline build against the varve VENDORED dir failed:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
 }

@@ -617,6 +617,86 @@ fn deposit_a_crate_kind_entry_and_export_a_cargo_registry() {
     );
 }
 
+// rivet: verifies REQ-VENDOR-001
+#[test]
+fn deposit_a_crate_kind_entry_and_export_crates_vendor() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    // A REAL .crate-shaped gzip tar (export-crates-vendor unpacks it).
+    let crate_bytes = {
+        let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        for (name, body) in [
+            (
+                "vend-0.1.0/Cargo.toml",
+                "[package]\nname=\"vend\"\nversion=\"0.1.0\"\n",
+            ),
+            ("vend-0.1.0/src/lib.rs", "pub fn v() {}\n"),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, name, body.as_bytes()).unwrap();
+        }
+        b.into_inner().unwrap().finish().unwrap()
+    };
+    let crate_path = parent.join("vend.crate");
+    std::fs::write(&crate_path, &crate_bytes).unwrap();
+
+    let spec = parent.join("deposit-spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"vend\"\nversion = \"0.1.0\"\nkind = \"crate\"\npath = \"{}\"\n",
+            crate_path.display()
+        ),
+    )
+    .unwrap();
+    let dest = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-08-07T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&dest)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&dest)
+        .assert()
+        .success();
+
+    let out = parent.join("vendor-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-crates-vendor", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vendored 1 verified crate"));
+
+    // The crate is UNPACKED with its checksum; the config uses a directory source.
+    assert!(out.join("vendor/vend-0.1.0/Cargo.toml").is_file());
+    let checksum =
+        std::fs::read_to_string(out.join("vendor/vend-0.1.0/.cargo-checksum.json")).unwrap();
+    assert!(checksum.contains(r#""package":"#), "{checksum}");
+    let config = std::fs::read_to_string(out.join(".cargo/config.toml")).unwrap();
+    assert!(config.contains("replace-with = \"vendored-sources\""));
+}
+
 fn status_doc_json(line: &str, counter: u64) -> String {
     format!(
         r#"{{

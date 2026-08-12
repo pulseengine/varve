@@ -634,3 +634,85 @@ artifacts:
     links:
       - type: verifies
         target: REQ-UPDATE-002
+
+  - id: VER-VENDOR-001
+    type: verification
+    title: The cargo-vendor export builds offline through bare Cargo
+    status: verified
+    release: v0.16.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core vendoring_unpacks_the_crate_and_preserves_the_upstream_hash
+        - run: cargo test -p varve-core the_vendored_config_replaces_with_a_directory_source
+        - run: cargo test -p varve-core --test cargo_offline a_varve_vendored_crate_builds_offline_through_cargo
+        - run: cargo test -p varve --test cli deposit_a_crate_kind_entry_and_export_crates_vendor
+    links:
+      - type: verifies
+        target: REQ-VENDOR-001
+
+  - id: VER-CORROSION-001
+    type: verification
+    title: Corrosion builds a varve-vendored crate offline (real CMake build)
+    status: verified
+    release: v0.16.0
+    fields:
+      method: automated-test
+      steps:
+        # Gated (VARVE_CORROSION_TEST=1 + cmake) — a real CMake+Corrosion build
+        # compiling varve's export_vendor_dir output offline. Runs in the
+        # dedicated `corrosion` CI job; verified locally 2026-08-12.
+        - run: cargo test -p varve-core --test corrosion_offline corrosion_builds_a_varve_vendored_crate_offline
+    links:
+      - type: verifies
+        target: REQ-CORROSION-001
+
+  - id: VER-BRIDGE-001
+    type: verification
+    title: The vendored export preserves the upstream integrity anchor
+    status: verified
+    release: v0.16.0
+    fields:
+      method: automated-test
+      steps:
+        # .cargo-checksum.json package == the sha256 varve signs (upstream hash preserved).
+        - run: cargo test -p varve-core vendoring_unpacks_the_crate_and_preserves_the_upstream_hash
+    links:
+      - type: verifies
+        target: REQ-BRIDGE-001
+
+  - id: VER-REVIEW-v0.16.0
+    type: verification
+    title: v0.16.0 independently reviewed — CLI overclaim dissent raised, resolved, re-confirmed
+    status: verified
+    release: v0.16.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Two independent clean-room reviews (fresh context, refute-framed). The
+        FIRST found the vendor/Corrosion engineering sound — all refutations
+        failed (correct cargo-vendor tree, real offline Cargo build, real
+        CMake+Corrosion build compiling varve's own export_vendor_dir output,
+        upstream sha256 anchor preserved, trust-first collection) — but
+        DISSENTED on honesty: two USER-FACING CLI strings (the ExportCratesVendor
+        --help doc and the export_crates_vendor success message) still claimed
+        rules_rust/crates_vendor "consume the bare vendor tree hermetically",
+        the exact capability the v0.16.0 Bazel spike disproved
+        ("Failed to get crate index config"). The library comments, README, and
+        rivet were already honest; only the CLI surface overclaimed. Resolved
+        before release: both strings reworded to name bare Cargo + Corrosion as
+        the proven consumers and defer rules_rust to REQ-VENDOR-002; a dedicated
+        real-.crate CLI test for export-crates-vendor added and VER-VENDOR-001
+        pointed at it; REQ-BRIDGE-001 narrowed to the proven .crate sha256
+        anchor. A SECOND independent review confirmed VERDICT pass, DISSENT
+        CLOSED — zero residual rules_rust overclaim anywhere, 185 tests pass,
+        clippy clean. The Bazel spike + this review together PREVENTED shipping
+        a rules_rust capability claim that does not yet hold.
+    links:
+      - type: verifies
+        target: REQ-VENDOR-001
+      - type: verifies
+        target: REQ-CORROSION-001
+      - type: verifies
+        target: REQ-BRIDGE-001
