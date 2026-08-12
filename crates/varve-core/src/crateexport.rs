@@ -158,6 +158,31 @@ pub fn export_local_registry(
     Ok(crates.len())
 }
 
+/// Materialise a Bazel **distdir** of the verified `.crate` tarballs
+/// (REQ-VENDOR-002, air-gap rules_rust). Bazel's `--distdir` resolves an
+/// `http_archive` from a local file whose sha256 matches — with NO network and
+/// NO URL rewrite. Because varve's signed `.crate` digest IS the `crate_universe`
+/// pin (== the crates.io checksum), a consumer that pre-generates its
+/// `crate_universe` output once and then builds with
+/// `bazel build --distdir=<this dir>` (network off) resolves every crate from
+/// varve's verified bytes. varve emits the bytes; the consumer commits the
+/// generated `crate_universe` output (so no repin/index lookup at build time).
+/// Returns the number of tarballs written.
+pub fn export_distdir(crates: &[CrateEntry], distdir: &Path) -> Result<usize, CrateExportError> {
+    let io = |path: &Path, source: std::io::Error| CrateExportError::Io {
+        path: path.display().to_string(),
+        source,
+    };
+    std::fs::create_dir_all(distdir).map_err(|e| io(distdir, e))?;
+    for entry in crates {
+        // Bazel matches distdir files by content sha256; the name is for
+        // humans. `<name>-<version>.crate` mirrors the crates.io asset name.
+        let file = distdir.join(format!("{}-{}.crate", entry.name, entry.version));
+        std::fs::write(&file, &entry.bytes).map_err(|e| io(&file, e))?;
+    }
+    Ok(crates.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +252,38 @@ mod tests {
         let checksum =
             std::fs::read_to_string(vendor.join("demo-0.1.0/.cargo-checksum.json")).unwrap();
         assert_eq!(checksum, r#"{"files":{},"package":"abc123def"}"#);
+    }
+
+    // rivet: verifies REQ-VENDOR-002
+    #[test]
+    fn a_distdir_holds_the_verified_crate_bytes_keyed_for_bazel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dd = tmp.path().join("distdir");
+        let bytes = b"the-verified-crate-tarball-bytes".to_vec();
+        // varve's cksum IS the sha256 of these bytes == the crate_universe pin.
+        let cksum = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&bytes))
+        };
+        let e = CrateEntry {
+            name: "cfg-if".into(),
+            version: "1.0.0".into(),
+            cksum: cksum.clone(),
+            bytes: bytes.clone(),
+        };
+        assert_eq!(export_distdir(std::slice::from_ref(&e), &dd).unwrap(), 1);
+        let file = dd.join("cfg-if-1.0.0.crate");
+        // The exact verified bytes are present...
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+        // ...and their sha256 is the join key Bazel's --distdir matches on.
+        let on_disk = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(std::fs::read(&file).unwrap()))
+        };
+        assert_eq!(
+            on_disk, cksum,
+            "distdir file sha256 must equal the crate_universe pin"
+        );
     }
 
     // rivet: verifies REQ-VENDOR-001

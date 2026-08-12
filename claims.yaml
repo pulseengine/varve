@@ -68,3 +68,9 @@ claims:
   - claim: "A released binary reports the version it is tagged as"
     evidence:
       - { kind: workflow, ref: "does not match Cargo.toml version", file: .github/workflows/release.yml }
+
+  - claim: "A release carries its rivet traceability as queryable, assessor-importable evidence"
+    evidence:
+      - { kind: file, ref: tools/tracepack-check.py }
+      - { kind: workflow, ref: "traceability.reqif", file: .github/workflows/release.yml }
+      - { kind: workflow, ref: "tracepack-check", file: .github/workflows/ci.yml }

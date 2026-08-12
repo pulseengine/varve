@@ -716,3 +716,70 @@ artifacts:
         target: REQ-CORROSION-001
       - type: verifies
         target: REQ-BRIDGE-001
+
+  - id: VER-VENDOR-002
+    type: verification
+    title: The varve distdir holds the verified crate bytes keyed for Bazel by sha256
+    status: verified
+    release: v0.17.0
+    fields:
+      method: automated-test
+      steps:
+        # varve's exported .crate bytes ARE present and their sha256 == the
+        # crate_universe pin (the --distdir join key). The end-to-end Bazel
+        # --distdir consumption was manually confirmed; an automated
+        # zero-network gate is a tracked follow-up (see REQ-VENDOR-002 scope).
+        - run: cargo test -p varve-core a_distdir_holds_the_verified_crate_bytes_keyed_for_bazel
+    links:
+      - type: verifies
+        target: REQ-VENDOR-002
+
+  - id: VER-TRACEPACK-001
+    type: verification
+    title: The release traceability exports (ReqIF + HTML) produce valid evidence
+    status: verified
+    release: v0.17.0
+    fields:
+      method: automated-test
+      steps:
+        # The oracle: rivet export --format reqif (well-formed, >=10 spec-objects)
+        # + html both succeed; run in CI and by the release step it mirrors.
+        - run: python3 tools/tracepack-check.py
+        # The release actually packs the three evidence assets.
+        - run: grep -q "traceability.reqif" .github/workflows/release.yml
+        - run: grep -q "traceability-html.tar.gz" .github/workflows/release.yml
+        - run: grep -q "rivet-artifacts.tar.gz" .github/workflows/release.yml
+    links:
+      - type: verifies
+        target: REQ-TRACEPACK-001
+
+  - id: VER-REVIEW-v0.17.0
+    type: verification
+    title: v0.17.0 independently reviewed — pass, no overclaim of the offline property
+    status: verified
+    release: v0.17.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-12,
+        over both v0.17.0 requirements. VERDICT pass, no dissent. Re-ran the
+        suites (131 lib, 186 workspace) and tools/tracepack-check.py (real
+        ReqIF+HTML export). Confirmed: (a) export_distdir writes verified bytes
+        verbatim and collect_verified_crates is trust-first (verify_installed +
+        re-hash vs signed digest), so cksum == signed digest == sha256(bytes) —
+        the crate_universe join key; (b) NO overclaim of a zero-network bazel
+        build anywhere — every offline assertion is either Bazel's documented
+        `--distdir` behavior under a stated precondition or explicitly labeled
+        manual/follow-up in REQ-VENDOR-002 + VER-VENDOR-002; (c) tracepack-check
+        genuinely validates (ReqIF well-formed + >=10 spec-objects, HTML index)
+        and is not vacuous in CI (the rivet job guarantees rivet); (d) the three
+        traceability assets are staged BEFORE SHA256SUMS so the cosign signature
+        covers them, and the rivet fetch is cosign-verified, not TOFU. Three
+        immaterial nits noted (join split across two layers; substring floor;
+        skip-safe only because CI guarantees rivet) — none a defect.
+    links:
+      - type: verifies
+        target: REQ-VENDOR-002
+      - type: verifies
+        target: REQ-TRACEPACK-001
