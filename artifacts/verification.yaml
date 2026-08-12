@@ -496,3 +496,87 @@ artifacts:
         target: REQ-STATUS-DIST-001
       - type: verifies
         target: REQ-INDEP-001
+
+  - id: VER-KIND-001
+    type: verification
+    title: Payload kinds parse canonically, default to tool, and refuse unknowns
+    status: verified
+    release: v0.15.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core every_kind_round_trips_through_its_wire_string
+        - run: cargo test -p varve-core an_unknown_kind_is_refused_not_guessed
+        - run: cargo test -p varve-core the_default_kind_is_tool_for_back_compat
+        - run: cargo test -p varve-core an_entry_kind_defaults_to_tool_and_refuses_unknowns
+    links:
+      - type: verifies
+        target: REQ-KIND-001
+
+  - id: VER-CRATE-001
+    type: verification
+    title: A varve-exported crate builds offline through a real Cargo
+    status: verified
+    release: v0.15.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core index_paths_follow_cargos_layout
+        - run: cargo test -p varve-core an_index_line_carries_the_cksum_cargo_will_verify
+        - run: cargo test -p varve-core config_redirects_crates_io_to_the_local_registry
+        - run: cargo test -p varve-core materialising_writes_the_crate_and_a_matching_index_entry
+        # The honest oracle: a real `cargo build --offline` against the export.
+        - run: cargo test -p varve-core --test cargo_offline a_varve_exported_crate_builds_offline_through_cargo
+        # Full CLI path: deposit crate-kind -> install -> export-cargo.
+        - run: cargo test -p varve --test cli deposit_a_crate_kind_entry_and_export_a_cargo_registry
+    links:
+      - type: verifies
+        target: REQ-CRATE-001
+
+  - id: VER-RELVER-001
+    type: verification
+    title: The release pipeline gates on tag == Cargo.toml version
+    status: verified
+    release: v0.15.0
+    fields:
+      method: inspection
+      steps:
+        # The guard job exists and asserts the agreement before any build.
+        - run: grep -q "does not match Cargo.toml version" .github/workflows/release.yml
+    links:
+      - type: verifies
+        target: REQ-RELVER-001
+
+  - id: VER-REVIEW-v0.15.0
+    type: verification
+    title: v0.15.0 scope independently reviewed by a refute-framed clean-room reviewer
+    status: verified
+    release: v0.15.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        VERDICT pass. Reviewer: clean-room agent (general-purpose, fresh
+        context, refute-framed), 2026-08-12, over the feat/v0.15.0 tree. It
+        re-ran every suite itself (127 lib, 1 cargo_offline, 34 CLI) AND ran an
+        independent tamper experiment — an --offline build against a registry
+        with a WRONG cksum, which Cargo rejected ("failed to verify the
+        checksum") — proving the offline oracle is non-vacuous. All five
+        refutations failed: (a) kind stamping leaves tool-layer digests
+        byte-identical and install/verify never consult kind; (b) the index
+        cksum is the signature-anchored sha256 and export_cargo verifies the
+        layer trust-first; (c) the offline build is real; (d) version-guard
+        gates the whole release via the needs-chain; (e) the index dedup does
+        not false-prefix-match adjacent versions. Two minor gaps were fixed in
+        response before release: the "unknown kind refused" claim was narrowed
+        to its true scope (deposit + kind-consuming exports; install is
+        kind-agnostic for forward-compat), and export_cargo now re-hashes the
+        on-disk bytes against the signed digest itself rather than relying on
+        Cargo's checksum as the only tie.
+    links:
+      - type: verifies
+        target: REQ-KIND-001
+      - type: verifies
+        target: REQ-CRATE-001
+      - type: verifies
+        target: REQ-RELVER-001

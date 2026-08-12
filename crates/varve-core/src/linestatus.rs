@@ -511,6 +511,7 @@ mod tests {
                 bytes: b"t".to_vec(),
                 source: None,
                 runner: None,
+                kind: None,
             }],
         };
         let outcome = deposit(&spec, &sk, "k", &dest).unwrap();
@@ -720,6 +721,7 @@ mod tests {
                     bytes: b"t".to_vec(),
                     source: None,
                     runner: None,
+                    kind: None,
                 }],
             },
             &sk,
@@ -762,6 +764,7 @@ mod tests {
                 bytes: b"t".to_vec(),
                 source: None,
                 runner: None,
+                kind: None,
             }],
         };
         deposit(&spec, &sk, "k", &dest).unwrap();

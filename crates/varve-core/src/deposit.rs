@@ -47,6 +47,9 @@ pub struct DepositTool {
     /// (from the SAME layer) that executes this entry, prefix args, and an
     /// optional per-user-argument flag (kilnd's --wasi-arg shape).
     pub runner: Option<RunnerSpec>,
+    /// Payload kind (REQ-KIND-001). `None` or `Tool` deposits no kind
+    /// annotation — pre-kind and tool layers keep byte-identical payloads.
+    pub kind: Option<crate::kind::PayloadKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -108,6 +111,10 @@ pub struct SpecTool {
     pub source: Option<ToolSource>,
     #[serde(default)]
     pub runner: Option<RunnerSpec>,
+    /// Payload kind (REQ-KIND-001): tool|crate|wit|zephyr-module|sdk|
+    /// wasm-component. Absent = tool.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositError> {
@@ -186,6 +193,14 @@ pub fn deposit(
                     crate::bazel::ANN_SRC_SHA256.into(),
                     source.sha256.clone().into(),
                 );
+            }
+            // Stamp the payload kind only when it is non-default: a `tool`
+            // (or unspecified) entry carries no kind annotation, so pre-kind
+            // tool layers keep byte-identical signed payloads (REQ-KIND-001).
+            if let Some(kind) = tool.kind
+                && kind != crate::kind::PayloadKind::Tool
+            {
+                annotations.insert(crate::kind::ANN_KIND.into(), kind.as_str().into());
             }
             if let Some(runner) = &tool.runner {
                 annotations.insert(crate::bazel::ANN_RUNNER.into(), runner.tool.clone().into());
@@ -271,6 +286,7 @@ mod tests {
                     bytes: b"synth-bytes".to_vec(),
                     source: None,
                     runner: None,
+                    kind: None,
                 },
                 DepositTool {
                     name: "rivet".into(),
@@ -279,6 +295,7 @@ mod tests {
                     bytes: b"rivet-bytes".to_vec(),
                     source: None,
                     runner: None,
+                    kind: None,
                 },
             ],
         }

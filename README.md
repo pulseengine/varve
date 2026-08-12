@@ -187,6 +187,34 @@ release gate (no verdict, no tag) lands at v1.0 alongside the root ceremony.
 Recording first, then gating, keeps the claim honest at each stage: *independent
 review is recorded* now, *independence is enforced* at v1.0.
 
+## Distributing more than binaries
+
+A tool binary is just bytes with an exec bit; a Rust crate, a WIT package, a
+Zephyr module, an SDK are also just bytes. From v0.15.0 a layer entry declares
+its **payload kind** (`tool | crate | wit | zephyr-module | sdk |
+wasm-component`) in its signed annotations — verification is unchanged (every
+kind is a signed digest checked against the trust root; an unknown kind is
+refused, never guessed), and per-consumer **export adapters** wire the
+*verified* store path into each build system's native mechanism. No git server:
+a content-addressed, signed, anti-rollback path is the feature, not a hack.
+
+First adapter — **`varve export-cargo`** (REQ-CRATE-001): it materialises a
+Cargo **local registry** (the `.crate` files plus an index) from a layer's
+verified `crate` entries and emits a `.cargo/config.toml` source-replacement, so
+a consumer builds **fully offline** against crates whose bytes varve signed. The
+cksum Cargo verifies *is* varve's signed sha256 of the `.crate`, so Cargo
+re-checks the integrity on its own terms. Proven end to end by a real
+`cargo build --offline` against an exported registry.
+
+```sh
+varve export-cargo --layer 2026.08.0 --out ./vendored
+# copy ./vendored/.cargo/config.toml into your project's .cargo/, then:
+cargo build --offline
+```
+
+WIT + wasm-components, Zephyr modules, and C SDKs follow the same shape in later
+releases; Bazel gets an export per kind (extending `varve export-bazel`).
+
 ## Related
 
 - [pulseengine.eu#157](https://github.com/pulseengine/pulseengine.eu/issues/157) — the design thread

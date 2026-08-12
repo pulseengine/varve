@@ -23,9 +23,11 @@
 
 pub mod archive;
 pub mod bazel;
+pub mod crateexport;
 pub mod deposit;
 pub mod discover;
 pub mod install;
+pub mod kind;
 pub mod layer;
 pub mod linestatus;
 pub mod manifest;
@@ -50,6 +52,7 @@ pub use deposit::{
 pub use install::{
     InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
 };
+pub use kind::{ANN_KIND, PayloadKind, UnknownKind};
 pub use layer::{LayerId, LayerIdError, Line};
 pub use linestatus::{
     KnownProblem, LayerStatusReport, LineStatus, LineStatusError, StatusCache,
