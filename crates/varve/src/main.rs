@@ -256,6 +256,10 @@ enum Cmd {
         /// (check --coverage) Exit non-zero if any subcommand is undocumented.
         #[arg(long)]
         strict: bool,
+        /// Output format: `text` (default) or `json` for machine queries —
+        /// applies to the topic list and to a single `varve docs <topic>`.
+        #[arg(long, value_name = "FMT", default_value = "text")]
+        format: String,
     },
 }
 
@@ -348,7 +352,15 @@ fn run() -> anyhow::Result<()> {
             grep,
             coverage,
             strict,
-        } => docs_cmd(topic.as_deref(), list, grep.as_deref(), coverage, strict),
+            format,
+        } => docs_cmd(
+            topic.as_deref(),
+            list,
+            grep.as_deref(),
+            coverage,
+            strict,
+            &format,
+        ),
     }
 }
 
@@ -611,8 +623,14 @@ fn docs_cmd(
     grep: Option<&str>,
     coverage: bool,
     strict: bool,
+    format: &str,
 ) -> anyhow::Result<()> {
     use clap::CommandFactory;
+    let json = match format {
+        "text" => false,
+        "json" => true,
+        other => bail!("unknown --format '{other}' (expected `text` or `json`)"),
+    };
     // `varve docs check --coverage` (or --coverage) — the mechanical invariant.
     if coverage || topic == Some("check") {
         let gaps = docs::coverage_gaps(&Cli::command());
@@ -646,11 +664,16 @@ fn docs_cmd(
         return Ok(());
     }
     if list || topic.is_none() {
-        print!("{}", docs::render_list());
+        if json {
+            println!("{}", docs::render_json(None));
+        } else {
+            print!("{}", docs::render_list());
+        }
         return Ok(());
     }
     let slug = topic.unwrap();
     match docs::find(slug) {
+        Some(_) if json => println!("{}", docs::render_json(Some(slug))),
         Some(t) => println!("{}", t.body.trim_end()),
         None => {
             eprintln!("no topic '{slug}'.\n");

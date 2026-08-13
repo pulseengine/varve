@@ -784,6 +784,38 @@ artifacts:
       - type: verifies
         target: REQ-TRACEPACK-001
 
+  - id: VER-REVIEW-v0.17.1
+    type: verification
+    title: v0.17.1 independently reviewed — pass; --format json overclaim fixed pre-release
+    status: verified
+    release: v0.17.1
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-13,
+        of `varve docs` (REQ-DOCS-001). VERDICT pass; all five claims re-derived
+        from evidence and CONFIRMED. Confirmed: (a) coverage is genuinely
+        mechanical — coverage_gaps walks the live clap tree (get_subcommands),
+        so a new subcommand without a topic makes `docs check --coverage
+        --strict` exit non-zero AND fails the unit test; (b) docs are embedded
+        via include_str! and print real prose offline; --grep searches bodies;
+        (c) the strict check is a real CI gate (ci.yml rust job, both OSes); (d)
+        REQ-DOCS-001 → VER-DOCS-001 is coherent, rivet validate + check
+        verification-evidence pass, all named tests exist. Full local gate
+        re-run with verified exit codes (fmt/clippy/test all 0). The reviewer
+        found ONE real overclaim: REQ-DOCS-001 promised `--format json` that did
+        not exist. FIXED before release — `--format json` implemented (TDD:
+        render_json + two tests, list and single-topic), wired into the CLI,
+        exercised end-to-end; and the "walks the clap subcommand tree" wording
+        was narrowed to "top-level subcommands" to match the (non-recursive)
+        implementation. Two immaterial nits noted (body-length floor guards
+        emptiness not quality; nested `shim install` documented in its parent
+        topic, not separately) — neither a defect.
+    links:
+      - type: verifies
+        target: REQ-DOCS-001
+
   - id: VER-DOCS-001
     type: verification
     title: Docs are embedded, queryable, and every subcommand is a covered topic
@@ -795,6 +827,9 @@ artifacts:
         - run: cargo test -p varve every_cli_subcommand_has_a_documented_topic
         - run: cargo test -p varve topics_are_findable_and_greppable
         - run: cargo test -p varve no_topic_body_is_empty
+        # `--format json` makes the docs machine-queryable (rivet-docs parity).
+        - run: cargo test -p varve topic_list_renders_as_machine_readable_json
+        - run: cargo test -p varve single_topic_renders_as_json_with_body
         # The user-facing CLI gate mirrors the invariant in CI.
         - run: grep -q "docs check --coverage --strict" .github/workflows/ci.yml
     links:

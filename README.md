@@ -171,10 +171,11 @@ in the rivet artifacts, DD-004/DD-005 and CA-*/AR-*):
 varve's docs ship *inside the binary* — no files, no network, so they work
 air-gapped. `varve docs` lists topics; `varve docs <topic>` shows one (every
 subcommand, plus concepts: pins, realms, layers, trust-roots, payload-kinds,
-air-gap); `varve docs --grep <q>` searches. Coverage is a **checked invariant**,
-not review discipline: `varve docs check --coverage --strict` fails if any
-subcommand lacks a topic, so an undocumented command cannot ship (CI-gated,
-like the review and claim checks).
+air-gap); `varve docs --grep <q>` searches; `varve docs --format json` emits the
+same content for machine queries (modelled on `rivet docs`). Coverage is a
+**checked invariant**, not review discipline: `varve docs check --coverage
+--strict` fails if any top-level subcommand lacks a topic, so an undocumented
+command cannot ship (CI-gated, like the review and claim checks).
 
 ## Independent review
 
