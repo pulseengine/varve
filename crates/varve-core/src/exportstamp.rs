@@ -97,6 +97,27 @@ pub fn status(stamp: &ExportStamp, current_manifest_digest: &str) -> ExportStatu
 
 #[cfg(test)]
 mod tests {
+    /// True when mode 000 does not actually deny a read here (running as root,
+    /// or a filesystem that ignores permission bits) — so the unreadable-file
+    /// tests cannot hold their premise and must skip rather than fail.
+    #[cfg(unix)]
+    fn premise_unavailable() -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(dir) = tempfile::tempdir() else {
+            return true;
+        };
+        let probe = dir.path().join("probe");
+        if std::fs::write(&probe, b"x").is_err() {
+            return true;
+        }
+        if std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o000)).is_err() {
+            return true;
+        }
+        let readable = std::fs::read(&probe).is_ok();
+        let _ = std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o644));
+        readable
+    }
+
     use super::*;
 
     fn sample() -> ExportStamp {
@@ -135,6 +156,15 @@ mod tests {
         // Reporting it as Missing would tell the user "re-run the export" when
         // the real fault is permissions — advice that cannot work. (Found by
         // cargo-mutants: the NotFound guard survived being replaced with true.)
+        // chmod(000) does not stop root, and some filesystems ignore modes, so
+        // this case cannot always be exercised. Test the PREMISE directly
+        // rather than guessing at uid: if an unreadable file is still readable
+        // here, skip. A test that cannot hold its premise should say so, not go
+        // red for the wrong reason.
+        if premise_unavailable() {
+            eprintln!("skipping: this environment does not deny reads on mode 000");
+            return;
+        }
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(STAMP_FILE);

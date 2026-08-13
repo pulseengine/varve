@@ -1047,6 +1047,8 @@ artifacts:
       steps:
         - run: python3 tools/proof-check.py
         - run: cargo test -p varve-core the_leap_rule_holds_at_the_year_the_solver_found
+        # The boundary obligation's witness (c == h) is exactly this test.
+        - run: cargo test -p varve-core an_equal_counter_reinstalls_cleanly
     links:
       - type: verifies
         target: REQ-PROOF-001
@@ -1149,3 +1151,80 @@ artifacts:
     links:
       - type: verifies
         target: REQ-SBOM-001
+
+  - id: VER-REVIEW-v0.18.1
+    type: verification
+    title: v0.18.1 independently reviewed (retroactive) — pass
+    status: verified
+    release: v0.18.1
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Retroactive independent clean-room review, 2026-08-13, commissioned
+        because the project's own review-check flagged that v0.18.1 had shipped
+        with a verified requirement and no recorded verdict — the advisory
+        mechanism working as intended. VERDICT pass. Confirmed: `index_path` is
+        now total (all slicing is chars().skip().take() on the same lowercased
+        string) and the reviewer could construct no panicking input, including
+        count-changing lowercase forms and astral-plane characters; validation
+        runs as the FIRST statement of all three export adapters, before any
+        directory or file is created, so a bad name cannot reach the unescaped
+        index_line; and the untar-escape test is NOT vacuous — it builds a real
+        gzip tar with a symlink to an absolute outside path plus a write through
+        it, varve has no guard of its own, and tar 0.4.46's protection is
+        precisely what the test pins. One finding adopted: `cksum` was the third
+        string interpolated into the index JSON without validation — unreachable
+        via the CLI (which re-hashes bytes against the signed digest first) but
+        reachable through the public library API. Now validated as 64 hex
+        digits, and the test fixtures corrected from unrealistic short values to
+        real-length digests.
+    links:
+      - type: verifies
+        target: REQ-CRATENAME-001
+
+  - id: VER-REVIEW-v0.20.0
+    type: verification
+    title: v0.20.0 independently reviewed (retroactive) — DISSENT on a tautological proof
+    status: verified
+    release: v0.20.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Retroactive independent clean-room review, 2026-08-13. VERDICT DISSENT,
+        and it was right twice — both times against claims varve itself made.
+        REQ-MUTATE-002 CONFIRMED outright: the five trust-decision modules are
+        in the gate, and the reviewer re-ran cargo-mutants over reverify.rs +
+        exportstamp.rs to get 15 caught / 2 unviable / 0 missed, confirming the
+        two NotFound-guard tests genuinely kill their mutants. The proof gate's
+        MECHANICS were confirmed by experiment: removing both negative controls
+        makes proof-check exit 1 ("no negative control"), so that requirement is
+        real and not decorative.
+        DISSENT 1 — TAUTOLOGY. `rollback-verdict-total.smt2` asserted
+        `c >= h AND c < h`, a bare contradiction that is unsat whatever
+        rollback.rs does. No mutation of `check` could make it sat, and it had
+        no negative-control twin. It was theatre inflating the obligation count
+        — precisely the hollow-gate failure this suite exists to prevent.
+        REPLACED with `rollback-boundary-mutant-is-distinguishable.smt2`, which
+        asks where `<` and `<=` disagree; it returns c == h, the re-install
+        case, and `an_equal_counter_reinstalls_cleanly` is exactly that test.
+        DISSENT 2 — UNSUPPORTED PROVENANCE. The leap proof's comment claimed
+        three 2026-08-08 cargo-mutants survivors were `||`->`&&` in the leap
+        predicate at rollback.rs:136. The reviewer checked git history: the leap
+        predicate has never been at line 136 (it is at 145), and the commit
+        introducing it also introduced the 2000-02-29 anchor that already kills
+        that mutant; the survivors killed that day were the OTHER `||`s, per
+        commit cc08bf1 "kill epoch_days validation-guard mutants". The claim had
+        been asserted from a summary rather than verified against history. The
+        comment now carries the correction as the record, and states honestly
+        that the 8192 case is defence in depth rather than the only killer —
+        though the reviewer did confirm mechanically that mutating the predicate
+        makes that test fail. Two minor findings adopted: the chmod-000 tests
+        would fail (loudly, not silently) as root, and now skip after testing
+        their own premise portably; and the cksum gap noted under VER-REVIEW-v0.18.1.
+    links:
+      - type: verifies
+        target: REQ-PROOF-001
+      - type: verifies
+        target: REQ-MUTATE-002
