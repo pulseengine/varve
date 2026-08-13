@@ -783,3 +783,20 @@ artifacts:
         target: REQ-VENDOR-002
       - type: verifies
         target: REQ-TRACEPACK-001
+
+  - id: VER-DOCS-001
+    type: verification
+    title: Docs are embedded, queryable, and every subcommand is a covered topic
+    status: verified
+    release: v0.17.1
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve every_cli_subcommand_has_a_documented_topic
+        - run: cargo test -p varve topics_are_findable_and_greppable
+        - run: cargo test -p varve no_topic_body_is_empty
+        # The user-facing CLI gate mirrors the invariant in CI.
+        - run: grep -q "docs check --coverage --strict" .github/workflows/ci.yml
+    links:
+      - type: verifies
+        target: REQ-DOCS-001

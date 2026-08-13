@@ -34,6 +34,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      - name: docs coverage (every subcommand documented)
+        # REQ-DOCS-001: a subcommand cannot ship undocumented. The unit test
+        # enforces the same invariant; this exercises the user-facing CLI gate.
+        run: cargo run -q -p varve -- docs check --coverage --strict
 
   rivet:
     name: rivet validate · release plan

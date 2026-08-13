@@ -166,6 +166,16 @@ in the rivet artifacts, DD-004/DD-005 and CA-*/AR-*):
    changed, plus known-problems referrers as the no-patch mitigation path. The
    frozen-line model every qualified-tool vendor converges on, made mechanical.
 
+## Documentation, embedded and queryable
+
+varve's docs ship *inside the binary* — no files, no network, so they work
+air-gapped. `varve docs` lists topics; `varve docs <topic>` shows one (every
+subcommand, plus concepts: pins, realms, layers, trust-roots, payload-kinds,
+air-gap); `varve docs --grep <q>` searches. Coverage is a **checked invariant**,
+not review discipline: `varve docs check --coverage --strict` fails if any
+subcommand lacks a topic, so an undocumented command cannot ship (CI-gated,
+like the review and claim checks).
+
 ## Independent review
 
 varve is largely authored through an AI-driven feature loop, so "verified" must
