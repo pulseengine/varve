@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 pub mod archive;
+pub mod attest;
 pub mod bazel;
 pub mod crateexport;
 pub mod deposit;

@@ -1228,3 +1228,27 @@ artifacts:
         target: REQ-PROOF-001
       - type: verifies
         target: REQ-MUTATE-002
+
+  - id: VER-ATTEST-001
+    type: verification
+    title: An attestation binds to its layer and its bytes, or it is refused
+    status: verified
+    release: v0.22.0
+    fields:
+      method: automated-test
+      steps:
+        # The statement names the bytes and the layer, and agrees with both.
+        - run: cargo test -p varve-core a_statement_names_the_bytes_and_the_layer
+        # The two fail-closed bindings.
+        - run: cargo test -p varve-core swapped_bytes_are_refused
+        - run: cargo test -p varve-core an_attestation_for_another_layer_is_refused
+        - run: cargo test -p varve-core an_unknown_kind_is_refused_not_guessed
+        # Signature round-trip, and the wrong root cannot vouch.
+        - run: cargo test -p varve-core a_statement_round_trips_through_a_signature
+        - run: cargo test -p varve-core the_wrong_root_cannot_vouch_for_an_association
+        # End to end at the CLI: sbom -> sign-attestation -> check-attestation,
+        # with tampered bytes, a wrong root and an unknown kind all refused.
+        - run: cargo test -p varve --test cli an_attestation_binds_to_its_layer_and_nothing_else
+    links:
+      - type: verifies
+        target: REQ-ATTEST-001

@@ -1575,7 +1575,7 @@ artifacts:
     type: requirement
     title: The realm authenticates the line index, not only each artifact
     status: approved
-    release: v0.19.0
+    release: v0.23.0
     description: >
       varve signs individual layer manifests and realms, but the LISTING of
       which layers exist for a line (the index a consumer enumerates) must
@@ -1598,8 +1598,8 @@ artifacts:
   - id: REQ-ATTEST-001
     type: requirement
     title: A layer carries its audit, provenance, and SBOM as verifiable referrers
-    status: approved
-    release: v0.19.0
+    status: verified
+    release: v0.22.0
     description: >
       varve shall be able to carry, and `varve verify` to report, third-party
       attestations attached to a layer as OCI referrer artifacts: cargo-vet /
