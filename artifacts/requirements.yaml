@@ -1659,3 +1659,37 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  - id: REQ-EXPORT-SYNC-001
+    type: requirement
+    title: Exports are pinned to their producing layer; verify fails loud on drift
+    status: verified
+    release: v0.18.0
+    description: >
+      The export adapters (export-cargo, export-crates-vendor,
+      export-bazel-distdir) materialise offline byte sources from a verified
+      layer. A consumer commits that vendored directory and builds against it —
+      but when the project's pin later moves to a new layer, the committed
+      export silently keeps serving the OLD crates, and toolchain-vs-source-set
+      diverge with nothing said. That is exactly the "stale silently" failure
+      varve exists to make loud, applied to exported artifacts instead of the
+      toolchain binaries. varve shall close it three ways: (1) the export
+      commands DEFAULT `--layer` to the resolved project pin (like install /
+      verify), so re-exporting after a bump naturally produces the new layer's
+      crates; (2) every export writes a `.varve-export.json` stamp into its
+      output directory recording {layer, manifest_digest, kind}, binding those
+      bytes to the layer that produced them (manifest_digest is the sha256 of
+      the DSSE-signed layer manifest — the same join key everything else uses);
+      (3) `varve verify --export <DIR>` (repeatable) re-derives the current
+      pin's manifest digest and HARD-FAILS (non-zero exit) when a stamped
+      export's manifest_digest diverges from it — a mechanical CI gate, not a
+      warning. An absent stamp in a named export dir is itself a failure (an
+      unstamped or hand-assembled tree is not a verified export); a malformed
+      stamp is a failure. Verify without --export is unchanged (backward
+      compatible). This makes an out-of-sync export impossible to miss: the same
+      command that proves the pinned layer intact also proves the exports still
+      belong to it.
+    tags: [distribution]
+    fields:
+      priority: should
+      category: functional

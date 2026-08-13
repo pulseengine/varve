@@ -835,3 +835,27 @@ artifacts:
     links:
       - type: verifies
         target: REQ-DOCS-001
+
+  - id: VER-EXPORT-SYNC-001
+    type: verification
+    title: Exports are stamped and verify hard-fails on pin/export drift
+    status: verified
+    release: v0.18.0
+    fields:
+      method: automated-test
+      steps:
+        # Core: stamp round-trips; absent and malformed stamps are failures;
+        # the drift verdict is current iff the digests match.
+        - run: cargo test -p varve-core write_then_read_round_trips
+        - run: cargo test -p varve-core read_missing_stamp_is_missing_error
+        - run: cargo test -p varve-core read_malformed_stamp_is_malformed_error
+        - run: cargo test -p varve-core status_is_current_when_digests_match
+        - run: cargo test -p varve-core status_is_stale_when_digests_differ
+        # CLI gate: a fresh stamp passes, a stale stamp hard-fails, a missing
+        # stamp hard-fails — the loud CI gate the requirement promises.
+        - run: cargo test -p varve --test cli verify_export_passes_when_the_stamp_matches_the_pin
+        - run: cargo test -p varve --test cli verify_export_hard_fails_on_a_stale_stamp
+        - run: cargo test -p varve --test cli verify_export_hard_fails_when_the_stamp_is_missing
+    links:
+      - type: verifies
+        target: REQ-EXPORT-SYNC-001

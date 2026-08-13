@@ -186,6 +186,99 @@ fn signed_layer_fixture(fx: &Fixture, layer: &str, counter: u64) -> SignedLayer 
     }
 }
 
+// rivet: verifies REQ-EXPORT-SYNC-001
+#[test]
+fn verify_export_hard_fails_on_a_stale_stamp() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    // An export dir stamped from a DIFFERENT layer digest than the pin resolves.
+    let export = fx.project.join("vendored");
+    std::fs::create_dir_all(&export).unwrap();
+    std::fs::write(
+        export.join(".varve-export.json"),
+        r#"{"layer":"2026.06.0","manifest_digest":"sha256:deadbeef","kind":"cargo"}"#,
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["verify", "--export"])
+        .arg(&export)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("STALE").or(predicate::str::contains("stale")));
+}
+
+// rivet: verifies REQ-EXPORT-SYNC-001
+#[test]
+fn verify_export_passes_when_the_stamp_matches_the_pin() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    // Learn the installed layer's manifest digest from verify's own output.
+    let out = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(out).unwrap();
+    let digest = stdout
+        .split_whitespace()
+        .find(|w| w.starts_with("sha256:"))
+        .expect("verify prints the layer digest");
+    // A stamp naming exactly that digest is fresh — the gate passes.
+    let export = fx.project.join("vendored");
+    std::fs::create_dir_all(&export).unwrap();
+    std::fs::write(
+        export.join(".varve-export.json"),
+        format!(r#"{{"layer":"2026.07.0","manifest_digest":"{digest}","kind":"cargo"}}"#),
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["verify", "--export"])
+        .arg(&export)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fresh"));
+}
+
+// rivet: verifies REQ-EXPORT-SYNC-001
+#[test]
+fn verify_export_hard_fails_when_the_stamp_is_missing() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    // A directory with no stamp is not a verified export — that is a failure.
+    let export = fx.project.join("hand-assembled");
+    std::fs::create_dir_all(&export).unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["verify", "--export"])
+        .arg(&export)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no export stamp"));
+}
+
 // rivet: verifies REQ-VERIFY-001
 #[test]
 fn install_verifies_lays_down_and_verify_repeats_the_verdict() {

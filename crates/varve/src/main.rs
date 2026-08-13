@@ -57,6 +57,12 @@ enum Cmd {
         /// Verify every installed layer instead of only the pinned one.
         #[arg(long)]
         all: bool,
+        /// Also check a committed export directory against the current pin: its
+        /// `.varve-export.json` stamp must name the layer the pin resolves to,
+        /// or verify fails (REQ-EXPORT-SYNC-001). Repeatable; run it in CI so a
+        /// stale vendored tree cannot slip through.
+        #[arg(long = "export", value_name = "DIR")]
+        export: Vec<PathBuf>,
     },
     /// Extract the core: export an installed layer as a directory-shaped
     /// OCI image layout — the offline artifact of record.
@@ -115,9 +121,10 @@ enum Cmd {
     /// a verified installed layer — every hash Bazel enforces becomes a
     /// transcription from the signed manifest instead of TOFU.
     ExportBazel {
-        /// Layer to export, e.g. `2026.08.0`.
+        /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
+        /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
         #[arg(long)]
-        layer: String,
+        layer: Option<String>,
         /// Output directory for the per-tool JSON registries.
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
@@ -126,9 +133,10 @@ enum Cmd {
     /// entries + a `.cargo/config.toml` source-replacement, so a consumer
     /// builds offline against varve-signed crates (REQ-CRATE-001).
     ExportCargo {
-        /// Layer to export, e.g. `2026.08.0`.
+        /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
+        /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
         #[arg(long)]
-        layer: String,
+        layer: Option<String>,
         /// Output directory (holds `registry/` and `.cargo/config.toml`).
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
@@ -138,9 +146,10 @@ enum Cmd {
     /// (REQ-VENDOR-001). rules_rust needs BUILD files on top of this tree
     /// (REQ-VENDOR-002), not yet emitted.
     ExportCratesVendor {
-        /// Layer to export, e.g. `2026.08.0`.
+        /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
+        /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
         #[arg(long)]
-        layer: String,
+        layer: Option<String>,
         /// Output directory (holds `vendor/` and `.cargo/config.toml`).
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
@@ -150,9 +159,10 @@ enum Cmd {
     /// crate_universe output + `bazel build --distdir=<DIR>` (network off) —
     /// each crate resolves from varve's verified bytes by sha256.
     ExportBazelDistdir {
-        /// Layer to export, e.g. `2026.08.0`.
+        /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
+        /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
         #[arg(long)]
-        layer: String,
+        layer: Option<String>,
         /// Output distdir directory.
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
@@ -292,7 +302,7 @@ fn run() -> anyhow::Result<()> {
         Cmd::Which { tool } => which(&store, &tool),
         Cmd::List => list(&store),
         Cmd::Install { from, platform } => install(&store, from.as_deref(), platform),
-        Cmd::Verify { all } => verify(&store, all),
+        Cmd::Verify { all, export } => verify(&store, all, &export),
         Cmd::Archive { layer, dest } => archive(&store, &layer, &dest),
         Cmd::Run {
             varve,
@@ -319,10 +329,14 @@ fn run() -> anyhow::Result<()> {
             &out,
             &tools,
         ),
-        Cmd::ExportBazel { layer, out } => export_bazel(&store, &layer, &out),
-        Cmd::ExportCargo { layer, out } => export_cargo(&store, &layer, &out),
-        Cmd::ExportCratesVendor { layer, out } => export_crates_vendor(&store, &layer, &out),
-        Cmd::ExportBazelDistdir { layer, out } => export_bazel_distdir(&store, &layer, &out),
+        Cmd::ExportBazel { layer, out } => export_bazel(&store, layer.as_deref(), &out),
+        Cmd::ExportCargo { layer, out } => export_cargo(&store, layer.as_deref(), &out),
+        Cmd::ExportCratesVendor { layer, out } => {
+            export_crates_vendor(&store, layer.as_deref(), &out)
+        }
+        Cmd::ExportBazelDistdir { layer, out } => {
+            export_bazel_distdir(&store, layer.as_deref(), &out)
+        }
         Cmd::Status { from_file } => status(&store, from_file.as_deref()),
         Cmd::SignStatus {
             file,
@@ -769,17 +783,68 @@ fn run_tool(
     }
 }
 
-fn export_bazel(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Result<()> {
-    // Trust first: exporting registries from an unverifiable layer would
-    // launder unanchored hashes into Bazel.
-    let verifier = trust_root()?;
-    let wanted: varve_core::LayerId = layer.parse()?;
-    let entry = store
-        .list()?
-        .into_iter()
-        .find(|e| e.layer == wanted)
-        .with_context(|| format!("layer {layer} is not installed — varve install it first"))?;
-    varve_core::verify_installed(store, &entry, &verifier, &varve_core::host_platform())?;
+/// Resolve which installed layer an export targets, and verify it (trust
+/// first: never export from an unverifiable layer). `layer` names one
+/// explicitly; `None` defaults to the resolved project pin, so an export with
+/// no `--layer` tracks the pin (REQ-EXPORT-SYNC-001). Returns the store the
+/// layer lives in (realm-aware on the pin path) and the verified entry.
+fn export_target(
+    base: &Store,
+    layer: Option<&str>,
+) -> anyhow::Result<(Store, varve_core::store::InstalledLayer)> {
+    match layer {
+        Some(l) => {
+            let verifier = trust_root()?;
+            let wanted: varve_core::LayerId = l.parse()?;
+            let entry = base
+                .list()?
+                .into_iter()
+                .find(|e| e.layer == wanted)
+                .with_context(|| format!("layer {l} is not installed — varve install it first"))?;
+            varve_core::verify_installed(base, &entry, &verifier, &varve_core::host_platform())?;
+            Ok((base.clone(), entry))
+        }
+        None => {
+            let ctx = project_ctx(base)?;
+            let verifier = ctx_verifier(&ctx)?;
+            let resolved = varve_core::resolve(&ctx.pin, &ctx.store)?;
+            varve_core::verify_installed(
+                &ctx.store,
+                &resolved.layer,
+                &verifier,
+                &varve_core::host_platform(),
+            )?;
+            Ok((ctx.store, resolved.layer))
+        }
+    }
+}
+
+/// Bind an export directory to the layer that produced it: write a
+/// `.varve-export.json` stamp (REQ-EXPORT-SYNC-001) so `varve verify --export`
+/// can later catch a stale export whose pin has moved on.
+fn write_export_stamp(
+    out: &std::path::Path,
+    entry: &varve_core::store::InstalledLayer,
+    kind: &str,
+) -> anyhow::Result<()> {
+    let stamp = varve_core::exportstamp::ExportStamp {
+        layer: entry.layer.to_string(),
+        manifest_digest: entry.digest.clone(),
+        kind: kind.to_string(),
+    };
+    varve_core::exportstamp::write_stamp(out, &stamp)?;
+    println!(
+        "stamped {} — export bound to layer {} ({}); `varve verify --export {}` checks it",
+        out.join(varve_core::exportstamp::STAMP_FILE).display(),
+        entry.layer,
+        entry.digest,
+        out.display(),
+    );
+    Ok(())
+}
+
+fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> anyhow::Result<()> {
+    let (_store, entry) = export_target(store, layer)?;
     let payload = std::fs::read(entry.root.join("layer.json"))?;
     let manifest = varve_core::LayerManifest::parse(&payload)?;
     let export = varve_core::bazel::export(&manifest);
@@ -793,27 +858,23 @@ fn export_bazel(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Re
         eprintln!("skipped {tool} ({platform}): {reason}");
     }
     if export.registries.is_empty() {
-        bail!("nothing exported — no entry in layer {layer} carries source provenance");
+        bail!(
+            "nothing exported — no entry in layer {} carries source provenance",
+            entry.layer
+        );
     }
+    write_export_stamp(out, &entry, "bazel-registry")?;
     Ok(())
 }
 
-/// Collect the verified `crate`-kind entries of an installed layer as
-/// CrateEntry values — the shared front-half of every Cargo-facing export.
-/// Trust-first: the layer is verified, and each blob is re-hashed against its
-/// signed digest before it can leave the store.
+/// Collect the verified `crate`-kind entries of an already-verified installed
+/// layer as CrateEntry values — the shared front-half of every Cargo-facing
+/// export. The layer was verified by `export_target`; each blob is still
+/// re-hashed against its signed digest before it can leave the store.
 fn collect_verified_crates(
     store: &Store,
-    layer: &str,
+    entry: &varve_core::store::InstalledLayer,
 ) -> anyhow::Result<Vec<varve_core::crateexport::CrateEntry>> {
-    let verifier = trust_root()?;
-    let wanted: varve_core::LayerId = layer.parse()?;
-    let entry = store
-        .list()?
-        .into_iter()
-        .find(|e| e.layer == wanted)
-        .with_context(|| format!("layer {layer} is not installed — varve install it first"))?;
-    varve_core::verify_installed(store, &entry, &verifier, &varve_core::host_platform())?;
     let payload = std::fs::read(entry.root.join("layer.json"))?;
     let manifest = varve_core::LayerManifest::parse(&payload)?;
 
@@ -838,7 +899,7 @@ fn collect_verified_crates(
             .with_context(|| format!("crate '{name}' digest is not sha256:<hex>"))?
             .to_string();
         let bytes_path = store
-            .tool_path(&entry, name)
+            .tool_path(entry, name)
             .with_context(|| format!("crate '{name}' blob is not present in the store"))?;
         let bytes = std::fs::read(&bytes_path)?;
         // Defense in depth: re-hash the on-disk bytes against the signed digest
@@ -858,13 +919,17 @@ fn collect_verified_crates(
         });
     }
     if crates.is_empty() {
-        bail!("nothing exported — layer {layer} carries no `crate` entries");
+        bail!(
+            "nothing exported — layer {} carries no `crate` entries",
+            entry.layer
+        );
     }
     Ok(crates)
 }
 
-fn export_cargo(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Result<()> {
-    let crates = collect_verified_crates(store, layer)?;
+fn export_cargo(store: &Store, layer: Option<&str>, out: &std::path::Path) -> anyhow::Result<()> {
+    let (store, entry) = export_target(store, layer)?;
+    let crates = collect_verified_crates(&store, &entry)?;
     let registry_dir = out.join("registry");
     let n = varve_core::crateexport::export_local_registry(&crates, &registry_dir)?;
     let cargo_dir = out.join(".cargo");
@@ -880,11 +945,17 @@ fn export_cargo(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Re
         registry_dir.display(),
         config.display()
     );
+    write_export_stamp(out, &entry, "cargo")?;
     Ok(())
 }
 
-fn export_bazel_distdir(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Result<()> {
-    let crates = collect_verified_crates(store, layer)?;
+fn export_bazel_distdir(
+    store: &Store,
+    layer: Option<&str>,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let (store, entry) = export_target(store, layer)?;
+    let crates = collect_verified_crates(&store, &entry)?;
     let n = varve_core::crateexport::export_distdir(&crates, out)?;
     println!(
         "wrote {n} verified .crate tarball(s) to the Bazel distdir {} — with a pre-generated \
@@ -892,11 +963,17 @@ fn export_bazel_distdir(store: &Store, layer: &str, out: &std::path::Path) -> an
         out.display(),
         out.display()
     );
+    write_export_stamp(out, &entry, "bazel-distdir")?;
     Ok(())
 }
 
-fn export_crates_vendor(store: &Store, layer: &str, out: &std::path::Path) -> anyhow::Result<()> {
-    let crates = collect_verified_crates(store, layer)?;
+fn export_crates_vendor(
+    store: &Store,
+    layer: Option<&str>,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let (store, entry) = export_target(store, layer)?;
+    let crates = collect_verified_crates(&store, &entry)?;
     let vendor_dir = out.join("vendor");
     let n = varve_core::crateexport::export_vendor_dir(&crates, &vendor_dir)?;
     let cargo_dir = out.join(".cargo");
@@ -913,6 +990,7 @@ fn export_crates_vendor(store: &Store, layer: &str, out: &std::path::Path) -> an
         vendor_dir.display(),
         config.display()
     );
+    write_export_stamp(out, &entry, "crates-vendor")?;
     Ok(())
 }
 
@@ -1247,7 +1325,7 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
     Ok(())
 }
 
-fn verify(store: &Store, all: bool) -> anyhow::Result<()> {
+fn verify(store: &Store, all: bool, exports: &[PathBuf]) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
     let verifier = ctx_verifier(&ctx)?;
     let store = &ctx.store;
@@ -1265,6 +1343,47 @@ fn verify(store: &Store, all: bool) -> anyhow::Result<()> {
         println!(
             "layer {} {} verified: signature OK, {checked} tool(s) match their signed digests",
             layer.layer, layer.digest
+        );
+    }
+    if !exports.is_empty() {
+        let current = varve_core::resolve(&ctx.pin, store)?.layer.digest;
+        verify_exports(&current, exports)?;
+    }
+    Ok(())
+}
+
+/// Check committed export directories against the current pin's manifest digest
+/// (REQ-EXPORT-SYNC-001). A stamp that names a different layer than the pin now
+/// resolves is stale; an absent or malformed stamp is not a verified export.
+/// Any of these fails the command — the whole point is a loud CI gate.
+fn verify_exports(current_digest: &str, exports: &[PathBuf]) -> anyhow::Result<()> {
+    use varve_core::exportstamp::{ExportStatus, read_stamp, status};
+    let mut stale = Vec::new();
+    for dir in exports {
+        let stamp = read_stamp(dir)?;
+        match status(&stamp, current_digest) {
+            ExportStatus::Current => println!(
+                "export {} — fresh: bound to layer {} ({})",
+                dir.display(),
+                stamp.layer,
+                stamp.kind
+            ),
+            ExportStatus::Stale { stamped, current } => {
+                eprintln!(
+                    "export {} — STALE: stamped from layer {} ({stamped}); the pin now \
+                     resolves {current}. Re-run the export against the current pin.",
+                    dir.display(),
+                    stamp.layer
+                );
+                stale.push(dir.display().to_string());
+            }
+        }
+    }
+    if !stale.is_empty() {
+        bail!(
+            "{} stale export(s) diverged from the pin (REQ-EXPORT-SYNC-001): {}",
+            stale.len(),
+            stale.join(", ")
         );
     }
     Ok(())

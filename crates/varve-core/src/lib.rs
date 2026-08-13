@@ -26,6 +26,7 @@ pub mod bazel;
 pub mod crateexport;
 pub mod deposit;
 pub mod discover;
+pub mod exportstamp;
 pub mod install;
 pub mod kind;
 pub mod layer;
