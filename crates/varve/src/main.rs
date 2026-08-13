@@ -15,6 +15,8 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use varve_core::{Pin, Store, discover, resolve};
 
+mod docs;
+
 #[derive(Parser)]
 #[command(
     name = "varve",
@@ -236,6 +238,29 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         envelope: PathBuf,
     },
+    /// Embedded, queryable documentation (offline). `varve docs` lists topics;
+    /// `varve docs <topic>` shows one; `varve docs check --coverage` asserts
+    /// every subcommand is documented (REQ-DOCS-001).
+    Docs {
+        /// A topic slug to show, or `check` to run the coverage invariant.
+        topic: Option<String>,
+        /// List all topics.
+        #[arg(long)]
+        list: bool,
+        /// Search across all topics.
+        #[arg(long, value_name = "QUERY")]
+        grep: Option<String>,
+        /// (check) Report subcommands lacking a documented topic.
+        #[arg(long)]
+        coverage: bool,
+        /// (check --coverage) Exit non-zero if any subcommand is undocumented.
+        #[arg(long)]
+        strict: bool,
+        /// Output format: `text` (default) or `json` for machine queries —
+        /// applies to the topic list and to a single `varve docs <topic>`.
+        #[arg(long, value_name = "FMT", default_value = "text")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -321,6 +346,21 @@ fn run() -> anyhow::Result<()> {
         } => sign_sums(&sums, &key, &key_id, &out),
         Cmd::SelfUpdate { check, to } => self_update(check, to.as_deref()),
         Cmd::SelfVerify { archive, envelope } => self_verify(&archive, &envelope),
+        Cmd::Docs {
+            topic,
+            list,
+            grep,
+            coverage,
+            strict,
+            format,
+        } => docs_cmd(
+            topic.as_deref(),
+            list,
+            grep.as_deref(),
+            coverage,
+            strict,
+            &format,
+        ),
     }
 }
 
@@ -572,6 +612,73 @@ fn self_update(check: bool, to: Option<&std::path::Path>) -> anyhow::Result<()> 
                     dest.display()
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+fn docs_cmd(
+    topic: Option<&str>,
+    list: bool,
+    grep: Option<&str>,
+    coverage: bool,
+    strict: bool,
+    format: &str,
+) -> anyhow::Result<()> {
+    use clap::CommandFactory;
+    let json = match format {
+        "text" => false,
+        "json" => true,
+        other => bail!("unknown --format '{other}' (expected `text` or `json`)"),
+    };
+    // `varve docs check --coverage` (or --coverage) — the mechanical invariant.
+    if coverage || topic == Some("check") {
+        let gaps = docs::coverage_gaps(&Cli::command());
+        if gaps.is_empty() {
+            println!(
+                "docs coverage: OK — all {} subcommands have a topic",
+                Cli::command().get_subcommands().count()
+            );
+            return Ok(());
+        }
+        eprintln!("docs coverage: {} subcommand(s) undocumented:", gaps.len());
+        for g in &gaps {
+            eprintln!("  {g}");
+        }
+        if strict {
+            bail!(
+                "undocumented subcommands (REQ-DOCS-001): {}",
+                gaps.join(", ")
+            );
+        }
+        return Ok(());
+    }
+    if let Some(q) = grep {
+        let hits = docs::grep(q);
+        if hits.is_empty() {
+            println!("no topic matches '{q}'");
+        }
+        for (slug, line) in hits {
+            println!("{slug}: {line}");
+        }
+        return Ok(());
+    }
+    if list || topic.is_none() {
+        if json {
+            println!("{}", docs::render_json(None));
+        } else {
+            print!("{}", docs::render_list());
+        }
+        return Ok(());
+    }
+    let slug = topic.unwrap();
+    match docs::find(slug) {
+        Some(_) if json => println!("{}", docs::render_json(Some(slug))),
+        Some(t) => println!("{}", t.body.trim_end()),
+        None => {
+            eprintln!("no topic '{slug}'.\n");
+            print!("{}", docs::render_list());
+            bail!("unknown topic: {slug}");
         }
     }
     Ok(())

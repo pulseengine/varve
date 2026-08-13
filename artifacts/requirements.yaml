@@ -1637,3 +1637,25 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  - id: REQ-DOCS-001
+    type: requirement
+    title: Documentation is embedded, queryable, and a checked invariant
+    status: verified
+    release: v0.17.1
+    description: >
+      varve shall ship its own documentation EMBEDDED in the binary (no files,
+      no network — works air-gapped) and queryable, modelled on `rivet docs`:
+      `varve docs` lists topics, `varve docs <topic>` shows one, `--grep`
+      searches, `--format json` is machine-readable. Crucially, coverage is a
+      MECHANICAL INVARIANT, not review discipline: `varve docs check --coverage`
+      enumerates the CLI's top-level subcommands and reports any one lacking a
+      documented topic; `--strict` exits non-zero (a CI gate like review-check /
+      claim-check), so a new subcommand cannot ship undocumented. Topics cover
+      every CLI subcommand plus the core concepts (pins, realms, layers, trust
+      roots, payload kinds, air-gap). Documentation-as-invariant is the same
+      "mechanical, not prose" spine as the rest of varve.
+    tags: [docs, ergonomics]
+    fields:
+      priority: should
+      category: functional
