@@ -279,6 +279,30 @@ fn verify_export_hard_fails_when_the_stamp_is_missing() {
         .stderr(predicate::str::contains("no export stamp"));
 }
 
+// rivet: verifies REQ-EXPORT-SYNC-001
+#[test]
+fn verify_export_hard_fails_on_a_malformed_stamp() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    // A stamp that is not valid JSON is not a verified export — a failure.
+    let export = fx.project.join("corrupt");
+    std::fs::create_dir_all(&export).unwrap();
+    std::fs::write(export.join(".varve-export.json"), b"{not json").unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["verify", "--export"])
+        .arg(&export)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("malformed"));
+}
+
 // rivet: verifies REQ-VERIFY-001
 #[test]
 fn install_verifies_lays_down_and_verify_repeats_the_verdict() {
