@@ -1020,7 +1020,42 @@ fn sign_sums_produces_an_envelope_self_verify_accepts() {
         .success();
 }
 
-// rivet: verifies REQ-SHIM-001
+// rivet: verifies REQ-SHIM-002
+#[cfg(unix)]
+#[test]
+fn a_shim_is_varve_itself_not_a_shell_script() {
+    // REQ-SHIM-002: no /bin/sh on the dispatch path, and no string handed to a
+    // shell parser. The shim must BE the varve binary, reached by a link.
+    let fx = fixture(Some(PIN_JULY), &[(MANIFEST_JULY, &[("synth", b"s")])]);
+    varve(&fx).args(["shim", "install"]).assert().success();
+    let shim = fx.root.join("shims").join("synth");
+    let bytes = std::fs::read(&shim).unwrap();
+    assert!(
+        !bytes.starts_with(b"#!"),
+        "the shim is still a script: {}",
+        String::from_utf8_lossy(&bytes[..bytes.len().min(80)])
+    );
+    #[cfg(unix)]
+    {
+        let meta = std::fs::symlink_metadata(&shim).unwrap();
+        assert!(
+            meta.file_type().is_symlink(),
+            "on unix a shim should be a symlink to varve, so it tracks self-update"
+        );
+        // …and it must point at a real varve binary.
+        let target = std::fs::read_link(&shim).unwrap();
+        assert!(
+            target
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("varve"),
+            "shim points at {target:?}, not the varve binary"
+        );
+    }
+}
+
+// rivet: verifies REQ-SHIM-001, REQ-SHIM-002
 #[cfg(unix)]
 #[test]
 fn shims_resolve_per_invocation_so_switching_projects_is_cd() {

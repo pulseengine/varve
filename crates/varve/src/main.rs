@@ -295,7 +295,38 @@ fn main() -> ExitCode {
     }
 }
 
+/// The tool this process was invoked AS, if it is not varve itself
+/// (REQ-SHIM-002 — the rustup pattern). A shim is a link to this very binary,
+/// so `argv[0]` carries the tool name and no shell ever runs.
+///
+/// `argv[0]` is caller-controlled, so it is validated here rather than trusted:
+/// only the file name is considered, it must be non-empty, must not be a path
+/// traversal, and must contain no separators. Even then it merely NAMES a tool;
+/// dispatch still resolves the pin and can only reach tools that layer exposes.
+fn dispatch_tool_name(argv0: Option<&std::ffi::OsStr>) -> Option<String> {
+    let raw = argv0?;
+    let name = std::path::Path::new(raw).file_name()?.to_str()?;
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    if name.is_empty() || name == "varve" || name == ".." || name == "." {
+        return None;
+    }
+    if name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 fn run() -> anyhow::Result<()> {
+    // Invoked under another name? Then this binary IS the shim: dispatch.
+    let mut args = std::env::args_os();
+    let argv0 = args.next();
+    if let Some(tool) = dispatch_tool_name(argv0.as_deref()) {
+        let store = Store::at(store_root()?);
+        let rest: Vec<String> = args.map(|a| a.to_string_lossy().into_owned()).collect();
+        let mut tool_and_args = vec![tool];
+        tool_and_args.extend(rest);
+        return run_tool(&store, None, &tool_and_args);
+    }
     let cli = Cli::parse();
     let store = Store::at(store_root()?);
     match cli.command {
@@ -419,19 +450,27 @@ fn shim_install(store: &Store, extra_tools: &[String]) -> anyhow::Result<()> {
     let shim_dir = store.root().join("shims");
     std::fs::create_dir_all(&shim_dir)
         .with_context(|| format!("cannot create {}", shim_dir.display()))?;
+    // A shim IS varve, reached under another name (REQ-SHIM-002): no shell on
+    // the dispatch path, and no string handed to a parser. On unix a symlink,
+    // so shims keep pointing at whatever varve currently is — `self-update`
+    // cannot leave them stale. On Windows, a copy (no symlink guarantee).
     for name in &names {
         let path = shim_dir.join(name);
-        let script = format!(
-            "#!/bin/sh\n# varve shim: resolves this project's pin on every invocation.\nexec \"{}\" run -- {name} \"$@\"\n",
-            varve_exe.display()
-        );
-        std::fs::write(&path, script)
-            .with_context(|| format!("cannot write {}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+        // Replace any earlier shim, script or link alike.
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("cannot replace {}", path.display()));
+            }
         }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&varve_exe, &path).with_context(|| {
+            format!("cannot link {} -> {}", path.display(), varve_exe.display())
+        })?;
+        #[cfg(not(unix))]
+        std::fs::copy(&varve_exe, &path)
+            .with_context(|| format!("cannot copy varve to {}", path.display()))?;
     }
     // The sourceable environment, rustup-style: one line in the shell
     // config sets everything up, and re-sourcing never stacks PATH.
@@ -1445,4 +1484,60 @@ fn list(store: &Store) -> anyhow::Result<()> {
         println!("{}  {}  {}", entry.layer, entry.channel, entry.digest);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::dispatch_tool_name;
+    use std::ffi::OsStr;
+
+    // rivet: verifies REQ-SHIM-002
+    #[test]
+    fn varve_invoked_as_itself_is_not_a_dispatch() {
+        for own in ["varve", "/usr/local/bin/varve", "varve.exe"] {
+            assert_eq!(
+                dispatch_tool_name(Some(OsStr::new(own))),
+                None,
+                "{own} must run the CLI, not dispatch"
+            );
+        }
+        assert_eq!(dispatch_tool_name(None), None);
+    }
+
+    // rivet: verifies REQ-SHIM-002
+    #[test]
+    fn a_shim_name_is_the_file_name_only() {
+        assert_eq!(
+            dispatch_tool_name(Some(OsStr::new("/home/u/.varve/shims/synth"))),
+            Some("synth".into())
+        );
+        assert_eq!(
+            dispatch_tool_name(Some(OsStr::new("rivet"))),
+            Some("rivet".into())
+        );
+        // Windows shims are copies named `<tool>.exe`.
+        assert_eq!(
+            dispatch_tool_name(Some(OsStr::new("synth.exe"))),
+            Some("synth".into())
+        );
+    }
+
+    // rivet: verifies REQ-SHIM-002
+    #[test]
+    fn a_hostile_argv0_cannot_smuggle_a_path() {
+        // argv[0] is caller-controlled: traversal and separators are refused
+        // rather than turned into a lookup. (`file_name` already strips the
+        // directory; these assert the remaining cases fail closed.)
+        for hostile in ["..", ".", ""] {
+            assert_eq!(
+                dispatch_tool_name(Some(OsStr::new(hostile))),
+                None,
+                "{hostile:?} must not name a tool"
+            );
+        }
+        // A traversal path yields its final component, never a path.
+        let got = dispatch_tool_name(Some(OsStr::new("../../etc/passwd")));
+        assert_eq!(got, Some("passwd".into()));
+        assert!(!got.unwrap().contains('/'));
+    }
 }

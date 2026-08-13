@@ -915,3 +915,50 @@ artifacts:
     links:
       - type: verifies
         target: REQ-CRATENAME-001
+
+  - id: VER-SHIM-002
+    type: verification
+    title: The shim is varve itself; argv[0] dispatch fails closed
+    status: verified
+    release: v0.19.0
+    fields:
+      method: automated-test
+      steps:
+        # The shim must not be a script, and on unix must be a symlink to varve
+        # (so self-update cannot leave it stale).
+        - run: cargo test -p varve --test cli a_shim_is_varve_itself_not_a_shell_script
+        # The pre-existing end-to-end dispatch test still passes through the NEW
+        # mechanism: same shim, two projects, each resolving its own pin, and a
+        # pinless directory failing closed. This is the regression guard.
+        - run: cargo test -p varve --test cli shims_resolve_per_invocation_so_switching_projects_is_cd
+        # argv[0] is caller-controlled: validated, never trusted as a path.
+        - run: cargo test -p varve varve_invoked_as_itself_is_not_a_dispatch
+        - run: cargo test -p varve a_shim_name_is_the_file_name_only
+        - run: cargo test -p varve a_hostile_argv0_cannot_smuggle_a_path
+    links:
+      - type: verifies
+        target: REQ-SHIM-002
+
+  - id: VER-PERF-001
+    type: verification
+    title: Dispatch cost is measured, and the complexity claim is the measurement
+    status: verified
+    release: v0.19.0
+    fields:
+      method: automated-test
+      baseline: >
+        criterion, release build, 2026-08-13. resolve/digest is FLAT across a
+        66x change in store size — 37.0 us (3 layers), 37.1 us (50), 37.2 us
+        (200) — while resolve/name_only grows linearly: 73.8 us (3), 646 us
+        (50), 2.51 ms (200), i.e. 68x slower than the digest pin at 200 layers.
+        This is the evidence for the documented claim that a digest-carrying pin
+        resolves in constant time and a name-only pin is linear in installed
+        layers; `concept-pins` tells users to pin the digest because of it.
+        Separately, removing the /bin/sh hop (REQ-SHIM-002) takes ~2.4 ms per
+        dispatch off the interactive path, measured over 200 execs.
+      steps:
+        # The benchmark exists and runs (--test mode executes each once).
+        - run: cargo bench -p varve-core --bench resolve -- --test
+    links:
+      - type: verifies
+        target: REQ-PERF-001

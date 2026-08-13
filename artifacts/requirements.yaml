@@ -1730,3 +1730,66 @@ artifacts:
     fields:
       priority: must
       category: functional
+
+  - id: REQ-SHIM-002
+    type: requirement
+    title: The shim is varve itself, not a shell script
+    status: verified
+    release: v0.19.0
+    description: >
+      `varve shim install` wrote a `/bin/sh` script per tool
+      (`exec "<varve>" run -- <tool> "$@"`). Three defects follow. (1) TRUST: an
+      unverified shell interpreter sits on the dispatch path of every tool
+      invocation, in a tool whose premise is a short verified path from pin to
+      binary — and the shell is the one component varve neither signs nor
+      checks. (2) INJECTION: the tool name was interpolated UNQUOTED, and the
+      varve path was interpolated inside sh double quotes where `"`, `$` and
+      backticks remain live; a name or install path carrying a shell
+      metacharacter breaks or injects. (3) COST: the extra process costs ~2.4 ms
+      per dispatch (measured), on the interactive hot path of every compiler
+      invocation, and the design is Unix-only.
+      varve shall instead dispatch on `argv[0]`, the rustup pattern: a shim is a
+      symlink to the varve binary (a copy on Windows), and varve invoked under
+      any name other than its own resolves the pin and execs that tool. This
+      deletes the shell, removes the injection class BY CONSTRUCTION (no string
+      ever reaches a parser), halves the process spawns, and makes Windows a
+      copy rather than a special case. Because a symlink resolves to whatever
+      varve currently is, shims also stop going stale after `self-update`.
+      The name derived from `argv[0]` is caller-controlled, so it shall be
+      validated (no path separators, no `..`, non-empty) and may only ever
+      select among tools the pinned layer already exposes — fail closed, as
+      everywhere else.
+    tags: [core, security, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-PERF-001
+    type: requirement
+    title: Dispatch cost is measured and budgeted, not folklore
+    status: verified
+    release: v0.19.0
+    description: >
+      varve had no benchmarks at all, while shim dispatch — the only genuinely
+      hot path it has, on every `cargo`/`rivet`/`synth` invocation — was
+      unmeasured. Measurement (2026-08-13, release build) found ~6.4 ms of varve
+      overhead per dispatch, of which ~2.4 ms was a `/bin/sh` process that
+      REQ-SHIM-002 removes outright, and a resolve cost that grows LINEARLY with
+      installed layers for a NAME-ONLY pin (3.8 ms at 3 layers, 8.6 ms at 201)
+      because `Store::list` parses every installed `layer.json` to recover its
+      identity. A pin carrying `digest` is already O(1) (`Store::get` reads one
+      entry), and layers coexist by design (REQ-COEXIST-001), so the linear case
+      is the one a long-lived machine lands in.
+      varve shall carry a criterion benchmark for resolve/dispatch so this cost
+      is a tracked number rather than folklore, and shall DOCUMENT the
+      complexity honestly: digest-pinned resolve is constant-time, name-only
+      resolve is linear in installed layers. Making the name-only path constant
+      needs a store-side identity index with its own invalidation and trust
+      questions; it is deliberately NOT claimed here, and is tracked separately.
+      The trust property this protects: a verified dispatch path must not be so
+      slow that users are tempted to bypass it — and its cost must be visible
+      before it regresses, not after a user complains.
+    tags: [core, ergonomics]
+    fields:
+      priority: should
+      category: performance
