@@ -1820,3 +1820,58 @@ artifacts:
     fields:
       priority: must
       category: functional
+
+  - id: REQ-PROOF-001
+    type: requirement
+    title: Trust obligations are discharged by certificate, and the gate proves it can go red
+    status: verified
+    release: v0.20.0
+    description: >
+      varve's anti-rollback decisions were checked only by example tests and by
+      proptest SAMPLING a bounded range. That gap is not theoretical: on
+      2026-08-08 cargo-mutants left three survivors in `epoch_days`, all
+      "replace || with && " in the Gregorian leap predicate — an arm proptest
+      never generated. varve shall carry SMT obligations, discharged by ordeal
+      (the certificate-checked QF_BV solver varve itself distributes), so the
+      statements hold over the whole input space rather than over samples. An
+      `unsat` from ordeal is returned only after its checker has validated an
+      LRAT certificate, so the artifact is evidence a third party can re-check,
+      not an exit code.
+      Crucially, every proof file declares the verdict it expects, and the suite
+      MUST contain negative controls — the same obligation against a
+      deliberately wrong predicate, which must still be refutable. A suite in
+      which everything is expected-unsat cannot distinguish "proved" from "the
+      solver stopped deciding anything"; `tools/proof-check.py` fails if no
+      negative control is present. A gate nobody has watched go red is not a
+      gate.
+      Where a solver finds a model, that model is a test case: the leap
+      obligation returned y = 8192, which is now the `8192-02-29` regression
+      test that kills the surviving mutants.
+    tags: [core, security, traceability]
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-MUTATE-002
+    type: requirement
+    title: The mutation gate covers the trust decisions, not a subset of them
+    status: verified
+    release: v0.20.0
+    description: >
+      The required mutation gate covered six files (177 mutants) while the
+      modules holding the actual trust decisions were EXCLUDED: `resolve.rs`
+      (the no-fallback law), `install.rs` (verify -> digest -> lay-down),
+      `selfverify.rs` (the self-update trust anchor), `reverify.rs` (`varve
+      verify` itself) and `exportstamp.rs`. A mutant deleting a digest check in
+      any of them merged green. varve shall include them in the required gate.
+      Adding them immediately paid: two survivors were found and killed, the
+      same defect in both — a `NotFound` match guard that could be replaced with
+      `true`, collapsing "this file cannot be read" into "this file is absent".
+      In `reverify.rs` that meant a permissions fault on a retained envelope
+      would be reported as "no retained envelope"; in `exportstamp.rs` it told
+      the user to re-run an export that was not the problem. A verification tool
+      must name the fault it actually hit.
+    tags: [core, security]
+    fields:
+      priority: should
+      category: functional

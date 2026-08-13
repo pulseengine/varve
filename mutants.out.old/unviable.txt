@@ -1,3 +1,0 @@
-crates/varve-core/src/manifest.rs:57:9: replace LayerManifest::parse -> Result<Self, ManifestError> with Ok(Default::default())
-crates/varve-core/src/rollback.rs:57:9: replace HighWaterMarks::load -> Result<Self, RollbackError> with Ok(Default::default())
-crates/varve-core/src/rollback.rs:83:9: replace HighWaterMarks::check -> RollbackVerdict with Default::default()

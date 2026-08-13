@@ -172,6 +172,32 @@ pub(crate) fn epoch_days(rfc3339: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+
+    // rivet: verifies REQ-PROOF-001
+    #[test]
+    fn the_leap_rule_holds_at_the_year_the_solver_found() {
+        // cargo-mutants left three survivors here on 2026-08-08, all
+        // "replace || with && in epoch_days" — the Gregorian leap predicate.
+        // proptest never sampled a year that distinguishes the mutant. ordeal
+        // did: y = 8192 (divisible by 4, not by 100, not by 400), so it is a
+        // leap year under the correct rule and NOT under the mutant. That
+        // makes 8192-02-29 the date the mutant must get wrong.
+        // See proofs/epoch-days-leap-mutant-is-distinguishable.smt2.
+        assert!(
+            epoch_days("8192-02-29").is_some(),
+            "8192 is a leap year: 8192-02-29 must be a real date"
+        );
+        // The neighbouring non-leap cases the same predicate must reject.
+        assert!(
+            epoch_days("8100-02-29").is_none(),
+            "8100 %% 100 == 0, %% 400 != 0"
+        );
+        assert!(epoch_days("8000-02-29").is_some(), "8000 %% 400 == 0");
+        assert!(
+            epoch_days("8193-02-29").is_none(),
+            "8193 is not divisible by 4"
+        );
+    }
     use super::*;
     use crate::manifest::{LayerManifest, fixtures};
 

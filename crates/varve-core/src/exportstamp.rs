@@ -128,6 +128,28 @@ mod tests {
     }
 
     // rivet: verifies REQ-EXPORT-SYNC-001
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_stamp_is_an_io_error_not_a_missing_one() {
+        // A stamp that EXISTS but cannot be read is not the same as no stamp.
+        // Reporting it as Missing would tell the user "re-run the export" when
+        // the real fault is permissions — advice that cannot work. (Found by
+        // cargo-mutants: the NotFound guard survived being replaced with true.)
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(STAMP_FILE);
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let got = read_stamp(dir.path());
+        // Restore before asserting, so a failure cannot leave an unremovable dir.
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+        match got {
+            Err(ExportStampError::Io(..)) => {}
+            other => panic!("expected Io for an unreadable stamp, got {other:?}"),
+        }
+    }
+
+    // rivet: verifies REQ-EXPORT-SYNC-001
     #[test]
     fn read_malformed_stamp_is_malformed_error() {
         let dir = tempfile::tempdir().unwrap();
