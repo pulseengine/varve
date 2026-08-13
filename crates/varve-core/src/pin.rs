@@ -74,6 +74,12 @@ pub enum PinError {
         "{path}: digest '{found}' is not a valid digest: expected 'sha256:' followed by 64 hex characters"
     )]
     MalformedDigest { path: String, found: String },
+    #[error(
+        "{path}: tool name {name:?} is not a plain name — a tool is looked up INSIDE \
+         the pinned layer, so a path would resolve outside it. Name the tool only, \
+         e.g. tools = [\"rivet\"]."
+    )]
+    ToolNameIsAPath { path: String, name: String },
     #[error("{path}: tools list is present but empty — omit it to select every tool in the layer")]
     EmptyTools { path: String },
 }
@@ -129,12 +135,30 @@ impl Pin {
                 });
             }
         }
-        if let Some(tools) = &raw.toolchain.tools
-            && tools.is_empty()
-        {
-            return Err(PinError::EmptyTools {
-                path: origin.to_string(),
-            });
+        if let Some(tools) = &raw.toolchain.tools {
+            if tools.is_empty() {
+                return Err(PinError::EmptyTools {
+                    path: origin.to_string(),
+                });
+            }
+            // A tool name indexes the verified layer's `bin/`. `Path::join`
+            // with an absolute path REPLACES the base, and `..` walks out of
+            // it, so anything but a plain name would escape the layer — the
+            // opposite of "a pin resolves exactly or the command fails".
+            for name in tools {
+                let plain = !name.is_empty()
+                    && name != "."
+                    && name != ".."
+                    && !name.contains('/')
+                    && !name.contains('\\')
+                    && !name.contains('\0');
+                if !plain {
+                    return Err(PinError::ToolNameIsAPath {
+                        path: origin.to_string(),
+                        name: name.clone(),
+                    });
+                }
+            }
         }
         Ok(Pin {
             realm: raw.toolchain.realm,
@@ -274,6 +298,36 @@ tools   = ["rivet", "synth"]
                 "input {bad:?} got: {err}"
             );
         }
+    }
+
+    // rivet: verifies REQ-PIN-002
+    #[test]
+    fn rejects_a_tool_name_that_is_a_path() {
+        // A tool name is looked up INSIDE the verified layer. `Path::join`
+        // with an absolute path REPLACES the base, so an unchecked name would
+        // resolve outside the layer entirely — exactly the "never falls back
+        // to binaries on PATH" guarantee the docs make. Fail closed here.
+        for hostile in [
+            "/usr/bin/id",
+            "../../usr/bin/id",
+            "sub/dir",
+            "..",
+            ".",
+            "",
+            "C:\\Windows\\system32\\cmd.exe",
+        ] {
+            let content = format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\ntools = [\"{}\"]\n",
+                hostile.replace('\\', "\\\\")
+            );
+            assert!(
+                Pin::parse(&content, "varve.toml").is_err(),
+                "tool name {hostile:?} must be refused — it escapes the layer"
+            );
+        }
+        // Ordinary names still parse.
+        let ok = "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\ntools = [\"rivet\", \"synth-c\", \"cargo_x\"]\n";
+        assert!(Pin::parse(ok, "varve.toml").is_ok());
     }
 
     // rivet: verifies REQ-PIN-001

@@ -915,3 +915,117 @@ artifacts:
     links:
       - type: verifies
         target: REQ-CRATENAME-001
+
+  - id: VER-SHIM-002
+    type: verification
+    title: The shim is varve itself; argv[0] dispatch fails closed
+    status: verified
+    release: v0.19.0
+    fields:
+      method: automated-test
+      steps:
+        # The shim must not be a script, and on unix must be a symlink to varve
+        # (so self-update cannot leave it stale).
+        - run: cargo test -p varve --test cli a_shim_is_varve_itself_not_a_shell_script
+        # The pre-existing end-to-end dispatch test still passes through the NEW
+        # mechanism: same shim, two projects, each resolving its own pin, and a
+        # pinless directory failing closed. This is the regression guard.
+        - run: cargo test -p varve --test cli shims_resolve_per_invocation_so_switching_projects_is_cd
+        # argv[0] is caller-controlled: validated, never trusted as a path.
+        - run: cargo test -p varve varve_invoked_as_itself_is_not_a_dispatch
+        - run: cargo test -p varve a_shim_name_is_the_file_name_only
+        - run: cargo test -p varve a_hostile_argv0_cannot_smuggle_a_path
+    links:
+      - type: verifies
+        target: REQ-SHIM-002
+
+  - id: VER-PERF-001
+    type: verification
+    title: Dispatch cost is measured, and the complexity claim is the measurement
+    status: verified
+    release: v0.19.0
+    fields:
+      method: automated-test
+      baseline: >
+        criterion, release build, 2026-08-13. resolve/digest is FLAT across a
+        66x change in store size — 37.0 us (3 layers), 37.1 us (50), 37.2 us
+        (200) — while resolve/name_only grows linearly: 73.8 us (3), 646 us
+        (50), 2.51 ms (200), i.e. 68x slower than the digest pin at 200 layers.
+        This is the evidence for the documented claim that a digest-carrying pin
+        resolves in constant time and a name-only pin is linear in installed
+        layers; `concept-pins` tells users to pin the digest because of it.
+        Separately, removing the /bin/sh hop (REQ-SHIM-002) takes ~2.4 ms per
+        dispatch off the interactive path, measured over 200 execs.
+      steps:
+        # The benchmark exists and runs (--test mode executes each once).
+        - run: cargo bench -p varve-core --bench resolve -- --test
+    links:
+      - type: verifies
+        target: REQ-PERF-001
+
+  - id: VER-PIN-002
+    type: verification
+    title: A pin naming a path instead of a tool is refused
+    status: verified
+    release: v0.19.0
+    fields:
+      method: automated-test
+      steps:
+        # Absolute, traversal, nested, dot and empty names are all refused;
+        # ordinary names still parse.
+        - run: cargo test -p varve-core rejects_a_tool_name_that_is_a_path
+    links:
+      - type: verifies
+        target: REQ-PIN-002
+
+  - id: VER-REVIEW-v0.19.0
+    type: verification
+    title: v0.19.0 independently reviewed — DISSENT, then closed; caught a real regression
+    status: verified
+    release: v0.19.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-13,
+        of the argv[0] shim (REQ-SHIM-002) and the dispatch benchmark
+        (REQ-PERF-001) at HEAD 0297d1a. VERDICT: DISSENT — and it was right on
+        both counts. Confirmed by the reviewer: no shell remains anywhere on the
+        dispatch path (zero shebangs generated; run_tool is Command::new + exec,
+        never re-entering `varve run`); the pre-existing end-to-end test really
+        does gate the NEW mechanism (argv[0] = .../shims/probe), and would fail
+        if dispatch regressed; argv[0] could NOT be broken after a determined
+        attempt (the real boundary is exact string equality against names read
+        from the layer's bin/, so the derived name never reaches a Path::join);
+        the benchmark numbers reproduced within noise (digest flat at
+        36.9/37.2/37.1 us; name_only 73.2 us/647 us/2.49 ms) and the setup
+        measures the divergence it claims. The reviewer independently measured
+        the shell removal at ~4.7 ms/dispatch — our ~2.4 ms claim was
+        CONSERVATIVE, not inflated.
+        DISSENT rested on two real defects, both now closed. (1) REGRESSION
+        INTRODUCED BY THIS CHANGE: the dispatch path used `to_string_lossy`, so
+        a non-UTF-8 argument was SILENTLY corrupted where the old script had
+        hard-errored — silent data loss in a tool whose premise is exactness.
+        Fixed losslessly: OsString end-to-end on both the dispatch and `varve
+        run` paths, with a test asserting byte-for-byte passthrough of
+        b"bad\xff\xfename". (2) FALSE CLAIM SHIPPED IN DOCS: "shims do not go
+        stale when varve updates itself" is false on Windows (a shim is a copy)
+        and has a demonstrated ZERO differential on unix — the reviewer showed
+        the old script survived an in-place self-update identically. The claim
+        was DELETED rather than scoped, and the Windows consequence documented.
+        Two further findings were adopted: the renamed-binary sharp edge (a copy
+        called `myvarve` loses the CLI entirely — rustup behaves the same, but
+        it was undocumented) is now stated in `varve docs shim`; and a
+        PRE-EXISTING seam, `tools = ["/usr/bin/id"]` in a pin resolving outside
+        the verified layer via Path::join, contradicting the documented
+        no-fallback guarantee, is fixed as REQ-PIN-002. One finding is deferred
+        with an issue: `varve env` still interpolates the store root into a live
+        shell string (same class, off the dispatch path, needs a hostile
+        VARVE_ROOT).
+    links:
+      - type: verifies
+        target: REQ-SHIM-002
+      - type: verifies
+        target: REQ-PERF-001
+      - type: verifies
+        target: REQ-PIN-002
