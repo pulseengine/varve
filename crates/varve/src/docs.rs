@@ -110,6 +110,16 @@ pub const TOPICS: &[Topic] = &[
         "cmd-status.md"
     ),
     topic!(
+        "sign-attestation",
+        "sign-attestation — bind an attestation to a layer (CI)",
+        "cmd-sign-attestation.md"
+    ),
+    topic!(
+        "check-attestation",
+        "check-attestation — does this attestation belong here?",
+        "cmd-check-attestation.md"
+    ),
+    topic!(
         "sign-status",
         "sign-status — sign a line-status document (CI)",
         "cmd-sign-status.md"

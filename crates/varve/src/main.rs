@@ -192,6 +192,43 @@ enum Cmd {
         #[arg(long = "from-file", value_name = "ENVELOPE")]
         from_file: Option<PathBuf>,
     },
+    /// (CI) Sign a statement binding an attestation to a layer: "this digest,
+    /// of this kind, from this producer, accompanies this layer"
+    /// (REQ-ATTEST-001). varve vouches for the ASSOCIATION and the bytes'
+    /// integrity — never for what the producer claimed.
+    SignAttestation {
+        /// Layer the attestation accompanies. Defaults to the resolved pin.
+        #[arg(long)]
+        layer: Option<String>,
+        /// What the document is: sbom | provenance | audit | vex | qualification.
+        #[arg(long)]
+        kind: String,
+        /// The attestation bytes to bind (carried verbatim, never rewritten).
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// Who produced the underlying claim, e.g. `adacore`, `cargo-vet`.
+        #[arg(long, default_value = "varve")]
+        producer: String,
+        /// File holding the hex-encoded ed25519 root SECRET key.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        #[arg(long, default_value = "varve-root-1")]
+        key_id: String,
+        /// Where to write the signed statement.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Check that an attestation belongs to the pinned layer: verify the
+    /// statement against the trust root, then re-hash the carried bytes and
+    /// confirm the layer it names is the one resolved here (REQ-ATTEST-001).
+    CheckAttestation {
+        /// The signed statement (DSSE envelope) produced by sign-attestation.
+        #[arg(long, value_name = "FILE")]
+        statement: PathBuf,
+        /// The attestation bytes the statement describes.
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+    },
     /// (CI) Validate and sign a line-status document into a DSSE envelope.
     SignStatus {
         /// The status document JSON (see docs: line, counter, issued-at,
@@ -403,6 +440,25 @@ fn run() -> anyhow::Result<()> {
             key_id,
             out,
         } => sign_status(&file, &key, &key_id, &out),
+        Cmd::SignAttestation {
+            layer,
+            kind,
+            file,
+            producer,
+            key,
+            key_id,
+            out,
+        } => sign_attestation(
+            &store,
+            layer.as_deref(),
+            &kind,
+            &file,
+            &producer,
+            &key,
+            &key_id,
+            &out,
+        ),
+        Cmd::CheckAttestation { statement, file } => check_attestation(&store, &statement, &file),
         Cmd::AttachStatus { layout, status } => attach_status(&layout, &status),
         Cmd::Shim(ShimCmd::Install { extra_tools }) => shim_install(&store, &extra_tools),
         Cmd::Env { shell } => print_env(&store, &shell),
@@ -990,6 +1046,90 @@ fn collect_verified_crates(
         );
     }
     Ok(crates)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_attestation(
+    store: &Store,
+    layer: Option<&str>,
+    kind: &str,
+    file: &std::path::Path,
+    producer: &str,
+    key: &std::path::Path,
+    key_id: &str,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let kind: varve_core::attest::AttestationKind = kind.parse()?;
+    // Trust first, as everywhere: binding an attestation to a layer we cannot
+    // verify would assert an association we have no basis for.
+    let (_store, entry) = export_target(store, layer)?;
+    let bytes = std::fs::read(file)
+        .with_context(|| format!("cannot read attestation {}", file.display()))?;
+    let st = varve_core::attest::statement(
+        &entry.layer.to_string(),
+        &entry.digest,
+        kind,
+        &bytes,
+        producer,
+    );
+    let hex_key = std::fs::read_to_string(key)
+        .with_context(|| format!("cannot read signing key {}", key.display()))?;
+    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    let envelope = varve_core::attest::sign(&st, &sk, key_id)?;
+    std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
+    println!(
+        "signed a {kind} attestation statement by {producer} -> {out}\n\
+         \u{20}\u{20}attestation digest : {adigest}\n\
+         \u{20}\u{20}bound to layer     : {layer} ({ldigest})\n\
+         varve vouches that these bytes accompany this layer; what {producer} claims is \
+         {producer}'s to prove.",
+        out = out.display(),
+        adigest = st.digest,
+        layer = entry.layer,
+        ldigest = st.layer_manifest_digest,
+    );
+    Ok(())
+}
+
+fn check_attestation(
+    store: &Store,
+    statement: &std::path::Path,
+    file: &std::path::Path,
+) -> anyhow::Result<()> {
+    let ctx = project_ctx(store)?;
+    let root = ctx_root_bytes(&ctx)?;
+    // VERIFY THE LAYER, not just the statement. Clean-room review found this
+    // reporting "attestation OK" over a tampered tool binary and a forged
+    // layer.json — states `varve verify` rejects. Both values this command
+    // then prints and joins on (the layer identity and its digest) are local
+    // labels: InstalledLayer.digest is the store DIRECTORY NAME and .layer is
+    // parsed from layer.json, neither authenticated until verify_installed
+    // re-checks the retained envelope. This is the command a disconnected
+    // consumer runs; it must not be the one that trusts unverified local state.
+    let (_store, entry) = export_target(store, None)?;
+    let envelope = std::fs::read(statement)
+        .with_context(|| format!("cannot read statement {}", statement.display()))?;
+    let bytes = std::fs::read(file)
+        .with_context(|| format!("cannot read attestation {}", file.display()))?;
+    // 1. The statement must verify against the pinned root — offline.
+    let st = varve_core::attest::verify_statement(&envelope, &root)?;
+    // 2. …and it must actually describe THESE bytes and THIS layer.
+    varve_core::attest::check(&st, &bytes, &entry.digest, &entry.layer.to_string())?;
+    println!(
+        "attestation OK: a {kind} document produced by {producer}, {n} bytes\n\
+         \u{20}\u{20}attestation digest : {adigest}\n\
+         \u{20}\u{20}bound to layer     : {layer} ({ldigest})\n\
+         note: varve verified the ASSOCIATION and the bytes' integrity, and re-verified the \
+         layer itself. Any claim {producer} makes INSIDE the document is verified with \
+         {producer}'s own key, not this one.",
+        kind = st.kind,
+        producer = st.producer,
+        n = bytes.len(),
+        adigest = st.digest,
+        layer = entry.layer,
+        ldigest = st.layer_manifest_digest,
+    );
+    Ok(())
 }
 
 fn sbom_cmd(

@@ -125,6 +125,9 @@ struct SignedLayer {
     archive: std::path::PathBuf,
     trust_root: std::path::PathBuf,
     wrong_root: std::path::PathBuf,
+    /// The hex-encoded SECRET half, for tests that must sign something else
+    /// under the same root (attestation statements).
+    secret_key: std::path::PathBuf,
 }
 
 fn signed_layer_fixture(fx: &Fixture, layer: &str, counter: u64) -> SignedLayer {
@@ -179,11 +182,171 @@ fn signed_layer_fixture(fx: &Fixture, layer: &str, counter: u64) -> SignedLayer 
         .unwrap()
         .join(format!("wrong-{layer}-{counter}.pub"));
     std::fs::write(&wrong_root, hex::encode(&wrong_pk)).unwrap();
+    let secret_key = fx
+        .project
+        .parent()
+        .unwrap()
+        .join(format!("secret-{layer}-{counter}.hex"));
+    std::fs::write(&secret_key, hex::encode(&sk)).unwrap();
     SignedLayer {
         archive,
         trust_root,
         wrong_root,
+        secret_key,
     }
+}
+
+// rivet: verifies REQ-ATTEST-001
+#[test]
+fn an_attestation_binds_to_its_layer_and_nothing_else() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+
+    // An SBOM of the pinned layer, then a signed statement binding it.
+    let sbom = fx.project.join("layer.cdx.json");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["sbom", "--out"])
+        .arg(&sbom)
+        .assert()
+        .success();
+    let stmt = fx.project.join("sbom.statement.dsse");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args([
+            "sign-attestation",
+            "--kind",
+            "sbom",
+            "--producer",
+            "varve",
+            "--file",
+        ])
+        .arg(&sbom)
+        .arg("--key")
+        .arg(&signed.secret_key)
+        .arg("--key-id")
+        .arg("test-root")
+        .arg("--out")
+        .arg(&stmt)
+        .assert()
+        .success();
+
+    // It checks out against the pinned layer.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["check-attestation", "--statement"])
+        .arg(&stmt)
+        .arg("--file")
+        .arg(&sbom)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("attestation OK"));
+
+    // Swap the bytes: the statement pins them, so this must be refused.
+    let tampered = fx.project.join("tampered.cdx.json");
+    std::fs::write(
+        &tampered,
+        b"{\"bomFormat\":\"CycloneDX\",\"components\":[]}",
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["check-attestation", "--statement"])
+        .arg(&stmt)
+        .arg("--file")
+        .arg(&tampered)
+        .assert()
+        .failure();
+
+    // A statement signed by another root cannot vouch for anything here.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.wrong_root)
+        .args(["check-attestation", "--statement"])
+        .arg(&stmt)
+        .arg("--file")
+        .arg(&sbom)
+        .assert()
+        .failure();
+
+    // An unknown kind is refused, not guessed.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["sign-attestation", "--kind", "vibes", "--file"])
+        .arg(&sbom)
+        .arg("--key")
+        .arg(&signed.secret_key)
+        .arg("--out")
+        .arg(fx.project.join("nope.dsse"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown attestation kind"));
+}
+
+// rivet: verifies REQ-ATTEST-001
+#[test]
+fn check_attestation_refuses_a_tampered_layer() {
+    // Clean-room review found check-attestation reporting "attestation OK" over
+    // a store state `varve verify` rejects: it checked the statement signature
+    // but never re-verified the LAYER, whose name and digest are local labels
+    // until its retained envelope is re-checked. This is the command the
+    // disconnected consumer runs; it must not be the trusting one.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    let sbom = fx.project.join("l.cdx.json");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["sbom", "--out"])
+        .arg(&sbom)
+        .assert()
+        .success();
+    let stmt = fx.project.join("s.dsse");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["sign-attestation", "--kind", "sbom", "--file"])
+        .arg(&sbom)
+        .arg("--key")
+        .arg(&signed.secret_key)
+        .arg("--key-id")
+        .arg("test-root")
+        .arg("--out")
+        .arg(&stmt)
+        .assert()
+        .success();
+    // Now alter an installed tool binary — the layer no longer verifies.
+    let core = fx.root.join("core");
+    let entry = std::fs::read_dir(&core)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(entry.join("bin/synth"), b"EVIL").unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .arg("verify")
+        .assert()
+        .failure();
+    // check-attestation must reach the same verdict, not report OK.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["check-attestation", "--statement"])
+        .arg(&stmt)
+        .arg("--file")
+        .arg(&sbom)
+        .assert()
+        .failure();
 }
 
 // rivet: verifies REQ-SBOM-001
