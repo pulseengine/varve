@@ -1070,3 +1070,28 @@ artifacts:
     links:
       - type: verifies
         target: REQ-MUTATE-002
+
+  - id: VER-SBOM-001
+    type: verification
+    title: The SBOM transcribes the signed manifest, deterministically and self-bound
+    status: verified
+    release: v0.21.0
+    fields:
+      method: automated-test
+      baseline: >
+        Exercised against the real pulseengine rolling layer 2026.08.2
+        (2026-08-13): 35 components, every one carrying a version and a SHA-256,
+        upstream vcs/distribution references transcribed from the depositor's
+        source annotations, and two consecutive emissions byte-identical
+        (`cmp` clean). The document records manifest digest
+        sha256:83a699600dea..., counter 3, channel rolling. Emission for an
+        unverifiable layer fails closed with the trust-root error.
+      steps:
+        - run: cargo test -p varve-core every_component_is_transcribed_from_the_signed_manifest
+        - run: cargo test -p varve-core emission_is_deterministic
+        - run: cargo test -p varve-core the_document_binds_itself_to_the_layer_it_describes
+        - run: cargo test -p varve-core per_platform_entries_are_distinguishable_not_duplicates
+        - run: cargo test -p varve-core an_unknown_format_is_refused_not_guessed
+    links:
+      - type: verifies
+        target: REQ-SBOM-001

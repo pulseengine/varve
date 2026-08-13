@@ -1875,3 +1875,40 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  - id: REQ-SBOM-001
+    type: requirement
+    title: The SBOM is a transcription of the signed manifest, not a scan
+    status: verified
+    release: v0.21.0
+    description: >
+      varve carried no SBOM at all, while holding — inside the DSSE-signed layer
+      manifest — precisely the data an SBOM answers with: every component's
+      name, version, sha256 digest, payload kind and upstream source
+      provenance. varve shall emit a CycloneDX 1.6 document for a VERIFIED
+      layer, transcribed from that signed manifest rather than scanned from a
+      filesystem or a lockfile. The distinction is the point: a scanner reports
+      what it believes it found and can miss a component or invent one, while a
+      transcription is exactly as trustworthy as the layer — a question
+      `varve verify` already decides. An SBOM for a layer that cannot be
+      verified is worse than none, because it looks authoritative; the command
+      shall therefore fail closed, as the export adapters do.
+      The document shall be DETERMINISTIC — components ordered by digest, a
+      serial number derived from the manifest digest, and the layer's own
+      issued-at rather than the wall clock — so re-emitting a layer is
+      byte-identical and any diff means the layer changed. It shall BIND ITSELF
+      to what it describes by recording the manifest digest, channel and
+      anti-rollback counter in its metadata, so a document can be checked
+      against the artifact it claims to cover. Per-platform entries shall carry
+      their platform, since a layer holds one distinct binary per platform and
+      they would otherwise read as duplicates.
+      Regulatory context, not the justification: EU CRA Article 13(5) requires
+      due diligence over third-party components, Article 14 reporting bites
+      2026-09-11 with a 24-hour clock that presumes you can say which
+      components are in a shipped product, and Annex I Part II(1) requires an
+      SBOM in a commonly used machine-readable format covering at least
+      top-level dependencies.
+    tags: [distribution, traceability, security]
+    fields:
+      priority: must
+      category: functional

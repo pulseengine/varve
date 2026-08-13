@@ -39,6 +39,7 @@ pub mod registry;
 pub mod resolve;
 pub mod reverify;
 pub mod rollback;
+pub mod sbom;
 pub mod selfverify;
 pub mod source;
 pub mod store;

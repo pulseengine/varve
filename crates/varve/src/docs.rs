@@ -100,6 +100,11 @@ pub const TOPICS: &[Topic] = &[
         "cmd-export-bazel-distdir.md"
     ),
     topic!(
+        "sbom",
+        "sbom — the signed manifest as a bill of materials",
+        "cmd-sbom.md"
+    ),
+    topic!(
         "status",
         "status — support window, yanks, known problems",
         "cmd-status.md"
