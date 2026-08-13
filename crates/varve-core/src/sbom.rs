@@ -64,6 +64,10 @@ fn component(entry: &crate::manifest::ManifestEntry) -> serde_json::Value {
     // kind.rs), so a layer deposited by a newer varve can reach us here.
     let ctype = match entry.kind() {
         Ok(crate::kind::PayloadKind::Tool) => "application",
+        // A composed layer is not a library — it is another BOM. Recorded as a
+        // platform component with a nested-BOM reference, so a consumer follows
+        // it rather than mistaking it for a shipped artifact.
+        Ok(crate::kind::PayloadKind::Layer) => "platform",
         Ok(_) => "library",
         Err(_) => {
             if let Some(raw) = entry.annotations.get(crate::kind::ANN_KIND) {
@@ -115,6 +119,14 @@ fn component(entry: &crate::manifest::ManifestEntry) -> serde_json::Value {
         c["purl"] = serde_json::json!(format!("pkg:github/{owner}/{name}@{version}"));
     }
 
+    // A composed layer points at its own document rather than restating it.
+    if entry.kind() == Ok(crate::kind::PayloadKind::Layer) {
+        c["externalReferences"] = serde_json::json!([{
+            "type": "bom",
+            "url": format!("urn:varve:layer:{}", entry.digest)
+        }]);
+        return c;
+    }
     // Upstream provenance, where the depositor recorded it. The repo annotation
     // is a bare `owner/name` slug, so it is expanded into something an assessor
     // can actually follow; the asset name is left relative to that release.

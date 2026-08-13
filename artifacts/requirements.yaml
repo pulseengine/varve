@@ -1575,7 +1575,7 @@ artifacts:
     type: requirement
     title: The realm authenticates the line index, not only each artifact
     status: approved
-    release: v0.23.0
+    release: v0.24.0
     description: >
       varve signs individual layer manifests and realms, but the LISTING of
       which layers exist for a line (the index a consumer enumerates) must
@@ -1644,7 +1644,7 @@ artifacts:
     type: requirement
     title: A layer transports its attestations as OCI referrers, and verify reports them
     status: approved
-    release: v0.23.0
+    release: v0.24.0
     description: >
       The transport half split out of REQ-ATTEST-001 when review found that
       requirement marked verified while this half was unimplemented. Binding
@@ -1993,4 +1993,77 @@ artifacts:
     tags: [distribution, traceability, security]
     fields:
       priority: must
+      category: functional
+
+  - id: REQ-COMPOSE-001
+    type: requirement
+    title: A layer may compose another layer, so one pin can span two trust universes
+    status: verified
+    release: v0.23.0
+    description: >
+      Raised by a consumer (varve#52, relay). A pin names exactly ONE realm and
+      ONE layer, so a project cannot draw on two trust universes at once. relay
+      needs the PulseEngine tools that CHECK its work (rivet, meld, synth,
+      witness) and the upstream BytecodeAlliance tools that BUILD it
+      (wasm-tools, cargo-component, wkg, wac) — and today the question "which
+      layer produced this artifact" is answerable for the checkers and not for
+      the producers. Two defects reached a downstream consumer through exactly
+      that unpinned half.
+      Putting upstream tools in the same layer would place unqualified releases
+      we do not control under a qualification claim that covers tools we do —
+      the consumer flagged this and is right. varve shall therefore let a layer
+      COMPOSE another: a signed manifest entry of payload kind `layer` whose
+      digest is the included layer's manifest digest and whose annotations name
+      its realm. The pin stays singular; resolution walks the graph; each layer
+      keeps its own realm, trust root, cadence and qualification claim; and
+      because the include lives in the signed payload, the composition itself
+      is signed.
+      Rules, all fail-closed: an included layer is verified against ITS OWN
+      realm's trust root, not the including layer's; a cycle is refused, not
+      followed; depth is bounded; and a tool name exposed by more than one
+      layer in the graph is an ERROR naming both layers, never a silent choice
+      — varve does not pick a winner, exactly as a pin that does not resolve
+      uniquely is an error rather than a fallback.
+      SCOPE, stated rather than implied: v0.23.0 covers EXPRESSING, RESOLVING
+      and VERIFYING a composition. Transitively FETCHING an included layer that
+      is not installed is deliberately NOT included; resolution fails with the
+      corrective `varve install` for the missing layer, which is the behaviour
+      a missing pinned layer already has.
+    tags: [core, distribution]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-LOCKPIN-001
+    type: requirement
+    title: A pinned crate that is compiled into an artifact is checkable, not merely shippable
+    status: verified
+    release: v0.23.0
+    description: >
+      Also from varve#52. varve pins what it DISPATCHES, but a code-generating
+      dependency reaches the artifact as a Cargo dependency compiled INTO it —
+      `wit-bindgen-rt` is baked into every component relay publishes, and
+      supplies `cabi_realloc`, the symbol whose absence shipped a raw core
+      module to a downstream consumer. There is no binary to shim, so `varve
+      which` has nothing to point at, and the consumer reported running THREE
+      versions of one generator at once (0.41.0 in published components, 0.60.0
+      at the workspace root, 0.58.0 in our fork) with nothing recording which
+      produced a given artifact.
+      varve already carries the crate payload kind, so it can DISTRIBUTE such a
+      dependency; what is missing is AGREEMENT. varve shall check a project's
+      resolved lockfile against the pinned layer's `crate` entries: `varve
+      verify --lockfile <FILE>` shall fail when a package the layer pins
+      resolves to a different version in the lockfile, or resolves to the same
+      version with a different checksum. Packages the layer does not pin are
+      not varve's business and are ignored — the layer does not claim to cover
+      every dependency, and pretending otherwise would make the check noise.
+      THE BOUNDARY, deliberate and to be documented: varve cannot intercept a
+      Cargo build and cannot guarantee the compiler used the bytes it pins.
+      Provenance for a compiled-in dependency is by ASSERTED AGREEMENT — the
+      lockfile and the layer must say the same thing, mechanically, or CI goes
+      red — not by dispatch. A consumer is entitled to know that boundary is
+      chosen rather than overlooked.
+    tags: [distribution, core]
+    fields:
+      priority: should
       category: functional

@@ -24,6 +24,7 @@
 pub mod archive;
 pub mod attest;
 pub mod bazel;
+pub mod compose;
 pub mod crateexport;
 pub mod deposit;
 pub mod discover;
@@ -32,6 +33,7 @@ pub mod install;
 pub mod kind;
 pub mod layer;
 pub mod linestatus;
+pub mod lockpin;
 pub mod manifest;
 pub mod pin;
 pub mod platform;

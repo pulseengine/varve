@@ -1311,3 +1311,49 @@ artifacts:
     links:
       - type: verifies
         target: REQ-ATTEST-001
+
+  - id: VER-COMPOSE-001
+    type: verification
+    title: One pin resolves a composition; ambiguity, cycles and missing includes fail closed
+    status: verified
+    release: v0.23.0
+    fields:
+      method: automated-test
+      steps:
+        # The consumer's case end to end: one pin, tools from both layers.
+        - run: cargo test -p varve --test cli one_pin_resolves_tools_from_a_composed_layer
+        # varve refuses to choose between two layers exposing one tool.
+        - run: cargo test -p varve --test cli a_tool_in_two_composed_layers_refuses_to_resolve
+        # Transitive fetch is out of scope, so a missing include names itself.
+        - run: cargo test -p varve --test cli a_composed_layer_that_is_not_installed_names_itself
+        # Core: union, ambiguity, cycles, uninstalled includes, and back-compat
+        # for every layer that composes nothing.
+        - run: cargo test -p varve-core a_composition_exposes_both_layers_tools
+        - run: cargo test -p varve-core a_tool_in_two_layers_is_an_error_not_a_silent_choice
+        - run: cargo test -p varve-core a_cycle_is_refused_not_followed
+        - run: cargo test -p varve-core an_uninstalled_include_is_skipped_for_the_caller_to_report
+        - run: cargo test -p varve-core a_layer_without_includes_composes_to_itself
+    links:
+      - type: verifies
+        target: REQ-COMPOSE-001
+
+  - id: VER-LOCKPIN-001
+    type: verification
+    title: A pinned crate disagreeing with the lockfile fails verify
+    status: verified
+    release: v0.23.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_lockfile_parses_to_name_version_and_checksum
+        # The consumer's reported drift (layer pins 0.58.0, lock resolves 0.41.0).
+        - run: cargo test -p varve-core the_reported_drift_is_caught
+        - run: cargo test -p varve-core same_version_different_bytes_is_the_more_serious_case
+        # Agreement is silent, and unpinned packages are not varve's business.
+        - run: cargo test -p varve-core agreement_is_silent_and_unpinned_packages_are_not_our_business
+        # Failing OPEN on an unreadable lockfile would be the worst answer.
+        - run: cargo test -p varve-core a_malformed_lockfile_is_an_error_not_a_silent_pass
+        - run: cargo test -p varve --test cli verify_lockfile_fails_when_a_pinned_crate_disagrees
+    links:
+      - type: verifies
+        target: REQ-LOCKPIN-001

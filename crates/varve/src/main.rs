@@ -57,6 +57,12 @@ enum Cmd {
         /// Verify every installed layer instead of only the pinned one.
         #[arg(long)]
         all: bool,
+        /// Also check a project's Cargo lockfile against the pinned layer's
+        /// `crate` entries: a package the layer pins must resolve to the same
+        /// version and bytes, or verify fails (REQ-LOCKPIN-001). varve cannot
+        /// intercept a build — this is asserted agreement, not dispatch.
+        #[arg(long = "lockfile", value_name = "FILE")]
+        lockfile: Option<PathBuf>,
         /// Also check a committed export directory against the current pin: its
         /// `.varve-export.json` stamp must name the layer the pin resolves to,
         /// or verify fails (REQ-EXPORT-SYNC-001). Repeatable; run it in CI so a
@@ -387,7 +393,11 @@ fn run() -> anyhow::Result<()> {
         Cmd::Which { tool } => which(&store, &tool),
         Cmd::List => list(&store),
         Cmd::Install { from, platform } => install(&store, from.as_deref(), platform),
-        Cmd::Verify { all, export } => verify(&store, all, &export),
+        Cmd::Verify {
+            all,
+            export,
+            lockfile,
+        } => verify(&store, all, &export, lockfile.as_deref()),
         Cmd::Archive { layer, dest } => archive(&store, &layer, &dest),
         Cmd::Run {
             varve,
@@ -1569,7 +1579,12 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
     Ok(())
 }
 
-fn verify(store: &Store, all: bool, exports: &[PathBuf]) -> anyhow::Result<()> {
+fn verify(
+    store: &Store,
+    all: bool,
+    exports: &[PathBuf],
+    lockfile: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
     let verifier = ctx_verifier(&ctx)?;
     let store = &ctx.store;
@@ -1593,7 +1608,55 @@ fn verify(store: &Store, all: bool, exports: &[PathBuf]) -> anyhow::Result<()> {
         let current = varve_core::resolve(&ctx.pin, store)?.layer.digest;
         verify_exports(&current, exports)?;
     }
+    if let Some(path) = lockfile {
+        verify_lockfile(store, &ctx, path)?;
+    }
     Ok(())
+}
+
+/// Check a project's lockfile against the pinned layer's `crate` entries
+/// (REQ-LOCKPIN-001). Packages the layer does not pin are ignored — the layer
+/// never claimed to cover every dependency.
+fn verify_lockfile(store: &Store, ctx: &ProjectCtx, path: &std::path::Path) -> anyhow::Result<()> {
+    let resolved = varve_core::resolve(&ctx.pin, &ctx.store)?;
+    let crates = match collect_verified_crates(&ctx.store, &resolved.layer) {
+        Ok(c) => c,
+        // A layer with no crate entries pins nothing to disagree with. Say so
+        // rather than implying the lockfile was checked against something.
+        Err(_) => {
+            println!(
+                "lockfile {}: layer {} pins no crates — nothing to check",
+                path.display(),
+                resolved.layer.layer
+            );
+            let _ = store;
+            return Ok(());
+        }
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read lockfile {}", path.display()))?;
+    let locked = varve_core::lockpin::parse_lockfile(&text, &path.display().to_string())?;
+    let found = varve_core::lockpin::disagreements(&crates, &locked);
+    if found.is_empty() {
+        println!(
+            "lockfile {} agrees with layer {} ({} pinned crate(s) checked against {} package(s))",
+            path.display(),
+            resolved.layer.layer,
+            crates.len(),
+            locked.len()
+        );
+        return Ok(());
+    }
+    for d in &found {
+        eprintln!("  {d}");
+    }
+    bail!(
+        "{} package(s) in {} disagree with layer {} (REQ-LOCKPIN-001) — re-resolve against the \
+         pinned layer, or move the pin",
+        found.len(),
+        path.display(),
+        resolved.layer.layer
+    );
 }
 
 /// Check committed export directories against the current pin's manifest digest

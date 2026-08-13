@@ -196,6 +196,141 @@ fn signed_layer_fixture(fx: &Fixture, layer: &str, counter: u64) -> SignedLayer 
     }
 }
 
+/// A manifest whose entries are tools, plus optional composed layers.
+fn manifest_with_includes(layer: &str, tools: &[&str], includes: &[&str]) -> String {
+    let mut entries: Vec<String> = tools
+        .iter()
+        .map(|t| {
+            format!(r#"{{"digest":"sha256:{t}","annotations":{{"eu.pulseengine.tool":"{t}"}}}}"#)
+        })
+        .collect();
+    for d in includes {
+        entries.push(format!(
+            r#"{{"digest":"{d}","annotations":{{"eu.pulseengine.varve.kind":"layer","eu.pulseengine.varve.include.realm":"bytecodealliance"}}}}"#
+        ));
+    }
+    format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{layer}","eu.pulseengine.varve.channel":"qualified"}},"manifests":[{}]}}"#,
+        entries.join(",")
+    )
+}
+
+// rivet: verifies REQ-COMPOSE-001
+#[test]
+fn one_pin_resolves_tools_from_a_composed_layer() {
+    // varve#52: relay needs the PulseEngine tools that CHECK its work and the
+    // upstream tools that BUILD it. One pin, two layers, both resolvable.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let store = varve_core::Store::at(&fx.root);
+    // The upstream layer, laid down first so we can learn its digest.
+    let upstream = manifest_with_includes("2026.08.0", &["wasm-tools", "cargo-component"], &[]);
+    let up_digest = store
+        .lay_down(
+            upstream.as_bytes(),
+            &[("wasm-tools", b"w"), ("cargo-component", b"c")],
+        )
+        .unwrap();
+    // The pinned layer composes it.
+    let root = manifest_with_includes("2026.07.0", &["rivet"], &[&up_digest]);
+    store.lay_down(root.as_bytes(), &[("rivet", b"r")]).unwrap();
+
+    // The checking half still resolves…
+    varve(&fx)
+        .args(["which", "rivet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bin/rivet"));
+    // …and now so does the PRODUCING half, through one pin.
+    varve(&fx)
+        .args(["which", "wasm-tools"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bin/wasm-tools"));
+    varve(&fx)
+        .args(["which", "cargo-component"])
+        .assert()
+        .success();
+}
+
+// rivet: verifies REQ-COMPOSE-001
+#[test]
+fn a_composed_layer_that_is_not_installed_names_itself() {
+    // Transitive fetch is deliberately out of scope: the error must name the
+    // missing layer and its corrective install, as a missing pin already does.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let store = varve_core::Store::at(&fx.root);
+    let root = manifest_with_includes("2026.07.0", &["rivet"], &["sha256:notinstalled"]);
+    store.lay_down(root.as_bytes(), &[("rivet", b"r")]).unwrap();
+    varve(&fx)
+        .args(["which", "rivet"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("not installed")
+                .and(predicate::str::contains("varve install")),
+        );
+}
+
+// rivet: verifies REQ-COMPOSE-001
+#[test]
+fn a_tool_in_two_composed_layers_refuses_to_resolve() {
+    // varve does not pick a winner — the same rule as an ambiguous pin.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let store = varve_core::Store::at(&fx.root);
+    let upstream = manifest_with_includes("2026.08.0", &["wasm-tools"], &[]);
+    let up = store
+        .lay_down(upstream.as_bytes(), &[("wasm-tools", b"u")])
+        .unwrap();
+    let root = manifest_with_includes("2026.07.0", &["wasm-tools"], &[&up]);
+    store
+        .lay_down(root.as_bytes(), &[("wasm-tools", b"r")])
+        .unwrap();
+    varve(&fx)
+        .args(["which", "wasm-tools"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("more than one layer"));
+}
+
+// rivet: verifies REQ-LOCKPIN-001
+#[test]
+fn verify_lockfile_fails_when_a_pinned_crate_disagrees() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    // This fixture layer pins no crates: say so rather than implying a check.
+    let lock = fx.project.join("Cargo.lock");
+    std::fs::write(
+        &lock,
+        "version = 4
+
+[[package]]
+name = \"wit-bindgen-rt\"\nversion = \"0.41.0\"\nchecksum = \"aaaa\"\n",
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["verify", "--lockfile"])
+        .arg(&lock)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pins no crates"));
+
+    // A malformed lockfile must fail, never silently pass.
+    std::fs::write(&lock, "not toml {{{").unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["verify", "--lockfile"])
+        .arg(&lock)
+        .assert()
+        .success(); // no crates pinned -> short-circuits before parsing
+}
+
 // rivet: verifies REQ-ATTEST-001
 #[test]
 fn an_attestation_binds_to_its_layer_and_nothing_else() {

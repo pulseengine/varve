@@ -43,6 +43,9 @@ pub enum PayloadKind {
     Sdk,
     /// A WebAssembly component.
     WasmComponent,
+    /// Another LAYER, composed into this one (REQ-COMPOSE-001). The digest is
+    /// that layer's signed manifest; it is not a blob to lay down.
+    Layer,
 }
 
 impl PayloadKind {
@@ -55,6 +58,7 @@ impl PayloadKind {
             PayloadKind::ZephyrModule => "zephyr-module",
             PayloadKind::Sdk => "sdk",
             PayloadKind::WasmComponent => "wasm-component",
+            PayloadKind::Layer => "layer",
         }
     }
 }
@@ -84,6 +88,7 @@ impl FromStr for PayloadKind {
             "zephyr-module" => Ok(PayloadKind::ZephyrModule),
             "sdk" => Ok(PayloadKind::Sdk),
             "wasm-component" => Ok(PayloadKind::WasmComponent),
+            "layer" => Ok(PayloadKind::Layer),
             other => Err(UnknownKind(other.to_string())),
         }
     }
