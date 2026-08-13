@@ -835,3 +835,61 @@ artifacts:
     links:
       - type: verifies
         target: REQ-DOCS-001
+
+  - id: VER-EXPORT-SYNC-001
+    type: verification
+    title: Exports are stamped and verify hard-fails on pin/export drift
+    status: verified
+    release: v0.18.0
+    fields:
+      method: automated-test
+      steps:
+        # Core: stamp round-trips; absent and malformed stamps are failures;
+        # the drift verdict is current iff the digests match.
+        - run: cargo test -p varve-core write_then_read_round_trips
+        - run: cargo test -p varve-core read_missing_stamp_is_missing_error
+        - run: cargo test -p varve-core read_malformed_stamp_is_malformed_error
+        - run: cargo test -p varve-core status_is_current_when_digests_match
+        - run: cargo test -p varve-core status_is_stale_when_digests_differ
+        # CLI gate: a fresh stamp passes, a stale stamp hard-fails, a missing
+        # stamp hard-fails — the loud CI gate the requirement promises.
+        - run: cargo test -p varve --test cli verify_export_passes_when_the_stamp_matches_the_pin
+        - run: cargo test -p varve --test cli verify_export_hard_fails_on_a_stale_stamp
+        - run: cargo test -p varve --test cli verify_export_hard_fails_when_the_stamp_is_missing
+        - run: cargo test -p varve --test cli verify_export_hard_fails_on_a_malformed_stamp
+    links:
+      - type: verifies
+        target: REQ-EXPORT-SYNC-001
+
+  - id: VER-REVIEW-v0.18.0
+    type: verification
+    title: v0.18.0 independently reviewed — pass, anti-stale export gate genuinely bites
+    status: verified
+    release: v0.18.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-13,
+        of anti-stale exports (REQ-EXPORT-SYNC-001) at HEAD 64236f1. VERDICT pass,
+        no dissent. Full gate re-run with captured exit codes (fmt/clippy/test 0;
+        rivet validate PASS; verification-evidence 126/126). Confirmed: (1) the
+        stamp's manifest_digest IS the sha256 of the DSSE-signed layer manifest
+        (InstalledLayer.digest, proven signed by verify_installed's envelope
+        check + byte-for-byte payload==layer.json), written from the SAME verified
+        entry the export used; all four handlers stamp; (2) export_target verifies
+        the layer on BOTH the explicit-layer and pin-default branches — no
+        unverified export path; (3) the gate hard-fails on stale, missing, AND
+        malformed stamps (read_stamp? propagates; Stale bail!s), the fresh test
+        learns the REAL installed digest from verify's stdout (not hardcoded) so
+        it is not a false pass; (4) the collect_verified_crates refactor kept the
+        per-blob re-hash-against-signed-digest and the layer is verified exactly
+        once, not zero times. Three findings, all below dissent and none a defect
+        of this feature: a pre-existing store-integrity shortcut (digest read from
+        the dir name, not recomputed — invariant holds via lay_down); malformed
+        stamp had only core coverage (CLOSED post-review with a CLI test); and a
+        non-blocking rivet WARN (no satisfies link) that does not affect the
+        earned verified status.
+    links:
+      - type: verifies
+        target: REQ-EXPORT-SYNC-001

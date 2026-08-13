@@ -223,6 +223,14 @@ varve export-cargo --layer 2026.08.0 --out ./vendored
 cargo build --offline
 ```
 
+Every export is **pinned to the layer that produced it**: `--layer` defaults to
+the resolved project pin, and each export writes a `.varve-export.json` stamp
+recording that layer's manifest digest. `varve verify --export <dir>` re-derives
+the pin and **fails** if a committed export has gone stale — so a vendored tree
+that silently lags the pin is a CI failure, not a surprise at build time
+(REQ-EXPORT-SYNC-001). The same anti-stale discipline varve applies to the
+toolchain, applied to the byte-sources it exports.
+
 WIT + wasm-components, Zephyr modules, and C SDKs follow the same shape in later
 releases; Bazel gets an export per kind (extending `varve export-bazel`).
 
