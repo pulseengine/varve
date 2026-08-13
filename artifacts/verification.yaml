@@ -909,6 +909,9 @@ artifacts:
         - run: cargo test -p varve-core a_name_or_version_that_would_corrupt_the_index_json_is_refused
         # All three export adapters fail closed on the same input.
         - run: cargo test -p varve-core export_refuses_an_unrepresentable_crate_name
+        # The untar path is depositor-controlled bytes: pin that neither a
+        # `..` entry nor a symlink-then-write-through can escape the vendor dir.
+        - run: cargo test -p varve-core vendoring_never_writes_outside_the_vendor_directory
     links:
       - type: verifies
         target: REQ-CRATENAME-001

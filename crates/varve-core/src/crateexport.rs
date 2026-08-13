@@ -331,6 +331,61 @@ mod tests {
         assert!(line.contains(r#""yanked":false"#));
     }
 
+    // rivet: verifies REQ-CRATENAME-001
+    #[test]
+    fn vendoring_never_writes_outside_the_vendor_directory() {
+        // `export_vendor_dir` untars depositor-supplied bytes. The tar crate
+        // refuses both escapes today; this pins that guarantee so a dependency
+        // bump or a switch to manual entry handling cannot silently lose it
+        // (the Cargo CVE-2026-5223 bug class: symlink out, then write through).
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("OUTSIDE");
+        std::fs::create_dir_all(&outside).unwrap();
+        let vendor = dir.path().join("vendor");
+
+        let mut tar_bytes = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut tar_bytes);
+            // 1. a symlink escaping the destination …
+            let mut link = tar::Header::new_gnu();
+            link.set_entry_type(tar::EntryType::Symlink);
+            link.set_size(0);
+            link.set_mode(0o777);
+            b.append_link(&mut link, "escape-0.1.0/link", &outside)
+                .unwrap();
+            // 2. … then a write THROUGH it.
+            let payload = b"PWNED";
+            let mut f = tar::Header::new_gnu();
+            f.set_size(payload.len() as u64);
+            f.set_mode(0o644);
+            b.append_data(&mut f, "escape-0.1.0/link/pwned.txt", &payload[..])
+                .unwrap();
+            b.finish().unwrap();
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&tar_bytes).unwrap();
+        let evil = gz.finish().unwrap();
+
+        let entries = [CrateEntry {
+            name: "escape".into(),
+            version: "0.1.0".into(),
+            cksum: "00".into(),
+            bytes: evil,
+        }];
+        // Whether it errors or skips the entry, the invariant is the same:
+        // nothing may be written outside the vendor directory.
+        let _ = export_vendor_dir(&entries, &vendor);
+        assert!(
+            !outside.join("pwned.txt").exists(),
+            "a crate tarball escaped the vendor directory"
+        );
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "nothing may be written outside the vendor directory"
+        );
+    }
+
     // rivet: verifies REQ-VENDOR-001, REQ-BRIDGE-001
     #[test]
     fn vendoring_unpacks_the_crate_and_preserves_the_upstream_hash() {
