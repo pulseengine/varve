@@ -1047,6 +1047,8 @@ artifacts:
       steps:
         - run: python3 tools/proof-check.py
         - run: cargo test -p varve-core the_leap_rule_holds_at_the_year_the_solver_found
+        # The boundary obligation's witness (c == h) is exactly this test.
+        - run: cargo test -p varve-core an_equal_counter_reinstalls_cleanly
     links:
       - type: verifies
         target: REQ-PROOF-001
@@ -1068,5 +1070,161 @@ artifacts:
         - run: cargo test -p varve-core an_unreadable_stamp_is_an_io_error_not_a_missing_one
         - run: grep -q "selfverify.rs" .github/workflows/ci.yml
     links:
+      - type: verifies
+        target: REQ-MUTATE-002
+
+  - id: VER-SBOM-001
+    type: verification
+    title: The SBOM transcribes the signed manifest, deterministically and self-bound
+    status: verified
+    release: v0.21.0
+    fields:
+      method: automated-test
+      baseline: >
+        Exercised against the real pulseengine rolling layer 2026.08.2
+        (2026-08-13): 35 components, every one carrying a version and a SHA-256,
+        upstream vcs/distribution references transcribed from the depositor's
+        source annotations, and two consecutive emissions byte-identical
+        (`cmp` clean). The document records manifest digest
+        sha256:83a699600dea..., counter 3, channel rolling. Emission for an
+        unverifiable layer fails closed with the trust-root error.
+      steps:
+        - run: cargo test -p varve-core every_component_is_transcribed_from_the_signed_manifest
+        - run: cargo test -p varve-core emission_is_deterministic
+        - run: cargo test -p varve-core the_document_binds_itself_to_the_layer_it_describes
+        - run: cargo test -p varve-core per_platform_entries_are_distinguishable_not_duplicates
+        - run: cargo test -p varve-core an_unknown_format_is_refused_not_guessed
+        # THE invariant: no signed entry may ever be dropped. Clean-room review
+        # refuted the first version here (3 signed entries -> 1 component).
+        - run: cargo test -p varve-core no_signed_entry_is_ever_dropped_from_the_document
+        # REQ-SBOM-001 says "shall fail closed"; this tests it at the CLI.
+        - run: cargo test -p varve --test cli sbom_fails_closed_on_a_layer_it_cannot_verify
+    links:
+      - type: verifies
+        target: REQ-SBOM-001
+
+  - id: VER-REVIEW-v0.21.0
+    type: verification
+    title: v0.21.0 independently reviewed — DISSENT on silent omission, then closed
+    status: verified
+    release: v0.21.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-13,
+        of `varve sbom` (REQ-SBOM-001) at HEAD 72c05a8. VERDICT: DISSENT — and
+        it was right, on the one claim that mattered most. Confirmed by the
+        reviewer: nothing is read from disk but the verified layer.json (sbom.rs
+        imports no std::fs); the command fails closed on BOTH the explicit
+        --layer and pin-default paths (empirically: no trust root, unknown
+        layer, and a TAMPERED layer.json each exit 1 with a 0-byte output);
+        emission is deterministic in code and by `cmp`; and the document is
+        SCHEMA-VALID against the real CycloneDX 1.6 schema fetched from
+        CycloneDX/specification (0 errors, with potent negative controls — a
+        bad type enum, a bad serialNumber and a missing bomFormat each produced
+        exactly 1 error).
+        DISSENT rested on a REFUTED headline claim. `component()` returned
+        Option and was filter_map'd, so a signed entry with no tool annotation
+        (which foreign-platform entries legitimately lack) or with a payload
+        kind this build does not recognise was DROPPED SILENTLY — proven with
+        three signed entries emitting one component, exit 0. For a document
+        sold as "a scanner can miss a component; a transcription cannot", that
+        is the defect that matters. FIXED: component() is now infallible —
+        whatever is unknown is LABELLED (kind.unrecognised, unnamed+digest
+        identity), never dropped — and `map` replaces `filter_map`, with a test
+        asserting component count == signed entry count.
+        The reviewer also found that a JUSTIFYING COMMENT WAS FALSE: sbom.rs
+        said "kind() already refuses it before we are called", and kind.rs
+        claimed install refuses unknown kinds. Neither is true — kind() is not
+        consulted by install or verify at all. Both comments corrected to state
+        reality; the behavioural question is deferred to varve#49 rather than
+        changed mid-release. Three further findings adopted: the CLI reported
+        the INPUT entry count rather than the emitted component count (it could
+        disagree with the file just written); REQ-SBOM-001 said "shall fail
+        closed" with no test, now covered at the CLI boundary; and the serial
+        number parsed as UUID "version 11", now a conformant RFC 9562 v8. Two
+        quality findings adopted for the CRA use the docs invoke: purl is now
+        emitted (pkg:github/owner/name@version — what lets a consumer match a
+        component to a CVE feed) and externalReferences are now followable URLs
+        rather than a bare `owner/name` slug.
+    links:
+      - type: verifies
+        target: REQ-SBOM-001
+
+  - id: VER-REVIEW-v0.18.1
+    type: verification
+    title: v0.18.1 independently reviewed (retroactive) — pass
+    status: verified
+    release: v0.18.1
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Retroactive independent clean-room review, 2026-08-13, commissioned
+        because the project's own review-check flagged that v0.18.1 had shipped
+        with a verified requirement and no recorded verdict — the advisory
+        mechanism working as intended. VERDICT pass. Confirmed: `index_path` is
+        now total (all slicing is chars().skip().take() on the same lowercased
+        string) and the reviewer could construct no panicking input, including
+        count-changing lowercase forms and astral-plane characters; validation
+        runs as the FIRST statement of all three export adapters, before any
+        directory or file is created, so a bad name cannot reach the unescaped
+        index_line; and the untar-escape test is NOT vacuous — it builds a real
+        gzip tar with a symlink to an absolute outside path plus a write through
+        it, varve has no guard of its own, and tar 0.4.46's protection is
+        precisely what the test pins. One finding adopted: `cksum` was the third
+        string interpolated into the index JSON without validation — unreachable
+        via the CLI (which re-hashes bytes against the signed digest first) but
+        reachable through the public library API. Now validated as 64 hex
+        digits, and the test fixtures corrected from unrealistic short values to
+        real-length digests.
+    links:
+      - type: verifies
+        target: REQ-CRATENAME-001
+
+  - id: VER-REVIEW-v0.20.0
+    type: verification
+    title: v0.20.0 independently reviewed (retroactive) — DISSENT on a tautological proof
+    status: verified
+    release: v0.20.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Retroactive independent clean-room review, 2026-08-13. VERDICT DISSENT,
+        and it was right twice — both times against claims varve itself made.
+        REQ-MUTATE-002 CONFIRMED outright: the five trust-decision modules are
+        in the gate, and the reviewer re-ran cargo-mutants over reverify.rs +
+        exportstamp.rs to get 15 caught / 2 unviable / 0 missed, confirming the
+        two NotFound-guard tests genuinely kill their mutants. The proof gate's
+        MECHANICS were confirmed by experiment: removing both negative controls
+        makes proof-check exit 1 ("no negative control"), so that requirement is
+        real and not decorative.
+        DISSENT 1 — TAUTOLOGY. `rollback-verdict-total.smt2` asserted
+        `c >= h AND c < h`, a bare contradiction that is unsat whatever
+        rollback.rs does. No mutation of `check` could make it sat, and it had
+        no negative-control twin. It was theatre inflating the obligation count
+        — precisely the hollow-gate failure this suite exists to prevent.
+        REPLACED with `rollback-boundary-mutant-is-distinguishable.smt2`, which
+        asks where `<` and `<=` disagree; it returns c == h, the re-install
+        case, and `an_equal_counter_reinstalls_cleanly` is exactly that test.
+        DISSENT 2 — UNSUPPORTED PROVENANCE. The leap proof's comment claimed
+        three 2026-08-08 cargo-mutants survivors were `||`->`&&` in the leap
+        predicate at rollback.rs:136. The reviewer checked git history: the leap
+        predicate has never been at line 136 (it is at 145), and the commit
+        introducing it also introduced the 2000-02-29 anchor that already kills
+        that mutant; the survivors killed that day were the OTHER `||`s, per
+        commit cc08bf1 "kill epoch_days validation-guard mutants". The claim had
+        been asserted from a summary rather than verified against history. The
+        comment now carries the correction as the record, and states honestly
+        that the 8192 case is defence in depth rather than the only killer —
+        though the reviewer did confirm mechanically that mutating the predicate
+        makes that test fail. Two minor findings adopted: the chmod-000 tests
+        would fail (loudly, not silently) as root, and now skip after testing
+        their own premise portably; and the cksum gap noted under VER-REVIEW-v0.18.1.
+    links:
+      - type: verifies
+        target: REQ-PROOF-001
       - type: verifies
         target: REQ-MUTATE-002

@@ -169,6 +169,21 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
+    /// Emit an SBOM for a verified layer, transcribed from its SIGNED manifest
+    /// rather than scanned from disk — every component, version and hash is
+    /// copied from what the trust root anchored (REQ-SBOM-001). Answers "which
+    /// components are in this product" for CRA Art. 13(5) due diligence.
+    Sbom {
+        /// Layer to describe, e.g. `2026.08.0`. Defaults to the resolved pin.
+        #[arg(long)]
+        layer: Option<String>,
+        /// Document format (currently `cyclonedx`).
+        #[arg(long, default_value = "cyclonedx")]
+        format: String,
+        /// Write here instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
     /// Support window, yank state and known problems for the pinned layer,
     /// from the newest verified line-status document.
     Status {
@@ -377,6 +392,9 @@ fn run() -> anyhow::Result<()> {
         }
         Cmd::ExportBazelDistdir { layer, out } => {
             export_bazel_distdir(&store, layer.as_deref(), &out)
+        }
+        Cmd::Sbom { layer, format, out } => {
+            sbom_cmd(&store, layer.as_deref(), &format, out.as_deref())
         }
         Cmd::Status { from_file } => status(&store, from_file.as_deref()),
         Cmd::SignStatus {
@@ -972,6 +990,45 @@ fn collect_verified_crates(
         );
     }
     Ok(crates)
+}
+
+fn sbom_cmd(
+    store: &Store,
+    layer: Option<&str>,
+    format: &str,
+    out: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let format: varve_core::sbom::SbomFormat =
+        format.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+    // Trust first: an SBOM for a layer we cannot verify would describe bytes
+    // nobody vouched for — worse than none, because it looks authoritative.
+    let (_store, entry) = export_target(store, layer)?;
+    let payload = std::fs::read(entry.root.join("layer.json"))?;
+    let manifest = varve_core::LayerManifest::parse(&payload)?;
+    let doc = varve_core::sbom::emit(&manifest, &entry.digest, format);
+    match out {
+        Some(path) => {
+            std::fs::write(path, &doc)
+                .with_context(|| format!("cannot write {}", path.display()))?;
+            // Count what was WRITTEN, from the document itself — not what we
+            // expected to write. A count taken from the input can disagree
+            // with the file just produced, which is exactly the kind of small
+            // lie an SBOM must not tell.
+            let written = serde_json::from_str::<serde_json::Value>(&doc)
+                .ok()
+                .and_then(|v| v["components"].as_array().map(|a| a.len()))
+                .unwrap_or_default();
+            println!(
+                "wrote an SBOM for layer {} ({written} component(s), from {} signed entries) to \
+                 {} — transcribed from the signed manifest, not scanned",
+                entry.layer,
+                manifest.entries.len(),
+                path.display()
+            );
+        }
+        None => println!("{doc}"),
+    }
+    Ok(())
 }
 
 fn export_cargo(store: &Store, layer: Option<&str>, out: &std::path::Path) -> anyhow::Result<()> {

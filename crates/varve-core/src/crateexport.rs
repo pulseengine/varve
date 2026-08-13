@@ -91,6 +91,16 @@ fn validate_entries(crates: &[CrateEntry]) -> Result<(), CrateExportError> {
     for e in crates {
         validate_crate_name(&e.name)?;
         validate_crate_version(&e.version)?;
+        // The cksum is the THIRD string interpolated into the index JSON with
+        // no escaping. The CLI can only produce a real digest here (it re-hashes
+        // the bytes against the signed digest first), but this is a public
+        // library API and a caller could hand us anything.
+        if e.cksum.len() != 64 || !e.cksum.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(CrateExportError::UnrepresentableCksum {
+                name: e.name.clone(),
+                cksum: e.cksum.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -132,6 +142,8 @@ pub enum CrateExportError {
     UnrepresentableName { name: String, why: String },
     #[error("crate version {version:?} cannot be exported: {why}")]
     UnrepresentableVersion { version: String, why: String },
+    #[error("crate {name:?} has a cksum that is not a bare sha256 hex digest: {cksum:?}")]
+    UnrepresentableCksum { name: String, cksum: String },
 }
 
 /// The `.cargo-checksum.json` for a vendored crate. `package` is the sha256 of
@@ -306,7 +318,7 @@ mod tests {
         let bad = [CrateEntry {
             name: "café-utils".into(),
             version: "0.1.0".into(),
-            cksum: "abc".into(),
+            cksum: "a".repeat(64),
             bytes: vec![],
         }];
         // Every export adapter fails closed on the same input.
@@ -321,13 +333,13 @@ mod tests {
         let e = CrateEntry {
             name: "demo".into(),
             version: "0.1.0".into(),
-            cksum: "abc123".into(),
+            cksum: "b".repeat(64),
             bytes: vec![],
         };
         let line = index_line(&e);
         assert!(line.contains(r#""name":"demo""#));
         assert!(line.contains(r#""vers":"0.1.0""#));
-        assert!(line.contains(r#""cksum":"abc123""#));
+        assert!(line.contains(&format!(r#""cksum":"{}""#, "b".repeat(64))));
         assert!(line.contains(r#""yanked":false"#));
     }
 
@@ -370,7 +382,7 @@ mod tests {
         let entries = [CrateEntry {
             name: "escape".into(),
             version: "0.1.0".into(),
-            cksum: "00".into(),
+            cksum: "c".repeat(64),
             bytes: evil,
         }];
         // Whether it errors or skips the entry, the invariant is the same:
@@ -411,7 +423,7 @@ mod tests {
         let e = CrateEntry {
             name: "demo".into(),
             version: "0.1.0".into(),
-            cksum: "abc123def".into(),
+            cksum: "d".repeat(64),
             bytes: targz,
         };
         assert_eq!(
@@ -424,7 +436,10 @@ mod tests {
         // The upstream integrity anchor (the .crate sha256) is preserved.
         let checksum =
             std::fs::read_to_string(vendor.join("demo-0.1.0/.cargo-checksum.json")).unwrap();
-        assert_eq!(checksum, r#"{"files":{},"package":"abc123def"}"#);
+        assert_eq!(
+            checksum,
+            format!(r#"{{"files":{{}},"package":"{}"}}"#, "d".repeat(64))
+        );
     }
 
     // rivet: verifies REQ-VENDOR-002
@@ -483,7 +498,7 @@ mod tests {
         let e = CrateEntry {
             name: "demo".into(),
             version: "0.1.0".into(),
-            cksum: "deadbeef".into(),
+            cksum: "e".repeat(64),
             bytes: b"crate-tarball-bytes".to_vec(),
         };
         assert_eq!(
@@ -497,7 +512,7 @@ mod tests {
         );
         // The index entry is at Cargo's path and carries the cksum.
         let idx = std::fs::read_to_string(reg.join("index/de/mo/demo")).unwrap();
-        assert!(idx.contains(r#""cksum":"deadbeef""#));
+        assert!(idx.contains(&format!(r#""cksum":"{}""#, "e".repeat(64))));
 
         // Re-exporting the same version does not duplicate the index line.
         export_local_registry(std::slice::from_ref(&e), &reg).unwrap();

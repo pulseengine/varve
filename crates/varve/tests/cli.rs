@@ -186,6 +186,62 @@ fn signed_layer_fixture(fx: &Fixture, layer: &str, counter: u64) -> SignedLayer 
     }
 }
 
+// rivet: verifies REQ-SBOM-001
+#[test]
+fn sbom_fails_closed_on_a_layer_it_cannot_verify() {
+    // REQ-SBOM-001 says the command "shall fail closed". An SBOM for an
+    // unverifiable layer is worse than none, because it looks authoritative.
+    // Clean-room review noted this was asserted in prose but never tested.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    let out = fx.project.join("sbom.cdx.json");
+
+    // 1. No trust root at all: refuse.
+    varve(&fx)
+        .args(["sbom", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("trust root"));
+    assert!(!out.exists(), "nothing may be written without a trust root");
+
+    // 2. The WRONG trust root: refuse.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.wrong_root)
+        .args(["sbom", "--out"])
+        .arg(&out)
+        .assert()
+        .failure();
+    assert!(!out.exists(), "nothing may be written under the wrong root");
+
+    // 3. The right root: a document, and it names the layer it describes.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["sbom", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    let doc = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        doc.contains("CycloneDX") && doc.contains("2026.07.0"),
+        "{doc}"
+    );
+
+    // 4. An unknown format is refused before anything is verified or written.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["sbom", "--format", "spdx"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown SBOM format"));
+}
+
 // rivet: verifies REQ-EXPORT-SYNC-001
 #[test]
 fn verify_export_hard_fails_on_a_stale_stamp() {
