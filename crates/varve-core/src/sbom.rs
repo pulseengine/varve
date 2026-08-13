@@ -37,28 +37,64 @@ impl std::str::FromStr for SbomFormat {
     }
 }
 
-/// One component as the signed manifest describes it.
-fn component(entry: &crate::manifest::ManifestEntry) -> Option<serde_json::Value> {
-    let name = entry.annotations.get("eu.pulseengine.tool")?;
+/// One component, as the signed manifest describes it.
+///
+/// INFALLIBLE by design. An earlier version returned `Option` and was
+/// `filter_map`'d, so an entry lacking a tool annotation — which foreign-platform
+/// entries legitimately do — or carrying a payload kind this build does not
+/// recognise disappeared from the document with no error. For a document whose
+/// entire claim is that it cannot miss a component, silent omission is the one
+/// failure mode that must be impossible. Whatever is unknown is LABELLED, never
+/// dropped: the digest is always present, and it alone identifies the artifact.
+fn component(entry: &crate::manifest::ManifestEntry) -> serde_json::Value {
+    let hex = entry
+        .digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&entry.digest);
+    let mut props: Vec<serde_json::Value> = Vec::new();
+
+    // A layer holds one entry per tool PER PLATFORM, each a distinct binary
+    // with a distinct digest. Without the platform they read as duplicates.
+    if let Some(platform) = entry.annotations.get("eu.pulseengine.platform") {
+        props.push(serde_json::json!({"name": "eu.pulseengine.platform", "value": platform}));
+    }
+
+    // An unrecognised payload kind is recorded verbatim and the component is
+    // still emitted. `kind()` is NOT enforced on the install path (see
+    // kind.rs), so a layer deposited by a newer varve can reach us here.
+    let ctype = match entry.kind() {
+        Ok(crate::kind::PayloadKind::Tool) => "application",
+        Ok(_) => "library",
+        Err(_) => {
+            if let Some(raw) = entry.annotations.get(crate::kind::ANN_KIND) {
+                props.push(serde_json::json!({
+                    "name": "eu.pulseengine.varve.kind.unrecognised",
+                    "value": raw
+                }));
+            }
+            "library"
+        }
+    };
+
+    // A name is required by CycloneDX. Where the manifest names the artifact we
+    // transcribe it; where it does not (a foreign-platform entry), the digest
+    // is the only honest identifier, and we say so rather than inventing one.
+    let name = match entry.annotations.get("eu.pulseengine.tool") {
+        Some(n) => n.clone(),
+        None => {
+            props.push(serde_json::json!({
+                "name": "eu.pulseengine.varve.unnamed",
+                "value": "the signed manifest names no tool for this entry; identified by digest"
+            }));
+            format!("sha256-{}", &hex[..hex.len().min(16)])
+        }
+    };
     let version = entry
         .annotations
         .get("eu.pulseengine.tool.version")
         .cloned()
         .unwrap_or_default();
-    let hex = entry
-        .digest
-        .strip_prefix("sha256:")
-        .unwrap_or(&entry.digest);
-    // A payload kind maps to a CycloneDX component type. An unknown kind is
-    // not guessed here — `kind()` already refuses it before we are called.
-    let ctype = match entry.kind().ok()? {
-        crate::kind::PayloadKind::Tool => "application",
-        crate::kind::PayloadKind::Crate
-        | crate::kind::PayloadKind::Wit
-        | crate::kind::PayloadKind::Sdk
-        | crate::kind::PayloadKind::ZephyrModule => "library",
-        crate::kind::PayloadKind::WasmComponent => "library",
-    };
+
     let mut c = serde_json::json!({
         "type": ctype,
         "name": name,
@@ -67,32 +103,48 @@ fn component(entry: &crate::manifest::ManifestEntry) -> Option<serde_json::Value
         // The digest IS the identity here: bom-ref stays stable across emissions.
         "bom-ref": entry.digest,
     });
-    // A layer carries one entry per tool PER PLATFORM, each a distinct binary
-    // with a distinct digest. They are genuinely different components, so they
-    // are all listed — but without the platform they read as duplicates.
-    if let Some(platform) = entry.annotations.get("eu.pulseengine.platform") {
-        c["properties"] = serde_json::json!([
-            {"name": "eu.pulseengine.platform", "value": platform}
-        ]);
+
+    // A package URL is what lets a consumer match a component against a CVE
+    // feed — the whole point of holding an SBOM when a report is due. Derived
+    // only from signed annotations, and omitted when they do not support it.
+    if let (Some(repo), false) = (
+        entry.annotations.get("eu.pulseengine.source.repo"),
+        version.is_empty(),
+    ) && let Some((owner, name)) = repo.split_once('/')
+    {
+        c["purl"] = serde_json::json!(format!("pkg:github/{owner}/{name}@{version}"));
     }
-    // Upstream provenance, where the depositor recorded it — the external
-    // reference an assessor follows back to the source of record.
+
+    // Upstream provenance, where the depositor recorded it. The repo annotation
+    // is a bare `owner/name` slug, so it is expanded into something an assessor
+    // can actually follow; the asset name is left relative to that release.
     if let Some(repo) = entry.annotations.get("eu.pulseengine.source.repo") {
-        let mut refs = vec![serde_json::json!({"type": "vcs", "url": repo})];
-        if let Some(asset) = entry.annotations.get("eu.pulseengine.source.asset") {
-            refs.push(serde_json::json!({"type": "distribution", "url": asset}));
+        let mut refs = vec![serde_json::json!({
+            "type": "vcs",
+            "url": format!("https://github.com/{repo}")
+        })];
+        if let (Some(asset), Some(release)) = (
+            entry.annotations.get("eu.pulseengine.source.asset"),
+            entry.annotations.get("eu.pulseengine.source.release"),
+        ) {
+            refs.push(serde_json::json!({
+                "type": "distribution",
+                "url": format!("https://github.com/{repo}/releases/download/{release}/{asset}")
+            }));
         }
         c["externalReferences"] = serde_json::Value::Array(refs);
     }
-    Some(c)
+    if !props.is_empty() {
+        c["properties"] = serde_json::Value::Array(props);
+    }
+    c
 }
 
 /// Emit an SBOM for a verified layer manifest. Deterministic: same manifest in,
 /// byte-identical document out.
 pub fn emit(manifest: &LayerManifest, manifest_digest: &str, format: SbomFormat) -> String {
     let SbomFormat::CycloneDx = format;
-    let mut components: Vec<serde_json::Value> =
-        manifest.entries.iter().filter_map(component).collect();
+    let mut components: Vec<serde_json::Value> = manifest.entries.iter().map(component).collect();
     // Stable order by bom-ref (the digest), so the document is diffable.
     components.sort_by(|a, b| a["bom-ref"].as_str().cmp(&b["bom-ref"].as_str()));
     let doc = serde_json::json!({
@@ -132,7 +184,15 @@ fn uuid_from_digest(digest: &str) -> String {
         .filter(|c| c.is_ascii_hexdigit())
         .take(32)
         .collect();
-    let h = format!("{hex:0<32}");
+    let mut h: Vec<u8> = format!("{hex:0<32}").into_bytes();
+    // RFC 9562 UUIDv8 is the custom/deterministic version, so set the version
+    // nibble to 8 and the variant to 10x. Without this the serial parses as
+    // "version 11", which no RFC defines — CycloneDX's own schema text asks for
+    // an RFC 4122 conformant serialNumber even though its pattern only checks
+    // shape. Still a pure function of the digest: two nibbles are forced.
+    h[12] = b'8';
+    h[16] = b'a';
+    let h = String::from_utf8(h).expect("hex digits stay ascii");
     format!(
         "{}-{}-{}-{}-{}",
         &h[0..8],
@@ -212,6 +272,52 @@ mod tests {
             .collect();
         assert!(platforms.contains(&"x86_64-unknown-linux-gnu"));
         assert!(platforms.contains(&"aarch64-apple-darwin"));
+    }
+
+    // rivet: verifies REQ-SBOM-001
+    #[test]
+    fn no_signed_entry_is_ever_dropped_from_the_document() {
+        // THE invariant this feature sells: "a scanner can miss a component;
+        // a transcription cannot." Clean-room review refuted an earlier version
+        // that returned Option and filter_map'd — three signed entries emitted
+        // one component, silently, exit 0. Entries can legitimately lack a tool
+        // annotation (foreign-platform entries install without one) or carry a
+        // payload kind this build does not know (a newer depositor). Neither
+        // may vanish: an SBOM that omits a component is worse than none.
+        let bytes = br#"{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "artifactType": "application/vnd.pulseengine.varve.layer.v1+json",
+  "annotations": {
+    "eu.pulseengine.varve.layer": "2026.08.0",
+    "eu.pulseengine.varve.channel": "qualified",
+    "eu.pulseengine.varve.counter": "1",
+    "org.opencontainers.image.created": "2026-08-01T00:00:00Z"
+  },
+  "manifests": [
+    { "digest": "sha256:aaaa", "annotations": { "eu.pulseengine.tool": "synth", "eu.pulseengine.tool.version": "1.0.0" } },
+    { "digest": "sha256:bbbb", "annotations": { "eu.pulseengine.tool": "future", "eu.pulseengine.varve.kind": "quantum-blob" } },
+    { "digest": "sha256:cccc", "annotations": { "eu.pulseengine.platform": "riscv64-unknown-none" } }
+  ]
+}"#;
+        let m = LayerManifest::parse(bytes).unwrap();
+        assert_eq!(m.entries.len(), 3, "fixture sanity");
+        let doc: serde_json::Value =
+            serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx)).unwrap();
+        let comps = doc["components"].as_array().unwrap();
+        assert_eq!(
+            comps.len(),
+            3,
+            "every signed entry must appear; got {comps:#?}"
+        );
+        // Every signed digest is present as a bom-ref.
+        for e in &m.entries {
+            assert!(
+                comps.iter().any(|c| c["bom-ref"] == e.digest.as_str()),
+                "signed entry {} is missing from the document",
+                e.digest
+            );
+        }
     }
 
     // rivet: verifies REQ-SBOM-001

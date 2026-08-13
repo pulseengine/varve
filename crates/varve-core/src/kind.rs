@@ -8,8 +8,19 @@
 //!
 //! Back-compat: an entry with no kind annotation is a `tool` (pre-kind layers,
 //! as an unstamped platform means any-platform). An *unknown* kind is a hard
-//! error — varve refuses to install a payload it does not know how to handle,
-//! rather than mishandle it (fail-closed).
+//! error WHERE THE KIND IS ACTED ON — `collect_verified_crates` refuses to
+//! export a payload it cannot classify, rather than mishandle it.
+//!
+//! Scope, stated precisely because an earlier version of this comment claimed
+//! more than the code does: `install` and `verify_installed` do NOT consult the
+//! kind. They check the signed digest of every entry, which is what makes the
+//! bytes trustworthy, and that check is kind-independent by design (DD-003). So
+//! a layer deposited by a newer varve, carrying a kind this build has never
+//! heard of, installs and verifies normally; only the adapters that must DO
+//! something kind-specific refuse it. Consumers of `kind()` must therefore
+//! handle `Err` on real installed layers — `sbom` labels such an entry rather
+//! than dropping it. Whether install should refuse outright is tracked in
+//! varve#49.
 
 use std::fmt;
 use std::str::FromStr;

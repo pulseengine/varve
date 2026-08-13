@@ -1010,15 +1010,23 @@ fn sbom_cmd(
         Some(path) => {
             std::fs::write(path, &doc)
                 .with_context(|| format!("cannot write {}", path.display()))?;
+            // Count what was WRITTEN, from the document itself — not what we
+            // expected to write. A count taken from the input can disagree
+            // with the file just produced, which is exactly the kind of small
+            // lie an SBOM must not tell.
+            let written = serde_json::from_str::<serde_json::Value>(&doc)
+                .ok()
+                .and_then(|v| v["components"].as_array().map(|a| a.len()))
+                .unwrap_or_default();
             println!(
-                "wrote an SBOM for layer {} ({} component(s)) to {} — transcribed from the \
-                 signed manifest, not scanned",
+                "wrote an SBOM for layer {} ({written} component(s), from {} signed entries) to \
+                 {} — transcribed from the signed manifest, not scanned",
                 entry.layer,
                 manifest.entries.len(),
                 path.display()
             );
         }
-        None => print!("{doc}"),
+        None => println!("{doc}"),
     }
     Ok(())
 }

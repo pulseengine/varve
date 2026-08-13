@@ -1092,6 +1092,60 @@ artifacts:
         - run: cargo test -p varve-core the_document_binds_itself_to_the_layer_it_describes
         - run: cargo test -p varve-core per_platform_entries_are_distinguishable_not_duplicates
         - run: cargo test -p varve-core an_unknown_format_is_refused_not_guessed
+        # THE invariant: no signed entry may ever be dropped. Clean-room review
+        # refuted the first version here (3 signed entries -> 1 component).
+        - run: cargo test -p varve-core no_signed_entry_is_ever_dropped_from_the_document
+        # REQ-SBOM-001 says "shall fail closed"; this tests it at the CLI.
+        - run: cargo test -p varve --test cli sbom_fails_closed_on_a_layer_it_cannot_verify
+    links:
+      - type: verifies
+        target: REQ-SBOM-001
+
+  - id: VER-REVIEW-v0.21.0
+    type: verification
+    title: v0.21.0 independently reviewed — DISSENT on silent omission, then closed
+    status: verified
+    release: v0.21.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-13,
+        of `varve sbom` (REQ-SBOM-001) at HEAD 72c05a8. VERDICT: DISSENT — and
+        it was right, on the one claim that mattered most. Confirmed by the
+        reviewer: nothing is read from disk but the verified layer.json (sbom.rs
+        imports no std::fs); the command fails closed on BOTH the explicit
+        --layer and pin-default paths (empirically: no trust root, unknown
+        layer, and a TAMPERED layer.json each exit 1 with a 0-byte output);
+        emission is deterministic in code and by `cmp`; and the document is
+        SCHEMA-VALID against the real CycloneDX 1.6 schema fetched from
+        CycloneDX/specification (0 errors, with potent negative controls — a
+        bad type enum, a bad serialNumber and a missing bomFormat each produced
+        exactly 1 error).
+        DISSENT rested on a REFUTED headline claim. `component()` returned
+        Option and was filter_map'd, so a signed entry with no tool annotation
+        (which foreign-platform entries legitimately lack) or with a payload
+        kind this build does not recognise was DROPPED SILENTLY — proven with
+        three signed entries emitting one component, exit 0. For a document
+        sold as "a scanner can miss a component; a transcription cannot", that
+        is the defect that matters. FIXED: component() is now infallible —
+        whatever is unknown is LABELLED (kind.unrecognised, unnamed+digest
+        identity), never dropped — and `map` replaces `filter_map`, with a test
+        asserting component count == signed entry count.
+        The reviewer also found that a JUSTIFYING COMMENT WAS FALSE: sbom.rs
+        said "kind() already refuses it before we are called", and kind.rs
+        claimed install refuses unknown kinds. Neither is true — kind() is not
+        consulted by install or verify at all. Both comments corrected to state
+        reality; the behavioural question is deferred to varve#49 rather than
+        changed mid-release. Three further findings adopted: the CLI reported
+        the INPUT entry count rather than the emitted component count (it could
+        disagree with the file just written); REQ-SBOM-001 said "shall fail
+        closed" with no test, now covered at the CLI boundary; and the serial
+        number parsed as UUID "version 11", now a conformant RFC 9562 v8. Two
+        quality findings adopted for the CRA use the docs invoke: purl is now
+        emitted (pkg:github/owner/name@version — what lets a consumer match a
+        component to a CVE feed) and externalReferences are now followable URLs
+        rather than a bare `owner/name` slug.
     links:
       - type: verifies
         target: REQ-SBOM-001
