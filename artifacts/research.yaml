@@ -16,9 +16,13 @@ artifacts:
       Model to keep: per-project manifest pinning an opaque release, install
       exactly the pin, criticalup verify re-checks the installed tree
       (sha256 + mode per file), archive for cold storage, release identifiers
-      YY.MM.P with the patch digit reserved from day one. Gaps to beat: no
-      anti-rollback or freshness metadata of any kind (never-expiring single
-      hardcoded root key); cryptographic revocation removed in v1.5.0 in
+      YY.MM.P with the patch digit reserved from day one. criticaltrust is
+      architecturally the same trusted base as varve — root compiled into the
+      binary, offline signature checks — and its key model is richer than
+      varve's single key (Root/Packages/Redirects/Revocation roles, each with
+      expiry). The gaps are specific, not breadth: no version-level
+      anti-rollback or freshness metadata of any kind; cryptographic
+      revocation removed in v1.5.0 in
       favour of an online liveness check that silently disappears offline; no
       digest pinning or lockfile in criticalup.toml; a v2 manifest schema with
       yanked/support-expires/release-date exists as dead code and never
@@ -50,10 +54,15 @@ artifacts:
         cache validation; opaque governance (empty public tracker, no
         SECURITY.md).
       differentiation: >
-        varve ships what criticalup left on the floor: digest pinning in the
-        pin, monotonic per-line counters + issued-at in signed metadata,
-        known-problems/support-window/yank referrers that actually ship, and
-        offline verification as the primary path rather than the degraded one.
+        Convergence, not distance: criticaltrust and varve share the same
+        architectural trusted base (pinned root, offline signature checks),
+        so the honest comparison is what each ships on top. varve: digest
+        pinning in the pin, monotonic per-line counters + issued-at in signed
+        metadata (anti-rollback criticalup lacks entirely),
+        known-problems/support-window/yank advisories that actually ship and
+        stay checkable offline (criticalup's v1.5.0 liveness replacement
+        silently disappears there), and source-artifact distribution
+        (crates/WIT/Zephyr/SDK/wasm) as a library and CLI.
 
   - id: AR-SUIT
     type: academic-reference

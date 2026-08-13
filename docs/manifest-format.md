@@ -46,7 +46,11 @@ tools   = ["rivet", "synth", "meld", "witness"]
 - `channel = "qualified"` selects a line with a stated support window and
   qualification evidence attached. `rolling` has neither and may move.
 - If `digest` is present it wins; a name that resolves to a different digest is a
-  hard failure, not a warning. That is the anti-rollback lever available today.
+  hard failure, not a warning. Anti-rollback itself is the monotonic per-line
+  counter (DD-005, implemented in `varve-core`'s rollback module): the client
+  persists a high-water mark per line and rejects any layer below it. The digest
+  pin complements the counter — byte-exact freezing, and protection at first
+  contact, before any high-water mark exists.
 
 ## 2. The layer manifest — an OCI image index
 
