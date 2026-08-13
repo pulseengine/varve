@@ -1597,28 +1597,110 @@ artifacts:
 
   - id: REQ-ATTEST-001
     type: requirement
-    title: A layer carries its audit, provenance, and SBOM as verifiable referrers
+    title: An attestation is bound to its layer and its bytes, without being re-attested
     status: verified
     release: v0.22.0
     description: >
-      varve shall be able to carry, and `varve verify` to report, third-party
-      attestations attached to a layer as OCI referrer artifacts: cargo-vet /
-      cargo-crev audit records (human review), SLSA in-toto build provenance,
-      and CycloneDX SBOMs. varve signs "authentic + current"; these add
-      "reviewed + provenanced + billed-of-materials" so one verified pull
-      yields all dimensions. The registries already publish this kind of
-      evidence; what drops it is the mirror boundary — mirroring tools carry
-      no attestations and installers do not gate on them — so the gap varve
-      fills is transporting the evidence with the bytes and verifying it
-      offline. varve does not re-attest human review; it transports and
-      integrity-binds the attestations others produce.
+      SCOPE NOTE, written after clean-room review caught the earlier text
+      claiming more than shipped: this requirement covers BINDING only. The
+      transport half — carrying attestations as OCI referrer artifacts and
+      having `varve verify` report them — is REQ-ATTEST-002, targeted at
+      v0.23.0. The original text asserted both and was marked verified with
+      half of it unimplemented, which is precisely the defect varve's
+      claim-check discipline exists to prevent.
+      A layer's bytes are authentic and current; varve's signature and counter
+      say so. They say nothing about whether the code was reviewed, how it was
+      built, or what it contains. Others produce those claims — cargo-vet /
+      cargo-crev audits, SLSA in-toto provenance, CycloneDX SBOMs, VEX, and
+      vendor attestations (AdaCore has shipped DSSE-signed in-toto provenance
+      since wave 26.1).
+      varve shall NOT re-attest any of it. Re-signing another party's judgement
+      under this root would launder it into ours, and an assessor reading the
+      chain could no longer tell who asserted what. varve shall instead sign a
+      STATEMENT ABOUT the attestation — this digest, of this kind, from this
+      producer, accompanies this layer — and carry the bytes verbatim, so a
+      consumer verifies two separable things: varve's vouching for the
+      association and the bytes' integrity, offline against the pinned root;
+      and, with the producer's own key, whatever the producer claimed. That
+      split is what lets a disconnected site check a vendor attestation whose
+      issuer it cannot reach — the case AdaCore's own online signature service
+      does not serve.
+      Fail-closed rules, each of which shall hold: an unknown attestation kind
+      is refused, never guessed; bytes that do not hash to the signed digest
+      are not the attested bytes; a statement naming ANOTHER layer is refused
+      as evidence about this one (the confused-deputy case); a statement whose
+      own two identities — layer name and layer digest — disagree is refused,
+      the same rule `resolve` applies to pins; the statement carries its own
+      DSSE payload type so a signed layer manifest or line-status cannot pose
+      as one; and the checking command shall RE-VERIFY THE LAYER, not merely
+      the statement, since the installed layer's name and digest are local
+      labels until its retained envelope is re-checked.
+    tags: [distribution, traceability, security]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-ATTEST-002
+    type: requirement
+    title: A layer transports its attestations as OCI referrers, and verify reports them
+    status: approved
+    release: v0.23.0
+    description: >
+      The transport half split out of REQ-ATTEST-001 when review found that
+      requirement marked verified while this half was unimplemented. Binding
+      shipped in v0.22.0 (`sign-attestation` / `check-attestation`); what has
+      NOT shipped is carriage: attestations attached to a deposit layout and an
+      OCI registry as referrer artifacts, travelling with the layer through
+      `archive` and an offline install, and `varve verify` reporting which
+      attestations a layer carries and whether each still binds.
+      This is the half that closes the mirror-boundary gap the research
+      identified: registries do publish this evidence, and mirroring tools drop
+      it — bandersnatch and Verdaccio carry no attestations, and every BCR
+      attestation URL points at github.com — so an air-gapped consumer receives
+      bytes without the evidence about them. Reuse the line-status referrer
+      machinery (REQ-STATUS-DIST-001) rather than inventing a second shape.
     tags: [distribution, traceability]
-    links:
-      - type: traces-to
-        target: REQ-VERIFY-001
     fields:
       priority: should
       category: functional
+
+  - id: DD-021
+    type: design-decision
+    title: varve signs a statement ABOUT an attestation, never a restatement OF it
+    status: accepted
+    release: v0.22.0
+    description: >
+      When varve carries someone else's attestation, it could re-sign the
+      content under its own root — making one signature the consumer checks.
+      It deliberately does not. Re-signing another party's judgement collapses
+      two different assertions into one: an assessor reading the chain could no
+      longer tell whether varve merely transported a cargo-vet audit or endorsed
+      its conclusion, and varve has no basis for the latter. It would also make
+      varve's root a laundering point — the strongest reason a regulated
+      consumer would refuse to pin it.
+      So the signed object is a STATEMENT ABOUT the bytes: {layer,
+      layer_manifest_digest, kind, digest, producer}. varve asserts association
+      and integrity, which it can actually check; `producer` is copied verbatim
+      and never interpreted. The carried document is untouched, so the
+      producer's own signature over it still verifies with the producer's key.
+      Consequence, accepted knowingly: a consumer must perform TWO
+      verifications, and varve's `check-attestation` says so in its output
+      rather than implying one verdict covers both. The alternative — one
+      signature, ambiguous meaning — is worse for exactly the assessors varve
+      is built for.
+    links:
+      - type: satisfies
+        target: REQ-ATTEST-001
+    fields:
+      rationale: >
+        One signature with an ambiguous meaning is worse than two signatures
+        with clear ones. Collapsing "varve transported this" and "the producer
+        asserts this" into a single varve signature would leave an assessor
+        unable to tell which varve actually vouched for, and would make varve's
+        root a laundering point for third-party judgements it cannot check —
+        the strongest reason a regulated consumer would refuse to pin it. The
+        cost, two verification steps for the consumer, is paid once and is
+        stated in the tool's own output.
 
   - id: REQ-TRACEPACK-001
     type: requirement

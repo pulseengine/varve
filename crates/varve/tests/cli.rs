@@ -288,6 +288,67 @@ fn an_attestation_binds_to_its_layer_and_nothing_else() {
         .stderr(predicate::str::contains("unknown attestation kind"));
 }
 
+// rivet: verifies REQ-ATTEST-001
+#[test]
+fn check_attestation_refuses_a_tampered_layer() {
+    // Clean-room review found check-attestation reporting "attestation OK" over
+    // a store state `varve verify` rejects: it checked the statement signature
+    // but never re-verified the LAYER, whose name and digest are local labels
+    // until its retained envelope is re-checked. This is the command the
+    // disconnected consumer runs; it must not be the trusting one.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    let sbom = fx.project.join("l.cdx.json");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["sbom", "--out"])
+        .arg(&sbom)
+        .assert()
+        .success();
+    let stmt = fx.project.join("s.dsse");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["sign-attestation", "--kind", "sbom", "--file"])
+        .arg(&sbom)
+        .arg("--key")
+        .arg(&signed.secret_key)
+        .arg("--key-id")
+        .arg("test-root")
+        .arg("--out")
+        .arg(&stmt)
+        .assert()
+        .success();
+    // Now alter an installed tool binary — the layer no longer verifies.
+    let core = fx.root.join("core");
+    let entry = std::fs::read_dir(&core)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(entry.join("bin/synth"), b"EVIL").unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .arg("verify")
+        .assert()
+        .failure();
+    // check-attestation must reach the same verdict, not report OK.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["check-attestation", "--statement"])
+        .arg(&stmt)
+        .arg("--file")
+        .arg(&sbom)
+        .assert()
+        .failure();
+}
+
 // rivet: verifies REQ-SBOM-001
 #[test]
 fn sbom_fails_closed_on_a_layer_it_cannot_verify() {

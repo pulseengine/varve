@@ -1078,12 +1078,15 @@ fn sign_attestation(
     let envelope = varve_core::attest::sign(&st, &sk, key_id)?;
     std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
     println!(
-        "signed a {kind} attestation statement for layer {} ({}) by {producer} -> {}\n\
+        "signed a {kind} attestation statement by {producer} -> {out}\n\
+         \u{20}\u{20}attestation digest : {adigest}\n\
+         \u{20}\u{20}bound to layer     : {layer} ({ldigest})\n\
          varve vouches that these bytes accompany this layer; what {producer} claims is \
          {producer}'s to prove.",
-        entry.layer,
-        st.digest,
-        out.display()
+        out = out.display(),
+        adigest = st.digest,
+        layer = entry.layer,
+        ldigest = st.layer_manifest_digest,
     );
     Ok(())
 }
@@ -1095,7 +1098,15 @@ fn check_attestation(
 ) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
     let root = ctx_root_bytes(&ctx)?;
-    let resolved = resolve(&ctx.pin, &ctx.store)?;
+    // VERIFY THE LAYER, not just the statement. Clean-room review found this
+    // reporting "attestation OK" over a tampered tool binary and a forged
+    // layer.json — states `varve verify` rejects. Both values this command
+    // then prints and joins on (the layer identity and its digest) are local
+    // labels: InstalledLayer.digest is the store DIRECTORY NAME and .layer is
+    // parsed from layer.json, neither authenticated until verify_installed
+    // re-checks the retained envelope. This is the command a disconnected
+    // consumer runs; it must not be the one that trusts unverified local state.
+    let (_store, entry) = export_target(store, None)?;
     let envelope = std::fs::read(statement)
         .with_context(|| format!("cannot read statement {}", statement.display()))?;
     let bytes = std::fs::read(file)
@@ -1103,18 +1114,20 @@ fn check_attestation(
     // 1. The statement must verify against the pinned root — offline.
     let st = varve_core::attest::verify_statement(&envelope, &root)?;
     // 2. …and it must actually describe THESE bytes and THIS layer.
-    varve_core::attest::check(&st, &bytes, &resolved.layer.digest)?;
+    varve_core::attest::check(&st, &bytes, &entry.digest, &entry.layer.to_string())?;
     println!(
-        "attestation OK: a {} document produced by {}, {} bytes, bound to layer {} ({})\n\
-         note: varve verified the ASSOCIATION and the bytes' integrity. Any claim {} makes \
-         inside the document is verified with {}'s own key, not this one.",
-        st.kind,
-        st.producer,
-        bytes.len(),
-        st.layer,
-        st.digest,
-        st.producer,
-        st.producer,
+        "attestation OK: a {kind} document produced by {producer}, {n} bytes\n\
+         \u{20}\u{20}attestation digest : {adigest}\n\
+         \u{20}\u{20}bound to layer     : {layer} ({ldigest})\n\
+         note: varve verified the ASSOCIATION and the bytes' integrity, and re-verified the \
+         layer itself. Any claim {producer} makes INSIDE the document is verified with \
+         {producer}'s own key, not this one.",
+        kind = st.kind,
+        producer = st.producer,
+        n = bytes.len(),
+        adigest = st.digest,
+        layer = entry.layer,
+        ldigest = st.layer_manifest_digest,
     );
     Ok(())
 }

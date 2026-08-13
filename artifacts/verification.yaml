@@ -1242,13 +1242,72 @@ artifacts:
         # The two fail-closed bindings.
         - run: cargo test -p varve-core swapped_bytes_are_refused
         - run: cargo test -p varve-core an_attestation_for_another_layer_is_refused
-        - run: cargo test -p varve-core an_unknown_kind_is_refused_not_guessed
+        # Renamed after review: the old name collided with a test in kind.rs,
+        # so this evidence step passed via a homonym and could be deleted
+        # without the gate noticing.
+        - run: cargo test -p varve-core an_unknown_attestation_kind_is_refused_not_guessed
+        # A statement whose own name and digest disagree is refused, the rule
+        # `resolve` applies to pins.
+        - run: cargo test -p varve-core a_statement_whose_own_two_identities_disagree_is_refused
         # Signature round-trip, and the wrong root cannot vouch.
         - run: cargo test -p varve-core a_statement_round_trips_through_a_signature
         - run: cargo test -p varve-core the_wrong_root_cannot_vouch_for_an_association
         # End to end at the CLI: sbom -> sign-attestation -> check-attestation,
         # with tampered bytes, a wrong root and an unknown kind all refused.
         - run: cargo test -p varve --test cli an_attestation_binds_to_its_layer_and_nothing_else
+        # The checker re-verifies the LAYER, not just the statement: review
+        # found it reporting OK over a tampered binary and a forged layer.json.
+        - run: cargo test -p varve --test cli check_attestation_refuses_a_tampered_layer
+    links:
+      - type: verifies
+        target: REQ-ATTEST-001
+
+  - id: VER-REVIEW-v0.22.0
+    type: verification
+    title: v0.22.0 independently reviewed — DISSENT on a consumer-side trust hole, then closed
+    status: verified
+    release: v0.22.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-13,
+        of REQ-ATTEST-001 at HEAD 56c9aa1. VERDICT DISSENT — the fifth
+        consecutive review to dissent and the fifth to be right. Confirmed by
+        the reviewer: the signed payload asserts nothing about the producer's
+        claim and `producer` is copied uninterpreted, so the "statement ABOUT,
+        never OF" split is real in what actually gets signed; all four payload
+        types are distinct and type confusion was refuted in BOTH directions by
+        probe (a layer manifest and a line-status each rejected as a statement,
+        and a statement rejected by the layer verifier); the signer is
+        trust-first (a tampered tool binary made sign-attestation exit 1).
+        DISSENT 1, the serious one: `check-attestation` verified the STATEMENT
+        but never the LAYER. The reviewer reproduced "attestation OK", exit 0,
+        over both a tampered tool binary and a forged layer.json — states where
+        `varve verify` exits 1 — because InstalledLayer.digest is the store
+        DIRECTORY NAME and .layer is parsed from the possibly-tampered
+        layer.json, neither authenticated until the retained envelope is
+        re-checked. Every sibling command routes through export_target; this
+        one, the command a disconnected consumer runs, did not. FIXED, with a
+        regression test asserting it now reaches the same verdict as `verify`.
+        DISSENT 2: REQ-ATTEST-001 was flipped to `verified` with two of its own
+        shall-clauses unimplemented — the text still promised OCI referrer
+        transport and `varve verify` reporting, neither of which shipped — in
+        the very commit that honestly retargeted REQ-INDEXAUTH-001. Exactly the
+        overclaim varve's claim-check discipline exists to prevent. FIXED by
+        narrowing REQ-ATTEST-001 to the binding half that shipped and splitting
+        the transport half into REQ-ATTEST-002 at v0.23.0.
+        Three further findings adopted: both commands printed the ATTESTATION
+        digest in the slot the codebase reserves for the LAYER manifest digest,
+        never showing the actual join key (now both are labelled explicitly);
+        `check` never compared the statement's layer NAME against anything
+        while the CLI printed it as fact, so a mis-issued statement could make
+        varve print a confident, signed-looking, wrong identity (now refused,
+        the same rule `resolve` applies to pins); and VER-ATTEST-001's kind step
+        was VACUOUS — the test name collided with one in kind.rs, so the
+        evidence passed via a homonym and could be deleted without the gate
+        noticing (renamed). DD-021 now records the "statement ABOUT, never OF"
+        decision, which had existed only in a doc comment.
     links:
       - type: verifies
         target: REQ-ATTEST-001

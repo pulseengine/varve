@@ -104,6 +104,11 @@ pub enum AttestError {
          {got} — refusing to associate it"
     )]
     LayerMismatch { expected: String, got: String },
+    #[error(
+        "attestation statement names layer '{named}' but the digest it carries is that of \
+         '{found}' — refusing a statement whose own two identities disagree"
+    )]
+    NameDigestMismatch { named: String, found: String },
     #[error("signature: {0}")]
     Signature(String),
 }
@@ -133,6 +138,7 @@ pub fn check(
     st: &AttestationStatement,
     bytes: &[u8],
     layer_manifest_digest: &str,
+    layer_name: &str,
 ) -> Result<(), AttestError> {
     let got = crate::store::manifest_digest(bytes);
     if got != st.digest {
@@ -145,6 +151,17 @@ pub fn check(
         return Err(AttestError::LayerMismatch {
             expected: st.layer_manifest_digest.clone(),
             got: layer_manifest_digest.to_string(),
+        });
+    }
+    // The statement carries TWO identities for the same layer — a name and a
+    // digest — and callers print the name. `resolve` already refuses a pin
+    // whose name and digest disagree (NameDigestMismatch); a statement must be
+    // held to the same rule, or a mis-issued one makes varve print a confident,
+    // signed-looking, wrong layer identity.
+    if st.layer != layer_name {
+        return Err(AttestError::NameDigestMismatch {
+            named: st.layer.clone(),
+            found: layer_name.to_string(),
         });
     }
     Ok(())
@@ -201,7 +218,7 @@ mod tests {
         assert_eq!(s.digest, crate::store::manifest_digest(BYTES));
         assert_eq!(s.layer_manifest_digest, LAYER_DIGEST);
         assert_eq!(s.kind, AttestationKind::Sbom);
-        assert!(check(&s, BYTES, LAYER_DIGEST).is_ok());
+        assert!(check(&s, BYTES, LAYER_DIGEST, "2026.08.0").is_ok());
     }
 
     // rivet: verifies REQ-ATTEST-001
@@ -209,7 +226,12 @@ mod tests {
     fn swapped_bytes_are_refused() {
         // The whole value of the statement is that it pins the bytes.
         let s = st();
-        match check(&s, b"different attestation entirely", LAYER_DIGEST) {
+        match check(
+            &s,
+            b"different attestation entirely",
+            LAYER_DIGEST,
+            "2026.08.0",
+        ) {
             Err(AttestError::DigestMismatch { .. }) => {}
             other => panic!("expected DigestMismatch, got {other:?}"),
         }
@@ -221,7 +243,7 @@ mod tests {
         // A validly-signed statement for layer A must not be accepted as
         // evidence about layer B — the confused-deputy case.
         let s = st();
-        match check(&s, BYTES, "sha256:2222") {
+        match check(&s, BYTES, "sha256:2222", "2026.08.0") {
             Err(AttestError::LayerMismatch { .. }) => {}
             other => panic!("expected LayerMismatch, got {other:?}"),
         }
@@ -229,7 +251,20 @@ mod tests {
 
     // rivet: verifies REQ-ATTEST-001
     #[test]
-    fn an_unknown_kind_is_refused_not_guessed() {
+    fn a_statement_whose_own_two_identities_disagree_is_refused() {
+        // The statement names a layer AND carries its digest; callers print the
+        // name. If they disagree, varve would print a signed-looking but wrong
+        // identity. `resolve` refuses this for pins; so must this.
+        let s = st();
+        match check(&s, BYTES, LAYER_DIGEST, "2026.01.0") {
+            Err(AttestError::NameDigestMismatch { .. }) => {}
+            other => panic!("expected NameDigestMismatch, got {other:?}"),
+        }
+    }
+
+    // rivet: verifies REQ-ATTEST-001
+    #[test]
+    fn an_unknown_attestation_kind_is_refused_not_guessed() {
         assert!("sbom".parse::<AttestationKind>().is_ok());
         assert!("qualification".parse::<AttestationKind>().is_ok());
         assert!("vibes".parse::<AttestationKind>().is_err());
