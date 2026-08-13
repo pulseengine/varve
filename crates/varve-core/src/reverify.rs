@@ -211,6 +211,28 @@ mod tests {
         assert!(matches!(err, ReverifyError::PayloadMismatch), "got: {err}");
     }
 
+    // rivet: verifies REQ-PROOF-001
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_envelope_is_an_io_error_not_a_missing_one() {
+        // An envelope that EXISTS but cannot be read is not a layer installed
+        // without one. Collapsing the two would report "no retained envelope"
+        // for what is really a permissions fault — a verification tool must
+        // name the fault it actually hit. (Found by cargo-mutants: the
+        // NotFound guard survived being replaced with `true`.)
+        use std::os::unix::fs::PermissionsExt;
+        let ctx = installed_layer();
+        let path = ctx.layer.root.join(ENVELOPE_FILE);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err =
+            verify_installed(&ctx.store, &ctx.layer, &ctx.verifier, "test-platform").unwrap_err();
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+        assert!(
+            matches!(err, ReverifyError::Io { .. }),
+            "an unreadable envelope must be an Io error, got: {err}"
+        );
+    }
+
     // rivet: verifies REQ-VERIFY-001
     #[test]
     fn a_missing_envelope_is_its_own_loud_verdict() {

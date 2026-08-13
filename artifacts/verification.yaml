@@ -1029,3 +1029,44 @@ artifacts:
         target: REQ-PERF-001
       - type: verifies
         target: REQ-PIN-002
+
+  - id: VER-PROOF-001
+    type: verification
+    title: SMT obligations discharged with certificates, negative controls included
+    status: verified
+    release: v0.20.0
+    fields:
+      method: automated-test
+      baseline: >
+        ordeal 0.14.0, 2026-08-13. rollback-advance-monotone: unsat with a
+        20092-byte checker-validated LRAT certificate. Its negative control
+        (min() instead of max()): sat, model p=0 m=0x8000000000000000 — the gate
+        demonstrably goes red. rollback-verdict-total: unsat.
+        epoch-days-leap-mutant-is-distinguishable: sat, model y=0x2000 (8192),
+        which became the 8192-02-29 regression test.
+      steps:
+        - run: python3 tools/proof-check.py
+        - run: cargo test -p varve-core the_leap_rule_holds_at_the_year_the_solver_found
+    links:
+      - type: verifies
+        target: REQ-PROOF-001
+
+  - id: VER-MUTATE-002
+    type: verification
+    title: The trust-decision modules are in the required mutation gate
+    status: verified
+    release: v0.20.0
+    fields:
+      method: automated-test
+      baseline: >
+        cargo-mutants 27.0.0, 2026-08-13. Adding resolve/install/selfverify/
+        reverify/exportstamp found 2 survivors, both the same NotFound-guard
+        defect; after the two tests below, re-running reverify.rs +
+        exportstamp.rs gave 15 caught, 0 missed, 2 unviable.
+      steps:
+        - run: cargo test -p varve-core an_unreadable_envelope_is_an_io_error_not_a_missing_one
+        - run: cargo test -p varve-core an_unreadable_stamp_is_an_io_error_not_a_missing_one
+        - run: grep -q "selfverify.rs" .github/workflows/ci.yml
+    links:
+      - type: verifies
+        target: REQ-MUTATE-002
