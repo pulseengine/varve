@@ -80,9 +80,11 @@ enum Cmd {
         /// touching the checked-in pin.
         #[arg(long, value_name = "LAYER")]
         varve: Option<String>,
-        /// Tool and its arguments, after `--`.
+        /// Tool and its arguments, after `--`. `OsString`, so an argument
+        /// that is not valid UTF-8 reaches the tool byte-for-byte instead of
+        /// being lossily rewritten (unix arguments are arbitrary bytes).
         #[arg(trailing_var_arg = true, required = true)]
-        tool_and_args: Vec<String>,
+        tool_and_args: Vec<std::ffi::OsString>,
     },
     /// (CI) Assemble, sign and publish a layer — the only way a layer comes
     /// into being. Writes the same OCI image layout `archive` produces.
@@ -322,10 +324,10 @@ fn run() -> anyhow::Result<()> {
     let argv0 = args.next();
     if let Some(tool) = dispatch_tool_name(argv0.as_deref()) {
         let store = Store::at(store_root()?);
-        let rest: Vec<String> = args.map(|a| a.to_string_lossy().into_owned()).collect();
-        let mut tool_and_args = vec![tool];
-        tool_and_args.extend(rest);
-        return run_tool(&store, None, &tool_and_args);
+        // Arguments pass through as OsString: a shim must hand the tool the
+        // exact bytes the caller typed, and unix arguments are arbitrary bytes.
+        let rest: Vec<std::ffi::OsString> = args.collect();
+        return run_tool(&store, None, &tool, &rest);
     }
     let cli = Cli::parse();
     let store = Store::at(store_root()?);
@@ -338,7 +340,15 @@ fn run() -> anyhow::Result<()> {
         Cmd::Run {
             varve,
             tool_and_args,
-        } => run_tool(&store, varve.as_deref(), &tool_and_args),
+        } => {
+            let (tool, args) = tool_and_args
+                .split_first()
+                .context("no tool named — usage: varve run [--varve LAYER] -- <tool> [args…]")?;
+            let tool = tool
+                .to_str()
+                .context("tool name must be valid UTF-8 — it names an entry in the layer")?;
+            run_tool(&store, varve.as_deref(), tool, args)
+        }
         Cmd::Deposit {
             spec,
             layer,
@@ -755,11 +765,9 @@ fn self_verify(archive: &std::path::Path, envelope: &std::path::Path) -> anyhow:
 fn run_tool(
     store: &Store,
     override_layer: Option<&str>,
-    tool_and_args: &[String],
+    tool: &str,
+    args: &[std::ffi::OsString],
 ) -> anyhow::Result<()> {
-    let (tool, args) = tool_and_args
-        .split_first()
-        .context("no tool named — usage: varve run [--varve LAYER] -- <tool> [args…]")?;
     let ctx = project_ctx(store)?;
     let mut pin = ctx.pin;
     if let Some(layer) = override_layer {

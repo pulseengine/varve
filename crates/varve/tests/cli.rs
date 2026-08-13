@@ -1023,6 +1023,43 @@ fn sign_sums_produces_an_envelope_self_verify_accepts() {
 // rivet: verifies REQ-SHIM-002
 #[cfg(unix)]
 #[test]
+fn a_shim_passes_non_utf8_arguments_through_byte_for_byte() {
+    // A shim must hand the tool the EXACT bytes the caller typed: unix
+    // arguments are arbitrary byte strings, and a filename is a common one.
+    // Rewriting them lossily would corrupt data silently — the opposite of
+    // this tool's contract.
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let store = varve_core::Store::at(&fx.root);
+    // A probe that writes its argument's raw bytes out for comparison.
+    let probe = b"#!/bin/sh\nprintf '%s' \"$1\" > \"$VARVE_ARG_OUT\"\n";
+    store
+        .lay_down(MANIFEST_JULY.as_bytes(), &[("probe", probe.as_slice())])
+        .unwrap();
+    varve(&fx).args(["shim", "install"]).assert().success();
+
+    let out_file = fx.project.join("arg.bin");
+    let nasty = OsStr::from_bytes(b"bad\xff\xfename");
+    let status = std::process::Command::new(fx.root.join("shims").join("probe"))
+        .arg(nasty)
+        .current_dir(&fx.project)
+        .env("VARVE_ROOT", &fx.root)
+        .env("VARVE_ARG_OUT", &out_file)
+        .status()
+        .unwrap();
+    assert!(status.success(), "shim dispatch failed");
+    let got = std::fs::read(&out_file).unwrap();
+    assert_eq!(
+        got.as_slice(),
+        b"bad\xff\xfename",
+        "the shim rewrote the argument instead of passing it through"
+    );
+}
+
+// rivet: verifies REQ-SHIM-002
+#[cfg(unix)]
+#[test]
 fn a_shim_is_varve_itself_not_a_shell_script() {
     // REQ-SHIM-002: no /bin/sh on the dispatch path, and no string handed to a
     // shell parser. The shim must BE the varve binary, reached by a link.

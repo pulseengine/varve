@@ -1753,8 +1753,11 @@ artifacts:
       any name other than its own resolves the pin and execs that tool. This
       deletes the shell, removes the injection class BY CONSTRUCTION (no string
       ever reaches a parser), halves the process spawns, and makes Windows a
-      copy rather than a special case. Because a symlink resolves to whatever
-      varve currently is, shims also stop going stale after `self-update`.
+      copy rather than a special case, and arguments pass through as raw bytes
+      (a unix argument is an arbitrary byte string; rewriting one lossily would
+      corrupt data silently). Two consequences shall be documented rather than
+      implied: the binary must be named `varve` to offer the CLI, and a Windows
+      shim is a copy, so it does not follow `self-update` until reinstalled.
       The name derived from `argv[0]` is caller-controlled, so it shall be
       validated (no path separators, no `..`, non-empty) and may only ever
       select among tools the pinned layer already exposes — fail closed, as
@@ -1793,3 +1796,27 @@ artifacts:
     fields:
       priority: should
       category: performance
+
+  - id: REQ-PIN-002
+    type: requirement
+    title: A pinned tool name is a name, never a path out of the layer
+    status: verified
+    release: v0.19.0
+    description: >
+      A pin may restrict itself to a subset of the layer's tools
+      (`tools = ["rivet"]`). That name is joined onto the verified layer's
+      `bin/` directory — and `Path::join` with an ABSOLUTE path REPLACES the
+      base, while `..` walks out of it. So `tools = ["/usr/bin/id"]` resolved
+      and ran a binary from outside the verified layer, directly contradicting
+      the guarantee varve documents and sells: "varve never falls back to
+      another layer or to binaries on PATH — a pin resolves exactly or the
+      command fails." Found by clean-room review of v0.19.0 (pre-existing, not
+      introduced by the shim change, and not reachable through a shim because an
+      argv[0]-derived name cannot contain a separator). varve shall refuse, at
+      pin-parse time, any tool name that is not a plain name — empty, `.`, `..`,
+      or containing `/`, `\`, or NUL — with an error naming the offending entry.
+      Fail closed at the boundary, rather than trusting a checked-in file.
+    tags: [core, security]
+    fields:
+      priority: must
+      category: functional
