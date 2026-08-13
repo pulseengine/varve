@@ -27,12 +27,72 @@ pub struct CrateEntry {
 /// char names get special prefixes, 4+ use first-two/next-two. Lowercased.
 pub fn index_path(name: &str) -> String {
     let n = name.to_lowercase();
+    // Slice by CHARACTER, not byte: matching on `chars().count()` and then
+    // indexing bytes panicked mid-codepoint on any non-ASCII name. Export
+    // paths refuse such names outright (`validate_crate_name`); this stays
+    // total anyway so a layout helper can never crash a client.
+    let take =
+        |from: usize, to: usize| -> String { n.chars().skip(from).take(to - from).collect() };
     match n.chars().count() {
         1 => format!("1/{n}"),
         2 => format!("2/{n}"),
-        3 => format!("3/{}/{n}", &n[0..1]),
-        _ => format!("{}/{}/{n}", &n[0..2], &n[2..4]),
+        3 => format!("3/{}/{n}", take(0, 1)),
+        _ => format!("{}/{}/{n}", take(0, 2), take(2, 4)),
     }
+}
+
+/// Refuse a crate name Cargo's registry index cannot express, or that would
+/// corrupt the index line's JSON. Cargo's rule: ASCII alphanumeric, `-`, `_`,
+/// non-empty. Failing closed here keeps `index_path`/`index_line` honest — the
+/// alternative is a panic or a silently malformed registry (REQ-CRATENAME-001).
+pub fn validate_crate_name(name: &str) -> Result<(), CrateExportError> {
+    if name.is_empty() {
+        return Err(CrateExportError::UnrepresentableName {
+            name: name.to_string(),
+            why: "empty".into(),
+        });
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+    {
+        return Err(CrateExportError::UnrepresentableName {
+            name: name.to_string(),
+            why: format!("contains {bad:?}; Cargo names are ASCII alphanumeric, '-' or '_'"),
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a version string that would corrupt the index line's JSON. Semver's
+/// own alphabet (alphanumerics, `.`, `-`, `+`) admits no quote or backslash.
+pub fn validate_crate_version(version: &str) -> Result<(), CrateExportError> {
+    if version.is_empty() {
+        return Err(CrateExportError::UnrepresentableVersion {
+            version: version.to_string(),
+            why: "empty".into(),
+        });
+    }
+    if let Some(bad) = version
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')))
+    {
+        return Err(CrateExportError::UnrepresentableVersion {
+            version: version.to_string(),
+            why: format!("contains {bad:?}; semver is ASCII alphanumeric, '.', '-' or '+'"),
+        });
+    }
+    Ok(())
+}
+
+/// Gate every export adapter: no entry leaves the store unless its name and
+/// version are representable. One place, so the adapters cannot drift apart.
+fn validate_entries(crates: &[CrateEntry]) -> Result<(), CrateExportError> {
+    for e in crates {
+        validate_crate_name(&e.name)?;
+        validate_crate_version(&e.version)?;
+    }
+    Ok(())
 }
 
 /// One index line for a crate version. `deps` empty is correct for a leaf
@@ -68,6 +128,10 @@ pub enum CrateExportError {
         #[source]
         source: std::io::Error,
     },
+    #[error("crate name {name:?} cannot be exported: {why}")]
+    UnrepresentableName { name: String, why: String },
+    #[error("crate version {version:?} cannot be exported: {why}")]
+    UnrepresentableVersion { version: String, why: String },
 }
 
 /// The `.cargo-checksum.json` for a vendored crate. `package` is the sha256 of
@@ -104,6 +168,9 @@ pub fn export_vendor_dir(
     crates: &[CrateEntry],
     vendor_dir: &Path,
 ) -> Result<usize, CrateExportError> {
+    // Fail closed before writing anything: an unrepresentable name would
+    // panic the index layout or corrupt the index JSON (REQ-CRATENAME-001).
+    validate_entries(crates)?;
     let io = |path: &Path, source: std::io::Error| CrateExportError::Io {
         path: path.display().to_string(),
         source,
@@ -127,6 +194,9 @@ pub fn export_local_registry(
     crates: &[CrateEntry],
     registry_dir: &Path,
 ) -> Result<usize, CrateExportError> {
+    // Fail closed before writing anything: an unrepresentable name would
+    // panic the index layout or corrupt the index JSON (REQ-CRATENAME-001).
+    validate_entries(crates)?;
     let io = |path: &Path, source: std::io::Error| CrateExportError::Io {
         path: path.display().to_string(),
         source,
@@ -169,6 +239,9 @@ pub fn export_local_registry(
 /// generated `crate_universe` output (so no repin/index lookup at build time).
 /// Returns the number of tarballs written.
 pub fn export_distdir(crates: &[CrateEntry], distdir: &Path) -> Result<usize, CrateExportError> {
+    // Fail closed before writing anything: an unrepresentable name would
+    // panic the index layout or corrupt the index JSON (REQ-CRATENAME-001).
+    validate_entries(crates)?;
     let io = |path: &Path, source: std::io::Error| CrateExportError::Io {
         path: path.display().to_string(),
         source,
@@ -195,6 +268,51 @@ mod tests {
         assert_eq!(index_path("abc"), "3/a/abc");
         assert_eq!(index_path("serde"), "se/rd/serde");
         assert_eq!(index_path("Varve-SDK"), "va/rv/varve-sdk"); // lowercased
+    }
+
+    // rivet: verifies REQ-CRATENAME-001
+    #[test]
+    fn a_non_ascii_crate_name_is_an_error_not_a_panic() {
+        // `chars().count()` + BYTE slicing used to panic mid-codepoint here.
+        // A name Cargo's index layout cannot express must fail closed.
+        for bad in ["日本語", "ααα", "café-utils"] {
+            assert!(
+                validate_crate_name(bad).is_err(),
+                "{bad} must be refused, not sliced"
+            );
+            // And the layout function itself must never panic, whatever it gets.
+            let _ = index_path(bad);
+        }
+    }
+
+    // rivet: verifies REQ-CRATENAME-001
+    #[test]
+    fn a_name_or_version_that_would_corrupt_the_index_json_is_refused() {
+        // index_line interpolates into JSON; a quote/backslash would break the
+        // line Cargo parses. Refuse at the gate rather than emit corrupt JSON.
+        assert!(validate_crate_name("evil\"name").is_err());
+        assert!(validate_crate_name("back\\slash").is_err());
+        assert!(validate_crate_name("").is_err());
+        assert!(validate_crate_version("1.0.0\"").is_err());
+        assert!(validate_crate_name("serde_json").is_ok());
+        assert!(validate_crate_name("varve-core").is_ok());
+        assert!(validate_crate_version("0.1.0-alpha.1+build.2").is_ok());
+    }
+
+    // rivet: verifies REQ-CRATENAME-001
+    #[test]
+    fn export_refuses_an_unrepresentable_crate_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = [CrateEntry {
+            name: "café-utils".into(),
+            version: "0.1.0".into(),
+            cksum: "abc".into(),
+            bytes: vec![],
+        }];
+        // Every export adapter fails closed on the same input.
+        assert!(export_local_registry(&bad, dir.path()).is_err());
+        assert!(export_vendor_dir(&bad, dir.path()).is_err());
+        assert!(export_distdir(&bad, dir.path()).is_err());
     }
 
     // rivet: verifies REQ-CRATE-001

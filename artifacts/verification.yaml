@@ -893,3 +893,22 @@ artifacts:
     links:
       - type: verifies
         target: REQ-EXPORT-SYNC-001
+
+  - id: VER-CRATENAME-001
+    type: verification
+    title: Unrepresentable crate names and versions fail closed at every adapter
+    status: verified
+    release: v0.18.1
+    fields:
+      method: automated-test
+      steps:
+        # The reproduced panic (café-utils / 日本語 / ααα) is now an error, and
+        # index_path itself is total — the test calls it on each bad name.
+        - run: cargo test -p varve-core a_non_ascii_crate_name_is_an_error_not_a_panic
+        # A name/version that would corrupt the index JSON is refused.
+        - run: cargo test -p varve-core a_name_or_version_that_would_corrupt_the_index_json_is_refused
+        # All three export adapters fail closed on the same input.
+        - run: cargo test -p varve-core export_refuses_an_unrepresentable_crate_name
+    links:
+      - type: verifies
+        target: REQ-CRATENAME-001

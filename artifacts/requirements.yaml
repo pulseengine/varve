@@ -1565,7 +1565,7 @@ artifacts:
     type: requirement
     title: The realm authenticates the line index, not only each artifact
     status: approved
-    release: v0.18.0
+    release: v0.19.0
     description: >
       varve signs individual layer manifests and realms, but the LISTING of
       which layers exist for a line (the index a consumer enumerates) must
@@ -1589,7 +1589,7 @@ artifacts:
     type: requirement
     title: A layer carries its audit, provenance, and SBOM as verifiable referrers
     status: approved
-    release: v0.18.0
+    release: v0.19.0
     description: >
       varve shall be able to carry, and `varve verify` to report, third-party
       attestations attached to a layer as OCI referrer artifacts: cargo-vet /
@@ -1692,4 +1692,28 @@ artifacts:
     tags: [distribution]
     fields:
       priority: should
+      category: functional
+
+  - id: REQ-CRATENAME-001
+    type: requirement
+    title: An unrepresentable crate name fails closed, never panics or corrupts the index
+    status: verified
+    release: v0.18.1
+    description: >
+      `index_path` matched on `chars().count()` and then sliced BYTES, so any
+      non-ASCII crate name panicked mid-codepoint — a client CRASH on the
+      offline-vendoring path, in a tool whose contract is to fail closed with an
+      error that carries its fix. Reproduced for `café-utils`, `日本語`, `ααα`.
+      Separately, `index_line` interpolates the name and version into the index
+      JSON with no escaping, so a name containing a quote or backslash would
+      emit a corrupt registry line. Both stem from trusting an unvalidated,
+      depositor-controlled annotation. varve shall (a) refuse a crate name or
+      version outside Cargo's own alphabet (name: ASCII alphanumeric, `-`, `_`;
+      version: alphanumeric, `.`, `-`, `+`) at EVERY export adapter, before any
+      bytes are written, and (b) keep `index_path` total by construction —
+      character-based slicing — so a layout helper can never crash a client even
+      if called directly. Fail closed, with the reason named.
+    tags: [distribution, security]
+    fields:
+      priority: must
       category: functional
