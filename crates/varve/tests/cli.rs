@@ -215,7 +215,7 @@ fn manifest_with_includes(layer: &str, tools: &[&str], includes: &[&str]) -> Str
     )
 }
 
-// rivet: verifies REQ-KEYGEN-001, REQ-PRODUCER-001
+// rivet: verifies REQ-KEYGEN-001, REQ-PRODUCER-001, REQ-STORE-001
 #[test]
 fn an_organisation_can_stand_up_its_own_realm() {
     // The path a ten-persona audit found CLOSED: four of five blocked personas
@@ -298,6 +298,24 @@ fn an_organisation_can_stand_up_its_own_realm() {
         .success()
         .stdout(predicate::str::contains("verified"));
     varve(&fx).args(["which", "acme-tool"]).assert().success();
+
+    // REQ-STORE-001: a layer `which` resolves must be a layer `list` can see.
+    // `list` read only the top-level core, so after a realm install it printed
+    // "no layers installed" with exit 0 — contradicted a second later by
+    // verify, which, run and sbom. Three personas reported it.
+    varve(&fx)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2026.08.0"));
+
+    // …and an explicit --layer must find it too. This is the README's
+    // headline example, and it failed on the realm path.
+    varve(&fx)
+        .args(["sbom", "--layer", "2026.08.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CycloneDX"));
 }
 
 // rivet: verifies REQ-PRODUCER-001

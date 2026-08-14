@@ -110,6 +110,24 @@ pub fn find_realms_file(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Every realm name the discovered realms file defines. Used to label store
+/// partitions by realm rather than by trust-root fingerprint — a fingerprint is
+/// unambiguous but tells a human nothing.
+pub fn realm_names(start: &Path) -> Result<Vec<String>, RealmError> {
+    let Some(path) = find_realms_file(start) else {
+        return Ok(Vec::new());
+    };
+    let text = std::fs::read_to_string(&path).map_err(|source| RealmError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let file: RawRealmsFile = toml::from_str(&text).map_err(|e| RealmError::Parse {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })?;
+    Ok(file.realm.into_keys().collect())
+}
+
 /// Load one realm by name from the realms file discovered from `start`.
 pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
     let Some(path) = find_realms_file(start) else {

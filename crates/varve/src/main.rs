@@ -955,15 +955,29 @@ fn export_target(
 ) -> anyhow::Result<(Store, varve_core::store::InstalledLayer)> {
     match layer {
         Some(l) => {
-            let verifier = trust_root()?;
+            // Search the PROJECT'S store, not the top-level core. Realms
+            // partition the core, so an explicit --layer used to miss a layer
+            // the same project's `which` resolves — reported as both "no trust
+            // root configured" (when one was) and "layer X is not installed"
+            // (when it was). This is the README's headline example
+            // (REQ-STORE-001).
+            let (store, verifier) = match project_ctx(base) {
+                Ok(ctx) => {
+                    let v = ctx_verifier(&ctx)?;
+                    (ctx.store, v)
+                }
+                // Outside a project there is no realm: the top-level core and
+                // the environment's trust root are the only answer available.
+                Err(_) => (base.clone(), trust_root()?),
+            };
             let wanted: varve_core::LayerId = l.parse()?;
-            let entry = base
+            let entry = store
                 .list()?
                 .into_iter()
                 .find(|e| e.layer == wanted)
                 .with_context(|| format!("layer {l} is not installed — varve install it first"))?;
-            varve_core::verify_installed(base, &entry, &verifier, &varve_core::host_platform())?;
-            Ok((base.clone(), entry))
+            varve_core::verify_installed(&store, &entry, &verifier, &varve_core::host_platform())?;
+            Ok((store, entry))
         }
         None => {
             let ctx = project_ctx(base)?;
@@ -1959,15 +1973,69 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
 }
 
 fn list(store: &Store) -> anyhow::Result<()> {
-    let layers = store.list()?;
-    if layers.is_empty() {
+    // Walk the top-level core AND every realm partition. Realms partition the
+    // core by trust-root fingerprint, so listing only the top level made
+    // realm-installed layers invisible: `list` printed "no layers installed"
+    // with exit 0 immediately after a successful install, contradicted a second
+    // later by verify, which, run and sbom (REQ-STORE-001). A command that
+    // reports what is installed must not depend on which realm you happen to
+    // be standing in.
+    let mut rows: Vec<(String, varve_core::store::InstalledLayer)> = store
+        .list()?
+        .into_iter()
+        .map(|e| (String::new(), e))
+        .collect();
+
+    let realms_dir = store.root().join("realms");
+    if let Ok(entries) = std::fs::read_dir(&realms_dir) {
+        let mut partitions: Vec<std::path::PathBuf> =
+            entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        partitions.sort();
+        for part in partitions {
+            let Some(fingerprint) = part.file_name().map(|f| f.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            // Name the realm where the project can tell us; otherwise the
+            // fingerprint, which is at least unambiguous.
+            let label = realm_name_for(&fingerprint).unwrap_or(fingerprint);
+            for entry in Store::at(&part).list().unwrap_or_default() {
+                rows.push((label.clone(), entry));
+            }
+        }
+    }
+
+    if rows.is_empty() {
         println!("no layers installed in {}", store.root().display());
         return Ok(());
     }
-    for entry in layers {
-        println!("{}  {}  {}", entry.layer, entry.channel, entry.digest);
+    for (realm, entry) in rows {
+        if realm.is_empty() {
+            println!("{}  {}  {}", entry.layer, entry.channel, entry.digest);
+        } else {
+            println!(
+                "{}  {}  {}  realm={realm}",
+                entry.layer, entry.channel, entry.digest
+            );
+        }
     }
     Ok(())
+}
+
+/// The realm name for a store-partition fingerprint, when this project's
+/// realms file defines one that matches. Best effort: a fingerprint with no
+/// local definition is still listed, under its fingerprint.
+fn realm_name_for(fingerprint: &str) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let names = varve_core::realm::realm_names(&cwd).ok()?;
+    for name in names {
+        if let Ok(realm) = varve_core::resolve_realm(&cwd, &name)
+            && realm.fingerprint() == fingerprint
+        {
+            return Some(name);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

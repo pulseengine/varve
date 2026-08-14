@@ -2155,7 +2155,7 @@ artifacts:
   - id: REQ-STORE-001
     type: requirement
     title: Every command finds the layer the project's realm actually installed
-    status: approved
+    status: verified
     release: v0.24.0
     description: >
       `crates/varve/src/main.rs` builds its store from the top-level core

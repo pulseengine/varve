@@ -1480,3 +1480,27 @@ artifacts:
     links:
       - type: verifies
         target: REQ-PRODUCER-001
+
+  - id: VER-STORE-001
+    type: verification
+    title: A layer `which` resolves is a layer `list` and `--layer` can see
+    status: verified
+    release: v0.24.0
+    fields:
+      method: automated-test
+      baseline: >
+        Reproduced before fixing: after a successful realm install and a passing
+        `verify`, `varve list` printed "no layers installed in <root>" with exit
+        0. `list` now walks the top-level core AND every realm partition,
+        labelling each by realm name where the project's realms file defines
+        one. `--layer` resolves through the project's store rather than the
+        top-level core. Confirmed against the real production store
+        (2026.08.0/.1/.2 all listed) and the README's headline example
+        `sbom --layer 2026.08.2` now emits CycloneDX instead of failing.
+      steps:
+        # The walkthrough asserts list AND --layer after a realm install —
+        # the two commands that could not see what `which` resolved.
+        - run: cargo test -p varve --test cli an_organisation_can_stand_up_its_own_realm
+    links:
+      - type: verifies
+        target: REQ-STORE-001
