@@ -362,6 +362,41 @@ fn a_tool_in_two_composed_layers_refuses_to_resolve() {
 
 // rivet: verifies REQ-LOCKPIN-001
 #[test]
+fn verify_lockfile_refuses_a_file_it_could_not_read() {
+    // A ten-persona docs audit found this exiting 0 on a path that does not
+    // exist, printing "pins no crates — nothing to check" for a file it had
+    // never opened. This gate is sold as the CI check for REQ-LOCKPIN-001, so
+    // a typo'd path would have been green forever. A gate that cannot fail is
+    // not a gate — and varve had just shipped one.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["verify", "--lockfile"])
+        .arg(fx.project.join("no-such-file.lock"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot read lockfile"));
+    // And a lockfile that exists but is malformed must also fail, even when
+    // the layer pins no crates — the file was read, so it must parse.
+    let bad = fx.project.join("Cargo.lock");
+    std::fs::write(&bad, "not toml {{{").unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["verify", "--lockfile"])
+        .arg(&bad)
+        .assert()
+        .failure();
+}
+
+// rivet: verifies REQ-LOCKPIN-001
+#[test]
 fn verify_lockfile_fails_when_a_pinned_crate_disagrees() {
     // The first version of this test asserted .success() twice and never tested
     // a disagreement — a test whose NAME claimed the opposite of what it did
