@@ -215,6 +215,171 @@ fn manifest_with_includes(layer: &str, tools: &[&str], includes: &[&str]) -> Str
     )
 }
 
+// rivet: verifies REQ-KEYGEN-001, REQ-PRODUCER-001, REQ-STORE-001
+#[test]
+fn an_organisation_can_stand_up_its_own_realm() {
+    // The path a ten-persona audit found CLOSED: four of five blocked personas
+    // could not get from a signing key to the trust-root a realm demands.
+    // keygen -> deposit under our own key -> our own realms file -> pin ->
+    // install -> verify against OUR root.
+    let fx = fixture(None, &[]);
+    let dir = fx.project.clone();
+    let key = dir.join("acme.key");
+    let pubf = dir.join("acme.pub");
+    varve(&fx)
+        .args(["keygen", "--out"])
+        .arg(&key)
+        .arg("--pub")
+        .arg(&pubf)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("trust-root"));
+
+    // pubkey re-prints the same value, bare, so it composes into a config.
+    let printed = varve(&fx)
+        .args(["pubkey"])
+        .arg(&key)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let printed = String::from_utf8(printed).unwrap().trim().to_string();
+    let from_file = std::fs::read_to_string(&pubf).unwrap().trim().to_string();
+    assert_eq!(printed, from_file);
+    assert_eq!(printed.len(), 64, "a trust-root is 64 hex characters");
+
+    // Deposit a layer signed with our key.
+    let tool = dir.join("acme-tool");
+    std::fs::write(&tool, b"#!/bin/sh\necho acme\n").unwrap();
+    let layout = dir.join("layout");
+    varve(&fx)
+        .args([
+            "deposit",
+            "--layer",
+            "2026.08.0",
+            "--channel",
+            "qualified",
+            "--counter",
+            "1",
+            "--issued-at",
+            "2026-08-01T00:00:00Z",
+            "--key",
+        ])
+        .arg(&key)
+        .arg("--out")
+        .arg(&layout)
+        .arg("--tool")
+        .arg(format!("acme-tool@1.0.0={}", tool.display()))
+        .assert()
+        .success();
+
+    // Our own realm, pinned by our own project, verified against OUR root.
+    std::fs::write(
+        dir.join("varve-realms.toml"),
+        format!(
+            "[realm.acme]\nregistry = \"oci://example.invalid/acme\"\ntrust-root = \"{printed}\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\nlayer = \"2026.08.0\"\n",
+    )
+    .unwrap();
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("verified"));
+    varve(&fx).args(["which", "acme-tool"]).assert().success();
+
+    // REQ-STORE-001: a layer `which` resolves must be a layer `list` can see.
+    // `list` read only the top-level core, so after a realm install it printed
+    // "no layers installed" with exit 0 — contradicted a second later by
+    // verify, which, run and sbom. Three personas reported it.
+    varve(&fx)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2026.08.0"));
+
+    // …and an explicit --layer must find it too. This is the README's
+    // headline example, and it failed on the realm path.
+    varve(&fx)
+        .args(["sbom", "--layer", "2026.08.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CycloneDX"));
+}
+
+// rivet: verifies REQ-PRODUCER-001
+#[test]
+fn deposit_refuses_a_key_that_would_sign_unverifiably() {
+    // varve accepted 64 bytes of entropy and emitted a signed layer no trust
+    // root on earth could verify, exit 0. The produce side now fails closed
+    // like the consume side.
+    let fx = fixture(None, &[]);
+    let dir = fx.project.clone();
+    let tool = dir.join("t");
+    std::fs::write(&tool, b"x").unwrap();
+
+    let entropy = dir.join("entropy.key");
+    std::fs::write(&entropy, "ab".repeat(64)).unwrap();
+    varve(&fx)
+        .args([
+            "deposit",
+            "--layer",
+            "2026.08.0",
+            "--channel",
+            "qualified",
+            "--counter",
+            "1",
+            "--issued-at",
+            "2026-08-01T00:00:00Z",
+            "--key",
+        ])
+        .arg(&entropy)
+        .arg("--out")
+        .arg(dir.join("out1"))
+        .arg("--tool")
+        .arg(format!("t@1.0.0={}", tool.display()))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NO trust root can verify"));
+
+    // A 32-byte secret — what the old --key help text described — names both
+    // lengths and the command that mints a real one.
+    let short = dir.join("short.key");
+    std::fs::write(&short, "ab".repeat(32)).unwrap();
+    varve(&fx)
+        .args([
+            "deposit",
+            "--layer",
+            "2026.08.0",
+            "--channel",
+            "qualified",
+            "--counter",
+            "1",
+            "--issued-at",
+            "2026-08-01T00:00:00Z",
+            "--key",
+        ])
+        .arg(&short)
+        .arg("--out")
+        .arg(dir.join("out2"))
+        .arg("--tool")
+        .arg(format!("t@1.0.0={}", tool.display()))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("128").and(predicate::str::contains("varve keygen")));
+}
+
 // rivet: verifies REQ-COMPOSE-001
 #[test]
 fn one_pin_resolves_tools_from_a_composed_layer() {

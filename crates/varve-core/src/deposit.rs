@@ -15,6 +15,35 @@ use crate::layer::LayerId;
 use crate::store::manifest_digest;
 use crate::verify::sign_layer_manifest;
 
+/// An RFC 3339 timestamp, not merely a date. `epoch_days` accepts a bare
+/// `YYYY-MM-DD` because it only needs day resolution; a manifest's issued-at
+/// must carry a time, since it lands verbatim in the SBOM's `metadata.timestamp`
+/// where a bare date is invalid (REQ-PRODUCER-001).
+fn is_rfc3339(s: &str) -> bool {
+    let Some((date, time)) = s.split_once('T') else {
+        return false;
+    };
+    if crate::rollback::epoch_days(date).is_none() {
+        return false;
+    }
+    // hh:mm:ss, then an optional fraction, then Z or a numeric offset.
+    let b = time.as_bytes();
+    if b.len() < 9 || b[2] != b':' || b[5] != b':' {
+        return false;
+    }
+    if !b[..8].iter().enumerate().all(|(i, c)| {
+        if i == 2 || i == 5 {
+            *c == b':'
+        } else {
+            c.is_ascii_digit()
+        }
+    }) {
+        return false;
+    }
+    let rest = &time[8..];
+    rest == "Z" || rest.ends_with('Z') || rest.contains('+') || rest.matches('-').count() == 1
+}
+
 /// What to deposit: the layer identity and the tools that make it up.
 #[derive(Debug, Clone)]
 pub struct DepositSpec {
@@ -153,6 +182,22 @@ pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositErr
 
 #[derive(Debug, thiserror::Error)]
 pub enum DepositError {
+    #[error(
+        "the envelope this deposit just signed does not verify against the key that signed \
+         it — refusing to publish an artifact no consumer could accept"
+    )]
+    SelfVerifyFailed,
+    #[error(
+        "channel {channel:?} is not one a pin can name — use `qualified` or `rolling`. \
+         Signing it would produce a layer no varve.toml could ever select."
+    )]
+    BadChannel { channel: String },
+    #[error(
+        "issued-at {issued_at:?} is not an RFC 3339 timestamp (e.g. 2026-08-01T00:00:00Z). \
+         It is signed into the manifest and drives staleness and the SBOM timestamp, so it \
+         cannot be corrected afterwards."
+    )]
+    BadIssuedAt { issued_at: String },
     #[error("deposit spec is not valid: {0}")]
     Spec(String),
     #[error("deposit has no tools — an empty layer is not a toolchain")]
@@ -285,6 +330,19 @@ pub fn deposit(
             "annotations": annotations,
         }));
     }
+    // Validate BEFORE signing. Everything below becomes immutable the moment it
+    // is signed, so a bad value here is not a mistake you can correct — it is a
+    // released artifact nobody can use (REQ-PRODUCER-001).
+    if spec.channel.parse::<crate::pin::Channel>().is_err() {
+        return Err(DepositError::BadChannel {
+            channel: spec.channel.clone(),
+        });
+    }
+    if !is_rfc3339(&spec.issued_at) {
+        return Err(DepositError::BadIssuedAt {
+            issued_at: spec.issued_at.clone(),
+        });
+    }
     let payload_json = serde_json::json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.index.v1+json",
@@ -300,6 +358,18 @@ pub fn deposit(
     });
     let payload = serde_json::to_vec_pretty(&payload_json).expect("payload serializes");
     let envelope = sign_layer_manifest(&payload, signing_key, key_id)?;
+    // Read our own work back before publishing it. The cheapest possible guard
+    // against emitting a release artifact nobody can verify — and the last
+    // point at which it is still correctable (REQ-PRODUCER-001).
+    let public = &signing_key[32..];
+    match crate::verify::dsse_verify_typed(
+        envelope.as_bytes(),
+        crate::verify::LAYER_PAYLOAD_TYPE,
+        public,
+    ) {
+        Ok(back) if back == payload => {}
+        _ => return Err(DepositError::SelfVerifyFailed),
+    }
 
     let blobs: Vec<(String, Vec<u8>)> = tools
         .iter()
@@ -320,6 +390,47 @@ pub fn deposit(
         layer: spec.layer.clone(),
         counter: spec.counter,
     })
+}
+
+#[cfg(test)]
+mod producer_tests {
+    use super::*;
+
+    // rivet: verifies REQ-PRODUCER-001
+    #[test]
+    fn a_channel_no_pin_could_name_is_refused_before_signing() {
+        // `--channel stable` signed happily and produced a layer no varve.toml
+        // could ever select, exit 0. The enum is shared with the pin parser so
+        // the two cannot drift.
+        assert!("qualified".parse::<crate::pin::Channel>().is_ok());
+        assert!("rolling".parse::<crate::pin::Channel>().is_ok());
+        for bad in ["stable", "Qualified", "", "beta"] {
+            assert!(
+                bad.parse::<crate::pin::Channel>().is_err(),
+                "{bad} must be refused"
+            );
+        }
+    }
+
+    // rivet: verifies REQ-PRODUCER-001
+    #[test]
+    fn issued_at_must_be_a_timestamp_not_merely_a_date() {
+        // A bare date passed `epoch_days` (which needs only day resolution) but
+        // lands verbatim in the SBOM's metadata.timestamp, where it is invalid
+        // and uncorrectable after signing.
+        assert!(is_rfc3339("2026-08-01T00:00:00Z"));
+        assert!(is_rfc3339("2026-08-01T12:34:56.789Z"));
+        assert!(is_rfc3339("2026-08-01T12:34:56+02:00"));
+        for bad in [
+            "2026-10-01",
+            "not-a-date",
+            "",
+            "2026-08-01T",
+            "2026-13-01T00:00:00Z",
+        ] {
+            assert!(!is_rfc3339(bad), "{bad} must be refused");
+        }
+    }
 }
 
 #[cfg(test)]

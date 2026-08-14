@@ -110,6 +110,24 @@ pub fn find_realms_file(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Every realm name the discovered realms file defines. Used to label store
+/// partitions by realm rather than by trust-root fingerprint — a fingerprint is
+/// unambiguous but tells a human nothing.
+pub fn realm_names(start: &Path) -> Result<Vec<String>, RealmError> {
+    let Some(path) = find_realms_file(start) else {
+        return Ok(Vec::new());
+    };
+    let text = std::fs::read_to_string(&path).map_err(|source| RealmError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let file: RawRealmsFile = toml::from_str(&text).map_err(|e| RealmError::Parse {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })?;
+    Ok(file.realm.into_keys().collect())
+}
+
 /// Load one realm by name from the realms file discovered from `start`.
 pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
     let Some(path) = find_realms_file(start) else {
@@ -183,6 +201,29 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(REALMS_FILE), content).unwrap();
         tmp
+    }
+
+    // rivet: verifies REQ-STORE-001
+    #[test]
+    fn every_defined_realm_is_named() {
+        // `list` labels store partitions by realm name rather than by
+        // trust-root fingerprint, which is unambiguous but tells a human
+        // nothing. Mutation testing found this helper replaceable by an empty
+        // vec with nothing noticing: the CLI test that covers it cannot kill
+        // mutants, because the gate runs `--workspace --lib`.
+        let dir = realms_dir(TWO_REALMS);
+        let mut names = realm_names(dir.path()).unwrap();
+        names.sort();
+        assert_eq!(names, ["acme", "pulseengine"], "both realms named");
+
+        // No realms file is not an error — a project may define none.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(realm_names(empty.path()).unwrap().is_empty());
+
+        // A malformed file IS an error: labelling must not paper over a file
+        // the user believes is being read.
+        let bad = realms_dir("this is not toml {{{");
+        assert!(realm_names(bad.path()).is_err());
     }
 
     const TWO_REALMS: &str = r#"

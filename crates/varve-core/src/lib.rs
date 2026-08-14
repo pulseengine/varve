@@ -30,6 +30,7 @@ pub mod deposit;
 pub mod discover;
 pub mod exportstamp;
 pub mod install;
+pub mod keys;
 pub mod kind;
 pub mod layer;
 pub mod linestatus;

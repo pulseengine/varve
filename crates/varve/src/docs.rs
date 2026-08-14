@@ -41,6 +41,11 @@ pub const TOPICS: &[Topic] = &[
         "concept-layers.md"
     ),
     topic!(
+        "signing-keys",
+        "Signing keys — the format, and what varve checks",
+        "concept-signing-keys.md"
+    ),
+    topic!(
         "trust-roots",
         "Trust roots — the pinned signing key",
         "concept-trust-roots.md"
@@ -51,6 +56,11 @@ pub const TOPICS: &[Topic] = &[
         "concept-payload-kinds.md"
     ),
     topic!("air-gap", "Air-gapped operation", "concept-air-gap.md"),
+    topic!(
+        "deploy",
+        "Deploying a layer — the push, and what consumers need",
+        "concept-deploy.md"
+    ),
     // ── one per CLI subcommand (slug == clap name) ────────────────────
     topic!("which", "which — which binary runs here", "cmd-which.md"),
     topic!("list", "list — layers in the core", "cmd-list.md"),
@@ -73,6 +83,16 @@ pub const TOPICS: &[Topic] = &[
         "run",
         "run — dispatch a tool with layer provenance",
         "cmd-run.md"
+    ),
+    topic!(
+        "keygen",
+        "keygen — mint a signing key and its public half",
+        "cmd-keygen.md"
+    ),
+    topic!(
+        "pubkey",
+        "pubkey — the value a realm pins as trust-root",
+        "cmd-pubkey.md"
     ),
     topic!(
         "deposit",

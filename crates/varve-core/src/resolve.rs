@@ -61,6 +61,17 @@ pub enum ResolveError {
     PartialLayer { layer: String, missing: Vec<String> },
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error(
+        "layer {layer} is installed on channel '{installed}', but this project's pin selects \
+         '{pinned}' — refusing. A qualified line carries a support window and qualification \
+         evidence; a rolling one carries neither. Install the {pinned} layer, or change the \
+         pin deliberately."
+    )]
+    ChannelMismatch {
+        layer: String,
+        installed: String,
+        pinned: String,
+    },
     #[error(transparent)]
     Compose(#[from] crate::compose::ComposeError),
     #[error(
@@ -115,6 +126,20 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
             }
         }
     };
+
+    // The pin's channel is part of the pin. `install` refuses a mismatched
+    // fetch, but nothing re-checked an ALREADY-INSTALLED layer, so editing a
+    // pin from `rolling` to `qualified` left `which`, `verify` and `run`
+    // happily resolving the rolling layer — a silent fallback in the one
+    // distinction varve exists to make, and the opposite of what the docs
+    // promise ("a pin resolves exactly or the command fails").
+    if !layer.channel.is_empty() && layer.channel != pin.channel.as_str() {
+        return Err(ResolveError::ChannelMismatch {
+            layer: layer.layer.to_string(),
+            installed: layer.channel.clone(),
+            pinned: pin.channel.as_str().to_string(),
+        });
+    }
 
     // Composition first (REQ-COMPOSE-001): a pin restricting `tools` may name a
     // tool that lives in an INCLUDED layer, so the composed set has to be known
@@ -231,7 +256,9 @@ fn compose_tools(
     // Every declared include must already be installed. Fetching transitively
     // is deliberately out of scope (REQ-COMPOSE-001), so name it and its fix.
     for inc in &root_view.includes {
-        if store.get(&inc.digest)?.is_none() {
+        // Look across partitions: a cross-realm include lives under the
+        // INCLUDED realm's fingerprint (REQ-STORE-001).
+        if store.find_anywhere(&inc.digest)?.is_none() {
             return Err(ResolveError::IncludeNotInstalled {
                 layer: layer.layer.to_string(),
                 missing: inc.layer.clone().unwrap_or_else(|| inc.digest.clone()),
@@ -244,7 +271,7 @@ fn compose_tools(
         }
     }
     let walked = crate::compose::walk(&layer.digest, &root_view, |digest| {
-        let entry = store.get(digest).ok().flatten()?;
+        let (_, entry) = store.find_anywhere(digest).ok().flatten()?;
         let bytes = std::fs::read(entry.root.join("layer.json")).ok()?;
         crate::compose::view(&bytes).ok()
     })?;
@@ -253,7 +280,7 @@ fn compose_tools(
 
     let mut out = Vec::new();
     for (digest, _) in walked.iter().skip(1) {
-        let Some(entry) = store.get(digest)? else {
+        let Some((owner, entry)) = store.find_anywhere(digest)? else {
             continue;
         };
         let bin = entry.root.join("bin");
@@ -267,7 +294,7 @@ fn compose_tools(
             .collect();
         names.sort();
         for name in names {
-            if let Some(path) = store.tool_path(&entry, &name) {
+            if let Some(path) = owner.tool_path(&entry, &name) {
                 out.push((name, path));
             }
         }
@@ -315,6 +342,48 @@ mod tests {
             entries.join(",")
         )
         .into_bytes()
+    }
+
+    // rivet: verifies REQ-CHANNEL-001
+    #[test]
+    fn a_pin_selecting_qualified_refuses_an_installed_rolling_layer() {
+        // THE distinction varve exists to make. `install` refused a mismatched
+        // FETCH, but nothing re-checked an already-installed layer — so editing
+        // a pin from rolling to qualified left which/verify/run resolving the
+        // rolling layer and reporting success. A safety-critical consumer would
+        // have pinned `qualified` and silently received an unqualified
+        // toolchain, with verify saying OK.
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &fixtures::manifest("2026.07.0", "rolling"),
+                &[("synth", b"s")],
+            )
+            .unwrap();
+        let err = resolve(&qualified_pin("2026.07.0"), &store).unwrap_err();
+        match err {
+            ResolveError::ChannelMismatch {
+                installed, pinned, ..
+            } => {
+                assert_eq!(installed, "rolling");
+                assert_eq!(pinned, "qualified");
+            }
+            other => panic!("expected ChannelMismatch, got {other}"),
+        }
+    }
+
+    // rivet: verifies REQ-CHANNEL-001
+    #[test]
+    fn a_matching_channel_still_resolves() {
+        // The guard must not break the ordinary case.
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &fixtures::manifest("2026.07.0", "qualified"),
+                &[("synth", b"s")],
+            )
+            .unwrap();
+        assert!(resolve(&qualified_pin("2026.07.0"), &store).is_ok());
     }
 
     // rivet: verifies REQ-COMPOSE-001

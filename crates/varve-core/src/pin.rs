@@ -27,6 +27,30 @@ pub enum Channel {
     Rolling,
 }
 
+impl Channel {
+    /// The wire string, matching the signed manifest annotation and the pin.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Channel::Qualified => "qualified",
+            Channel::Rolling => "rolling",
+        }
+    }
+}
+
+impl std::str::FromStr for Channel {
+    type Err = ();
+    /// The SAME vocabulary a pin accepts, exposed so the produce side can
+    /// refuse a channel no pin could ever name (REQ-PRODUCER-001). Deriving
+    /// both from one enum is what keeps them from drifting apart.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "qualified" => Ok(Channel::Qualified),
+            "rolling" => Ok(Channel::Rolling),
+            _ => Err(()),
+        }
+    }
+}
+
 /// A parsed, validated pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pin {

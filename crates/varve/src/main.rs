@@ -92,8 +92,28 @@ enum Cmd {
         #[arg(trailing_var_arg = true, required = true)]
         tool_and_args: Vec<std::ffi::OsString>,
     },
-    /// (CI) Assemble, sign and publish a layer — the only way a layer comes
-    /// into being. Writes the same OCI image layout `archive` produces.
+    /// Mint a signing key and its public half — the value a realm pins as
+    /// `trust-root` (REQ-KEYGEN-001). Without this an organisation cannot
+    /// stand up its own realm at all: nothing else in varve emits a public key.
+    Keygen {
+        /// Where to write the signing key (128 hex characters). Keep it secret.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// Where to write the public half (64 hex characters). Safe to publish;
+        /// this is what consumers pin.
+        #[arg(long = "pub", value_name = "FILE")]
+        public: Option<PathBuf>,
+    },
+    /// Print the public half of an existing signing key, in exactly the form a
+    /// realm's `trust-root` accepts. Refuses a key whose halves disagree.
+    Pubkey {
+        /// The signing key file.
+        key: PathBuf,
+    },
+    /// (CI) Assemble and SIGN a layer — the only way a layer comes into being.
+    /// Writes an OCI image layout directory, the same shape `archive` produces.
+    /// It does NOT publish: varve runs no server and pushes nothing, by design
+    /// (README, "No server of our own"). See `varve docs deploy` for the push.
     Deposit {
         /// Deposit spec file (TOML: layer/channel/counter + [[tool]] with
         /// source provenance). Alternative to the individual flags below.
@@ -112,7 +132,8 @@ enum Cmd {
         /// RFC 3339 issued-at timestamp.
         #[arg(long, value_name = "RFC3339")]
         issued_at: String,
-        /// File holding the hex-encoded ed25519 root SECRET key.
+        /// Signing key file: 128 hex characters — a 32-byte ed25519 seed
+        /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
         /// Key identifier recorded in the signature.
@@ -215,7 +236,8 @@ enum Cmd {
         /// Who produced the underlying claim, e.g. `adacore`, `cargo-vet`.
         #[arg(long, default_value = "varve")]
         producer: String,
-        /// File holding the hex-encoded ed25519 root SECRET key.
+        /// Signing key file: 128 hex characters — a 32-byte ed25519 seed
+        /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
         #[arg(long, default_value = "varve-root-1")]
@@ -241,7 +263,8 @@ enum Cmd {
         /// support-until, yanked, known-problems).
         #[arg(long, value_name = "FILE")]
         file: PathBuf,
-        /// File holding the hex-encoded ed25519 root SECRET key.
+        /// Signing key file: 128 hex characters — a 32-byte ed25519 seed
+        /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
         #[arg(long, default_value = "varve-root-1")]
@@ -279,7 +302,8 @@ enum Cmd {
     SignSums {
         #[arg(long, value_name = "FILE")]
         sums: PathBuf,
-        /// File holding the hex-encoded ed25519 root SECRET key.
+        /// Signing key file: 128 hex characters — a 32-byte ed25519 seed
+        /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
         #[arg(long, default_value = "varve-root-1")]
@@ -450,6 +474,8 @@ fn run() -> anyhow::Result<()> {
             key_id,
             out,
         } => sign_status(&file, &key, &key_id, &out),
+        Cmd::Keygen { out, public } => keygen(&out, public.as_deref()),
+        Cmd::Pubkey { key } => pubkey(&key),
         Cmd::SignAttestation {
             layer,
             kind,
@@ -589,7 +615,10 @@ fn sign_sums(
     let bytes = std::fs::read(sums).with_context(|| format!("cannot read {}", sums.display()))?;
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
+    // varve used to accept 64 bytes of entropy here and emit a signed layer no
+    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
     let envelope = varve_core::sign_release_sums(&bytes, &sk, key_id)?;
     std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
     println!("signed release sums -> {}", out.display());
@@ -684,7 +713,10 @@ fn sign_status(
         serde_json::from_slice(&bytes).context("status document does not match the schema")?;
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
+    // varve used to accept 64 bytes of entropy here and emit a signed layer no
+    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
     let envelope = doc.sign(&sk, key_id)?;
     std::fs::write(out, envelope)
         .with_context(|| format!("cannot write envelope {}", out.display()))?;
@@ -925,15 +957,29 @@ fn export_target(
 ) -> anyhow::Result<(Store, varve_core::store::InstalledLayer)> {
     match layer {
         Some(l) => {
-            let verifier = trust_root()?;
+            // Search the PROJECT'S store, not the top-level core. Realms
+            // partition the core, so an explicit --layer used to miss a layer
+            // the same project's `which` resolves — reported as both "no trust
+            // root configured" (when one was) and "layer X is not installed"
+            // (when it was). This is the README's headline example
+            // (REQ-STORE-001).
+            let (store, verifier) = match project_ctx(base) {
+                Ok(ctx) => {
+                    let v = ctx_verifier(&ctx)?;
+                    (ctx.store, v)
+                }
+                // Outside a project there is no realm: the top-level core and
+                // the environment's trust root are the only answer available.
+                Err(_) => (base.clone(), trust_root()?),
+            };
             let wanted: varve_core::LayerId = l.parse()?;
-            let entry = base
+            let entry = store
                 .list()?
                 .into_iter()
                 .find(|e| e.layer == wanted)
                 .with_context(|| format!("layer {l} is not installed — varve install it first"))?;
-            varve_core::verify_installed(base, &entry, &verifier, &varve_core::host_platform())?;
-            Ok((base.clone(), entry))
+            varve_core::verify_installed(&store, &entry, &verifier, &varve_core::host_platform())?;
+            Ok((store, entry))
         }
         None => {
             let ctx = project_ctx(base)?;
@@ -1059,6 +1105,71 @@ fn collect_verified_crates(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn keygen(out: &std::path::Path, public: Option<&std::path::Path>) -> anyhow::Result<()> {
+    // Refuse to clobber: a signing key is not something to overwrite by accident.
+    if out.exists() {
+        bail!(
+            "{} already exists — refusing to overwrite a signing key. Move it aside first.",
+            out.display()
+        );
+    }
+    if let Some(p) = public
+        && p.exists()
+    {
+        bail!(
+            "{} already exists — refusing to overwrite a published trust root. \
+             Re-print it instead with `varve pubkey <key>`, or choose another path.",
+            p.display()
+        );
+    }
+    let (secret, pub_hex) = varve_core::keys::generate();
+
+    std::fs::write(out, format!("{secret}\n"))
+        .with_context(|| format!("cannot write {}", out.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Owner-only from the moment it exists.
+        std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o600))?;
+    }
+    match public {
+        Some(p) => {
+            std::fs::write(p, format!("{pub_hex}\n"))
+                .with_context(|| format!("cannot write {}", p.display()))?;
+            println!(
+                "signing key -> {} (KEEP SECRET, mode 0600)\npublic half -> {}\n\n\
+                 Consumers pin the public half as a realm's trust-root:\n\n  \
+                 [realm.<your-realm>]\n  registry   = \"oci://<your registry>\"\n  \
+                 trust-root = \"{pub_hex}\"\n\n\
+                 Sign layers with: varve deposit --key {} …",
+                out.display(),
+                p.display(),
+                out.display()
+            );
+        }
+        None => {
+            println!(
+                "signing key -> {} (KEEP SECRET, mode 0600)\n\n\
+                 Its public half — what consumers pin as a realm's trust-root:\n\n  {pub_hex}\n\n\
+                 Re-print it any time with: varve pubkey {}",
+                out.display(),
+                out.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn pubkey(key: &std::path::Path) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(key)
+        .with_context(|| format!("cannot read signing key {}", key.display()))?;
+    let public = varve_core::keys::public_from_secret(&text, &key.display().to_string())?;
+    // Bare on stdout, so it composes: trust-root = "$(varve pubkey root.key)"
+    println!("{public}");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn sign_attestation(
     store: &Store,
     layer: Option<&str>,
@@ -1084,7 +1195,10 @@ fn sign_attestation(
     );
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
+    // varve used to accept 64 bytes of entropy here and emit a signed layer no
+    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
     let envelope = varve_core::attest::sign(&st, &sk, key_id)?;
     std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
     println!(
@@ -1181,8 +1295,23 @@ fn sbom_cmd(
     Ok(())
 }
 
+/// An absolute path for an export directory, created if needed. Paths that end
+/// up inside a generated `.cargo/config.toml` must be absolute: that file is
+/// copied into a project and read from a different working directory than the
+/// one the export ran in.
+fn absolute_export_dir(out: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
+    out.canonicalize()
+        .with_context(|| format!("cannot resolve {} to an absolute path", out.display()))
+}
+
 fn export_cargo(store: &Store, layer: Option<&str>, out: &std::path::Path) -> anyhow::Result<()> {
     let (store, entry) = export_target(store, layer)?;
+    // The generated .cargo/config.toml is meant to be COPIED into a project,
+    // so a relative --out embedded verbatim produced a config that resolves
+    // against the wrong directory and a build that fails — while the tool
+    // printed instructions saying it would work.
+    let out = &absolute_export_dir(out)?;
     let crates = collect_verified_crates(&store, &entry)?;
     let registry_dir = out.join("registry");
     let n = varve_core::crateexport::export_local_registry(&crates, &registry_dir)?;
@@ -1227,6 +1356,8 @@ fn export_crates_vendor(
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
     let (store, entry) = export_target(store, layer)?;
+    // Same reason as export_cargo: the config is copied elsewhere.
+    let out = &absolute_export_dir(out)?;
     let crates = collect_verified_crates(&store, &entry)?;
     let vendor_dir = out.join("vendor");
     let n = varve_core::crateexport::export_vendor_dir(&crates, &vendor_dir)?;
@@ -1364,9 +1495,24 @@ fn run_deposit(
     deposit_tools: Vec<varve_core::DepositTool>,
     includes: Vec<varve_core::deposit::DepositInclude>,
 ) -> anyhow::Result<()> {
+    // `deposit` writes an oci-layout DIRECTORY. A registry-shaped --out used to
+    // report success while creating a local directory literally named
+    // `./oci:/ghcr.io/...` (REQ-PRODUCER-001).
+    let out_str = out.to_string_lossy();
+    if let Some(scheme) = out_str.split_once("://").map(|(s, _)| s.to_string()) {
+        bail!(
+            "--out {out_str} looks like a {scheme} registry reference, but deposit writes a \
+             LOCAL oci-layout directory. Deposit to a directory, then push that directory to \
+             the registry with your OCI client (e.g. `oras cp --from-oci-layout <dir>:<tag> \
+             {out_str}`)."
+        );
+    }
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
+    // varve used to accept 64 bytes of entropy here and emit a signed layer no
+    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
     let spec = varve_core::DepositSpec {
         includes,
         layer: layer.parse()?,
@@ -1387,6 +1533,15 @@ fn run_deposit(
 }
 
 fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result<()> {
+    // Use the PROJECT'S store. `archive` filtered the ambient top-level core,
+    // so for a realm-pinned layer it reported "not installed" while `list`,
+    // `verify`, `which`, `run` and `sbom` all resolved it — and its corrective
+    // advice (`varve install`) was a no-op loop. That takes out the offline
+    // path, which is varve's whole thesis (REQ-STORE-001).
+    let store = match project_ctx(store) {
+        Ok(ctx) => ctx.store,
+        Err(_) => store.clone(),
+    };
     let wanted: varve_core::LayerId = layer.parse()?;
     let matching: Vec<_> = store
         .list()?
@@ -1403,7 +1558,7 @@ fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result
              not supported yet; clean up the core first"
         ),
     };
-    varve_core::export_archive(store, &entry, dest)?;
+    varve_core::export_archive(&store, &entry, dest)?;
     println!(
         "archived layer {} {} as oci-layout at {}",
         entry.layer,
@@ -1568,6 +1723,53 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
             "warning: layer {} was issued {age} days ago — check whether a newer deposit of \
              its line exists",
             outcome.layer
+        );
+    }
+
+    // A composed layer is only usable once what it composes is installed too.
+    // install exited 0 on a composition `verify` rejects, so `run` then
+    // executed a tool from an unverified included layer — and the error the
+    // user eventually hit named `varve install`, which cannot take a layer or a
+    // digest, so following it was a no-op loop.
+    if let Some(entry) = ctx.store.get(&outcome.digest)?
+        && let Ok(bytes) = std::fs::read(entry.root.join("layer.json"))
+        && let Ok(view) = varve_core::compose::view(&bytes)
+        && !view.includes.is_empty()
+    {
+        let missing: Vec<String> = view
+            .includes
+            .iter()
+            .filter(|inc| {
+                ctx.store
+                    .find_anywhere(&inc.digest)
+                    .ok()
+                    .flatten()
+                    .is_none()
+            })
+            .map(|inc| {
+                let name = inc.layer.clone().unwrap_or_else(|| inc.digest.clone());
+                match &inc.realm {
+                    Some(r) => format!("{name} (realm '{r}')"),
+                    None => name,
+                }
+            })
+            .collect();
+        if !missing.is_empty() {
+            bail!(
+                "layer {} composes {} layer(s) that are not installed: {}.\n\
+                 Install each from its own source first — a composed layer names what it \
+                 needs by digest, but does not fetch it. For each, pin it in a project \
+                 (or point --from at the source that carries it) and run `varve install` \
+                 there, then re-run this install.",
+                outcome.layer,
+                missing.len(),
+                missing.join(", ")
+            );
+        }
+        println!(
+            "  composes {} installed layer(s) — `varve verify` checks each against its own \
+             realm's trust root",
+            view.includes.len()
         );
     }
 
@@ -1739,7 +1941,7 @@ fn verify_composition_inner(
     }
     let cwd = std::env::current_dir().context("cannot determine working directory")?;
     for inc in &view.includes {
-        let Some(entry) = store.get(&inc.digest)? else {
+        let Some((owner, entry)) = store.find_anywhere(&inc.digest)? else {
             bail!(
                 "layer {} composes {}, which is not installed — `varve install` it, then re-verify",
                 layer.layer,
@@ -1779,7 +1981,7 @@ fn verify_composition_inner(
         );
         // Composition is a graph: verify what this layer composes too, on a
         // path that remembers where it has been.
-        verify_composition_inner(ctx, store, &entry, path)?;
+        verify_composition_inner(ctx, &owner, &entry, path)?;
     }
     Ok(())
 }
@@ -1868,15 +2070,69 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
 }
 
 fn list(store: &Store) -> anyhow::Result<()> {
-    let layers = store.list()?;
-    if layers.is_empty() {
+    // Walk the top-level core AND every realm partition. Realms partition the
+    // core by trust-root fingerprint, so listing only the top level made
+    // realm-installed layers invisible: `list` printed "no layers installed"
+    // with exit 0 immediately after a successful install, contradicted a second
+    // later by verify, which, run and sbom (REQ-STORE-001). A command that
+    // reports what is installed must not depend on which realm you happen to
+    // be standing in.
+    let mut rows: Vec<(String, varve_core::store::InstalledLayer)> = store
+        .list()?
+        .into_iter()
+        .map(|e| (String::new(), e))
+        .collect();
+
+    let realms_dir = store.root().join("realms");
+    if let Ok(entries) = std::fs::read_dir(&realms_dir) {
+        let mut partitions: Vec<std::path::PathBuf> =
+            entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        partitions.sort();
+        for part in partitions {
+            let Some(fingerprint) = part.file_name().map(|f| f.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            // Name the realm where the project can tell us; otherwise the
+            // fingerprint, which is at least unambiguous.
+            let label = realm_name_for(&fingerprint).unwrap_or(fingerprint);
+            for entry in Store::at(&part).list().unwrap_or_default() {
+                rows.push((label.clone(), entry));
+            }
+        }
+    }
+
+    if rows.is_empty() {
         println!("no layers installed in {}", store.root().display());
         return Ok(());
     }
-    for entry in layers {
-        println!("{}  {}  {}", entry.layer, entry.channel, entry.digest);
+    for (realm, entry) in rows {
+        if realm.is_empty() {
+            println!("{}  {}  {}", entry.layer, entry.channel, entry.digest);
+        } else {
+            println!(
+                "{}  {}  {}  realm={realm}",
+                entry.layer, entry.channel, entry.digest
+            );
+        }
     }
     Ok(())
+}
+
+/// The realm name for a store-partition fingerprint, when this project's
+/// realms file defines one that matches. Best effort: a fingerprint with no
+/// local definition is still listed, under its fingerprint.
+fn realm_name_for(fingerprint: &str) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let names = varve_core::realm::realm_names(&cwd).ok()?;
+    for name in names {
+        if let Ok(realm) = varve_core::resolve_realm(&cwd, &name)
+            && realm.fingerprint() == fingerprint
+        {
+            return Some(name);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

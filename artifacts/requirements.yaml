@@ -2082,3 +2082,185 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  - id: REQ-KEYGEN-001
+    type: requirement
+    title: varve can mint a signing key and print its public half
+    status: verified
+    release: v0.24.0
+    description: >
+      A ten-persona documentation audit (2026-08-14) found the extender path is
+      not merely undocumented but CLOSED: nothing in varve emits the public half
+      of a signing key, so the 64-hex `trust-root` that varve-realms.toml
+      demands is unobtainable. One persona held a working key, signed a layer
+      with it, and tried six derivations plus offline DSSE-PAE verification
+      across six message encodings; none matched. Four of the five blocked
+      personas were blocked by exactly this. Verbatim: "everything needed to run
+      a second realm exists in the code except the one function that prints a
+      public key."
+      Compounding it, the `--key` help text is ACTIVELY WRONG — it says
+      "hex-encoded ed25519 root SECRET key" while the tool requires 128 hex
+      characters (a 32-byte seed followed by its 32-byte public key) and refuses
+      a 32-byte secret. The resulting error, "manifest signature verification
+      failed: invalid signing key: Ed25519 signature function error", is wrong
+      on all three counts: nothing was verified (the key failed to LOAD), the
+      tail is a leaked library string, and it carries no fix.
+      varve shall provide `varve keygen`, writing a signing key and its public
+      half, and `varve pubkey <keyfile>` printing the public half of an existing
+      key in exactly the form `trust-root` accepts. The key error shall name the
+      length it got, the length it needs, and the command that mints one. A new
+      `signing-keys` topic shall document the format and the key's lifecycle.
+      This is the gate on an organisation running its own realm at all, and
+      therefore on splitting layer maintenance into per-realm repositories.
+    tags: [core, security, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-PRODUCER-001
+    type: requirement
+    title: The produce side fails closed, like the consume side already does
+    status: verified
+    release: v0.24.0
+    description: >
+      The same audit found what it called the deepest inversion in the tool: the
+      consumer half is strict while the producer half validates nothing, so
+      varve emits permanently-broken signed artifacts and reports success. Each
+      of these exited 0 (verified 2026-08-14):
+      64 bytes of random entropy accepted as a signing key, producing a layer no
+      trust root on earth can verify; `--channel stable` signed into the
+      manifest, making the layer un-nameable by any pin, which only accepts
+      `qualified` or `rolling`; `--issued-at 2026-10-01` (a flag documented
+      `<RFC3339>`) signed verbatim, yielding an invalid CycloneDX
+      `metadata.timestamp` in a CRA-facing artifact and uncorrectable after
+      signing; `--out oci://ghcr.io/acme/layers` reporting "deposited ... at
+      oci://..." while writing a local directory literally named
+      `./oci:/ghcr.io/acme/layers`; and `attach-status` binding a line 2099.01
+      status to a 2026.08 layout, for the consumer to discover.
+      For a project whose thesis is "fail closed, never a fallback", signing an
+      artifact that can never be verified and printing OK is the inversion that
+      matters most. varve shall validate producer input BEFORE signing: the
+      channel against the same enum the pin parser accepts, the issued-at as RFC
+      3339, the signing key as a well-formed keypair whose public half matches
+      its seed, a registry-shaped `--out` refused with the command that would
+      actually publish, and a status document's line against the layout it is
+      attached to. `deposit` shall additionally verify the envelope it just
+      wrote before returning 0 — the cheapest possible guard against emitting an
+      unverifiable release artifact.
+    tags: [core, security]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-STORE-001
+    type: requirement
+    title: Every command finds the layer the project's realm actually installed
+    status: verified
+    release: v0.24.0
+    description: >
+      `crates/varve/src/main.rs` builds its store from the top-level core
+      (`Store::at(store_root()?)`) while the project path builds it from the
+      realm partition (`Store::at(realm.effective_root(base.root()))`). Realms
+      partition the core by trust-root fingerprint, so that single divergence
+      makes realm-installed layers invisible to every command that takes the
+      first path. Three personas reported it as three unrelated bugs:
+      `varve list` printing "no layers installed" with exit 0 immediately after
+      a successful realm install, contradicted a second later by verify, which,
+      run and sbom — and it is the path the README calls the recommended
+      zero-config one; `--layer` failing on `export-*` and `sbom` for a
+      realm-pinned project with either "no trust root configured" (when it is
+      configured) or "layer X is not installed" (when it is), which is the
+      README's headline example; and a cross-realm composition reporting an
+      installed include as missing, whose corrective advice then hits the
+      per-line rollback guard and locks the user out with no documented
+      recovery — two errors forming a loop with no exit.
+      varve shall resolve the store through the project's realm wherever a
+      command operates on the project's layers, so that a layer which `which`
+      resolves is a layer `list`, `--layer` and composition can all see.
+    tags: [core]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-CHANNEL-001
+    type: requirement
+    title: The pin's channel is enforced at resolution, not only at install
+    status: verified
+    release: v0.24.0
+    description: >
+      Found by the ten-persona audit re-run, independently by two personas, and
+      it is the most serious defect the audit has produced. `install` refuses a
+      fetched manifest whose channel disagrees with the pin, but NOTHING
+      re-checked an already-installed layer. So editing a pin from `rolling` to
+      `qualified` — or installing under one pin and later tightening it — left
+      `which`, `verify` and `run` resolving the rolling layer and reporting
+      success. `varve which` printed "(rolling)" directly beside a pin that said
+      qualified, exit 0.
+      Qualified-versus-rolling is THE distinction varve exists to make: a
+      qualified line carries a support window and qualification evidence, a
+      rolling one carries neither and may move. A safety-critical consumer
+      pinning `qualified` silently received an unqualified toolchain while
+      `verify` reported OK — destroying exactly the evidence the product exists
+      to preserve, and directly contradicting what the docs promise ("varve
+      never falls back … a pin resolves exactly or the command fails").
+      varve shall compare the installed layer's channel against the pin's at
+      RESOLUTION, refusing a mismatch with an error naming both channels and
+      what each means. A layer with no channel annotation (pre-channel layers)
+      is not refused on this ground.
+    tags: [core, security]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-DEPLOY-001
+    type: requirement
+    title: The publish step is documented, and deposit stops claiming to do it
+    status: verified
+    release: v0.24.0
+    description: >
+      Two personas — both producer-side — could not finish because NOTHING
+      publishes. `deposit --help` said "Assemble, sign and publish a layer"; it
+      writes a local OCI layout directory and stops. No push/publish/upload
+      command exists, and `docs --grep push|oras|deploy` returned nothing, while
+      every realm definition REQUIRES a `registry`. The gap was a false claim
+      plus a missing page, not missing code: varve deliberately runs no server
+      and pushes nothing (README, "No server of our own"), and registry.rs says
+      publishing is `oras push`, which "never joins the client trust path".
+      varve shall stop claiming to publish, and shall document the actual
+      sequence — the one varve's own release pipeline runs — together with what
+      a consumer needs (registry reference + trust root), how they bootstrap
+      trust the first time, and the air-gapped alternative where no registry
+      exists at all.
+    tags: [ergonomics, distribution]
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-PRODUCE-002
+    type: requirement
+    title: Three produce-side paths that failed open
+    status: verified
+    release: v0.24.0
+    description: >
+      Three further defects the audit re-run surfaced, each a case where varve
+      reported success over a state that could not work.
+      (1) `attach-status` accepted a LOWER counter and silently downgraded a
+      layout's baseline — the one place monotonicity was not enforced, while
+      `status --from-file` and `install` both refuse it. A re-run CI step could
+      ship a layout whose fresh consumers cache a pre-yank document and are told
+      "not yanked" about a YANKED layer.
+      (2) `install` exited 0 on a composition whose includes are not installed,
+      so `run` then executed a tool from an unverified layer; and the error the
+      user eventually hit named `varve install`, which takes no layer or digest,
+      making the advice a no-op loop. install shall refuse, naming every missing
+      include and its realm, and shall say how to install each.
+      (3) `export-cargo` and `export-crates-vendor` embedded `--out` VERBATIM in
+      the `.cargo/config.toml` they generate. That file is meant to be copied
+      into a project, so a relative `--out` produced a config resolving against
+      the wrong directory and a build that fails — while the tool printed
+      instructions saying it would work, and the README calls this path "proven
+      end to end". Export directories shall be absolute in generated config.
+    tags: [core, distribution]
+    fields:
+      priority: should
+      category: functional
