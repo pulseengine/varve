@@ -57,6 +57,12 @@ enum Cmd {
         /// Verify every installed layer instead of only the pinned one.
         #[arg(long)]
         all: bool,
+        /// Also check a project's Cargo lockfile against the pinned layer's
+        /// `crate` entries: a package the layer pins must resolve to the same
+        /// version and bytes, or verify fails (REQ-LOCKPIN-001). varve cannot
+        /// intercept a build — this is asserted agreement, not dispatch.
+        #[arg(long = "lockfile", value_name = "FILE")]
+        lockfile: Option<PathBuf>,
         /// Also check a committed export directory against the current pin: its
         /// `.varve-export.json` stamp must name the layer the pin resolves to,
         /// or verify fails (REQ-EXPORT-SYNC-001). Repeatable; run it in CI so a
@@ -387,7 +393,11 @@ fn run() -> anyhow::Result<()> {
         Cmd::Which { tool } => which(&store, &tool),
         Cmd::List => list(&store),
         Cmd::Install { from, platform } => install(&store, from.as_deref(), platform),
-        Cmd::Verify { all, export } => verify(&store, all, &export),
+        Cmd::Verify {
+            all,
+            export,
+            lockfile,
+        } => verify(&store, all, &export, lockfile.as_deref()),
         Cmd::Archive { layer, dest } => archive(&store, &layer, &dest),
         Cmd::Run {
             varve,
@@ -1276,6 +1286,15 @@ fn deposit_cmd(
                 kind,
             });
         }
+        let includes = file_spec
+            .includes
+            .into_iter()
+            .map(|i| varve_core::deposit::DepositInclude {
+                digest: i.digest,
+                realm: i.realm,
+                layer: i.layer,
+            })
+            .collect();
         return run_deposit(
             &file_spec.layer,
             &file_spec.channel,
@@ -1285,6 +1304,7 @@ fn deposit_cmd(
             key_id,
             out,
             deposit_tools,
+            includes,
         );
     }
     let (layer, channel, counter) = (
@@ -1326,6 +1346,9 @@ fn deposit_cmd(
         key_id,
         out,
         deposit_tools,
+        // Composition is expressed in a spec file's [[include]] tables; the
+        // individual flags deliberately do not grow a way to say it.
+        Vec::new(),
     )
 }
 
@@ -1339,11 +1362,13 @@ fn run_deposit(
     key_id: &str,
     out: &std::path::Path,
     deposit_tools: Vec<varve_core::DepositTool>,
+    includes: Vec<varve_core::deposit::DepositInclude>,
 ) -> anyhow::Result<()> {
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
     let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
     let spec = varve_core::DepositSpec {
+        includes,
         layer: layer.parse()?,
         channel: channel.to_string(),
         counter,
@@ -1569,7 +1594,12 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
     Ok(())
 }
 
-fn verify(store: &Store, all: bool, exports: &[PathBuf]) -> anyhow::Result<()> {
+fn verify(
+    store: &Store,
+    all: bool,
+    exports: &[PathBuf],
+    lockfile: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
     let verifier = ctx_verifier(&ctx)?;
     let store = &ctx.store;
@@ -1588,10 +1618,164 @@ fn verify(store: &Store, all: bool, exports: &[PathBuf]) -> anyhow::Result<()> {
             "layer {} {} verified: signature OK, {checked} tool(s) match their signed digests",
             layer.layer, layer.digest
         );
+        // A composition is only as trustworthy as every layer in it. Verifying
+        // the root alone left an UNSIGNED included layer dispatching while
+        // verify reported OK (found by clean-room review) — the included
+        // layer's tools are on PATH exactly like the root's.
+        verify_composition(&ctx, store, &layer)?;
     }
     if !exports.is_empty() {
         let current = varve_core::resolve(&ctx.pin, store)?.layer.digest;
         verify_exports(&current, exports)?;
+    }
+    if let Some(path) = lockfile {
+        verify_lockfile(&ctx, path)?;
+    }
+    Ok(())
+}
+
+/// Check a project's lockfile against the pinned layer's `crate` entries
+/// (REQ-LOCKPIN-001). Packages the layer does not pin are ignored — the layer
+/// never claimed to cover every dependency.
+fn verify_lockfile(ctx: &ProjectCtx, path: &std::path::Path) -> anyhow::Result<()> {
+    let resolved = varve_core::resolve(&ctx.pin, &ctx.store)?;
+    // A layer with no crate entries pins nothing to disagree with — but ONLY
+    // that case may pass quietly. An earlier version mapped EVERY error here to
+    // "pins no crates", so a single foreign-platform crate entry silently
+    // disabled the whole gate and CI went green over a real disagreement
+    // (found by clean-room review). Failing open is the worst possible answer
+    // for a gate, so every other error propagates.
+    let crates = match collect_verified_crates(&ctx.store, &resolved.layer) {
+        Ok(c) => c,
+        Err(e) if e.to_string().contains("carries no `crate` entries") => {
+            println!(
+                "lockfile {}: layer {} pins no crates — nothing to check",
+                path.display(),
+                resolved.layer.layer
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(e).context(
+                "cannot read the pinned layer's crates, so the lockfile CANNOT be checked \
+                 — refusing to report agreement",
+            );
+        }
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read lockfile {}", path.display()))?;
+    let locked = varve_core::lockpin::parse_lockfile(&text, &path.display().to_string())?;
+    let found = varve_core::lockpin::disagreements(&crates, &locked);
+    if found.is_empty() {
+        println!(
+            "lockfile {} agrees with layer {} ({} pinned crate(s) checked against {} package(s))",
+            path.display(),
+            resolved.layer.layer,
+            crates.len(),
+            locked.len()
+        );
+        return Ok(());
+    }
+    for d in &found {
+        eprintln!("  {d}");
+    }
+    bail!(
+        "{} package(s) in {} disagree with layer {} (REQ-LOCKPIN-001) — re-resolve against the \
+         pinned layer, or move the pin",
+        found.len(),
+        path.display(),
+        resolved.layer.layer
+    );
+}
+
+/// Verify every layer a composition includes, each against ITS OWN realm's
+/// trust root (REQ-COMPOSE-001). The including layer's root does not speak for
+/// another realm — that separation is the whole reason composition exists
+/// rather than merging tools into one layer.
+fn verify_composition(
+    ctx: &ProjectCtx,
+    store: &Store,
+    layer: &varve_core::store::InstalledLayer,
+) -> anyhow::Result<()> {
+    let mut path = std::collections::BTreeSet::new();
+    verify_composition_inner(ctx, store, layer, &mut path)
+}
+
+/// The recursive half, carrying the ancestor path. The guards are NOT optional:
+/// without them `verify --all` walked a self-referencing store entry until the
+/// stack was exhausted and the process aborted (found by re-verification).
+/// Resolution refuses such a graph, so verify must reach the same verdict —
+/// "refused" and "followed until it crashes" are not the same answer, least of
+/// all in the command whose job is to inspect adversarial store state.
+fn verify_composition_inner(
+    ctx: &ProjectCtx,
+    store: &Store,
+    layer: &varve_core::store::InstalledLayer,
+    path: &mut std::collections::BTreeSet<String>,
+) -> anyhow::Result<()> {
+    if !path.insert(layer.digest.clone()) {
+        bail!(
+            "composition cycle while verifying: layer {} ({}) reappears on its own path —              refusing to follow it",
+            layer.layer,
+            layer.digest
+        );
+    }
+    if path.len() > varve_core::compose::MAX_DEPTH {
+        bail!(
+            "composition is more than {} layers deep while verifying — refusing to walk further",
+            varve_core::compose::MAX_DEPTH
+        );
+    }
+    let Ok(bytes) = std::fs::read(layer.root.join("layer.json")) else {
+        return Ok(());
+    };
+    let view = varve_core::compose::view(&bytes)?;
+    if view.includes.is_empty() {
+        return Ok(());
+    }
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    for inc in &view.includes {
+        let Some(entry) = store.get(&inc.digest)? else {
+            bail!(
+                "layer {} composes {}, which is not installed — `varve install` it, then re-verify",
+                layer.layer,
+                inc.layer.clone().unwrap_or_else(|| inc.digest.clone())
+            );
+        };
+        // Whose root vouches for this layer? The include names a realm, and
+        // that realm's root is authoritative for it — not ours.
+        let verifier = match &inc.realm {
+            Some(name) => {
+                let realm = varve_core::resolve_realm(&cwd, name).with_context(|| {
+                    format!(
+                        "layer {} composes a layer from realm '{name}', but that realm is not                          defined here — add it to varve-realms.toml so its trust root can                          verify what it vouches for",
+                        layer.layer
+                    )
+                })?;
+                varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?
+            }
+            // No realm named: the including layer's own root applies.
+            None => ctx_verifier(ctx)?,
+        };
+        let checked =
+            varve_core::verify_installed(store, &entry, &verifier, &varve_core::host_platform())
+                .with_context(|| {
+                    format!(
+                        "composed layer {} (from realm '{}') failed verification",
+                        entry.layer,
+                        inc.realm.as_deref().unwrap_or("<including layer's>")
+                    )
+                })?;
+        println!(
+            "  composes {} {} — verified against realm '{}': {checked} tool(s) match",
+            entry.layer,
+            entry.digest,
+            inc.realm.as_deref().unwrap_or("<including layer's>")
+        );
+        // Composition is a graph: verify what this layer composes too, on a
+        // path that remembers where it has been.
+        verify_composition_inner(ctx, store, &entry, path)?;
     }
     Ok(())
 }

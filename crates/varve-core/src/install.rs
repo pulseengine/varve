@@ -175,6 +175,13 @@ pub fn install(
         ) {
             continue;
         }
+        // A composed layer is a REFERENCE, not a blob to lay down: its digest
+        // names another layer's manifest, which has its own install. Skip it
+        // here — install rejected it outright before, so a real composed layer
+        // could not be installed at all (REQ-COMPOSE-001).
+        if entry.kind() == Ok(crate::kind::PayloadKind::Layer) {
+            continue;
+        }
         matched += 1;
         let tool = entry
             .annotations
