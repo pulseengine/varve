@@ -2082,3 +2082,102 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  - id: REQ-KEYGEN-001
+    type: requirement
+    title: varve can mint a signing key and print its public half
+    status: verified
+    release: v0.24.0
+    description: >
+      A ten-persona documentation audit (2026-08-14) found the extender path is
+      not merely undocumented but CLOSED: nothing in varve emits the public half
+      of a signing key, so the 64-hex `trust-root` that varve-realms.toml
+      demands is unobtainable. One persona held a working key, signed a layer
+      with it, and tried six derivations plus offline DSSE-PAE verification
+      across six message encodings; none matched. Four of the five blocked
+      personas were blocked by exactly this. Verbatim: "everything needed to run
+      a second realm exists in the code except the one function that prints a
+      public key."
+      Compounding it, the `--key` help text is ACTIVELY WRONG — it says
+      "hex-encoded ed25519 root SECRET key" while the tool requires 128 hex
+      characters (a 32-byte seed followed by its 32-byte public key) and refuses
+      a 32-byte secret. The resulting error, "manifest signature verification
+      failed: invalid signing key: Ed25519 signature function error", is wrong
+      on all three counts: nothing was verified (the key failed to LOAD), the
+      tail is a leaked library string, and it carries no fix.
+      varve shall provide `varve keygen`, writing a signing key and its public
+      half, and `varve pubkey <keyfile>` printing the public half of an existing
+      key in exactly the form `trust-root` accepts. The key error shall name the
+      length it got, the length it needs, and the command that mints one. A new
+      `signing-keys` topic shall document the format and the key's lifecycle.
+      This is the gate on an organisation running its own realm at all, and
+      therefore on splitting layer maintenance into per-realm repositories.
+    tags: [core, security, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-PRODUCER-001
+    type: requirement
+    title: The produce side fails closed, like the consume side already does
+    status: verified
+    release: v0.24.0
+    description: >
+      The same audit found what it called the deepest inversion in the tool: the
+      consumer half is strict while the producer half validates nothing, so
+      varve emits permanently-broken signed artifacts and reports success. Each
+      of these exited 0 (verified 2026-08-14):
+      64 bytes of random entropy accepted as a signing key, producing a layer no
+      trust root on earth can verify; `--channel stable` signed into the
+      manifest, making the layer un-nameable by any pin, which only accepts
+      `qualified` or `rolling`; `--issued-at 2026-10-01` (a flag documented
+      `<RFC3339>`) signed verbatim, yielding an invalid CycloneDX
+      `metadata.timestamp` in a CRA-facing artifact and uncorrectable after
+      signing; `--out oci://ghcr.io/acme/layers` reporting "deposited ... at
+      oci://..." while writing a local directory literally named
+      `./oci:/ghcr.io/acme/layers`; and `attach-status` binding a line 2099.01
+      status to a 2026.08 layout, for the consumer to discover.
+      For a project whose thesis is "fail closed, never a fallback", signing an
+      artifact that can never be verified and printing OK is the inversion that
+      matters most. varve shall validate producer input BEFORE signing: the
+      channel against the same enum the pin parser accepts, the issued-at as RFC
+      3339, the signing key as a well-formed keypair whose public half matches
+      its seed, a registry-shaped `--out` refused with the command that would
+      actually publish, and a status document's line against the layout it is
+      attached to. `deposit` shall additionally verify the envelope it just
+      wrote before returning 0 — the cheapest possible guard against emitting an
+      unverifiable release artifact.
+    tags: [core, security]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-STORE-001
+    type: requirement
+    title: Every command finds the layer the project's realm actually installed
+    status: approved
+    release: v0.24.0
+    description: >
+      `crates/varve/src/main.rs` builds its store from the top-level core
+      (`Store::at(store_root()?)`) while the project path builds it from the
+      realm partition (`Store::at(realm.effective_root(base.root()))`). Realms
+      partition the core by trust-root fingerprint, so that single divergence
+      makes realm-installed layers invisible to every command that takes the
+      first path. Three personas reported it as three unrelated bugs:
+      `varve list` printing "no layers installed" with exit 0 immediately after
+      a successful realm install, contradicted a second later by verify, which,
+      run and sbom — and it is the path the README calls the recommended
+      zero-config one; `--layer` failing on `export-*` and `sbom` for a
+      realm-pinned project with either "no trust root configured" (when it is
+      configured) or "layer X is not installed" (when it is), which is the
+      README's headline example; and a cross-realm composition reporting an
+      installed include as missing, whose corrective advice then hits the
+      per-line rollback guard and locks the user out with no documented
+      recovery — two errors forming a loop with no exit.
+      varve shall resolve the store through the project's realm wherever a
+      command operates on the project's layers, so that a layer which `which`
+      resolves is a layer `list`, `--layer` and composition can all see.
+    tags: [core]
+    fields:
+      priority: must
+      category: functional

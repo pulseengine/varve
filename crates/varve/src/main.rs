@@ -92,6 +92,24 @@ enum Cmd {
         #[arg(trailing_var_arg = true, required = true)]
         tool_and_args: Vec<std::ffi::OsString>,
     },
+    /// Mint a signing key and its public half — the value a realm pins as
+    /// `trust-root` (REQ-KEYGEN-001). Without this an organisation cannot
+    /// stand up its own realm at all: nothing else in varve emits a public key.
+    Keygen {
+        /// Where to write the signing key (128 hex characters). Keep it secret.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// Where to write the public half (64 hex characters). Safe to publish;
+        /// this is what consumers pin.
+        #[arg(long = "pub", value_name = "FILE")]
+        public: Option<PathBuf>,
+    },
+    /// Print the public half of an existing signing key, in exactly the form a
+    /// realm's `trust-root` accepts. Refuses a key whose halves disagree.
+    Pubkey {
+        /// The signing key file.
+        key: PathBuf,
+    },
     /// (CI) Assemble, sign and publish a layer — the only way a layer comes
     /// into being. Writes the same OCI image layout `archive` produces.
     Deposit {
@@ -112,7 +130,8 @@ enum Cmd {
         /// RFC 3339 issued-at timestamp.
         #[arg(long, value_name = "RFC3339")]
         issued_at: String,
-        /// File holding the hex-encoded ed25519 root SECRET key.
+        /// Signing key file: 128 hex characters — a 32-byte ed25519 seed
+        /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
         /// Key identifier recorded in the signature.
@@ -215,7 +234,8 @@ enum Cmd {
         /// Who produced the underlying claim, e.g. `adacore`, `cargo-vet`.
         #[arg(long, default_value = "varve")]
         producer: String,
-        /// File holding the hex-encoded ed25519 root SECRET key.
+        /// Signing key file: 128 hex characters — a 32-byte ed25519 seed
+        /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
         #[arg(long, default_value = "varve-root-1")]
@@ -241,7 +261,8 @@ enum Cmd {
         /// support-until, yanked, known-problems).
         #[arg(long, value_name = "FILE")]
         file: PathBuf,
-        /// File holding the hex-encoded ed25519 root SECRET key.
+        /// Signing key file: 128 hex characters — a 32-byte ed25519 seed
+        /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
         #[arg(long, default_value = "varve-root-1")]
@@ -279,7 +300,8 @@ enum Cmd {
     SignSums {
         #[arg(long, value_name = "FILE")]
         sums: PathBuf,
-        /// File holding the hex-encoded ed25519 root SECRET key.
+        /// Signing key file: 128 hex characters — a 32-byte ed25519 seed
+        /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
         #[arg(long, default_value = "varve-root-1")]
@@ -450,6 +472,8 @@ fn run() -> anyhow::Result<()> {
             key_id,
             out,
         } => sign_status(&file, &key, &key_id, &out),
+        Cmd::Keygen { out, public } => keygen(&out, public.as_deref()),
+        Cmd::Pubkey { key } => pubkey(&key),
         Cmd::SignAttestation {
             layer,
             kind,
@@ -589,7 +613,10 @@ fn sign_sums(
     let bytes = std::fs::read(sums).with_context(|| format!("cannot read {}", sums.display()))?;
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
+    // varve used to accept 64 bytes of entropy here and emit a signed layer no
+    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
     let envelope = varve_core::sign_release_sums(&bytes, &sk, key_id)?;
     std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
     println!("signed release sums -> {}", out.display());
@@ -684,7 +711,10 @@ fn sign_status(
         serde_json::from_slice(&bytes).context("status document does not match the schema")?;
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
+    // varve used to accept 64 bytes of entropy here and emit a signed layer no
+    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
     let envelope = doc.sign(&sk, key_id)?;
     std::fs::write(out, envelope)
         .with_context(|| format!("cannot write envelope {}", out.display()))?;
@@ -1059,6 +1089,61 @@ fn collect_verified_crates(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn keygen(out: &std::path::Path, public: Option<&std::path::Path>) -> anyhow::Result<()> {
+    // Refuse to clobber: a signing key is not something to overwrite by accident.
+    if out.exists() {
+        bail!(
+            "{} already exists — refusing to overwrite a signing key. Move it aside first.",
+            out.display()
+        );
+    }
+    let (secret, pub_hex) = varve_core::keys::generate();
+    std::fs::write(out, format!("{secret}\n"))
+        .with_context(|| format!("cannot write {}", out.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Owner-only from the moment it exists.
+        std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o600))?;
+    }
+    match public {
+        Some(p) => {
+            std::fs::write(p, format!("{pub_hex}\n"))
+                .with_context(|| format!("cannot write {}", p.display()))?;
+            println!(
+                "signing key -> {} (KEEP SECRET, mode 0600)\npublic half -> {}\n\n\
+                 Consumers pin the public half as a realm's trust-root:\n\n  \
+                 [realm.<your-realm>]\n  registry   = \"oci://<your registry>\"\n  \
+                 trust-root = \"{pub_hex}\"\n\n\
+                 Sign layers with: varve deposit --key {} …",
+                out.display(),
+                p.display(),
+                out.display()
+            );
+        }
+        None => {
+            println!(
+                "signing key -> {} (KEEP SECRET, mode 0600)\n\n\
+                 Its public half — what consumers pin as a realm's trust-root:\n\n  {pub_hex}\n\n\
+                 Re-print it any time with: varve pubkey {}",
+                out.display(),
+                out.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn pubkey(key: &std::path::Path) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(key)
+        .with_context(|| format!("cannot read signing key {}", key.display()))?;
+    let public = varve_core::keys::public_from_secret(&text, &key.display().to_string())?;
+    // Bare on stdout, so it composes: trust-root = "$(varve pubkey root.key)"
+    println!("{public}");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn sign_attestation(
     store: &Store,
     layer: Option<&str>,
@@ -1084,7 +1169,10 @@ fn sign_attestation(
     );
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
+    // varve used to accept 64 bytes of entropy here and emit a signed layer no
+    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
     let envelope = varve_core::attest::sign(&st, &sk, key_id)?;
     std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
     println!(
@@ -1366,7 +1454,10 @@ fn run_deposit(
 ) -> anyhow::Result<()> {
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    let sk = hex_decode(hex_key.trim()).context("signing key is not valid hex")?;
+    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
+    // varve used to accept 64 bytes of entropy here and emit a signed layer no
+    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
     let spec = varve_core::DepositSpec {
         includes,
         layer: layer.parse()?,

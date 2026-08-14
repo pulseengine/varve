@@ -1429,3 +1429,54 @@ artifacts:
         target: REQ-COMPOSE-001
       - type: verifies
         target: REQ-LOCKPIN-001
+
+  - id: VER-KEYGEN-001
+    type: verification
+    title: An organisation can mint a key, and stand up its own realm with it
+    status: verified
+    release: v0.24.0
+    fields:
+      method: automated-test
+      baseline: >
+        Exercised end to end 2026-08-14: `varve keygen --out acme.key --pub
+        acme.pub` printed a realm skeleton carrying the trust-root inline;
+        `varve pubkey acme.key` re-printed the identical 64 hex characters;
+        a layer deposited under that key installed and VERIFIED against a realm
+        pinning it. The key format was confirmed empirically rather than assumed
+        — 64-byte secret (128 hex) = 32-byte seed followed by its 32-byte
+        public half, and the public half IS secret[32..].
+      steps:
+        # The route that did not exist: key -> the value trust-root accepts.
+        - run: cargo test -p varve-core a_minted_key_yields_the_public_half_a_realm_pins
+        # The property that makes keygen more than formatting: a minted key
+        # signs a layer that its printed public half verifies.
+        - run: cargo test -p varve-core a_minted_key_actually_signs_and_verifies_end_to_end
+        - run: cargo test -p varve-core the_wrong_length_says_what_it_wanted
+        - run: cargo test -p varve-core non_hex_is_its_own_error_not_a_length_complaint
+        # The whole extender path at the CLI, which four of five blocked
+        # personas could not complete.
+        - run: cargo test -p varve --test cli an_organisation_can_stand_up_its_own_realm
+    links:
+      - type: verifies
+        target: REQ-KEYGEN-001
+
+  - id: VER-PRODUCER-001
+    type: verification
+    title: The produce side refuses a key that would sign unverifiably
+    status: verified
+    release: v0.24.0
+    fields:
+      method: automated-test
+      baseline: >
+        The audit's exact case reproduced and now refused: 64 bytes of entropy
+        as a signing key produced "deposited layer … OK" before; it now fails
+        with "NO trust root can verify". A 32-byte secret — the format the
+        --key help text WRONGLY described — now names both lengths and the
+        command that mints a real key, replacing "Ed25519 signature function
+        error". All four signing-key read sites validate.
+      steps:
+        - run: cargo test -p varve-core a_key_that_signs_unverifiably_is_refused_before_it_signs
+        - run: cargo test -p varve --test cli deposit_refuses_a_key_that_would_sign_unverifiably
+    links:
+      - type: verifies
+        target: REQ-PRODUCER-001

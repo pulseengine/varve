@@ -75,6 +75,16 @@ pub const TOPICS: &[Topic] = &[
         "cmd-run.md"
     ),
     topic!(
+        "keygen",
+        "keygen — mint a signing key and its public half",
+        "cmd-keygen.md"
+    ),
+    topic!(
+        "pubkey",
+        "pubkey — the value a realm pins as trust-root",
+        "cmd-pubkey.md"
+    ),
+    topic!(
         "deposit",
         "deposit — assemble and sign a layer (CI)",
         "cmd-deposit.md"
