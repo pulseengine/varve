@@ -116,6 +116,12 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
         }
     };
 
+    // Composition first (REQ-COMPOSE-001): a pin restricting `tools` may name a
+    // tool that lives in an INCLUDED layer, so the composed set has to be known
+    // before deciding what is missing. Resolving the root first reported
+    // `PartialLayer` for a perfectly resolvable composed tool.
+    let composed: Vec<(String, std::path::PathBuf)> = compose_tools(&layer, store)?;
+
     let tool_names: Vec<String> = match &pin.tools {
         Some(subset) => subset.clone(),
         None => {
@@ -128,7 +134,10 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
                     .collect(),
                 Err(_) => Vec::new(),
             };
+            // Unrestricted pins expose the whole composition.
+            names.extend(composed.iter().map(|(n, _)| n.clone()));
             names.sort();
+            names.dedup();
             names
         }
     };
@@ -136,35 +145,24 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
     let mut tools = Vec::new();
     let mut missing = Vec::new();
     for name in tool_names {
-        match store.tool_path(&layer, &name) {
-            Some(path) => tools.push((name, path)),
-            None => missing.push(name),
+        // The root layer wins only because a duplicate is refused outright
+        // below; there is never a silent shadowing choice.
+        let own = store.tool_path(&layer, &name);
+        let from_composition = composed.iter().find(|(n, _)| n == &name);
+        match (own, from_composition) {
+            (Some(_), Some(_)) => {
+                return Err(ResolveError::Compose(
+                    crate::compose::ComposeError::AmbiguousTool {
+                        tool: name,
+                        first: layer.digest.clone(),
+                        second: "an included layer".into(),
+                    },
+                ));
+            }
+            (Some(path), None) => tools.push((name, path)),
+            (None, Some((_, path))) => tools.push((name, path.clone())),
+            (None, None) => missing.push(name),
         }
-    }
-
-    // Composition (REQ-COMPOSE-001): a layer may include others, so one pin can
-    // span two trust universes. Tools from included layers join this layer's,
-    // and a name exposed twice is an error rather than a silent choice.
-    let composed = compose_tools(&layer, store)?;
-    for (name, path) in composed {
-        if tools.iter().any(|(n, _)| n == &name) {
-            // Also caught by union_tools, but this covers a pin-restricted
-            // subset where the duplicate is not in the walked set.
-            return Err(ResolveError::Compose(
-                crate::compose::ComposeError::AmbiguousTool {
-                    tool: name,
-                    first: layer.digest.clone(),
-                    second: "an included layer".into(),
-                },
-            ));
-        }
-        // A pin restricting `tools` selects from the composition too.
-        if let Some(subset) = &pin.tools
-            && !subset.contains(&name)
-        {
-            continue;
-        }
-        tools.push((name, path));
     }
     if !missing.is_empty() {
         return Err(ResolveError::PartialLayer {
@@ -297,6 +295,113 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::at(tmp.path().join("varve-root"));
         (tmp, store)
+    }
+
+    /// A manifest that composes another layer by digest.
+    fn manifest_composing(layer: &str, tools: &[&str], include: &str) -> Vec<u8> {
+        let mut entries: Vec<String> = tools
+            .iter()
+            .map(|t| {
+                format!(
+                    r#"{{"digest":"sha256:{t}","annotations":{{"eu.pulseengine.tool":"{t}"}}}}"#
+                )
+            })
+            .collect();
+        entries.push(format!(
+            r#"{{"digest":"{include}","annotations":{{"eu.pulseengine.varve.kind":"layer"}}}}"#
+        ));
+        format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{layer}","eu.pulseengine.varve.channel":"qualified"}},"manifests":[{}]}}"#,
+            entries.join(",")
+        )
+        .into_bytes()
+    }
+
+    // rivet: verifies REQ-COMPOSE-001
+    #[test]
+    fn resolve_returns_the_composed_layers_tools() {
+        // The unit-level guard on composition. Mutation testing kills with
+        // `--workspace --lib`, so the CLI integration tests cannot protect this
+        // — `compose_tools -> Ok(vec![])` survived until this existed, meaning
+        // nothing noticed a composition silently resolving to nothing.
+        let (_tmp, store) = store();
+        let up = store
+            .lay_down(
+                &fixtures::manifest("2026.08.0", "qualified"),
+                &[("wasm-tools", b"w")],
+            )
+            .unwrap();
+        store
+            .lay_down(
+                &manifest_composing("2026.07.0", &["rivet"], &up),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let resolved = resolve(&qualified_pin("2026.07.0"), &store).unwrap();
+        let names: Vec<&str> = resolved.tools.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"rivet"), "own tool missing: {names:?}");
+        assert!(
+            names.contains(&"wasm-tools"),
+            "composed tool missing — the composition resolved to nothing: {names:?}"
+        );
+    }
+
+    // rivet: verifies REQ-COMPOSE-001
+    #[test]
+    fn resolve_refuses_a_tool_exposed_by_both_layers() {
+        // Kills the `n == &name` -> `!=` mutant: with the comparison inverted,
+        // the duplicate would slip through instead of being refused.
+        let (_tmp, store) = store();
+        let up = store
+            .lay_down(
+                &fixtures::manifest("2026.08.0", "qualified"),
+                &[("wasm-tools", b"u")],
+            )
+            .unwrap();
+        store
+            .lay_down(
+                &manifest_composing("2026.07.0", &["wasm-tools"], &up),
+                &[("wasm-tools", b"r")],
+            )
+            .unwrap();
+        let err = resolve(&qualified_pin("2026.07.0"), &store).unwrap_err();
+        assert!(
+            matches!(err, ResolveError::Compose(_)),
+            "a tool in two layers must be refused, got {err}"
+        );
+    }
+
+    // rivet: verifies REQ-COMPOSE-001
+    #[test]
+    fn a_pin_restricting_tools_also_restricts_the_composition() {
+        // Kills the `!subset.contains(..)` -> `subset.contains(..)` mutant:
+        // inverted, the pin would admit exactly the tools it excluded.
+        let (_tmp, store) = store();
+        let up = store
+            .lay_down(
+                &fixtures::manifest("2026.08.0", "qualified"),
+                &[("wasm-tools", b"w"), ("wkg", b"k")],
+            )
+            .unwrap();
+        store
+            .lay_down(
+                &manifest_composing("2026.07.0", &["rivet"], &up),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let pinned = pin(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\ntools = [\"rivet\", \"wasm-tools\"]\n",
+        );
+        let resolved = resolve(&pinned, &store).unwrap();
+        let names: Vec<&str> = resolved.tools.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"wasm-tools"),
+            "selected composed tool: {names:?}"
+        );
+        assert!(
+            !names.contains(&"wkg"),
+            "the pin did not select wkg, so the composition must not add it: {names:?}"
+        );
     }
 
     // rivet: verifies REQ-PIN-001

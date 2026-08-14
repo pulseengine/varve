@@ -1335,6 +1335,12 @@ artifacts:
         - run: cargo test -p varve-core a_diamond_is_walked_once_not_refused_as_a_cycle
         # Depth is bounded, so "refused" never means "followed until abort".
         - run: cargo test -p varve-core depth_is_bounded_so_a_long_chain_cannot_exhaust_the_walker
+        # UNIT-level guards on composition. The mutation gate kills with
+        # `--workspace --lib`, so the CLI tests above cannot protect this code:
+        # `compose_tools -> Ok(vec![])` survived until these existed.
+        - run: cargo test -p varve-core resolve_returns_the_composed_layers_tools
+        - run: cargo test -p varve-core resolve_refuses_a_tool_exposed_by_both_layers
+        - run: cargo test -p varve-core a_pin_restricting_tools_also_restricts_the_composition
         # Core: union, ambiguity, cycles, uninstalled includes, and back-compat
         # for every layer that composes nothing.
         - run: cargo test -p varve-core a_composition_exposes_both_layers_tools
