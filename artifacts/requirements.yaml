@@ -2211,3 +2211,56 @@ artifacts:
     fields:
       priority: must
       category: functional
+
+  - id: REQ-DEPLOY-001
+    type: requirement
+    title: The publish step is documented, and deposit stops claiming to do it
+    status: verified
+    release: v0.24.0
+    description: >
+      Two personas — both producer-side — could not finish because NOTHING
+      publishes. `deposit --help` said "Assemble, sign and publish a layer"; it
+      writes a local OCI layout directory and stops. No push/publish/upload
+      command exists, and `docs --grep push|oras|deploy` returned nothing, while
+      every realm definition REQUIRES a `registry`. The gap was a false claim
+      plus a missing page, not missing code: varve deliberately runs no server
+      and pushes nothing (README, "No server of our own"), and registry.rs says
+      publishing is `oras push`, which "never joins the client trust path".
+      varve shall stop claiming to publish, and shall document the actual
+      sequence — the one varve's own release pipeline runs — together with what
+      a consumer needs (registry reference + trust root), how they bootstrap
+      trust the first time, and the air-gapped alternative where no registry
+      exists at all.
+    tags: [ergonomics, distribution]
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-PRODUCE-002
+    type: requirement
+    title: Three produce-side paths that failed open
+    status: verified
+    release: v0.24.0
+    description: >
+      Three further defects the audit re-run surfaced, each a case where varve
+      reported success over a state that could not work.
+      (1) `attach-status` accepted a LOWER counter and silently downgraded a
+      layout's baseline — the one place monotonicity was not enforced, while
+      `status --from-file` and `install` both refuse it. A re-run CI step could
+      ship a layout whose fresh consumers cache a pre-yank document and are told
+      "not yanked" about a YANKED layer.
+      (2) `install` exited 0 on a composition whose includes are not installed,
+      so `run` then executed a tool from an unverified layer; and the error the
+      user eventually hit named `varve install`, which takes no layer or digest,
+      making the advice a no-op loop. install shall refuse, naming every missing
+      include and its realm, and shall say how to install each.
+      (3) `export-cargo` and `export-crates-vendor` embedded `--out` VERBATIM in
+      the `.cargo/config.toml` they generate. That file is meant to be copied
+      into a project, so a relative `--out` produced a config resolving against
+      the wrong directory and a build that fails — while the tool printed
+      instructions saying it would work, and the README calls this path "proven
+      end to end". Export directories shall be absolute in generated config.
+    tags: [core, distribution]
+    fields:
+      priority: should
+      category: functional

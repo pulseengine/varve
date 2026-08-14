@@ -333,6 +333,23 @@ pub fn attach_envelope_to_layout(
         .line
         .parse()
         .map_err(|e| LineStatusError::Payload(format!("status line '{}': {e}", doc.line)))?;
+    // Monotonicity holds here too. `status --from-file` and `install` both
+    // refuse a counter regression; attaching did not, so a re-run CI step could
+    // silently downgrade a layout's baseline — shipping a pre-yank document
+    // that fresh consumers cache and are told "not yanked" about a YANKED
+    // layer. The one place the rule was missing was the one that produces the
+    // artifact.
+    if let Some(existing) = read_any_from_layout(layout)?
+        && let Ok(prev) = parse_unverified(&existing)
+        && prev.line == doc.line
+        && doc.counter < prev.counter
+    {
+        return Err(LineStatusError::Stale {
+            line: doc.line.clone(),
+            presented: doc.counter,
+            cached: prev.counter,
+        });
+    }
     // The status must belong to THIS layout's line. Attaching a 2099.01 status
     // to a 2026.08 layout used to succeed, leaving the consumer to discover it
     // (REQ-PRODUCER-001).
@@ -346,6 +363,21 @@ pub fn attach_envelope_to_layout(
     }
     attach_to_layout(layout, &line, envelope)?;
     Ok((line, doc.counter))
+}
+
+/// Parse a status document out of an envelope WITHOUT verifying it. Used only
+/// to read back what a layout already carries, so a regression can be refused;
+/// the signature is checked wherever the document is actually trusted.
+fn parse_unverified(envelope: &[u8]) -> Result<LineStatus, LineStatusError> {
+    let text = std::str::from_utf8(envelope)
+        .map_err(|e| LineStatusError::Payload(format!("envelope is not utf-8: {e}")))?;
+    let env = wsc::dsse::DsseEnvelope::from_json(text)
+        .map_err(|e| LineStatusError::Payload(format!("not a DSSE envelope: {e}")))?;
+    let payload = env
+        .payload_bytes()
+        .map_err(|e| LineStatusError::Payload(format!("envelope payload: {e}")))?;
+    serde_json::from_slice(&payload)
+        .map_err(|e| LineStatusError::Payload(format!("status document: {e}")))
 }
 
 /// The line a deposit layout's own manifest declares, if it can be read. Best

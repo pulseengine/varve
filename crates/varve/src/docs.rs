@@ -56,6 +56,11 @@ pub const TOPICS: &[Topic] = &[
         "concept-payload-kinds.md"
     ),
     topic!("air-gap", "Air-gapped operation", "concept-air-gap.md"),
+    topic!(
+        "deploy",
+        "Deploying a layer — the push, and what consumers need",
+        "concept-deploy.md"
+    ),
     // ── one per CLI subcommand (slug == clap name) ────────────────────
     topic!("which", "which — which binary runs here", "cmd-which.md"),
     topic!("list", "list — layers in the core", "cmd-list.md"),

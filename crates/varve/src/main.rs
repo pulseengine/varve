@@ -110,8 +110,10 @@ enum Cmd {
         /// The signing key file.
         key: PathBuf,
     },
-    /// (CI) Assemble, sign and publish a layer — the only way a layer comes
-    /// into being. Writes the same OCI image layout `archive` produces.
+    /// (CI) Assemble and SIGN a layer — the only way a layer comes into being.
+    /// Writes an OCI image layout directory, the same shape `archive` produces.
+    /// It does NOT publish: varve runs no server and pushes nothing, by design
+    /// (README, "No server of our own"). See `varve docs deploy` for the push.
     Deposit {
         /// Deposit spec file (TOML: layer/channel/counter + [[tool]] with
         /// source provenance). Alternative to the individual flags below.
@@ -1293,8 +1295,23 @@ fn sbom_cmd(
     Ok(())
 }
 
+/// An absolute path for an export directory, created if needed. Paths that end
+/// up inside a generated `.cargo/config.toml` must be absolute: that file is
+/// copied into a project and read from a different working directory than the
+/// one the export ran in.
+fn absolute_export_dir(out: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
+    out.canonicalize()
+        .with_context(|| format!("cannot resolve {} to an absolute path", out.display()))
+}
+
 fn export_cargo(store: &Store, layer: Option<&str>, out: &std::path::Path) -> anyhow::Result<()> {
     let (store, entry) = export_target(store, layer)?;
+    // The generated .cargo/config.toml is meant to be COPIED into a project,
+    // so a relative --out embedded verbatim produced a config that resolves
+    // against the wrong directory and a build that fails — while the tool
+    // printed instructions saying it would work.
+    let out = &absolute_export_dir(out)?;
     let crates = collect_verified_crates(&store, &entry)?;
     let registry_dir = out.join("registry");
     let n = varve_core::crateexport::export_local_registry(&crates, &registry_dir)?;
@@ -1339,6 +1356,8 @@ fn export_crates_vendor(
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
     let (store, entry) = export_target(store, layer)?;
+    // Same reason as export_cargo: the config is copied elsewhere.
+    let out = &absolute_export_dir(out)?;
     let crates = collect_verified_crates(&store, &entry)?;
     let vendor_dir = out.join("vendor");
     let n = varve_core::crateexport::export_vendor_dir(&crates, &vendor_dir)?;
@@ -1704,6 +1723,53 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
             "warning: layer {} was issued {age} days ago — check whether a newer deposit of \
              its line exists",
             outcome.layer
+        );
+    }
+
+    // A composed layer is only usable once what it composes is installed too.
+    // install exited 0 on a composition `verify` rejects, so `run` then
+    // executed a tool from an unverified included layer — and the error the
+    // user eventually hit named `varve install`, which cannot take a layer or a
+    // digest, so following it was a no-op loop.
+    if let Some(entry) = ctx.store.get(&outcome.digest)?
+        && let Ok(bytes) = std::fs::read(entry.root.join("layer.json"))
+        && let Ok(view) = varve_core::compose::view(&bytes)
+        && !view.includes.is_empty()
+    {
+        let missing: Vec<String> = view
+            .includes
+            .iter()
+            .filter(|inc| {
+                ctx.store
+                    .find_anywhere(&inc.digest)
+                    .ok()
+                    .flatten()
+                    .is_none()
+            })
+            .map(|inc| {
+                let name = inc.layer.clone().unwrap_or_else(|| inc.digest.clone());
+                match &inc.realm {
+                    Some(r) => format!("{name} (realm '{r}')"),
+                    None => name,
+                }
+            })
+            .collect();
+        if !missing.is_empty() {
+            bail!(
+                "layer {} composes {} layer(s) that are not installed: {}.\n\
+                 Install each from its own source first — a composed layer names what it \
+                 needs by digest, but does not fetch it. For each, pin it in a project \
+                 (or point --from at the source that carries it) and run `varve install` \
+                 there, then re-run this install.",
+                outcome.layer,
+                missing.len(),
+                missing.join(", ")
+            );
+        }
+        println!(
+            "  composes {} installed layer(s) — `varve verify` checks each against its own \
+             realm's trust root",
+            view.includes.len()
         );
     }
 
