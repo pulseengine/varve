@@ -2024,11 +2024,20 @@ artifacts:
       layer in the graph is an ERROR naming both layers, never a silent choice
       — varve does not pick a winner, exactly as a pin that does not resolve
       uniquely is an error rather than a fallback.
-      SCOPE, stated rather than implied: v0.23.0 covers EXPRESSING, RESOLVING
-      and VERIFYING a composition. Transitively FETCHING an included layer that
-      is not installed is deliberately NOT included; resolution fails with the
-      corrective `varve install` for the missing layer, which is the behaviour
-      a missing pinned layer already has.
+      SCOPE, and what an earlier version of this text got wrong. It claimed
+      "EXPRESSES, RESOLVES and VERIFIES" while only resolution existed: deposit
+      could not emit an include, install REJECTED one, and verify checked only
+      the root layer — so an entirely UNSIGNED included layer dispatched its
+      tools while `varve verify` exited 0. Clean-room review found all three.
+      They are now built: `deposit` emits includes from `[[include]]` tables in
+      a spec file (the flags deliberately do not grow a way to say it), install
+      skips layer-kind entries rather than treating them as blobs, and `verify`
+      walks the composition, verifying each included layer against its own
+      realm's trust root and recursing.
+      Still deliberately OUT: transitively FETCHING an included layer that is
+      not installed. Resolution and verification both fail naming the missing
+      layer and its corrective `varve install`, which is the behaviour a missing
+      pinned layer already has.
     tags: [core, distribution]
     fields:
       priority: must

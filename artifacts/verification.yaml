@@ -1326,6 +1326,13 @@ artifacts:
         - run: cargo test -p varve --test cli a_tool_in_two_composed_layers_refuses_to_resolve
         # Transitive fetch is out of scope, so a missing include names itself.
         - run: cargo test -p varve --test cli a_composed_layer_that_is_not_installed_names_itself
+        # The security clause: install ACCEPTS a composed layer, and verify
+        # REFUSES one whose included layer is unsigned. Review demonstrated the
+        # old behaviour — unsigned include dispatched, verify exited 0.
+        - run: cargo test -p varve --test cli verify_refuses_a_composition_whose_included_layer_is_unsigned
+        # A diamond (two layers sharing a base) is walked once, not misreported
+        # as a cycle — the most ordinary composition shape there is.
+        - run: cargo test -p varve-core a_diamond_is_walked_once_not_refused_as_a_cycle
         # Core: union, ambiguity, cycles, uninstalled includes, and back-compat
         # for every layer that composes nothing.
         - run: cargo test -p varve-core a_composition_exposes_both_layers_tools

@@ -29,6 +29,16 @@ pub struct DepositSpec {
     pub issued_at: String,
     /// (tool name, tool version, binary bytes) triples.
     pub tools: Vec<DepositTool>,
+    /// Layers composed into this one (REQ-COMPOSE-001).
+    pub includes: Vec<DepositInclude>,
+}
+
+/// One composed layer, as the depositor names it.
+#[derive(Debug, Clone, Default)]
+pub struct DepositInclude {
+    pub digest: String,
+    pub realm: Option<String>,
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +106,26 @@ pub struct DepositFileSpec {
     pub counter: u64,
     #[serde(default, rename = "tool")]
     pub tools: Vec<SpecTool>,
+    /// Layers this one composes (REQ-COMPOSE-001). Without this a composed
+    /// layer could not be PRODUCED at all — only hand-authored.
+    #[serde(default, rename = "include")]
+    pub includes: Vec<SpecInclude>,
+}
+
+/// A layer composed into this one: named by the digest of its signed manifest,
+/// plus the realm whose trust root is authoritative for it.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecInclude {
+    /// `sha256:<hex>` of the included layer's signed manifest.
+    pub digest: String,
+    /// The realm that verifies it. Absent = this layer's own realm.
+    #[serde(default)]
+    pub realm: Option<String>,
+    /// The included layer's identifier, so errors can name it before it is
+    /// fetched.
+    #[serde(default)]
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -225,6 +255,36 @@ pub fn deposit(
             })
         })
         .collect();
+    // Composed layers are entries too: a `layer`-kind reference whose digest is
+    // the included layer's SIGNED MANIFEST digest. Emitting them here is what
+    // makes the composition part of the signed payload — and what lets a
+    // composed layer be produced at all rather than hand-authored.
+    let mut entries = entries;
+    for inc in &spec.includes {
+        let mut annotations = serde_json::Map::new();
+        annotations.insert(
+            crate::kind::ANN_KIND.into(),
+            crate::kind::PayloadKind::Layer.as_str().into(),
+        );
+        if let Some(realm) = &inc.realm {
+            annotations.insert(
+                crate::compose::ANN_INCLUDE_REALM.into(),
+                realm.clone().into(),
+            );
+        }
+        if let Some(layer) = &inc.layer {
+            annotations.insert(
+                crate::compose::ANN_INCLUDE_LAYER.into(),
+                layer.clone().into(),
+            );
+        }
+        entries.push(serde_json::json!({
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": inc.digest,
+            "size": 0,
+            "annotations": annotations,
+        }));
+    }
     let payload_json = serde_json::json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.index.v1+json",
@@ -274,6 +334,7 @@ mod tests {
 
     fn spec() -> DepositSpec {
         DepositSpec {
+            includes: Vec::new(),
             layer: "2026.08.0".parse().unwrap(),
             channel: "qualified".into(),
             counter: 1,

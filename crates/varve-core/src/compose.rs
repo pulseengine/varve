@@ -132,22 +132,25 @@ pub fn walk<F>(
 where
     F: FnMut(&str) -> Option<LayerView>,
 {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut out = vec![(root_digest.to_string(), root.clone())];
-    seen.insert(root_digest.to_string());
-
-    // (digest, manifest, depth) — breadth-first so a shallow duplicate is
-    // reported against the layer nearest the root.
-    let mut queue: Vec<(String, LayerView, usize)> =
-        vec![(root_digest.to_string(), root.clone(), 0)];
-    while let Some((from, manifest, depth)) = queue.pop() {
-        if depth >= MAX_DEPTH {
+    let mut emitted: BTreeSet<String> = BTreeSet::new();
+    emitted.insert(root_digest.to_string());
+    // (digest, view, ancestors-on-this-path). A CYCLE is a digest reappearing
+    // on its OWN path — not merely one seen before. An earlier version used a
+    // global `seen`, which reported a DIAMOND (two layers sharing a base) as a
+    // cycle, with a message falsely claiming the layer included itself. A
+    // shared base is the most ordinary composition there is.
+    let mut stack: Vec<(String, LayerView, BTreeSet<String>)> = vec![(
+        root_digest.to_string(),
+        root.clone(),
+        BTreeSet::from([root_digest.to_string()]),
+    )];
+    while let Some((from, view, path)) = stack.pop() {
+        if path.len() > MAX_DEPTH {
             return Err(ComposeError::TooDeep);
         }
-        for inc in includes(&manifest) {
-            if seen.contains(&inc.digest) {
-                // Re-including a layer already in the graph is a cycle: the
-                // graph is a tree of distinct layers by construction.
+        for inc in includes(&view) {
+            if path.contains(&inc.digest) {
                 return Err(ComposeError::Cycle {
                     digest: inc.digest.clone(),
                     via: from.clone(),
@@ -157,9 +160,13 @@ where
                 // Not installed. The caller names it and how to fix it.
                 continue;
             };
-            seen.insert(inc.digest.clone());
-            out.push((inc.digest.clone(), child.clone()));
-            queue.push((inc.digest.clone(), child, depth + 1));
+            // A layer reachable by two paths is walked once, not refused.
+            if emitted.insert(inc.digest.clone()) {
+                out.push((inc.digest.clone(), child.clone()));
+            }
+            let mut child_path = path.clone();
+            child_path.insert(inc.digest.clone());
+            stack.push((inc.digest.clone(), child, child_path));
         }
     }
     Ok(out)
@@ -265,6 +272,30 @@ mod tests {
             Err(ComposeError::AmbiguousTool { tool, .. }) => assert_eq!(tool, "wasm-tools"),
             other => panic!("expected AmbiguousTool, got {other:?}"),
         }
+    }
+
+    // rivet: verifies REQ-COMPOSE-001
+    #[test]
+    fn a_diamond_is_walked_once_not_refused_as_a_cycle() {
+        // A includes B and C; both include D. This terminates and is the most
+        // ordinary composition shape there is — two layers sharing a base.
+        // The first version reported it as a cycle, with a message claiming D
+        // "includes itself". Found by clean-room review.
+        let d = manifest("2026.08.0", &["base"], &[]);
+        let b = manifest("2026.08.0", &["b"], &[("sha256:d", "r")]);
+        let c = manifest("2026.08.0", &["c"], &[("sha256:d", "r")]);
+        let a = manifest("2026.08.0", &["a"], &[("sha256:b", "r"), ("sha256:c", "r")]);
+        let walked = walk("sha256:a", &a, |q| match q {
+            "sha256:b" => Some(b.clone()),
+            "sha256:c" => Some(c.clone()),
+            "sha256:d" => Some(d.clone()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(walked.len(), 4, "A, B, C and D each once: {walked:?}");
+        // …and the shared base's tool resolves exactly once, not ambiguously.
+        let tools = union_tools(&walked).unwrap();
+        assert_eq!(tools["base"], "sha256:d");
     }
 
     // rivet: verifies REQ-COMPOSE-001

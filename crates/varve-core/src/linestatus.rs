@@ -500,6 +500,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("layout");
         let spec = DepositSpec {
+            includes: Vec::new(),
             layer: "2026.07.0".parse().unwrap(),
             channel: "qualified".into(),
             counter: 1,
@@ -710,6 +711,7 @@ mod tests {
         let dest = tmp.path().join("layout");
         deposit(
             &DepositSpec {
+                includes: Vec::new(),
                 layer: "2026.07.0".parse().unwrap(),
                 channel: "qualified".into(),
                 counter: 1,
@@ -753,6 +755,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("layout");
         let spec = DepositSpec {
+            includes: Vec::new(),
             layer: "2026.07.0".parse().unwrap(),
             channel: "qualified".into(),
             counter: 1,
