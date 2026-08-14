@@ -2265,6 +2265,57 @@ artifacts:
       priority: should
       category: functional
 
+  - id: REQ-LAYOUT-001
+    type: requirement
+    title: A deposited layout is addressable by tag, not only by digest
+    status: verified
+    release: v0.25.0
+    description: >
+      A ten-persona documentation audit graded the platform engineer's entire
+      job BLOCKED on one line. `varve docs deploy` offered
+      `oras cp --from-oci-layout ./layout:2026.08.0 "$REPO:2026.08.0"` as the
+      short publish form, and it cannot resolve: the index varve writes carries
+      no `org.opencontainers.image.ref.name`, which is the annotation every OCI
+      client uses as the tag. The layout was addressable by digest alone, so
+      the documented one-liner failed for a reason no error explained.
+      varve shall annotate the layer manifest in the emitted `index.json` with
+      the standard `org.opencontainers.image.ref.name` set to the layer id, so
+      `<layout>:<layer>` resolves in any OCI client. This is a purely additive
+      annotation: it changes no digest, no signature and no verification, since
+      the index is not signed and the payload is unchanged.
+    tags: [distribution, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-DOCS-004
+    type: requirement
+    title: The docs answer recovery and adapter selection
+    status: verified
+    release: v0.25.0
+    description: >
+      Two paths survived the audit that added the workflow chapters. The
+      hostile tester was BLOCKED: a store that fails to read had no documented
+      way out, no `uninstall`/`repair`/`gc` exists, and the fix every message
+      suggested was `varve install` — which they believed anti-rollback would
+      refuse. Running it proves otherwise: an EQUAL counter is not a
+      regression, so re-installing repairs in place, and the genuinely refused
+      case is going BACKWARDS. The docs stated neither.
+      Separately, `concept-payload-kinds.md` asserted "the kind selects which
+      export adapter applies", which is false in both directions:
+      `export-bazel` ignores kind entirely and keys on `platform` plus
+      `[tool.source]`, both set at deposit time and named in no topic, while
+      three adapters share `kind = "crate"`. A build engineer whose whole brief
+      is choosing an adapter was misdirected by the one topic that addresses it.
+      varve shall carry a `recovery` topic — repair, deliberate rollback and
+      its cost, removal, re-keying, and reset — and shall replace the false
+      selection sentence with a consumer-to-adapter table naming each adapter's
+      output and the entries it takes.
+    tags: [docs, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
   - id: REQ-DOCS-002
     type: requirement
     title: The docs teach the FILES a user writes and the TASKS they perform

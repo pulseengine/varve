@@ -101,7 +101,8 @@ varve which synth                  # which binary runs here — and which layer 
 varve list                         # layers present locally, and which projects pin them
 varve archive 2026.07 core.tar     # extract the core: the offline artifact of record
 varve run --varve 2026.09 -- synth # one-off, without editing the pin
-varve deposit                      # (CI) assemble, sign and publish a layer
+varve deposit                      # (CI) assemble and sign a layer, locally — see
+                                   #      `varve docs deploy` to publish it
 ```
 
 A project declares its layer in a checked-in manifest; shims on `PATH` resolve it

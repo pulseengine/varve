@@ -1642,3 +1642,74 @@ artifacts:
     links:
       - type: verifies
         target: REQ-PRODUCE-002
+
+  - id: VER-REVIEW-v0.24.0-late
+    type: verification
+    title: The three v0.24.0 requirements the reviewer never saw — REFUTED on evidence, fixed
+    status: verified
+    release: v0.24.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed),
+        2026-08-14. `review-check` had carried an advisory warning that
+        v0.24.0's review did not cover REQ-CHANNEL-001, REQ-DEPLOY-001 or
+        REQ-PRODUCE-002: all three landed AFTER that release's reviewer had
+        run, so nobody had ever reviewed them. This closes that gap.
+        VERDICT REFUTED on all three, and the shape is different from
+        v0.24.0's. The CODE was real — the reviewer ran every behaviour on the
+        release binary and each did the right thing: a qualified pin refuses an
+        installed rolling layer on `which`, `run`, the shims and `verify` (one
+        `resolve()` chokepoint, which is why one unit test legitimately covers
+        four surfaces); a stale line-status is refused at attach; a
+        composition with an uninstalled include is refused naming the layer and
+        its realm; a relative `--out` yields an absolute path. The prior
+        `--out oci://` and bare-date bugs are confirmed fixed on both the
+        `--spec` and flag paths.
+        The failure was on the EVIDENCE side and it was systematic: of the
+        eight tests named in this file for those three requirements, SEVEN
+        exercise a different function than the clause they are cited for, and
+        `rivet check verification-evidence` passes because those test names
+        exist. 11 of 13 shall-clauses had no killing test. The reviewer proved
+        each with a mutation that left the whole workspace suite green:
+        replacing the entire ChannelMismatch `#[error(...)]` with "channel
+        mismatch"; deleting `!layer.channel.is_empty() &&`; deleting the Stale
+        block from `attach_envelope_to_layout`; `if false && !missing.is_empty()`
+        on the install path; and making `absolute_export_dir` return its
+        argument verbatim.
+        One genuine content defect: README.md:100 still read
+        `varve deposit  # (CI) assemble, sign and publish a layer` — the exact
+        claim REQ-DEPLOY-001 was written to retract, cited twice in its own
+        text, unchanged since before the requirement existed. The `--help` was
+        fixed and the most-read surface was not.
+        All five mutations are now killed and the README claim is gone, each
+        re-run against the reviewer's own mutant to confirm it fails.
+      evidence:
+        # Clause: the error names both channels AND what each means. The old
+        # tests asserted struct FIELDS and never rendered the message.
+        - run: cargo test -p varve-core the_channel_refusal_names_both_channels_and_what_they_cost
+        # Clause: a layer with no channel annotation is not refused. Every
+        # fixture in the workspace wrote a channel, so the exemption was
+        # untested and deleting it broke nothing.
+        - run: cargo test -p varve-core a_layer_predating_channel_annotations_is_not_refused
+        # Clause: attach refuses a counter regression. The cited test exercised
+        # StatusCache::update, a different function.
+        - run: cargo test -p varve-core attaching_a_stale_document_over_a_newer_one_is_refused
+        # Clause: install refuses a composition whose include is missing. The
+        # cited test contained no composition at all.
+        - run: cargo test -p varve --test cli install_refuses_a_composition_whose_include_is_not_installed
+        # Clause: export paths are absolute. Every export test passed an
+        # ABSOLUTE --out, so the bug was unreachable from its own evidence.
+        - run: cargo test -p varve --test cli a_relative_out_still_yields_an_absolute_path_in_the_generated_config
+        # Clause: nothing shipped claims deposit publishes — README included.
+        - run: cargo test -p varve --bin varve nothing_shipped_claims_varve_publishes
+        # Clause: the deploy page carries a sequence a producer can run.
+        - run: cargo test -p varve --bin varve the_deploy_topic_carries_a_sequence_a_producer_can_actually_run
+    links:
+      - type: verifies
+        target: REQ-CHANNEL-001
+      - type: verifies
+        target: REQ-DEPLOY-001
+      - type: verifies
+        target: REQ-PRODUCE-002

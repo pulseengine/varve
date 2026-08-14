@@ -82,6 +82,11 @@ pub const TOPICS: &[Topic] = &[
         "concept-composition.md"
     ),
     topic!(
+        "recovery",
+        "Recovery — repairing, removing, and going back",
+        "concept-recovery.md"
+    ),
+    topic!(
         "threat-model",
         "What verification does and does not prove",
         "concept-threat-model.md"
@@ -222,6 +227,10 @@ pub const REQUIRED_TOPICS: &[&str] = &[
     "threat-model",
     "deploy",
     "signing-keys",
+    // A ten-persona audit graded the hostile tester's path BLOCKED: a store
+    // that fails to read has no documented way out, and the fix every command
+    // suggested was one they had already been refused.
+    "recovery",
 ];
 
 /// Topics a user must ACT on, which therefore have to show a literal example
@@ -229,6 +238,7 @@ pub const REQUIRED_TOPICS: &[&str] = &[
 /// files were under 30 words when this was written, and personas recovered the
 /// file formats from serde errors instead.
 pub const TOPICS_NEEDING_EXAMPLES: &[&str] = &[
+    "recovery",
     "getting-started",
     "config-reference",
     "own-realm",
@@ -359,6 +369,154 @@ mod tests {
         out
     }
 
+    // rivet: verifies REQ-DOCS-004
+    #[test]
+    fn the_adapter_topic_names_every_adapter_and_what_selects_it() {
+        // "The kind selects which export adapter applies" was false in both
+        // directions: export-bazel ignores kind and keys on platform plus
+        // [tool.source], while three adapters share kind = "crate". A build
+        // engineer whose whole brief is choosing an adapter was misdirected by
+        // the one topic that addresses it.
+        let body = TOPICS
+            .iter()
+            .find(|t| t.slug == "payload-kinds")
+            .unwrap()
+            .body;
+        assert!(
+            !body.contains("The kind selects which export adapter applies"),
+            "the refuted claim must not come back"
+        );
+        for adapter in [
+            "export-cargo",
+            "export-crates-vendor",
+            "export-bazel-distdir",
+            "export-bazel",
+        ] {
+            assert!(body.contains(adapter), "the table must name `{adapter}`");
+        }
+        // …and the two annotations that actually select export-bazel, which
+        // appeared in no topic and no --help.
+        assert!(
+            body.contains("[tool.source]") && body.contains("platform"),
+            "the topic must name what selects export-bazel, not just its name"
+        );
+    }
+
+    // rivet: verifies REQ-DOCS-004
+    #[test]
+    fn the_recovery_topic_states_what_repairs_and_what_is_refused() {
+        // The hostile tester's path was BLOCKED: a store that fails to read had
+        // no documented way out, and they believed anti-rollback refused the
+        // repair. Running it proves an EQUAL counter is not a regression, so
+        // re-installing repairs in place; the refused case is going BACKWARDS.
+        let body = TOPICS.iter().find(|t| t.slug == "recovery").unwrap().body;
+        assert!(
+            body.contains("varve install --from"),
+            "the repair must be a command, not a description"
+        );
+        assert!(
+            body.contains("equal") || body.contains("**equal**"),
+            "it must say WHY re-installing is allowed — an equal counter is no \
+             regression — or a reader stops at the rollback error"
+        );
+        assert!(
+            body.contains("high-water-marks.json"),
+            "deliberate rollback means editing local state; name the file"
+        );
+        assert!(
+            body.contains("no `uninstall`") || body.contains("no `uninstall`, `repair`"),
+            "a missing command must be stated as missing, not left to be searched for"
+        );
+    }
+
+    // rivet: verifies REQ-DEPLOY-001
+    #[test]
+    fn nothing_shipped_claims_varve_publishes() {
+        // The requirement exists to RETRACT a claim. An independent review
+        // found `varve deposit  # (CI) assemble, sign and publish a layer` at
+        // README.md:100 — unchanged since before the requirement was written,
+        // and cited twice in its own text. The --help was fixed and the
+        // most-read surface was not, so the clause was factually unmet while
+        // marked verified.
+        let readme = include_str!("../../../README.md");
+        for (surface, text) in [
+            ("README.md", readme),
+            (
+                "the deposit topic",
+                TOPICS.iter().find(|t| t.slug == "deposit").unwrap().body,
+            ),
+            (
+                "the deploy topic",
+                TOPICS.iter().find(|t| t.slug == "deploy").unwrap().body,
+            ),
+        ] {
+            for line in text.lines() {
+                let l = line.to_lowercase();
+                // "does NOT publish" and "to publish it, see …" are the point;
+                // "deposit … publishes" is the retracted claim.
+                // The retracted claim is deposit ACTING as a publisher. Prose
+                // that says it does not publish, or points at how to publish,
+                // is the fix and must not trip the gate.
+                for claim in [
+                    "and publish a layer",
+                    "sign and publish",
+                    "deposit publishes",
+                    "deposit will publish",
+                ] {
+                    assert!(
+                        !l.contains(claim),
+                        "{surface} still says deposit publishes — varve runs no server \
+                         and pushes nothing (REQ-DEPLOY-001): {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    // rivet: verifies REQ-DEPLOY-001
+    #[test]
+    fn the_deploy_topic_carries_a_sequence_a_producer_can_actually_run() {
+        // An independent review replaced this topic with a three-line stub
+        // holding one empty ```sh fence, and BOTH gates stayed green: `docs
+        // check --coverage --strict` printed OK and the workspace suite passed.
+        // The recorded evidence was three shell greps that no CI job runs.
+        let body = TOPICS.iter().find(|t| t.slug == "deploy").unwrap().body;
+        // The push itself.
+        for needle in ["oras blob push", "oras manifest push"] {
+            assert!(body.contains(needle), "the push must show `{needle}`");
+        }
+        // …with the part that makes the upload CONSUMABLE. A manifest without
+        // the role annotations uploads fine and no consumer can read it.
+        for role in ["\"envelope\"", "\"payload\"", "\"line-status\""] {
+            assert!(
+                body.contains(role),
+                "the artifact manifest must annotate the {role} role, or every \
+                 consumer fails to read what was pushed"
+            );
+        }
+        // No unexecutable placeholder standing in for the one line that matters.
+        assert!(
+            !body.contains("<your artifact manifest>"),
+            "a producer cannot execute a placeholder"
+        );
+        // What a consumer needs, the first-time bootstrap, and the air-gapped
+        // alternative — the remaining three clauses.
+        for (clause, needle) in [
+            ("the realm registry field", "registry"),
+            ("the trust root", "trust-root"),
+            (
+                "first-time bootstrap",
+                "varve cannot verify the first realms file",
+            ),
+            ("the air-gapped alternative", "varve archive"),
+        ] {
+            assert!(
+                body.contains(needle),
+                "the deploy topic must cover {clause} (REQ-DEPLOY-001)"
+            );
+        }
+    }
+
     // rivet: verifies REQ-DOCS-003
     #[test]
     fn every_documented_file_example_parses_with_the_real_parser() {
@@ -467,6 +625,7 @@ mod tests {
     }
 
     // rivet: verifies REQ-DOCS-003
+    // rivet: verifies REQ-DOCS-004
     #[test]
     fn the_workflow_topics_exist() {
         // Two audits found the docs unusable for files and tasks while the
