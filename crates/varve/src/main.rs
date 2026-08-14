@@ -1514,6 +1514,15 @@ fn run_deposit(
 }
 
 fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result<()> {
+    // Use the PROJECT'S store. `archive` filtered the ambient top-level core,
+    // so for a realm-pinned layer it reported "not installed" while `list`,
+    // `verify`, `which`, `run` and `sbom` all resolved it — and its corrective
+    // advice (`varve install`) was a no-op loop. That takes out the offline
+    // path, which is varve's whole thesis (REQ-STORE-001).
+    let store = match project_ctx(store) {
+        Ok(ctx) => ctx.store,
+        Err(_) => store.clone(),
+    };
     let wanted: varve_core::LayerId = layer.parse()?;
     let matching: Vec<_> = store
         .list()?
@@ -1530,7 +1539,7 @@ fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result
              not supported yet; clean up the core first"
         ),
     };
-    varve_core::export_archive(store, &entry, dest)?;
+    varve_core::export_archive(&store, &entry, dest)?;
     println!(
         "archived layer {} {} as oci-layout at {}",
         entry.layer,

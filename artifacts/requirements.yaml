@@ -2181,3 +2181,33 @@ artifacts:
     fields:
       priority: must
       category: functional
+
+  - id: REQ-CHANNEL-001
+    type: requirement
+    title: The pin's channel is enforced at resolution, not only at install
+    status: verified
+    release: v0.24.0
+    description: >
+      Found by the ten-persona audit re-run, independently by two personas, and
+      it is the most serious defect the audit has produced. `install` refuses a
+      fetched manifest whose channel disagrees with the pin, but NOTHING
+      re-checked an already-installed layer. So editing a pin from `rolling` to
+      `qualified` — or installing under one pin and later tightening it — left
+      `which`, `verify` and `run` resolving the rolling layer and reporting
+      success. `varve which` printed "(rolling)" directly beside a pin that said
+      qualified, exit 0.
+      Qualified-versus-rolling is THE distinction varve exists to make: a
+      qualified line carries a support window and qualification evidence, a
+      rolling one carries neither and may move. A safety-critical consumer
+      pinning `qualified` silently received an unqualified toolchain while
+      `verify` reported OK — destroying exactly the evidence the product exists
+      to preserve, and directly contradicting what the docs promise ("varve
+      never falls back … a pin resolves exactly or the command fails").
+      varve shall compare the installed layer's channel against the pin's at
+      RESOLUTION, refusing a mismatch with an error naming both channels and
+      what each means. A layer with no channel annotation (pre-channel layers)
+      is not refused on this ground.
+    tags: [core, security]
+    fields:
+      priority: must
+      category: functional

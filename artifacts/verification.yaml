@@ -1573,3 +1573,23 @@ artifacts:
         target: REQ-PRODUCER-001
       - type: verifies
         target: REQ-STORE-001
+
+  - id: VER-CHANNEL-001
+    type: verification
+    title: A qualified pin refuses an installed rolling layer
+    status: verified
+    release: v0.24.0
+    fields:
+      method: automated-test
+      baseline: >
+        Reproduced end to end 2026-08-14 before fixing: install under a rolling
+        pin, edit the pin to `qualified`, then `which` printed
+        "layer 2026.08.0 (rolling) …" and exit 0, `verify` reported
+        "signature OK", and `run` dispatched the tool. After the fix all three
+        refuse with both channels named, and a matching pin still resolves.
+      steps:
+        - run: cargo test -p varve-core a_pin_selecting_qualified_refuses_an_installed_rolling_layer
+        - run: cargo test -p varve-core a_matching_channel_still_resolves
+    links:
+      - type: verifies
+        target: REQ-CHANNEL-001

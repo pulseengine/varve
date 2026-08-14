@@ -27,6 +27,16 @@ pub enum Channel {
     Rolling,
 }
 
+impl Channel {
+    /// The wire string, matching the signed manifest annotation and the pin.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Channel::Qualified => "qualified",
+            Channel::Rolling => "rolling",
+        }
+    }
+}
+
 impl std::str::FromStr for Channel {
     type Err = ();
     /// The SAME vocabulary a pin accepts, exposed so the produce side can
