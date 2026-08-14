@@ -1636,6 +1636,9 @@ artifacts:
         # attach path, which the line-status suite exercises heavily.
         - run: cargo test -p varve-core the_cache_refuses_a_counter_regression
         - run: cargo test -p varve --test cli an_organisation_can_stand_up_its_own_realm
+        # Unit-level, because the mutation gate runs `--workspace --lib` and
+        # cannot use CLI tests: `realm_names` was replaceable by an empty vec.
+        - run: cargo test -p varve-core every_defined_realm_is_named
     links:
       - type: verifies
         target: REQ-PRODUCE-002
