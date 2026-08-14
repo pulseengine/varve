@@ -276,6 +276,26 @@ mod tests {
 
     // rivet: verifies REQ-COMPOSE-001
     #[test]
+    fn depth_is_bounded_so_a_long_chain_cannot_exhaust_the_walker() {
+        // The bound is what keeps "refused" from meaning "followed until the
+        // process aborts". Re-verification found `verify` recursing without it
+        // and stack-overflowing on a self-referencing store entry; both walkers
+        // are now bounded.
+        let leaf = manifest("2026.08.0", &["leaf"], &[]);
+        // A chain longer than MAX_DEPTH, each link including the next.
+        let chain: Vec<LayerView> = (0..=MAX_DEPTH + 2)
+            .map(|i| manifest("2026.08.0", &["t"], &[(&format!("sha256:{}", i + 1), "r")]))
+            .collect();
+        let err = walk("sha256:0", &chain[0], |d| {
+            let n: usize = d.trim_start_matches("sha256:").parse().ok()?;
+            chain.get(n).cloned().or_else(|| Some(leaf.clone()))
+        })
+        .unwrap_err();
+        assert!(matches!(err, ComposeError::TooDeep), "got {err:?}");
+    }
+
+    // rivet: verifies REQ-COMPOSE-001
+    #[test]
     fn a_diamond_is_walked_once_not_refused_as_a_cycle() {
         // A includes B and C; both include D. This terminates and is the most
         // ordinary composition shape there is — two layers sharing a base.

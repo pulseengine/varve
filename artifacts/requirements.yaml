@@ -2018,9 +2018,15 @@ artifacts:
       keeps its own realm, trust root, cadence and qualification claim; and
       because the include lives in the signed payload, the composition itself
       is signed.
-      Rules, all fail-closed: an included layer is verified against ITS OWN
-      realm's trust root, not the including layer's; a cycle is refused, not
-      followed; depth is bounded; and a tool name exposed by more than one
+      Rules, all fail-closed, and holding on BOTH walkers — resolution and
+      verification. (Re-verification found verify recursing unbounded and
+      stack-overflowing on a self-referencing store entry, which is not what
+      "refused" means, least of all in the command whose job is to inspect
+      adversarial store state.) An included layer is verified against ITS OWN
+      realm's trust root, not the including layer's; a cycle — a layer
+      reappearing on its own path — is refused, while a DIAMOND, where two
+      layers share a base, is walked once and is legal; depth is bounded at 8;
+      and a tool name exposed by more than one
       layer in the graph is an ERROR naming both layers, never a silent choice
       — varve does not pick a winner, exactly as a pin that does not resolve
       uniquely is an error rather than a fallback.

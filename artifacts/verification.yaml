@@ -1333,6 +1333,8 @@ artifacts:
         # A diamond (two layers sharing a base) is walked once, not misreported
         # as a cycle — the most ordinary composition shape there is.
         - run: cargo test -p varve-core a_diamond_is_walked_once_not_refused_as_a_cycle
+        # Depth is bounded, so "refused" never means "followed until abort".
+        - run: cargo test -p varve-core depth_is_bounded_so_a_long_chain_cannot_exhaust_the_walker
         # Core: union, ambiguity, cycles, uninstalled includes, and back-compat
         # for every layer that composes nothing.
         - run: cargo test -p varve-core a_composition_exposes_both_layers_tools
@@ -1362,5 +1364,59 @@ artifacts:
         - run: cargo test -p varve-core a_malformed_lockfile_is_an_error_not_a_silent_pass
         - run: cargo test -p varve --test cli verify_lockfile_fails_when_a_pinned_crate_disagrees
     links:
+      - type: verifies
+        target: REQ-LOCKPIN-001
+
+  - id: VER-REVIEW-v0.23.0
+    type: verification
+    title: v0.23.0 independently reviewed — DISSENT (feature unreachable), fixed forward, re-verified
+    status: verified
+    release: v0.23.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-14,
+        of REQ-COMPOSE-001 and REQ-LOCKPIN-001 at HEAD 0db9f84. VERDICT DISSENT
+        — the sixth consecutive review to dissent and the sixth to be right, and
+        the most serious to date. The requirement claimed composition was
+        EXPRESSED, RESOLVED and VERIFIED; only resolution existed. `deposit`
+        could not emit an include, `install` REJECTED one (every entry required
+        eu.pulseengine.tool, so a real composed layer could not be installed at
+        all — every shipped test bypassed install via store.lay_down), and
+        `verify` checked only the root, so an entirely UNSIGNED included layer
+        dispatched its tools while verify exited 0. The realm clause — "verified
+        against ITS OWN realm's trust root" — was parsed into an error string
+        and otherwise unimplemented. This was the SECOND consecutive release
+        marking a requirement `verified` with a shall-clause unbuilt.
+        Three further defects: cycle detection used a global seen-set, so a
+        DIAMOND (two layers sharing a base — the most ordinary composition
+        shape) was refused with a message falsely claiming the layer "includes
+        itself"; the lockfile gate mapped EVERY collect_verified_crates error to
+        "pins no crates", and since that function does not platform-filter, one
+        foreign-platform crate entry silently disabled the gate over a real
+        disagreement; and the CLI test named
+        `verify_lockfile_fails_when_a_pinned_crate_disagrees` contained no
+        disagreement and asserted .success() twice, including that a MALFORMED
+        lockfile passes.
+        FIXED FORWARD rather than narrowed a third time (user decision). All six
+        were then RE-VERIFIED independently and empirically at HEAD a6f42c0: a
+        deposited include appears inside the DSSE-signed payload; install
+        accepts a composed layer and lays no blob for the include; verify fails
+        on an unsigned include and passes on a properly signed one; the realm
+        case was constructed BOTH directions (signed by the named realm's key
+        passes; re-signed by a third key fails; a missing varve-realms.toml
+        names the realm); diamond walks, real cycle refused, chain of 9 refused;
+        and the lockfile gate now fails closed on the foreign-platform case that
+        previously went green.
+        That re-verification found ONE NEW defect, introduced by the fix:
+        `verify_composition` recursed with no cycle or depth guard, so
+        `varve verify --all` STACK-OVERFLOWED (SIGABRT) on a self-referencing
+        store entry — "followed until the process aborts" is not "refused",
+        least of all in the command whose job is to inspect adversarial store
+        state. Both walkers are now bounded, with a regression test.
+    links:
+      - type: verifies
+        target: REQ-COMPOSE-001
       - type: verifies
         target: REQ-LOCKPIN-001

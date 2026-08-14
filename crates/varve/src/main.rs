@@ -1629,7 +1629,7 @@ fn verify(
         verify_exports(&current, exports)?;
     }
     if let Some(path) = lockfile {
-        verify_lockfile(store, &ctx, path)?;
+        verify_lockfile(&ctx, path)?;
     }
     Ok(())
 }
@@ -1637,7 +1637,7 @@ fn verify(
 /// Check a project's lockfile against the pinned layer's `crate` entries
 /// (REQ-LOCKPIN-001). Packages the layer does not pin are ignored — the layer
 /// never claimed to cover every dependency.
-fn verify_lockfile(store: &Store, ctx: &ProjectCtx, path: &std::path::Path) -> anyhow::Result<()> {
+fn verify_lockfile(ctx: &ProjectCtx, path: &std::path::Path) -> anyhow::Result<()> {
     let resolved = varve_core::resolve(&ctx.pin, &ctx.store)?;
     // A layer with no crate entries pins nothing to disagree with — but ONLY
     // that case may pass quietly. An earlier version mapped EVERY error here to
@@ -1645,7 +1645,6 @@ fn verify_lockfile(store: &Store, ctx: &ProjectCtx, path: &std::path::Path) -> a
     // disabled the whole gate and CI went green over a real disagreement
     // (found by clean-room review). Failing open is the worst possible answer
     // for a gate, so every other error propagates.
-    let _ = store;
     let crates = match collect_verified_crates(&ctx.store, &resolved.layer) {
         Ok(c) => c,
         Err(e) if e.to_string().contains("carries no `crate` entries") => {
@@ -1698,6 +1697,35 @@ fn verify_composition(
     store: &Store,
     layer: &varve_core::store::InstalledLayer,
 ) -> anyhow::Result<()> {
+    let mut path = std::collections::BTreeSet::new();
+    verify_composition_inner(ctx, store, layer, &mut path)
+}
+
+/// The recursive half, carrying the ancestor path. The guards are NOT optional:
+/// without them `verify --all` walked a self-referencing store entry until the
+/// stack was exhausted and the process aborted (found by re-verification).
+/// Resolution refuses such a graph, so verify must reach the same verdict —
+/// "refused" and "followed until it crashes" are not the same answer, least of
+/// all in the command whose job is to inspect adversarial store state.
+fn verify_composition_inner(
+    ctx: &ProjectCtx,
+    store: &Store,
+    layer: &varve_core::store::InstalledLayer,
+    path: &mut std::collections::BTreeSet<String>,
+) -> anyhow::Result<()> {
+    if !path.insert(layer.digest.clone()) {
+        bail!(
+            "composition cycle while verifying: layer {} ({}) reappears on its own path —              refusing to follow it",
+            layer.layer,
+            layer.digest
+        );
+    }
+    if path.len() > varve_core::compose::MAX_DEPTH {
+        bail!(
+            "composition is more than {} layers deep while verifying — refusing to walk further",
+            varve_core::compose::MAX_DEPTH
+        );
+    }
     let Ok(bytes) = std::fs::read(layer.root.join("layer.json")) else {
         return Ok(());
     };
@@ -1745,8 +1773,9 @@ fn verify_composition(
             entry.digest,
             inc.realm.as_deref().unwrap_or("<including layer's>")
         );
-        // Composition is a graph: verify what this layer composes too.
-        verify_composition(ctx, store, &entry)?;
+        // Composition is a graph: verify what this layer composes too, on a
+        // path that remembers where it has been.
+        verify_composition_inner(ctx, store, &entry, path)?;
     }
     Ok(())
 }
