@@ -15,3 +15,16 @@ manifest to find the one you meant. Measured on a release build: digest-pinned
 resolve stays at ~37 microseconds whether the core holds 3 layers or 200, while
 a name-only pin costs ~74 microseconds at 3 layers and ~2.5 milliseconds at 200.
 Layers coexist on purpose, so a long-lived machine drifts into the slow case.
+
+```toml
+manifest-version = 1
+
+[toolchain]
+realm   = "pulseengine"
+channel = "qualified"
+layer   = "2026.08.2"
+digest  = "sha256:83a699…"      # optional; wins over the name when present
+tools   = ["rivet", "synth"]    # optional; a subset, plain names only
+```
+
+Full field reference: `varve docs config-reference`.
