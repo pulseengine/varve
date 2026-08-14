@@ -125,7 +125,7 @@ pub fn staleness_warning(issued_at: &str, now: &str, threshold_days: u32) -> Opt
 // Public so the manifest parser can reject a malformed issued-at at parse
 // time (F2, 2026-08-08 audit) — the producer and the staleness verdict must
 // agree on what a valid date is, so there is one function.
-pub(crate) fn epoch_days(rfc3339: &str) -> Option<i64> {
+pub fn epoch_days(rfc3339: &str) -> Option<i64> {
     // Accept "YYYY-MM-DD", optionally followed by "T…" (the time part is not
     // used at day resolution). The date must be exactly 10 chars with dashes
     // at positions 4 and 7 — each guard independently reachable.

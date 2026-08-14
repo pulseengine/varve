@@ -41,6 +41,11 @@ pub const TOPICS: &[Topic] = &[
         "concept-layers.md"
     ),
     topic!(
+        "signing-keys",
+        "Signing keys — the format, and what varve checks",
+        "concept-signing-keys.md"
+    ),
+    topic!(
         "trust-roots",
         "Trust roots — the pinned signing key",
         "concept-trust-roots.md"

@@ -128,6 +128,60 @@ impl Store {
     }
 
     /// Look up a layer by manifest digest (`sha256:<hex>`).
+    /// The varve root this store lives under: itself, or the parent of a realm
+    /// partition (`<root>/realms/<fingerprint>`).
+    pub fn varve_root(&self) -> std::path::PathBuf {
+        let root = self.root();
+        if root
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|n| n == "realms")
+        {
+            root.parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| root.to_path_buf())
+        } else {
+            root.to_path_buf()
+        }
+    }
+
+    /// Find a layer by digest in ANY partition under this varve root — the
+    /// top-level core or any realm's. A digest is content-addressed, so where
+    /// it happens to live does not change what it is; a cross-realm composition
+    /// include is installed under the INCLUDED realm's fingerprint, not the
+    /// including project's, and looking only in one partition reported it as
+    /// missing while `list` showed it installed (REQ-STORE-001).
+    ///
+    /// Locating a layer is not accepting it: the caller still verifies it
+    /// against the trust root of the realm that vouches for it.
+    pub fn find_anywhere(
+        &self,
+        digest: &str,
+    ) -> Result<Option<(Store, InstalledLayer)>, StoreError> {
+        if let Some(entry) = self.get(digest)? {
+            return Ok(Some((self.clone(), entry)));
+        }
+        let root = self.varve_root();
+        // The top-level core, then every realm partition, in a stable order.
+        let mut candidates = vec![Store::at(&root)];
+        if let Ok(rd) = std::fs::read_dir(root.join("realms")) {
+            let mut parts: Vec<std::path::PathBuf> =
+                rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+            parts.sort();
+            candidates.extend(parts.into_iter().map(Store::at));
+        }
+        for candidate in candidates {
+            if candidate.root() == self.root() {
+                continue;
+            }
+            if let Some(entry) = candidate.get(digest)? {
+                return Ok(Some((candidate, entry)));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn get(&self, digest: &str) -> Result<Option<InstalledLayer>, StoreError> {
         let entry = self.core_dir().join(digest.replace(':', "-"));
         if !entry.join("layer.json").is_file() {
@@ -202,6 +256,53 @@ pub(crate) mod fixtures {
 }}"#
         )
         .into_bytes()
+    }
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+
+    // rivet: verifies REQ-STORE-001
+    #[test]
+    fn a_layer_is_found_in_any_partition_under_the_same_root() {
+        // A cross-realm composition include lives under the INCLUDED realm's
+        // fingerprint, not the including project's. Looking in one partition
+        // reported it missing while `list` showed it installed — `verify`,
+        // `which` and `run` disagreed with `list`, and the corrective advice
+        // failed (REQ-STORE-001).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mine = Store::at(root.join("realms").join("aaaa"));
+        let theirs = Store::at(root.join("realms").join("bbbb"));
+        let digest = theirs
+            .lay_down(
+                &fixtures::manifest("2026.08.0", "qualified"),
+                &[("btool", b"b")],
+            )
+            .unwrap();
+
+        // My own partition does not have it…
+        assert!(mine.get(&digest).unwrap().is_none());
+        // …but it is installed under this varve root, and locating it says so.
+        let (owner, entry) = mine.find_anywhere(&digest).unwrap().expect("found");
+        assert_eq!(entry.digest, digest);
+        assert_eq!(owner.root(), theirs.root(), "found in the owning partition");
+        // The tool resolves through the partition that actually holds it.
+        assert!(owner.tool_path(&entry, "btool").is_some());
+    }
+
+    // rivet: verifies REQ-STORE-001
+    #[test]
+    fn the_varve_root_is_recovered_from_a_realm_partition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert_eq!(
+            Store::at(root.join("realms").join("ffff")).varve_root(),
+            root.to_path_buf()
+        );
+        // A non-partition store is its own root.
+        assert_eq!(Store::at(root).varve_root(), root.to_path_buf());
     }
 }
 

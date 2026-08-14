@@ -333,8 +333,55 @@ pub fn attach_envelope_to_layout(
         .line
         .parse()
         .map_err(|e| LineStatusError::Payload(format!("status line '{}': {e}", doc.line)))?;
+    // The status must belong to THIS layout's line. Attaching a 2099.01 status
+    // to a 2026.08 layout used to succeed, leaving the consumer to discover it
+    // (REQ-PRODUCER-001).
+    if let Some(layout_line) = layout_line(layout)
+        && layout_line != line.to_string()
+    {
+        return Err(LineStatusError::LineMismatch {
+            expected: layout_line,
+            got: line.to_string(),
+        });
+    }
     attach_to_layout(layout, &line, envelope)?;
     Ok((line, doc.counter))
+}
+
+/// The line a deposit layout's own manifest declares, if it can be read. Best
+/// effort: a layout we cannot introspect is not blocked from being annotated,
+/// but one that plainly disagrees is.
+fn layout_line(layout: &Path) -> Option<String> {
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(layout.join("index.json")).ok()?).ok()?;
+    for m in index["manifests"].as_array()? {
+        let digest = m["digest"].as_str()?.replace(':', "-");
+        let blob = layout
+            .join("blobs")
+            .join("sha256")
+            .join(digest.trim_start_matches("sha256-"));
+        let Ok(bytes) = std::fs::read(&blob) else {
+            continue;
+        };
+        // The layer envelope's payload carries the line annotation. Reuse the
+        // DSSE reader already used in this module rather than hand-rolling.
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        let Ok(env) = wsc::dsse::DsseEnvelope::from_json(text) else {
+            continue;
+        };
+        let Ok(payload) = env.payload_bytes() else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+            continue;
+        };
+        if let Some(line) = doc["annotations"]["eu.pulseengine.varve.line"].as_str() {
+            return Some(line.to_string());
+        }
+    }
+    None
 }
 
 /// Read the single baseline status envelope a deposit layout carries,

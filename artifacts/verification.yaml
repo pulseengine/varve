@@ -1462,7 +1462,7 @@ artifacts:
 
   - id: VER-PRODUCER-001
     type: verification
-    title: The produce side refuses a key that would sign unverifiably
+    title: The produce side fails closed on every input it signs
     status: verified
     release: v0.24.0
     fields:
@@ -1477,6 +1477,11 @@ artifacts:
       steps:
         - run: cargo test -p varve-core a_key_that_signs_unverifiably_is_refused_before_it_signs
         - run: cargo test -p varve --test cli deposit_refuses_a_key_that_would_sign_unverifiably
+        # The other four clauses, each reproducing an audit case that used to
+        # exit 0: a channel no pin can name, and an issued-at that is a date
+        # rather than a timestamp (it lands verbatim in the SBOM).
+        - run: cargo test -p varve-core a_channel_no_pin_could_name_is_refused_before_signing
+        - run: cargo test -p varve-core issued_at_must_be_a_timestamp_not_merely_a_date
     links:
       - type: verifies
         target: REQ-PRODUCER-001
@@ -1501,6 +1506,70 @@ artifacts:
         # The walkthrough asserts list AND --layer after a realm install —
         # the two commands that could not see what `which` resolved.
         - run: cargo test -p varve --test cli an_organisation_can_stand_up_its_own_realm
+        # The composition clause the shall-clause names: a cross-realm include
+        # lives under the INCLUDED realm's fingerprint, so a single-partition
+        # lookup reported it missing while `list` showed it installed.
+        - run: cargo test -p varve-core a_layer_is_found_in_any_partition_under_the_same_root
+        - run: cargo test -p varve-core the_varve_root_is_recovered_from_a_realm_partition
     links:
+      - type: verifies
+        target: REQ-STORE-001
+
+  - id: VER-REVIEW-v0.24.0
+    type: verification
+    title: v0.24.0 independently reviewed — DISSENT on unimplemented shall-clauses, fixed forward
+    status: verified
+    release: v0.24.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-14,
+        at HEAD df2ce6c. VERDICT DISSENT — the seventh consecutive review to
+        dissent and the seventh to be right. Its framing is the finding that
+        matters most: "This is the THIRD consecutive release with requirement
+        text outrunning code, and the verification artifact narrows the scope
+        silently rather than declaring it." Every gate was green while two of
+        three must-priority requirements were partially implemented, because
+        `rivet check verification-evidence` checks that named tests EXIST, not
+        that they cover the shall-clauses.
+        CONFIRMED outright: REQ-KEYGEN-001. The reviewer ran the full extender
+        path with its own key and realm — keygen, deposit, realms file,
+        install, verify, run — and confirmed the printed public half is the one
+        that actually verifies layers signed by that key, that keygen refuses
+        to clobber and sets 0600, and that the secret never reaches stdout.
+        REFUTED, and now fixed: FIVE of six REQ-PRODUCER-001 clauses were
+        unimplemented — only the key check shipped. All five now hold, each
+        verified against the reviewer's own reproduction: a channel no pin can
+        name is refused (the enum is shared with the pin parser so they cannot
+        drift); issued-at must be a TIMESTAMP not merely a date (a bare date
+        passed `epoch_days`, which needs only day resolution, and landed
+        verbatim in the SBOM's metadata.timestamp where it is invalid); a
+        registry-shaped `--out` is refused with the command that would actually
+        publish, instead of writing `./oci:/ghcr.io/...`; attach-status refuses
+        a status whose line disagrees with the layout's; and deposit re-verifies
+        the envelope it just signed before returning.
+        Two of those fixes were themselves wrong on the first attempt and were
+        caught by running the reviewer's cases rather than trusting the diff:
+        the `--out` guard landed in `sign_sums` instead of `run_deposit` (the
+        pattern matched the first of four signing sites), and the RFC-3339
+        check accepted a bare date.
+        REFUTED, and now fixed: REQ-STORE-001's shall-clause names composition,
+        and cross-realm composition still reported an installed include as
+        missing — `list` said installed while verify/which/run said not, and the
+        corrective advice failed. A digest is content-addressed, so a layer is
+        now located in ANY partition under the same varve root while still being
+        VERIFIED against the trust root of the realm that vouches for it.
+        Demonstrated end to end with two realms: verify walks into the other
+        realm and reports "verified against realm 'beta'".
+        Two minor findings also closed: the `signing-keys` topic the requirement
+        promised now exists (and states plainly that varve has no rotation or
+        revocation yet), and keygen refused to clobber a key but silently
+        overwrote a published `--pub` trust root.
+    links:
+      - type: verifies
+        target: REQ-KEYGEN-001
+      - type: verifies
+        target: REQ-PRODUCER-001
       - type: verifies
         target: REQ-STORE-001

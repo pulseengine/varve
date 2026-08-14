@@ -1111,7 +1111,17 @@ fn keygen(out: &std::path::Path, public: Option<&std::path::Path>) -> anyhow::Re
             out.display()
         );
     }
+    if let Some(p) = public
+        && p.exists()
+    {
+        bail!(
+            "{} already exists — refusing to overwrite a published trust root. \
+             Re-print it instead with `varve pubkey <key>`, or choose another path.",
+            p.display()
+        );
+    }
     let (secret, pub_hex) = varve_core::keys::generate();
+
     std::fs::write(out, format!("{secret}\n"))
         .with_context(|| format!("cannot write {}", out.display()))?;
     #[cfg(unix)]
@@ -1466,6 +1476,18 @@ fn run_deposit(
     deposit_tools: Vec<varve_core::DepositTool>,
     includes: Vec<varve_core::deposit::DepositInclude>,
 ) -> anyhow::Result<()> {
+    // `deposit` writes an oci-layout DIRECTORY. A registry-shaped --out used to
+    // report success while creating a local directory literally named
+    // `./oci:/ghcr.io/...` (REQ-PRODUCER-001).
+    let out_str = out.to_string_lossy();
+    if let Some(scheme) = out_str.split_once("://").map(|(s, _)| s.to_string()) {
+        bail!(
+            "--out {out_str} looks like a {scheme} registry reference, but deposit writes a \
+             LOCAL oci-layout directory. Deposit to a directory, then push that directory to \
+             the registry with your OCI client (e.g. `oras cp --from-oci-layout <dir>:<tag> \
+             {out_str}`)."
+        );
+    }
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
     // Refuse a key that cannot produce verifiable signatures BEFORE signing.
@@ -1844,7 +1866,7 @@ fn verify_composition_inner(
     }
     let cwd = std::env::current_dir().context("cannot determine working directory")?;
     for inc in &view.includes {
-        let Some(entry) = store.get(&inc.digest)? else {
+        let Some((owner, entry)) = store.find_anywhere(&inc.digest)? else {
             bail!(
                 "layer {} composes {}, which is not installed — `varve install` it, then re-verify",
                 layer.layer,
@@ -1884,7 +1906,7 @@ fn verify_composition_inner(
         );
         // Composition is a graph: verify what this layer composes too, on a
         // path that remembers where it has been.
-        verify_composition_inner(ctx, store, &entry, path)?;
+        verify_composition_inner(ctx, &owner, &entry, path)?;
     }
     Ok(())
 }

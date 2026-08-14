@@ -231,7 +231,9 @@ fn compose_tools(
     // Every declared include must already be installed. Fetching transitively
     // is deliberately out of scope (REQ-COMPOSE-001), so name it and its fix.
     for inc in &root_view.includes {
-        if store.get(&inc.digest)?.is_none() {
+        // Look across partitions: a cross-realm include lives under the
+        // INCLUDED realm's fingerprint (REQ-STORE-001).
+        if store.find_anywhere(&inc.digest)?.is_none() {
             return Err(ResolveError::IncludeNotInstalled {
                 layer: layer.layer.to_string(),
                 missing: inc.layer.clone().unwrap_or_else(|| inc.digest.clone()),
@@ -244,7 +246,7 @@ fn compose_tools(
         }
     }
     let walked = crate::compose::walk(&layer.digest, &root_view, |digest| {
-        let entry = store.get(digest).ok().flatten()?;
+        let (_, entry) = store.find_anywhere(digest).ok().flatten()?;
         let bytes = std::fs::read(entry.root.join("layer.json")).ok()?;
         crate::compose::view(&bytes).ok()
     })?;
@@ -253,7 +255,7 @@ fn compose_tools(
 
     let mut out = Vec::new();
     for (digest, _) in walked.iter().skip(1) {
-        let Some(entry) = store.get(digest)? else {
+        let Some((owner, entry)) = store.find_anywhere(digest)? else {
             continue;
         };
         let bin = entry.root.join("bin");
@@ -267,7 +269,7 @@ fn compose_tools(
             .collect();
         names.sort();
         for name in names {
-            if let Some(path) = store.tool_path(&entry, &name) {
+            if let Some(path) = owner.tool_path(&entry, &name) {
                 out.push((name, path));
             }
         }
