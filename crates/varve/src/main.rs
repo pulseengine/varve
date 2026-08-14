@@ -1806,10 +1806,12 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         if !missing.is_empty() {
             bail!(
                 "layer {} composes {} layer(s) that are not installed: {}.\n\
-                 Install each from its own source first — a composed layer names what it \
-                 needs by digest, but does not fetch it. For each, pin it in a project \
-                 (or point --from at the source that carries it) and run `varve install` \
-                 there, then re-run this install.",
+                 Install each first — a composed layer names what it needs by digest, \
+                 but does not fetch it. `install` resolves THIS project's pin, so \
+                 pointing --from at the other source is not enough: give the included \
+                 layer its own pin (a directory whose varve.toml names that realm, \
+                 channel and layer), run `varve install` there, then re-run this one. \
+                 Both land in the same store. See `varve docs composition`.",
                 outcome.layer,
                 missing.len(),
                 missing.join(", ")

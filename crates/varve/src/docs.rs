@@ -332,6 +332,87 @@ mod tests {
         );
     }
 
+    /// Every fenced block in the docs, with the topic it came from.
+    fn fenced_blocks(slug: &str) -> Vec<(String, String)> {
+        let body = TOPICS
+            .iter()
+            .find(|t| t.slug == slug)
+            .unwrap_or_else(|| panic!("topic '{slug}' must exist"))
+            .body;
+        let mut out = Vec::new();
+        let mut lang: Option<String> = None;
+        let mut buf = String::new();
+        for line in body.lines() {
+            match (&lang, line.strip_prefix("```")) {
+                (None, Some(l)) => lang = Some(l.trim().to_string()),
+                (Some(l), Some(_)) => {
+                    out.push((l.clone(), std::mem::take(&mut buf)));
+                    lang = None;
+                }
+                (Some(_), None) => {
+                    buf.push_str(line);
+                    buf.push('\n');
+                }
+                (None, None) => {}
+            }
+        }
+        out
+    }
+
+    // rivet: verifies REQ-DOCS-003
+    #[test]
+    fn every_documented_file_example_parses_with_the_real_parser() {
+        // A gate that checks an example EXISTS is the same mistake as a gate
+        // that checks a topic exists: `known-problems` shipped documented as an
+        // array of strings while the parser wanted an array of structs, so the
+        // one file the docs taught was the one file varve rejected — and the
+        // reader had nothing to recover with. These run the SHIPPING parsers.
+        let tmp = std::env::temp_dir().join(format!("varve-docs-parse-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut checked = 0;
+
+        // Every topic, not just config-reference: the elided `sha256:83a699…`
+        // and `trust-root = "83a699…"` that this gate first caught were copied
+        // across five topics, and a user pastes whichever one they read.
+        let blocks: Vec<(String, String)> =
+            TOPICS.iter().flat_map(|t| fenced_blocks(t.slug)).collect();
+        for (lang, block) in blocks {
+            match lang.as_str() {
+                "toml" if block.contains("manifest-version") => {
+                    varve_core::pin::Pin::parse(&block, "docs")
+                        .expect("the documented varve.toml must parse as a pin");
+                    checked += 1;
+                }
+                "toml" if block.contains("[realm.") => {
+                    std::fs::write(tmp.join(varve_core::realm::REALMS_FILE), &block).unwrap();
+                    let names = varve_core::realm::realm_names(&tmp)
+                        .expect("the documented varve-realms.toml must parse");
+                    let first = names.first().expect("it must define a realm").clone();
+                    varve_core::realm::resolve_realm(&tmp, &first)
+                        .expect("the documented realm must RESOLVE, not merely parse");
+                    checked += 1;
+                }
+                "toml" if block.contains("[[tool]]") || block.contains("[tool.runner]") => {
+                    varve_core::deposit::parse_deposit_spec(&block)
+                        .expect("the documented deposit spec must parse");
+                    checked += 1;
+                }
+                "json" if block.contains("\"line\"") => {
+                    serde_json::from_str::<varve_core::linestatus::LineStatus>(&block)
+                        .expect("the documented line-status document must parse");
+                    checked += 1;
+                }
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            checked >= 6,
+            "the docs claim to cover every hand-written file; only {checked} \
+             example(s) were machine-checked against a real parser (REQ-DOCS-003)"
+        );
+    }
+
     // rivet: verifies REQ-DOCS-002
     #[test]
     fn the_docs_teach_the_facts_a_user_is_rejected_for_not_knowing() {

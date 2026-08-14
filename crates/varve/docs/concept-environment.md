@@ -13,14 +13,19 @@ The core, the shims, the anti-rollback state and the status cache all live under
 
 ```
 $VARVE_ROOT/
-  core/                      layers installed outside any realm
-  realms/<fingerprint>/core/ layers installed under a realm
-  shims/                     PATH dispatchers
-  state/                     high-water marks (anti-rollback)
-  env                        the sourceable PATH setup
+  shims/                       PATH dispatchers
+  env                          the sourceable PATH setup
+
+  core/                        no realm: installed layers
+  state/                       no realm: high-water marks, cached line-status
+
+  realms/<fingerprint>/core/   under a realm: installed layers
+  realms/<fingerprint>/state/  under a realm: ITS high-water marks and cache
 ```
 
-Realms partition the core by trust-root fingerprint, so the same layer id under two realms is two different installs that never collide. `varve list` labels rows by realm for exactly that reason.
+A realm namespaces the **whole** effective root, not just `core/`. Looking for
+`$VARVE_ROOT/state/high-water-marks.json` on a realm-pinned project finds
+nothing — it is under `realms/<fingerprint>/state/`. Realms partition by trust-root fingerprint, so the same layer id under two realms is two different installs that never collide. `varve list` labels rows by realm for exactly that reason.
 
 Set it for containers and CI, where `$HOME` is not where you want ~200 MB per layer to land.
 

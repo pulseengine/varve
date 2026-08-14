@@ -17,7 +17,7 @@ version = "1.0.0"
 path = "./dist/acmetool"
 
 [[include]]
-digest = "sha256:8b6586…"          # the included layer's manifest digest
+digest = "sha256:8b65864f2d9c7a3e1b5f8d2c6a9e4b7d3f1c8a5e2b9d6c3f7a4e1b8d5c2f9a6e"          # the included layer's manifest digest
 realm  = "bytecodealliance"        # whose trust root verifies it
 layer  = "2026.08.0"               # for error messages before it is fetched
 ```
@@ -28,10 +28,29 @@ The include lives inside the signed payload, so the composition itself is signed
 
 Install the included layer first, then the layer that composes it:
 
+`install` resolves **the project's pin** against `--from`, so you cannot install
+two different layers from one project directory by changing `--from` alone. The
+included layer needs its own pin:
+
 ```sh
-varve install --from ./upstream-layout    # pinned to the upstream realm
-varve install --from ./our-layout         # pinned to ours
+# 1. a directory pinned to the UPSTREAM layer
+mkdir -p upstream && cd upstream
+cat > varve.toml <<'EOF'
+manifest-version = 1
+
+[toolchain]
+realm   = "bytecodealliance"
+channel = "qualified"
+layer   = "2026.08.0"
+EOF
+varve install --from ../upstream-layout
+
+# 2. back in your own project, pinned to the composing layer
+cd .. && varve install --from ./our-layout
 ```
+
+Both land in the same `$VARVE_ROOT`, partitioned by realm, which is why step 2
+then finds what step 1 installed.
 
 Order matters: installing a composition whose includes are absent is refused, naming each missing layer and its realm. varve does **not** fetch includes transitively — it names what it needs by digest and leaves obtaining it to you.
 
@@ -39,7 +58,7 @@ Order matters: installing a composition whose includes are absent is refused, na
 
 ```sh
 $ varve verify
-layer 2026.09.0 sha256:97f920… verified: signature OK, 1 tool(s) match
+layer 2026.09.0 sha256:97f920… verified: signature OK, 1 tool(s) match their signed digests
   composes 2026.08.0 sha256:5be938… — verified against realm 'beta': 1 tool(s) match
 ```
 

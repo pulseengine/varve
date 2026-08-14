@@ -19,7 +19,9 @@
 > yet: it awaits the trust-root ceremony (the v1.0 gate), so today's layers
 > are signed with a provisional rolling key and make no qualification
 > promise. The release plan lives in rivet (`rivet release status`); see
-> [SECURITY.md](SECURITY.md) for the current trust posture and its limits.
+> [SECURITY.md](SECURITY.md) for the current trust posture and its limits —
+> or `varve docs threat-model`, which carries the same limits inside the
+> binary and so travels across an air gap.
 
 ## Getting started
 
@@ -50,7 +52,9 @@ rivet --version           # dispatched from the pinned layer
 Without a realm, point `VARVE_TRUST_ROOT` at the published root key
 (`rolling.pub`, a release asset) and pass `--from oci://ghcr.io/pulseengine/varve/layers`.
 The rolling channel is provisional and makes no qualification promise — see
-[SECURITY.md](SECURITY.md).
+[SECURITY.md](SECURITY.md), or `varve docs threat-model` where the network is
+not available. New to varve? `varve docs getting-started` is the five-minute
+transcript; `varve docs config-reference` is every file you will hand-write.
 
 ## The problem
 

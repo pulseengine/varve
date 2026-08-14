@@ -13,7 +13,7 @@ manifest-version = 1          # required; only 1 exists
 realm   = "pulseengine"       # optional; names the trust universe (see realms)
 channel = "qualified"         # required; `qualified` or `rolling`, nothing else
 layer   = "2026.08.2"         # required; always YYYY.MM.P, three parts
-digest  = "sha256:83a699…"    # optional; when present it WINS over the name
+digest  = "sha256:83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"    # optional; when present it WINS over the name
 tools   = ["rivet", "synth"]  # optional; restrict to a subset of the layer
 ```
 
@@ -26,7 +26,7 @@ Alongside the pin, found by the same upward walk. Nearest wins; definitions are 
 ```toml
 [realm.pulseengine]
 registry        = "oci://ghcr.io/pulseengine/varve/layers"   # required
-trust-root      = "83a699…"                                  # 64 hex characters
+trust-root      = "83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"
 # or, instead of an inline key:
 # trust-root-file = "./roots/pulseengine.pub"
 ```
@@ -56,7 +56,7 @@ asset   = "rivet-v0.32.0-x86_64-unknown-linux-gnu.tar.gz"
 sha256  = "…"
 
 [[include]]                    # optional; compose another layer
-digest = "sha256:8b6586…"
+digest = "sha256:8b65864f2d9c7a3e1b5f8d2c6a9e4b7d3f1c8a5e2b9d6c3f7a4e1b8d5c2f9a6e"
 realm  = "bytecodealliance"
 layer  = "2026.08.0"
 ```
@@ -76,8 +76,68 @@ Signed with `varve sign-status`, attached with `varve attach-status`.
   "issued-at": "2026-08-14T00:00:00Z",
   "support-until": "2027-08-01",
   "yanked": { "2026.08.1": "miscompiles under -O2; use 2026.08.2" },
-  "known-problems": ["synth: nested match arms may mis-fuse (#412)"]
+  "known-problems": [
+    {
+      "id": "VARVE-2026-0003",
+      "title": "synth mis-fuses nested match arms",
+      "severity": "high",
+      "affected": ["2026.08.0", "2026.08.1"],
+      "workaround": "build that crate with -C opt-level=1",
+      "detection": "the fused block is missing its second arm",
+      "mitigation": "fixed in 2026.08.2"
+    }
+  ]
 }
 ```
 
 `yanked` is a **map** from layer id to reason, not a boolean. `counter` is monotonic per line, enforced everywhere including at attach time.
+
+### `known-problems` entries
+
+Each is an object, not a string — `sign-status` rejects a bare string with
+`invalid type: string, expected struct KnownProblem`.
+
+| field | required | meaning |
+|---|---|---|
+| `id` | yes | your identifier for the problem |
+| `title` | yes | one line |
+| `severity` | yes | free text; varve does not interpret it |
+| `affected` | yes | array of layer ids, e.g. `["2026.08.0"]` |
+| `workaround` | no | what a consumer can do today |
+| `detection` | no | how to tell whether you are hit |
+| `mitigation` | no | where it is fixed |
+
+Unknown fields are refused, so a typo is an error rather than a silently
+dropped advisory.
+
+### `[tool.runner]` — a payload that is not directly executable
+
+A wasm component or a jar needs something to run it. Set it on the `[[tool]]`:
+
+```toml
+layer   = "2026.09.0"
+channel = "qualified"
+counter = 1
+
+[[tool]]
+name    = "checker"
+version = "1.2.0"
+path    = "./dist/checker.wasm"
+kind    = "wasm-component"
+
+[tool.runner]
+tool       = "wasmtime"    # another tool in this layer
+args       = ["run"]       # array, placed before the payload path
+arg-prefix = "--dir"       # a STRING, repeated before EACH user argument
+```
+
+The dispatched command is
+
+```
+<runner> <args…> <payload> [arg-prefix] <arg1> [arg-prefix] <arg2> …
+```
+
+so the example above turns `checker a.wit b.wit` into
+`wasmtime run checker.wasm --dir a.wit --dir b.wit`. `arg-prefix` is a single
+string repeated per argument, not a list inserted once — an array is refused
+with `invalid type: sequence, expected a string`.

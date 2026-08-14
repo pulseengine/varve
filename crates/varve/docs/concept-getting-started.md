@@ -24,7 +24,7 @@ layer   = "2026.08.2"
 ```toml
 [realm.pulseengine]
 registry   = "oci://ghcr.io/pulseengine/varve/layers"
-trust-root = "<64 hex characters — the published rolling.pub>"
+trust-root = "83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"   # 64 hex chars: the published rolling.pub
 ```
 
 The canonical file ships as a release asset:
@@ -61,3 +61,8 @@ varve fails closed and the error carries its fix. A pin that does not resolve ex
 - `varve docs config-reference` — every file and every field
 - `varve docs own-realm` — run your own trust universe rather than consuming this one
 - `varve docs air-gap` — no network, ever
+
+> `varve status` exits 1 with `no line-status document cached for line …` when
+> the layout you installed from carries no signed advisory baseline. That is a
+> missing document, not a problem with your layer; `varve verify` is the
+> integrity check.
