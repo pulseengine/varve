@@ -14,6 +14,18 @@ annotations and the upload succeeds while every consumer fails to read it.
 This is what varve's own release pipeline runs
 (`.github/workflows/deposit-layer.yml`), reduced to the parts you need:
 
+First, a prerequisite the sequence below depends on: `varve deposit` does
+**not** attach a baseline line-status, and this push reads one. Attach it to the
+layout before pushing, or `STATUS_DIGEST` resolves to `null` and both the blob
+push and the manifest build fail on a nonexistent path:
+
+```sh
+varve sign-status --file status.json --key root.key --out status.dsse
+varve attach-status --status status.dsse --layout ./layout
+```
+
+Then:
+
 ```sh
 oras login ghcr.io -u "$USER" --password-stdin <<< "$TOKEN"
 REPO=ghcr.io/your-org/layers

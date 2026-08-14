@@ -1713,3 +1713,216 @@ artifacts:
         target: REQ-DEPLOY-001
       - type: verifies
         target: REQ-PRODUCE-002
+
+  - id: VER-DOCS-002
+    type: verification
+    title: The docs teach the FILES and TASKS — verified against the facts, not topic presence
+    status: verified
+    release: v0.25.0
+    tags: [docs]
+    fields:
+      method: test
+      baseline: >
+        Each test checks a FACT the requirement names, and each was confirmed
+        to fail by mutation. Removing `manifest-version` from
+        config-reference, renaming VARVE_ROOT in environment, and gutting
+        getting-started to prose each fail a named test. The published-key test
+        exists because an independent review found this release teaching a
+        FABRICATED 64-hex value labelled as the real rolling.pub, in the topic
+        whose first line reads "Every file here is literal — copy it": a user
+        who copied it got "No valid signatures". The earlier elision
+        `trust-root = "83a699…"` had been "fixed" by padding the placeholder
+        until the PARSER accepted it, which is how a shape check certifies a
+        false fact. The published root is a fact, so the test compares against
+        trust-roots/rolling.pub — the file the release actually ships.
+      evidence:
+        - run: cargo test -p varve --bin varve the_docs_teach_the_facts_a_user_is_rejected_for_not_knowing
+        - run: cargo test -p varve --bin varve the_task_topics_walk_a_user_through_a_sequence
+        # composition and threat-model previously had NO content assertion
+        # anywhere: reduced to a title plus filler, every gate stayed green.
+        - run: cargo test -p varve --bin varve the_two_flagship_topics_teach_their_feature_not_just_its_name
+        - run: cargo test -p varve --bin varve a_topic_showing_the_published_realm_shows_the_published_key
+    links:
+      - type: verifies
+        target: REQ-DOCS-002
+
+  - id: VER-DOCS-003
+    type: verification
+    title: The docs gate checks what the docs teach — and can itself fail
+    status: verified
+    release: v0.25.0
+    tags: [docs, traceability]
+    fields:
+      method: test
+      baseline: >
+        Three successive weaknesses, each found by a reviewer and each closed
+        by a test that fails on the reviewer's own mutant.
+        (1) The gate asserted a topic EXISTS. Restoring the shipped
+        `known-problems`-as-strings defect now fails
+        `every_documented_file_example_parses_with_the_real_parser`, which
+        parses fenced blocks with the SHIPPING parsers — Pin::parse,
+        realm_names + resolve_realm, parse_deposit_spec, LineStatus.
+        (2) That parser gate reached 12 of 35 blocks. A review appended a
+        varve.toml MISSING manifest-version — the exact defect REQ-DOCS-002
+        exists to fix — and it was skipped because the classifier keyed on the
+        very field being tested. It now keys on `[toolchain]`, refuses any
+        unclassified toml/json block, and a companion test checks every
+        `varve <sub>` in all 19 shell blocks against the real clap subcommand
+        list (the review's `varve frobnicate` now fails by name).
+        (3) An EMPTY fence satisfied "carries a worked example", and both gate
+        functions could be neutered to `return Vec::new()` with the whole suite
+        green — the vacuous-gate shape. The check now requires a fence with
+        content, and `the_gate_detects_a_broken_topic_set_not_merely_a_healthy_one`
+        hands the functions a set it KNOWS is broken, so a gate that stops
+        looking fails instead of passing quietly.
+      evidence:
+        - run: cargo test -p varve --bin varve every_documented_file_example_parses_with_the_real_parser
+        - run: cargo test -p varve --bin varve every_documented_command_is_a_real_command
+        - run: cargo test -p varve --bin varve the_gate_detects_a_broken_topic_set_not_merely_a_healthy_one
+        - run: cargo test -p varve --bin varve the_workflow_topics_exist
+        - run: cargo test -p varve --bin varve topics_a_user_must_act_on_show_a_worked_example
+    links:
+      - type: verifies
+        target: REQ-DOCS-003
+
+  - id: VER-DOCS-004
+    type: verification
+    title: Recovery and adapter selection — the two paths the persona audit left open
+    status: verified
+    release: v0.25.0
+    tags: [docs, ergonomics]
+    fields:
+      method: test
+      baseline: >
+        The recovery topic's factual claims were established by RUNNING them,
+        not by repeating the persona's assumption. The persona believed
+        anti-rollback refused the repair; it does not — an equal counter is not
+        a regression, so `varve install --from` repairs a corrupted layer.json
+        in place. The refused case is going BACKWARDS, and there is no
+        `--force`. An independent reviewer re-ran all three and reproduced the
+        rollback error character-for-character, including the realm-partitioned
+        state path.
+        `concept-payload-kinds.md` claimed "the kind selects which export
+        adapter applies", false in both directions: export-bazel ignores kind
+        and keys on `platform` plus `[tool.source]` — named in no topic and no
+        --help — while three adapters share `kind = "crate"`.
+      evidence:
+        - run: cargo test -p varve --bin varve the_recovery_topic_states_what_repairs_and_what_is_refused
+        - run: cargo test -p varve --bin varve the_adapter_topic_names_every_adapter_and_what_selects_it
+        - run: cargo test -p varve --bin varve the_workflow_topics_exist
+    links:
+      - type: verifies
+        target: REQ-DOCS-004
+
+  - id: VER-LAYOUT-001
+    type: verification
+    title: A deposited layout is addressable by tag
+    status: verified
+    release: v0.25.0
+    tags: [distribution]
+    fields:
+      method: test
+      baseline: >
+        Deleting `REF_NAME: layer_name` from write_oci_layout fails
+        export_writes_a_standard_oci_image_layout, which asserts the tag
+        resolves to the LAYER MANIFEST rather than the envelope. Confirmed live
+        on both paths — `varve deposit --out ./layout` writes
+        "org.opencontainers.image.ref.name": "2026.08.0".
+        The "purely additive" claim was checked by an independent reviewer
+        rather than asserted: re-depositing identical inputs with and without
+        the annotation produced byte-identical blob trees and an identical
+        layer digest, install succeeded both ways, and every index.json reader
+        (OciLayoutSource::fetch_manifest, linestatus::{attach_envelope_to_layout,
+        read_any_from_layout, read_from_layout, layout_line}) keys on
+        artifactType or a eu.pulseengine.varve.* annotation, so none can be
+        perturbed. CONFIRMED.
+        Scope stated honestly: no CI job runs a real OCI client, so "resolves
+        in any OCI client" rests on the annotation being the standard one, not
+        on an executed `oras cp`. Tracked in issue #62.
+      evidence:
+        - run: cargo test -p varve-core export_writes_a_standard_oci_image_layout
+    links:
+      - type: verifies
+        target: REQ-LAYOUT-001
+
+  - id: VER-REVIEW-v0.25.0
+    type: verification
+    title: v0.25.0 independently reviewed — DISSENT, including a fabricated trust root
+    status: verified
+    release: v0.25.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed),
+        2026-08-14, at HEAD d99529c. VERDICT DISSENT — the eighth consecutive
+        review to dissent and the eighth to be right. 9 of 15 shall-clauses
+        unsupported. All findings accepted; all fixed.
+        FINDING A, the worst, and the reason this review paid for itself:
+        `concept-getting-started.md` taught
+        `trust-root = "83a6991d…"` LABELLED as "the published rolling.pub", in
+        the topic whose first line reads "Every file here is literal — copy
+        it". The real published root is 4e771dc6…. A user who copied it got
+        "manifest signature verification failed … No valid signatures". The
+        same fabricated value appeared under `[realm.pulseengine]` in
+        config-reference and realms, alongside the REAL registry URL. Its
+        origin: 83a699 is the prefix of the LAYER DIGEST, misused as a key.
+        The compounding failure is the important part. An earlier gate had
+        caught the elided `trust-root = "83a699…"` as "not 64 hex", and the
+        remedy was to PAD THE PLACEHOLDER until the parser accepted it — a
+        shape check certifying a false fact. A published key is a fact, so it
+        is now compared against trust-roots/rolling.pub, the file the release
+        ships. The full getting-started transcript was then run from the
+        topic's literal files against the real registry: install, verify (9
+        tools), which, list — all green.
+        FINDING 0: all four requirements were `status: verified` with NO
+        verification artifact — graph orphans — while `rivet check
+        verification-evidence` printed 195 named steps green, vacuously,
+        because none belonged to them. This is the identified failure mode in a
+        STRONGER form than the four prior releases: previously the cited tests
+        tested the wrong function; here nothing was cited at all. VER-DOCS-002,
+        -003, -004 and VER-LAYOUT-001 now exist.
+        GATE WEAKNESSES, each proven by mutation and each now closed: an EMPTY
+        fence satisfied "carries a worked example" (four topics stubbed to a
+        title plus ```sh with nothing in it, gate exit 0); `composition` and
+        `threat-model` had no content assertion anywhere; the parse gate
+        reached 12 of 35 blocks and skipped a varve.toml missing
+        `manifest-version` because it keyed on the very field under test; all
+        19 shell blocks were unchecked, so `varve frobnicate --nonexistent-flag`
+        passed; and both gate functions could be neutered to `return
+        Vec::new()` with the whole suite green — the vacuous-gate shape, since
+        both tests only ever asserted emptiness.
+        DOC DEFECTS: the deploy push sequence fails on a `null` status digest
+        because `deposit` attaches no line-status and `attach-status` was an
+        unstated prerequisite; README's `varve archive 2026.07 core.tar` was
+        wrong on both arguments (a line, not a layer; a tar, not a directory);
+        a `sha256 = "…"` elision survived in a copy-pasteable block; CHANGELOG
+        was twelve releases stale.
+        CONFIRMED by the reviewer against the running binary: REQ-LAYOUT-001's
+        "purely additive" claim (byte-identical blob trees and layer digests,
+        every index.json reader keys on other fields); the recovery topic's
+        three factual claims, reproduced character-for-character; the own-realm
+        and composition transcripts end to end; the environment precedence
+        rules; the known-problems schema; the arg-prefix dispatch order. No
+        regressions found.
+        SCOPE STATED, NOT CLOSED: no CI job runs a real OCI client, so
+        REQ-LAYOUT-001's "resolves in any OCI client" rests on the annotation
+        being the standard one. The reviewer also flagged that the DSSE
+        envelope is a sibling index entry rather than referenced from the
+        tagged manifest, so a tag-scoped `oras cp` may drop the signature.
+        Both are issue #62 — not claimed as verified here.
+      evidence:
+        - run: cargo test -p varve --bin varve a_topic_showing_the_published_realm_shows_the_published_key
+        - run: cargo test -p varve --bin varve the_gate_detects_a_broken_topic_set_not_merely_a_healthy_one
+        - run: cargo test -p varve --bin varve every_documented_command_is_a_real_command
+        - run: cargo test -p varve --bin varve every_documented_file_example_parses_with_the_real_parser
+        - run: cargo test -p varve --bin varve the_two_flagship_topics_teach_their_feature_not_just_its_name
+    links:
+      - type: verifies
+        target: REQ-DOCS-002
+      - type: verifies
+        target: REQ-DOCS-003
+      - type: verifies
+        target: REQ-DOCS-004
+      - type: verifies
+        target: REQ-LAYOUT-001

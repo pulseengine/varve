@@ -9,7 +9,7 @@ layer signed by one realm's root will not verify under another. The canonical
 ```toml
 [realm.pulseengine]
 registry        = "oci://ghcr.io/pulseengine/varve/layers"
-trust-root      = "83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"
+trust-root      = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
 # trust-root-file = "./roots/pe.pub"   # or a key file, relative to this one
 ```
 

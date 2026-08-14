@@ -23,7 +23,7 @@ manifest-version = 1
 realm   = "pulseengine"
 channel = "qualified"
 layer   = "2026.08.2"
-digest  = "sha256:83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"      # optional; wins over the name when present
+digest  = "sha256:83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"   # example; `varve list` prints the real one
 tools   = ["rivet", "synth"]    # optional; a subset, plain names only
 ```
 

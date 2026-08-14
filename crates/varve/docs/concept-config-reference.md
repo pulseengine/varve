@@ -13,7 +13,8 @@ manifest-version = 1          # required; only 1 exists
 realm   = "pulseengine"       # optional; names the trust universe (see realms)
 channel = "qualified"         # required; `qualified` or `rolling`, nothing else
 layer   = "2026.08.2"         # required; always YYYY.MM.P, three parts
-digest  = "sha256:83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"    # optional; when present it WINS over the name
+digest  = "sha256:83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"   # EXAMPLE — `varve list` prints yours
+# when present, the digest WINS over the layer name
 tools   = ["rivet", "synth"]  # optional; restrict to a subset of the layer
 ```
 
@@ -26,7 +27,7 @@ Alongside the pin, found by the same upward walk. Nearest wins; definitions are 
 ```toml
 [realm.pulseengine]
 registry        = "oci://ghcr.io/pulseengine/varve/layers"   # required
-trust-root      = "83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"
+trust-root      = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
 # or, instead of an inline key:
 # trust-root-file = "./roots/pulseengine.pub"
 ```
@@ -53,7 +54,7 @@ kind     = "tool"              # tool | crate | wit | zephyr-module | sdk | wasm
 repo    = "pulseengine/rivet"
 release = "v0.32.0"
 asset   = "rivet-v0.32.0-x86_64-unknown-linux-gnu.tar.gz"
-sha256  = "…"
+sha256  = "9f2c1d8e5a3b7c04e6d9128f3a5b7c0d4e6f8a2b5c7d9e1f3a5b7c9d1e3f5a70"
 
 [[include]]                    # optional; compose another layer
 digest = "sha256:8b65864f2d9c7a3e1b5f8d2c6a9e4b7d3f1c8a5e2b9d6c3f7a4e1b8d5c2f9a6e"

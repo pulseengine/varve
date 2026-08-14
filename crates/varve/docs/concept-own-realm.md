@@ -30,7 +30,8 @@ Or `--spec` for anything non-trivial — see `varve docs config-reference`. varv
 ```toml
 [realm.acme]
 registry   = "oci://ghcr.io/acme/layers"
-trust-root = "83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"   # the contents of acme.pub
+trust-root = "c1d4e7a02b58f36c9e14d7a0b3f68c25e91a4d7b0c36f89e25a1d4b70c68f39a"
+# ^ EXAMPLE ONLY — paste the 64 characters your own acme.pub holds.
 ```
 
 ## 4. A consumer pins it

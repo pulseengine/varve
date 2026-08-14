@@ -99,7 +99,8 @@ varve install                      # resolve this project's pin, fetch, verify, 
 varve verify                       # re-check an installed layer against its signature
 varve which synth                  # which binary runs here — and which layer it came from
 varve list                         # layers present locally, and which projects pin them
-varve archive 2026.07 core.tar     # extract the core: the offline artifact of record
+varve archive 2026.07.0 ./core     # extract one layer to a DIRECTORY: the offline
+                                   #      artifact of record
 varve run --varve 2026.09 -- synth # one-off, without editing the pin
 varve deposit                      # (CI) assemble and sign a layer, locally — see
                                    #      `varve docs deploy` to publish it
