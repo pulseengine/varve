@@ -386,6 +386,59 @@ mod tests {
         assert!(resolve(&qualified_pin("2026.07.0"), &store).is_ok());
     }
 
+    // rivet: verifies REQ-CHANNEL-001
+    #[test]
+    fn the_channel_refusal_names_both_channels_and_what_they_cost() {
+        // An independent review replaced the whole #[error(...)] with the text
+        // "channel mismatch" and the entire workspace suite stayed GREEN: the
+        // existing tests assert the struct's FIELDS and never render the
+        // message a user actually reads. The clause is that the error names
+        // both channels AND what each means, so the test renders it.
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &fixtures::manifest("2026.07.0", "rolling"),
+                &[("synth", b"s")],
+            )
+            .unwrap();
+        let msg = resolve(&qualified_pin("2026.07.0"), &store)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("rolling"), "names what is installed: {msg}");
+        assert!(msg.contains("qualified"), "names what is pinned: {msg}");
+        // …and why the difference is the point, not a label mismatch.
+        assert!(
+            msg.contains("support window"),
+            "says what qualified carries: {msg}"
+        );
+        assert!(
+            msg.contains("qualification evidence"),
+            "says what rolling lacks: {msg}"
+        );
+    }
+
+    // rivet: verifies REQ-CHANNEL-001
+    #[test]
+    fn a_layer_predating_channel_annotations_is_not_refused() {
+        // Deleting `!layer.channel.is_empty() &&` from the guard left the whole
+        // suite green, because every fixture in the workspace writes a channel.
+        // Without the exemption, every layer deposited before channels existed
+        // becomes unresolvable — a silent break of installed toolchains.
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &fixtures::manifest_without_channel("2026.07.0"),
+                &[("synth", b"s")],
+            )
+            .unwrap();
+        let resolved = resolve(&qualified_pin("2026.07.0"), &store);
+        assert!(
+            resolved.is_ok(),
+            "a layer that states no channel contradicts no pin: {:?}",
+            resolved.err()
+        );
+    }
+
     // rivet: verifies REQ-COMPOSE-001
     #[test]
     fn resolve_returns_the_composed_layers_tools() {

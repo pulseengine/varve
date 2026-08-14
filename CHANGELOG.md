@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.25.0 — 2026-08-14
+
+The documentation release. Two ten-persona audits reached the same verdict:
+varve documented its CONCEPTS and its COMMANDS, and neither its FILES nor its
+TASKS — 10 of 10 personas reverse-engineered at least one file format by
+feeding bogus input to serde, and several said the parse errors were the best
+documentation in the product.
+
+- Six new topics — `getting-started`, `config-reference`, `environment`,
+  `own-realm`, `composition`, `threat-model` — each with copy-pasteable
+  examples rather than prose, plus `recovery` (repair, deliberate rollback and
+  its cost, removal, re-keying, reset). `manifest-version` was required and
+  appeared in no topic; `kind = "crate"` — how a crate is deposited — was
+  documented nowhere, which made three of four export adapters unexercisable
+  outside the project
+- `concept-payload-kinds.md` claimed "the kind selects which export adapter
+  applies", false in both directions; replaced with a consumer-to-adapter table
+- **REQ-LAYOUT-001**: the emitted `index.json` now carries
+  `org.opencontainers.image.ref.name`, so `oras cp --from-oci-layout
+  ./layout:<layer>` resolves. Purely additive — verified byte-identical blob
+  trees and layer digests
+- The docs gate now checks what the docs must TEACH: workflow topics must
+  exist, act-on topics must carry a **non-empty** fence, every fenced block is
+  parsed with the SHIPPING parser, and every `varve <sub>` in a shell block is
+  checked against the real subcommand list
+- Persona audit: 0 of 9 blocked, from 5/10 two releases ago
+
+Fixed in review, and worth naming: a **fabricated trust root** was shipped in
+`getting-started` labelled as the published `rolling.pub`. A user copying it
+got "No valid signatures". The earlier elided form had been "fixed" by padding
+the placeholder until the parser accepted it — a shape check certifying a false
+fact. The published key is now compared against `trust-roots/rolling.pub`.
+
+## v0.14.0 – v0.24.0
+
+Not written up here at the time. Each release's substance is in its git tag,
+its release notes, and its rivet requirements (`rivet release status <ver>`);
+this file went eleven releases stale before the v0.25.0 review caught it.
+
 ## v0.13.1 — 2026-08-08
 
 Cold-start onboarding (REQ-ONBOARD-001) — fixes pulseengine/varve#34,

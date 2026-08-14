@@ -813,11 +813,50 @@ fn docs_cmd(
     // `varve docs check --coverage` (or --coverage) — the mechanical invariant.
     if coverage || topic == Some("check") {
         let gaps = docs::coverage_gaps(&Cli::command());
-        if gaps.is_empty() {
+        // Subcommand presence is not the whole contract. Two audits found the
+        // docs unusable for FILES and TASKS while this check reported green,
+        // because a file format is not a subcommand and neither is a task
+        // (REQ-DOCS-003).
+        let missing_topics = docs::missing_required_topics();
+        let bare_topics = docs::topics_without_examples();
+        if gaps.is_empty() && missing_topics.is_empty() && bare_topics.is_empty() {
             println!(
-                "docs coverage: OK — all {} subcommands have a topic",
-                Cli::command().get_subcommands().count()
+                "docs coverage: OK — {} subcommands documented, {} workflow topic(s) present, \
+                 {} topic(s) carry a worked example",
+                Cli::command().get_subcommands().count(),
+                docs::REQUIRED_TOPICS.len(),
+                docs::TOPICS_NEEDING_EXAMPLES.len()
             );
+            return Ok(());
+        }
+        if !missing_topics.is_empty() {
+            eprintln!(
+                "docs coverage: {} workflow topic(s) missing — a user cannot do the job \
+                 without them:",
+                missing_topics.len()
+            );
+            for m in &missing_topics {
+                eprintln!("  {m}");
+            }
+        }
+        if !bare_topics.is_empty() {
+            eprintln!(
+                "docs coverage: {} topic(s) must SHOW a literal example, not describe one:",
+                bare_topics.len()
+            );
+            for b in &bare_topics {
+                eprintln!("  {b}");
+            }
+        }
+        if gaps.is_empty() {
+            if strict {
+                bail!(
+                    "documentation gaps (REQ-DOCS-003): {} missing topic(s), {} without an \
+                     example",
+                    missing_topics.len(),
+                    bare_topics.len()
+                );
+            }
             return Ok(());
         }
         eprintln!("docs coverage: {} subcommand(s) undocumented:", gaps.len());
@@ -826,8 +865,18 @@ fn docs_cmd(
         }
         if strict {
             bail!(
-                "undocumented subcommands (REQ-DOCS-001): {}",
-                gaps.join(", ")
+                "undocumented subcommands (REQ-DOCS-001): {}{}",
+                gaps.join(", "),
+                if missing_topics.is_empty() && bare_topics.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " — plus {} missing workflow topic(s) and {} without an example \
+                         (REQ-DOCS-003)",
+                        missing_topics.len(),
+                        bare_topics.len()
+                    )
+                }
             );
         }
         return Ok(());
@@ -1757,10 +1806,12 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         if !missing.is_empty() {
             bail!(
                 "layer {} composes {} layer(s) that are not installed: {}.\n\
-                 Install each from its own source first — a composed layer names what it \
-                 needs by digest, but does not fetch it. For each, pin it in a project \
-                 (or point --from at the source that carries it) and run `varve install` \
-                 there, then re-run this install.",
+                 Install each first — a composed layer names what it needs by digest, \
+                 but does not fetch it. `install` resolves THIS project's pin, so \
+                 pointing --from at the other source is not enough: give the included \
+                 layer its own pin (a directory whose varve.toml names that realm, \
+                 channel and layer), run `varve install` there, then re-run this one. \
+                 Both land in the same store. See `varve docs composition`.",
                 outcome.layer,
                 missing.len(),
                 missing.join(", ")

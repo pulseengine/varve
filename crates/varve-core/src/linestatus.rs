@@ -823,6 +823,72 @@ mod tests {
         );
     }
 
+    // rivet: verifies REQ-PRODUCE-002
+    #[test]
+    fn attaching_a_stale_document_over_a_newer_one_is_refused() {
+        // An independent review deleted the Stale block from
+        // attach_envelope_to_layout and the whole workspace stayed green: the
+        // test cited as this clause's evidence exercises StatusCache::update, a
+        // DIFFERENT function, and the attach test above attaches exactly once.
+        // Unguarded, a re-run CI step downgrades a layout's baseline — shipping
+        // a pre-yank document that fresh consumers cache and are told "not
+        // yanked" about a YANKED layer.
+        use crate::deposit::{DepositSpec, DepositTool, deposit};
+        let (sk, _pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("layout");
+        deposit(
+            &DepositSpec {
+                includes: Vec::new(),
+                layer: "2026.07.0".parse().unwrap(),
+                channel: "qualified".into(),
+                counter: 1,
+                issued_at: "2026-08-07T00:00:00Z".into(),
+                tools: vec![DepositTool {
+                    name: "synth".into(),
+                    version: "1".into(),
+                    platform: None,
+                    bytes: b"t".to_vec(),
+                    source: None,
+                    runner: None,
+                    kind: None,
+                }],
+            },
+            &sk,
+            "k",
+            &dest,
+        )
+        .unwrap();
+
+        // The newer document lands…
+        attach_envelope_to_layout(&dest, status(7).sign(&sk, "k").unwrap().as_bytes()).unwrap();
+        // …and the older one is refused, naming both counters.
+        let err = attach_envelope_to_layout(&dest, status(3).sign(&sk, "k").unwrap().as_bytes())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LineStatusError::Stale {
+                    presented: 3,
+                    cached: 7,
+                    ..
+                }
+            ),
+            "a lower counter must be refused, got {err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains('3') && msg.contains('7'), "names both: {msg}");
+        // The layout still carries the NEWER document, not the stale one.
+        let carried = parse_unverified(&read_any_from_layout(&dest).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            carried.counter, 7,
+            "the newer baseline survives the attempt"
+        );
+        // Re-attaching the SAME counter is not a regression and is allowed —
+        // CI re-runs must stay idempotent.
+        attach_envelope_to_layout(&dest, status(7).sign(&sk, "k").unwrap().as_bytes()).unwrap();
+    }
+
     // rivet: verifies REQ-STATUS-DIST-001
     #[test]
     fn a_deposit_layouts_baseline_is_readable_without_naming_the_line() {

@@ -257,6 +257,24 @@ pub(crate) mod fixtures {
         )
         .into_bytes()
     }
+
+    /// A layer from before channel annotations existed. The resolver's channel
+    /// guard must exempt it: a pre-channel layer states no channel, so it
+    /// contradicts no pin.
+    pub fn manifest_without_channel(layer: &str) -> Vec<u8> {
+        format!(
+            r#"{{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "artifactType": "application/vnd.pulseengine.varve.layer.v1+json",
+  "annotations": {{
+    "eu.pulseengine.varve.layer": "{layer}"
+  }},
+  "manifests": []
+}}"#
+        )
+        .into_bytes()
+    }
 }
 
 #[cfg(test)]

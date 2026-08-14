@@ -23,6 +23,12 @@ pub const SIGNATURE_ARTIFACT_TYPE: &str = "application/vnd.pulseengine.varve.sig
 /// Annotation on the signature entry naming the manifest digest it signs.
 pub const ANN_SIGNS: &str = "eu.pulseengine.varve.signs";
 
+/// The standard OCI tag annotation. Every OCI client reads it to resolve
+/// `<layout>:<tag>`; without it a layout can only be addressed by digest, and
+/// `oras cp --from-oci-layout ./layout:2026.08.0` — the publish one-liner the
+/// deploy docs offer — cannot resolve at all.
+pub const REF_NAME: &str = "org.opencontainers.image.ref.name";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
     #[error("io error at {path}: {source}")]
@@ -130,6 +136,10 @@ pub(crate) fn write_oci_layout(
                 "digest": payload_digest,
                 "size": payload.len(),
                 "annotations": {
+                    // The standard OCI tag, so `oras cp --from-oci-layout
+                    // ./layout:<layer>` and every other client can address
+                    // this layout by name rather than by digest alone.
+                    REF_NAME: layer_name,
                     "eu.pulseengine.varve.layer": layer_name,
                     "eu.pulseengine.varve.channel": channel,
                 }
@@ -309,6 +319,7 @@ mod tests {
     // rivet: verifies REQ-OFFLINE-001
     #[test]
     fn export_writes_a_standard_oci_image_layout() {
+        // rivet: verifies REQ-LAYOUT-001
         let (tmp, store, layer, _verifier, payload) = installed();
         let dest = tmp.path().join("archive");
         export(&store, &layer, &dest).unwrap();
@@ -323,6 +334,26 @@ mod tests {
         let hex = payload_digest.strip_prefix("sha256:").unwrap();
         let manifest_blob = dest.join("blobs/sha256").join(hex);
         assert_eq!(std::fs::read(&manifest_blob).unwrap(), payload);
+
+        // The layout is addressable by tag. A ten-persona audit graded the
+        // platform engineer's whole job BLOCKED here: `oras cp
+        // --from-oci-layout ./layout:2026.08.0` — the one-line publish the
+        // docs offered — cannot resolve a layout whose index carries no
+        // org.opencontainers.image.ref.name, and every OCI client uses that
+        // annotation as the tag.
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dest.join("index.json")).unwrap()).unwrap();
+        let tagged = index["manifests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["annotations"][REF_NAME] == "2026.07.0")
+            .expect("the layer manifest must be tagged with the layer id");
+        assert_eq!(
+            tagged["digest"],
+            manifest_digest(&payload).as_str(),
+            "the tag must point at the layer manifest, not the envelope"
+        );
 
         // index.json references the manifest and the signature blob.
         let index: serde_json::Value =

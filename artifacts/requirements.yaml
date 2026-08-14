@@ -2264,3 +2264,112 @@ artifacts:
     fields:
       priority: should
       category: functional
+
+  - id: REQ-LAYOUT-001
+    type: requirement
+    title: A deposited layout is addressable by tag, not only by digest
+    status: verified
+    release: v0.25.0
+    description: >
+      A ten-persona documentation audit graded the platform engineer's entire
+      job BLOCKED on one line. `varve docs deploy` offered
+      `oras cp --from-oci-layout ./layout:2026.08.0 "$REPO:2026.08.0"` as the
+      short publish form, and it cannot resolve: the index varve writes carries
+      no `org.opencontainers.image.ref.name`, which is the annotation every OCI
+      client uses as the tag. The layout was addressable by digest alone, so
+      the documented one-liner failed for a reason no error explained.
+      varve shall annotate the layer manifest in the emitted `index.json` with
+      the standard `org.opencontainers.image.ref.name` set to the layer id, so
+      `<layout>:<layer>` resolves in any OCI client. This is a purely additive
+      annotation: it changes no digest, no signature and no verification, since
+      the index is not signed and the payload is unchanged.
+    tags: [distribution, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-DOCS-004
+    type: requirement
+    title: The docs answer recovery and adapter selection
+    status: verified
+    release: v0.25.0
+    description: >
+      Two paths survived the audit that added the workflow chapters. The
+      hostile tester was BLOCKED: a store that fails to read had no documented
+      way out, no `uninstall`/`repair`/`gc` exists, and the fix every message
+      suggested was `varve install` — which they believed anti-rollback would
+      refuse. Running it proves otherwise: an EQUAL counter is not a
+      regression, so re-installing repairs in place, and the genuinely refused
+      case is going BACKWARDS. The docs stated neither.
+      Separately, `concept-payload-kinds.md` asserted "the kind selects which
+      export adapter applies", which is false in both directions:
+      `export-bazel` ignores kind entirely and keys on `platform` plus
+      `[tool.source]`, both set at deposit time and named in no topic, while
+      three adapters share `kind = "crate"`. A build engineer whose whole brief
+      is choosing an adapter was misdirected by the one topic that addresses it.
+      varve shall carry a `recovery` topic — repair, deliberate rollback and
+      its cost, removal, re-keying, and reset — and shall replace the false
+      selection sentence with a consumer-to-adapter table naming each adapter's
+      output and the entries it takes.
+    tags: [docs, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-DOCS-002
+    type: requirement
+    title: The docs teach the FILES a user writes and the TASKS they perform
+    status: verified
+    release: v0.25.0
+    description: >
+      Two ten-persona audits reached the same verdict: "varve documents its
+      CONCEPTS and its COMMANDS, and documents neither its FILES nor its TASKS."
+      All 26 subcommands have a topic and the coverage gate reports green, while
+      10 of 10 personas reverse-engineered at least one file format by feeding
+      deliberately-bogus input to serde and reading `expected one of …`. Several
+      said the parse errors are the best documentation in the product.
+      Every file a user must author by hand — `varve.toml`, `varve-realms.toml`,
+      the deposit `--spec` TOML, the line-status JSON — has its schema in ZERO
+      topics. `manifest-version` is required and appears in no topic at all, so
+      a pin written strictly from the docs is rejected. `kind = "crate"` on a
+      `[[tool]]` table is how a crate is deposited and is documented nowhere,
+      which makes three of four export adapters unexercisable by anyone outside
+      the project. `VARVE_ROOT` returns "no topic matches".
+      There is no task-shaped topic anywhere: no getting-started, no own-realm
+      walkthrough, no composition chapter. The three flagship features of the
+      last releases therefore ship with no entry point.
+      varve shall add topics covering the files (`config-reference`), the
+      environment (`environment`), the first five minutes (`getting-started`),
+      standing up your own realm end to end (`own-realm`), composition, and what
+      verification does NOT prove (`threat-model` — the README defers twice to
+      SECURITY.md, which is outside the air-gap-safe embedded docs, so the
+      reviewer who most needs it is the one who cannot read it). Each shall
+      contain a literal, copy-pasteable example rather than prose description.
+    tags: [docs, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-DOCS-003
+    type: requirement
+    title: The docs gate checks what the docs must teach, not that a file exists
+    status: verified
+    release: v0.25.0
+    description: >
+      `varve docs check --coverage` asserts one topic per subcommand. It
+      reported GREEN through every finding of both audits, because the gaps are
+      not subcommand-shaped: four required file formats are not subcommands, a
+      task is not a subcommand, and an environment variable is not a subcommand.
+      The audit's words: "the gate is not merely weak; it actively certifies the
+      hole."
+      A topic can also exist and teach nothing — eight topic files are under 30
+      words. varve shall therefore extend its own gate: the workflow topics
+      REQ-DOCS-002 names must exist, and the topics a user must ACT on
+      (`getting-started`, `config-reference`, `own-realm`, `deploy`, `deposit`,
+      `realms`, `pins`, `air-gap`) must each carry a fenced code example. Both
+      checks run under `--strict` in CI, so a topic that stops teaching fails
+      the build exactly as an undocumented subcommand already does.
+    tags: [docs, traceability]
+    fields:
+      priority: must
+      category: functional

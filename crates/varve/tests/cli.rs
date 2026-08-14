@@ -485,6 +485,65 @@ fn verify_refuses_a_composition_whose_included_layer_is_unsigned() {
         );
 }
 
+// rivet: verifies REQ-PRODUCE-002
+#[test]
+fn install_refuses_a_composition_whose_include_is_not_installed() {
+    // An independent review changed the guard to `if false && !missing…` and
+    // the whole suite stayed green: the test cited as this clause's evidence
+    // contains no composition at all, and the one composition CLI test
+    // exercises `which`, not `install`. Unguarded, install exits 0 on a
+    // composition `verify` rejects, and `run` then executes a tool from an
+    // unverified included layer.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let tool_bytes = b"synth-bytes";
+    let blob = varve_core::manifest_digest(tool_bytes);
+    // An include that names a realm and a layer, and is NOT installed anywhere.
+    let payload = format!(
+        r#"{{
+  "schemaVersion":2,
+  "mediaType":"application/vnd.oci.image.index.v1+json",
+  "artifactType":"application/vnd.pulseengine.varve.layer.v1+json",
+  "annotations":{{"eu.pulseengine.varve.layer":"2026.07.0",
+    "eu.pulseengine.varve.line":"2026.07",
+    "eu.pulseengine.varve.channel":"qualified",
+    "eu.pulseengine.varve.counter":"1",
+    "org.opencontainers.image.created":"2026-07-31T09:14:00Z"}},
+  "manifests":[
+    {{"mediaType":"application/octet-stream","digest":"{blob}","size":{size},
+      "annotations":{{"eu.pulseengine.tool":"synth"}}}},
+    {{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":0,
+      "annotations":{{"eu.pulseengine.varve.kind":"layer",
+        "eu.pulseengine.varve.include.realm":"bytecodealliance",
+        "eu.pulseengine.varve.include.layer":"2026.05.0"}}}}
+  ]
+}}"#,
+        size = tool_bytes.len()
+    );
+    let envelope = varve_core::sign_layer_manifest(payload.as_bytes(), &sk, "test-root").unwrap();
+    let archive = fx.project.parent().unwrap().join("missing-include-archive");
+    varve_core::DirSource::at(&archive)
+        .put(envelope.as_bytes(), &[(blob.as_str(), tool_bytes)])
+        .unwrap();
+    let root = fx.project.parent().unwrap().join("mi-root.pub");
+    std::fs::write(&root, hex::encode(&pk)).unwrap();
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root)
+        .args(["install", "--from"])
+        .arg(&archive)
+        .assert()
+        .failure()
+        // names the missing layer…
+        .stderr(predicate::str::contains("2026.05.0"))
+        // …and the realm it must come from, which is the whole point: the same
+        // layer id under another realm is a different layer…
+        .stderr(predicate::str::contains("bytecodealliance"))
+        // …and how to get it. `varve install` alone takes no layer or digest,
+        // so advice naming only that is a no-op loop.
+        .stderr(predicate::str::contains("varve.toml"));
+}
+
 // rivet: verifies REQ-COMPOSE-001
 #[test]
 fn a_composed_layer_that_is_not_installed_names_itself() {
@@ -1408,6 +1467,91 @@ fn deposit_a_crate_kind_entry_and_export_a_cargo_registry() {
     assert!(
         idx.contains(r#""cksum":"#) && idx.contains(r#""vers":"0.1.0""#),
         "{idx}"
+    );
+}
+
+// rivet: verifies REQ-PRODUCE-002
+#[test]
+fn a_relative_out_still_yields_an_absolute_path_in_the_generated_config() {
+    // An independent review made absolute_export_dir return its argument
+    // verbatim and the whole suite stayed GREEN: every export test passes an
+    // ABSOLUTE --out, so the bug was unreachable from the suite that was cited
+    // as its evidence. The generated .cargo/config.toml is meant to be COPIED
+    // into a project and read from a different working directory, so a relative
+    // path there is a build that fails while varve printed instructions saying
+    // it would work. This test passes a RELATIVE --out, as a user does.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    let crate_bytes = b"fake-but-signed-crate-bytes".to_vec();
+    let crate_path = parent.join("demo-crate-0.1.0.crate");
+    std::fs::write(&crate_path, &crate_bytes).unwrap();
+    let spec = parent.join("spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"demo-crate\"\nversion = \"0.1.0\"\nkind = \"crate\"\n\
+             path = \"{}\"\n",
+            crate_path.display()
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "k", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    // The user's own working directory, and a RELATIVE --out inside it.
+    let workdir = parent.join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+    varve(&fx)
+        .current_dir(&workdir)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args([
+            "export-cargo",
+            "--layer",
+            "2026.07.0",
+            "--out",
+            "./cargo-out",
+        ])
+        .assert()
+        .success();
+
+    let config = std::fs::read_to_string(workdir.join("cargo-out/.cargo/config.toml")).unwrap();
+    let registry_line = config
+        .lines()
+        .find(|l| l.contains("local-registry"))
+        .unwrap_or_else(|| panic!("no local-registry in:\n{config}"));
+    let path = registry_line
+        .split('"')
+        .nth(1)
+        .unwrap_or_else(|| panic!("unquoted path: {registry_line}"));
+    assert!(
+        std::path::Path::new(path).is_absolute(),
+        "a config meant to be copied into another directory must not carry a \
+         relative path: {registry_line}"
+    );
+    assert!(
+        !path.starts_with("./") && !path.contains("/./"),
+        "the path must be resolved, not merely prefixed: {registry_line}"
     );
 }
 

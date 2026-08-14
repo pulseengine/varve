@@ -7,3 +7,31 @@ exports produce local, offline-consumable byte sources; and the trust root is
 pinned, not fetched. A varve operation must never REQUIRE reaching a public API.
 This is the core thesis: a phone-home that fails on a network blip is exactly
 the fragility varve exists to remove.
+
+## The whole workflow, with commands
+
+On a connected machine:
+
+```sh
+varve install                       # get the layer normally
+varve archive 2026.08.2 ./core      # write the offline artifact of record
+```
+
+`archive` requires the layer to be INSTALLED, and one directory holds exactly one layer. Carry `./core` across on whatever media you use.
+
+Inside the gap:
+
+```sh
+varve install --from ./core         # same verification, no network
+varve verify                        # the install-time verdict, repeated
+```
+
+Verification is identical on both sides because it depends on the signature and the pinned root, not on the transport. Nothing here contacts a registry or a transparency log.
+
+Advisories cross the gap as files too:
+
+```sh
+varve status --from-file ./line-status.dsse
+```
+
+What still needs care: `varve self-update` reaches a public API by default (set `VARVE_UPDATE_API` at a mirror), and a realm definition requires a `registry` field even when you never contact one — a placeholder is fine.
