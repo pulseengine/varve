@@ -1639,18 +1639,25 @@ fn verify(
 /// never claimed to cover every dependency.
 fn verify_lockfile(ctx: &ProjectCtx, path: &std::path::Path) -> anyhow::Result<()> {
     let resolved = varve_core::resolve(&ctx.pin, &ctx.store)?;
-    // A layer with no crate entries pins nothing to disagree with — but ONLY
-    // that case may pass quietly. An earlier version mapped EVERY error here to
-    // "pins no crates", so a single foreign-platform crate entry silently
-    // disabled the whole gate and CI went green over a real disagreement
-    // (found by clean-room review). Failing open is the worst possible answer
-    // for a gate, so every other error propagates.
+    // READ THE LOCKFILE FIRST. An earlier version checked the layer's crates
+    // before opening the file, so `--lockfile /does/not/exist` printed
+    // "pins no crates — nothing to check" and exited 0 — naming a path it had
+    // never opened. A gate that cannot fail is not a gate, and this one is sold
+    // as the CI check for REQ-LOCKPIN-001.
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read lockfile {}", path.display()))?;
+    let locked = varve_core::lockpin::parse_lockfile(&text, &path.display().to_string())?;
+
+    // Only a layer that genuinely pins nothing may pass quietly, and it says
+    // plainly that the check asserted nothing rather than implying agreement.
     let crates = match collect_verified_crates(&ctx.store, &resolved.layer) {
         Ok(c) => c,
         Err(e) if e.to_string().contains("carries no `crate` entries") => {
             println!(
-                "lockfile {}: layer {} pins no crates — nothing to check",
+                "lockfile {}: parsed {} package(s); layer {} pins no crates, so this check \
+                 asserted nothing",
                 path.display(),
+                locked.len(),
                 resolved.layer.layer
             );
             return Ok(());
@@ -1662,9 +1669,6 @@ fn verify_lockfile(ctx: &ProjectCtx, path: &std::path::Path) -> anyhow::Result<(
             );
         }
     };
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("cannot read lockfile {}", path.display()))?;
-    let locked = varve_core::lockpin::parse_lockfile(&text, &path.display().to_string())?;
     let found = varve_core::lockpin::disagreements(&crates, &locked);
     if found.is_empty() {
         println!(

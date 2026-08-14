@@ -5,11 +5,15 @@
 name: Fuzz
 
 on:
+  # NO `paths:` filter, deliberately. These five checks are REQUIRED to merge
+  # (all 14 CI contexts were made required in v0.20.0), and GitHub treats a
+  # required check that never reports as permanently pending — so a
+  # path-filtered required workflow deadlocks any PR outside its filter. That
+  # happened: the first PR that touched only crates/varve/ could not be merged
+  # at all. Requiring a check and conditioning it on paths are incompatible;
+  # this keeps the requirement and drops the condition (~60s per target, run in
+  # parallel).
   pull_request:
-    paths:
-      - "crates/varve-core/**"
-      - "fuzz/**"
-      - ".github/workflows/fuzz.yml"
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:

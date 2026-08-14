@@ -1369,6 +1369,9 @@ artifacts:
         # Failing OPEN on an unreadable lockfile would be the worst answer.
         - run: cargo test -p varve-core a_malformed_lockfile_is_an_error_not_a_silent_pass
         - run: cargo test -p varve --test cli verify_lockfile_fails_when_a_pinned_crate_disagrees
+        # The gate must not pass on a file it never opened. A docs audit found
+        # it exiting 0 on a nonexistent path, naming it in the output.
+        - run: cargo test -p varve --test cli verify_lockfile_refuses_a_file_it_could_not_read
     links:
       - type: verifies
         target: REQ-LOCKPIN-001

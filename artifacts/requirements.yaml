@@ -1575,7 +1575,7 @@ artifacts:
     type: requirement
     title: The realm authenticates the line index, not only each artifact
     status: approved
-    release: v0.24.0
+    release: v0.26.0
     description: >
       varve signs individual layer manifests and realms, but the LISTING of
       which layers exist for a line (the index a consumer enumerates) must
@@ -1644,7 +1644,7 @@ artifacts:
     type: requirement
     title: A layer transports its attestations as OCI referrers, and verify reports them
     status: approved
-    release: v0.24.0
+    release: v0.26.0
     description: >
       The transport half split out of REQ-ATTEST-001 when review found that
       requirement marked verified while this half was unimplemented. Binding
