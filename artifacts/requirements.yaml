@@ -1829,6 +1829,13 @@ artifacts:
       cadence. For the same reason a source that drops attestations does not
       make a correctly-signed layer uninstallable — the loss is reported, never
       silent.
+      Registry carriage landed after the rest: `RegistrySource::fetch_attestations`
+      surfaces `attestation-statement` / `attestation-bytes` referrers, paired
+      by the `eu.pulseengine.varve.attests` annotation rather than by position,
+      for both a named and a digest pin. Until it existed an `oci://` install
+      carried nothing — varve's most-used transport reproducing the exact
+      mirror-boundary loss this requirement exists to close.
+
       Corrected during implementation. The original text also required
       attestations "attached to ... an OCI registry as referrer artifacts". varve
       attaches nothing to a registry and shall not: it runs no server and pushes

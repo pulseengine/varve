@@ -1926,3 +1926,90 @@ artifacts:
         target: REQ-DOCS-004
       - type: verifies
         target: REQ-LAYOUT-001
+
+  - id: VER-INDEXAUTH-001
+    type: verification
+    title: The realm's signed line index — a source that hides a layer is caught
+    status: verified
+    release: v0.26.0
+    tags: [security]
+    fields:
+      method: test
+      baseline: >
+        Five numbered clauses, each with a test that fails on its own mutation.
+        Ten mutations were applied, run and reverted. Two of the tests were
+        WRONG when first written and the mutants proved it: the cross-document
+        replay test passed because the two structs' deny_unknown_fields shapes
+        diverge, so it proved schema divergence while claiming to prove the
+        payload-type check; and the counter-regression test called
+        refuse_regression DIRECTLY, so deleting that call from `check` — the
+        function install goes through — left the suite green. Both are fixed
+        and both now fail on their mutant.
+        CLAUSE 4 WAS CORRECTED, not merely implemented. It read "the
+        anti-rollback high-water mark shall be advanceable from the verified
+        index". An integration test through `install` refuted it on the first
+        run: raising the ENFORCEMENT mark to the line's newest counter makes a
+        deliberately-pinned older layer uninstallable the moment the realm
+        publishes a newer one — breaking frozen toolchains, varve's entire
+        purpose, to defend against an attack varve's pin-based model does not
+        have. Uptane's freshness attack presumes a client that wants the
+        latest; a varve consumer names an exact layer. The clause is now
+        REPORTING, and `advance_to` was deleted rather than left as dead
+        trust-critical code.
+      evidence:
+        - run: cargo test -p varve-core an_index_verifies_only_against_the_realm_that_signed_it
+        - run: cargo test -p varve-core a_signed_line_status_cannot_be_replayed_as_an_index
+        - run: cargo test -p varve-core a_source_that_hides_a_layer_the_index_names_is_refused
+        - run: cargo test -p varve-core check_refuses_a_stale_index_not_only_refuse_regression_does
+        - run: cargo test -p varve-core a_realm_that_promised_an_index_does_not_fall_back_to_an_unsigned_listing
+        - run: cargo test -p varve-core a_source_that_cannot_enumerate_is_not_treated_as_hiding_everything
+        - run: cargo test -p varve-core a_realm_declares_whether_it_publishes_a_signed_index
+        # Through install(), not through the helpers.
+        - run: cargo test -p varve-core install_refuses_a_source_that_hides_an_indexed_layer
+        - run: cargo test -p varve-core install_raises_the_mark_from_the_index_even_when_the_layer_is_hidden
+    links:
+      - type: verifies
+        target: REQ-INDEXAUTH-001
+
+  - id: VER-SHADOW-001
+    type: verification
+    title: varve notices when PATH runs a different binary than the one it pins
+    status: verified
+    release: v0.26.0
+    tags: [ergonomics, security]
+    fields:
+      method: test
+      baseline: >
+        Reported from use (varve#66) and reproduced: `varve which rivet`
+        printed the store path while the shell ran a different binary, and
+        `verify` called the layer perfect — which it was. Every individual
+        answer correct, the composite false, against the README's own words for
+        the command.
+        The first implementation reported EVERY tool on a correctly configured
+        machine as shadowed, and its unit test passed: a varve shim is a
+        symlink to the VARVE BINARY (argv[0] dispatch since v0.19.0), not to
+        the pinned tool, and the test had symlinked to the STORE — testing a
+        mechanism varve does not use. Only the end-to-end run caught it.
+        `check` now takes the dispatcher path and the test asserts both that a
+        real shim agrees AND that omitting the dispatcher reproduces the bug.
+        Flagging the correct configuration is worse than not checking, because
+        it teaches people to ignore the check.
+        The check then found a REAL shadowing on the development machine — a
+        cargo-installed ~/.cargo/bin/synth over the fixture's pinned synth —
+        which turned three unrelated CLI tests red there and green elsewhere.
+        Every command builder in cli.rs now sets a hermetic PATH: a suite whose
+        result depends on what the person running it happens to have installed
+        is not a suite.
+        Four PATH configurations were checked end to end against the release
+        binary: shims first (pass), no shims (pass), foreign binary before the
+        shims (fail), foreign binary after the shims (pass).
+      evidence:
+        - run: cargo test -p varve-core a_different_binary_earlier_on_path_is_reported_as_shadowing
+        - run: cargo test -p varve-core a_real_shim_symlinked_to_varve_itself_agrees
+        - run: cargo test -p varve-core a_tool_absent_from_path_is_not_shadowed
+        - run: cargo test -p varve-core resolution_follows_path_order_and_the_executable_bit
+        - run: cargo test -p varve-core a_name_with_a_separator_is_not_a_path_lookup
+        - run: cargo test -p varve --test cli verify_fails_when_path_runs_a_different_binary_than_the_pin
+    links:
+      - type: verifies
+        target: REQ-SHADOW-001

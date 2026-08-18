@@ -24,6 +24,15 @@ pub const ROLE_PAYLOAD: &str = "payload";
 /// registry (REQ-STATUS-DIST-001), so `varve status` works after an
 /// `oci://` install with no local layout.
 pub const ROLE_LINE_STATUS: &str = "line-status";
+/// A carried attestation's signed STATEMENT (REQ-ATTEST-002). Many per layer,
+/// unlike line-status which is one per line — so these are found by scanning
+/// all layers, not by taking the first match.
+pub const ROLE_ATTESTATION_STATEMENT: &str = "attestation-statement";
+/// The attested bytes travelling verbatim beside a statement. Linked back to
+/// its statement by the `eu.pulseengine.varve.attests` annotation, so a layer
+/// carrying several attestations cannot mix up which evidence belongs to which
+/// claim.
+pub const ROLE_ATTESTATION_BYTES: &str = "attestation-bytes";
 
 /// The digest of the first layer in an OCI artifact manifest carrying the
 /// given `eu.pulseengine.varve.role` annotation, if present. Pure — the
@@ -181,6 +190,54 @@ impl RegistrySource {
         }
     }
 
+    /// Every attestation a tag's artifact manifest references
+    /// (REQ-ATTEST-002). A statement whose bytes are absent from the manifest
+    /// is an ERROR, not a skipped entry: evidence that did not travel is the
+    /// thing this requirement exists to detect, and dropping it here would
+    /// reproduce the mirror-boundary bug inside the code meant to catch it.
+    fn attestations_for_tag(
+        &self,
+        tag: &str,
+    ) -> Result<Vec<crate::attestcarry::CarriedAttestation>, SourceError> {
+        let manifest = self.artifact_manifest_for_tag(tag)?;
+        let Some(layers) = manifest["layers"].as_array() else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for l in layers
+            .iter()
+            .filter(|l| l["annotations"][ANN_ROLE] == ROLE_ATTESTATION_STATEMENT)
+        {
+            let Some(st_digest) = l["digest"].as_str() else {
+                continue;
+            };
+            let bytes_digest = layers
+                .iter()
+                .find(|b| {
+                    b["annotations"][ANN_ROLE] == ROLE_ATTESTATION_BYTES
+                        && b["annotations"][crate::attestcarry::ANN_STATEMENT] == *st_digest
+                })
+                .and_then(|b| b["digest"].as_str())
+                .ok_or_else(|| {
+                    SourceError::NotFound(format!(
+                        "tag {tag} carries attestation statement {st_digest} but the manifest \
+                         references no bytes for it — the claim travelled and the evidence \
+                         did not"
+                    ))
+                })?;
+            out.push(crate::attestcarry::CarriedAttestation {
+                statement_digest: st_digest.to_string(),
+                statement: self.fetch_blob(st_digest)?,
+                bytes: self.fetch_blob(bytes_digest)?,
+            });
+        }
+        // Deterministic, matching the layout and store readers — a report that
+        // reshuffles between transports is a diff generator for anyone
+        // recording verify output as evidence.
+        out.sort_by(|a, b| a.statement_digest.cmp(&b.statement_digest));
+        Ok(out)
+    }
+
     fn tags(&self) -> Result<Vec<String>, SourceError> {
         let bytes = self.get(&format!("{}/tags/list", self.base()), "application/json")?;
         let json: serde_json::Value = serde_json::from_slice(&bytes)
@@ -237,6 +294,32 @@ impl LayerSource for RegistrySource {
                     }
                 }
                 Ok(None)
+            }
+        }
+    }
+
+    fn fetch_attestations(
+        &self,
+        layer: &LayerRef,
+    ) -> Result<Vec<crate::attestcarry::CarriedAttestation>, SourceError> {
+        // Same tag resolution as the baseline: a named pin maps to its tag, a
+        // digest pin is located by the tag scan. Untrusted bytes throughout —
+        // the caller re-verifies every statement against the trust root, and
+        // the registry is precisely the party this evidence constrains.
+        match layer {
+            LayerRef::Name(id) => self.attestations_for_tag(&id.to_string()),
+            LayerRef::Digest(digest) => {
+                for tag in self.tags()? {
+                    if let Ok(envelope) = self.envelope_for_tag(&tag)
+                        && let Ok(text) = std::str::from_utf8(&envelope)
+                        && let Ok(env) = wsc::dsse::DsseEnvelope::from_json(text)
+                        && let Ok(payload) = env.payload_bytes()
+                        && &crate::store::manifest_digest(&payload) == digest
+                    {
+                        return self.attestations_for_tag(&tag);
+                    }
+                }
+                Ok(Vec::new())
             }
         }
     }

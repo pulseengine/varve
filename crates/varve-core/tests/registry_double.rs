@@ -30,6 +30,16 @@ fn oci_artifact_manifest(
     payload_digest: &str,
     tools: &[(&str, &[u8])],
 ) -> Vec<u8> {
+    oci_artifact_manifest_with(envelope, payload_digest, tools, &[])
+}
+
+/// `attestations` is (statement_digest, statement_len, bytes_digest, bytes_len).
+fn oci_artifact_manifest_with(
+    envelope: &[u8],
+    payload_digest: &str,
+    tools: &[(&str, &[u8])],
+    attestations: &[(String, usize, String, usize)],
+) -> Vec<u8> {
     let envelope_digest = manifest_digest(envelope);
     let mut layers = vec![serde_json::json!({
         "mediaType": "application/json",
@@ -48,6 +58,23 @@ fn oci_artifact_manifest(
             "mediaType": "application/octet-stream",
             "digest": digest,
             "size": bytes.len(),
+        }));
+    }
+    for (st_digest, st_len, b_digest, b_len) in attestations {
+        layers.push(serde_json::json!({
+            "mediaType": "application/json",
+            "digest": st_digest,
+            "size": st_len,
+            "annotations": { "eu.pulseengine.varve.role": "attestation-statement" }
+        }));
+        layers.push(serde_json::json!({
+            "mediaType": "application/octet-stream",
+            "digest": b_digest,
+            "size": b_len,
+            "annotations": {
+                "eu.pulseengine.varve.role": "attestation-bytes",
+                "eu.pulseengine.varve.attests": st_digest
+            }
         }));
     }
     serde_json::to_vec(&serde_json::json!({
@@ -361,4 +388,111 @@ fn blobs_larger_than_ten_mib_pull_cleanly() {
     .unwrap();
     let outcome = install(&pin, &source, &verifier, &store, &mut marks, &policy).unwrap();
     assert_eq!(outcome.digest, payload_digest);
+}
+
+// rivet: verifies REQ-ATTEST-002
+#[test]
+fn an_oci_install_carries_the_attestations_the_registry_publishes() {
+    // The clause that was NOT implemented when the rest of carriage shipped:
+    // an `oci://` install carried nothing, so a consumer pulling from a
+    // registry got the bytes and none of the evidence about them — the exact
+    // mirror-boundary loss the requirement exists to close, reproduced by
+    // varve's own most-used transport.
+    use varve_core::attest::{AttestationKind, sign, statement};
+    use varve_core::source::{LayerRef, LayerSource};
+
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let tool = b"registry-synth".to_vec();
+    let tool_digest = manifest_digest(&tool);
+    let host = varve_core::host_platform();
+    let payload = format!(
+        r#"{{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "artifactType": "application/vnd.pulseengine.varve.layer.v1+json",
+  "annotations": {{
+    "eu.pulseengine.varve.layer": "2026.08.0",
+    "eu.pulseengine.varve.line": "2026.08",
+    "eu.pulseengine.varve.channel": "rolling",
+    "eu.pulseengine.varve.counter": "1",
+    "org.opencontainers.image.created": "2026-08-07T00:00:00Z"
+  }},
+  "manifests": [
+    {{
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "{tool_digest}",
+      "size": 0,
+      "annotations": {{ "eu.pulseengine.tool": "synth", "eu.pulseengine.platform": "{host}" }}
+    }}
+  ]
+}}"#
+    )
+    .into_bytes();
+    let payload_digest = manifest_digest(&payload);
+    let envelope = varve_core::sign_layer_manifest(&payload, &sk, "test-root").unwrap();
+
+    // Two attestations, because one would not catch a reader that returns the
+    // first match — the shape line-status uses and attestations must not.
+    let mut blobs = BTreeMap::new();
+    let mut refs = Vec::new();
+    for (kind, bytes) in [
+        (AttestationKind::Sbom, b"sbom-evidence".to_vec()),
+        (AttestationKind::Provenance, b"slsa-evidence".to_vec()),
+    ] {
+        let st = statement("2026.08.0", &payload_digest, kind, &bytes, "acme-ci");
+        let env = sign(&st, &sk, "test-root").unwrap();
+        let st_digest = manifest_digest(env.as_bytes());
+        let b_digest = manifest_digest(&bytes);
+        refs.push((st_digest.clone(), env.len(), b_digest.clone(), bytes.len()));
+        blobs.insert(st_digest, env.into_bytes());
+        blobs.insert(b_digest, bytes);
+    }
+
+    blobs.insert(
+        manifest_digest(envelope.as_bytes()),
+        envelope.as_bytes().to_vec(),
+    );
+    blobs.insert(payload_digest.clone(), payload.clone());
+    blobs.insert(tool_digest.clone(), tool.clone());
+
+    let mut manifests = BTreeMap::new();
+    manifests.insert(
+        "2026.08.0".to_string(),
+        oci_artifact_manifest_with(
+            envelope.as_bytes(),
+            &payload_digest,
+            &[(tool_digest.as_str(), tool.as_slice())],
+            &refs,
+        ),
+    );
+    let reference = serve(RegistryContent { manifests, blobs });
+
+    let source = varve_core::registry::RegistrySource::new(
+        varve_core::registry::RegistryRef::parse(&reference).unwrap(),
+    );
+    let carried = source
+        .fetch_attestations(&LayerRef::Name("2026.08.0".parse().unwrap()))
+        .expect("the registry publishes them, so the source must surface them");
+    assert_eq!(carried.len(), 2, "both attestations, not just the first");
+
+    // …and each still BINDS to this layer once re-verified against the root.
+    // The registry is not trusted to have checked anything.
+    let reports = varve_core::attestcarry::report(&carried, &payload_digest, "2026.08.0", &pk);
+    assert!(
+        reports.iter().all(|r| r.binds),
+        "every carried attestation must bind: {reports:?}"
+    );
+    let mut kinds: Vec<&str> = reports.iter().map(|r| r.kind.as_str()).collect();
+    kinds.sort();
+    assert_eq!(kinds, vec!["provenance", "sbom"]);
+
+    // A digest pin reaches the same evidence via the tag scan.
+    let by_digest = source
+        .fetch_attestations(&LayerRef::Digest(payload_digest.clone()))
+        .unwrap();
+    assert_eq!(
+        by_digest.len(),
+        2,
+        "a digest pin must not lose the evidence"
+    );
 }
