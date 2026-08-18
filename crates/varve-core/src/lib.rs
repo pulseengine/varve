@@ -23,6 +23,7 @@
 
 pub mod archive;
 pub mod attest;
+pub mod attestcarry;
 pub mod bazel;
 pub mod compose;
 pub mod crateexport;
