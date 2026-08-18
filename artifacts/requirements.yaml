@@ -1693,6 +1693,72 @@ artifacts:
       priority: must
       category: functional
 
+  - id: REQ-REGISTRY-002
+    type: requirement
+    title: varve speaks the OCI distribution spec, not one registry's dialect
+    status: approved
+    release: v0.27.0
+    description: >
+      varve's registry client works against GHCR and would fail elsewhere, and
+      the failures are quiet. Decision 2026-08-18: support potentially ANY
+      registry by being SPEC-COMPLIANT rather than by adding per-registry code
+      paths, and obtain credentials without executing anything.
+      What is wrong today, all verified by reading the shipped client:
+      (1) The token endpoint is GUESSED — hardcoded `/token?service=…`. The
+      spec says an unauthenticated request returns 401 with
+      `WWW-Authenticate: Bearer realm=…,service=…,scope=…` and the client uses
+      THAT realm. varve shall parse the challenge. This is a correctness bug
+      for third-party registries even when they are PUBLIC, not only an auth
+      bug — Artifactory, Harbor, ECR and GitLab all use different realms.
+      (2) No credentials are ever sent. varve shall read `auths` from the
+      docker/podman config and an explicit environment variable, in a
+      documented precedence, and send Basic to the token endpoint — and only
+      to the token endpoint, never to the registry API. A registry names its
+      own token realm, and the realm is legitimately on a DIFFERENT host
+      (auth.docker.io for registry-1.docker.io), so the realm host cannot be
+      constrained; its SCHEME can, and shall be: an https registry may not
+      point varve's credential at a cleartext realm.
+      varve shall NOT execute docker credential helpers. Sourcing a secret by
+      exec'ing a PATH-resolved binary is the exact class of trust
+      REQ-SHADOW-001 was written because PATH does not deserve. Cloud
+      registries (ECR, GCP Artifact Registry, ACR) are therefore supported by
+      the user supplying the credential — `aws ecr get-login-password` into the
+      environment variable — which is friction, and is the accepted price of
+      running no external binary.
+      (3) `/tags/list` is never paginated (varve#70). The spec paginates it
+      with `?n=` and a `Link: rel="next"` header. Three digest-pin paths
+      enumerate tags, so a truncated page makes a digest pin, a status baseline
+      and carried attestations all come back EMPTY — wrong answers that look
+      like legitimate absence. varve shall follow the pages, with a bound so a
+      hostile registry cannot make the client loop.
+      (4) One `Accept` media type is offered. varve shall accept the Docker
+      manifest media type as well as the OCI one, or registries serving only
+      the former are unreachable.
+      (5) Failures are swallowed — the token chain is `.ok().and_then(…)`, so a
+      401 becomes `None` and the user sees a confusing downstream error.
+      varve shall distinguish "no credentials offered" from "credentials
+      rejected", and say which.
+      (6) varve shall NOT send an Authorization header across a redirect.
+      Blob fetches redirect to CDNs; a client that retains the header leaks
+      the credential cross-origin. Harmless while the token is anonymous and
+      pull-scoped, real the moment (2) lands — so it lands WITH (2), not
+      after. CORRECTION 2026-08-18, from measuring the HTTP client rather
+      than reading its documentation: this clause originally said "to a
+      different host", and ureq's `SameHost` setting — which reads as the
+      literal implementation of that phrasing — compares the host NAME and
+      IGNORES THE PORT, so it forwards the credential from `host:5000` to
+      `host:8080`. "Different host" is therefore not a safe boundary with
+      this client; varve drops the header on EVERY redirect. The same leak by
+      another route is a `Link: rel="next"` on `/tags/list` pointing off the
+      registry's origin, which varve shall refuse to follow.
+    tags: [distribution, security]
+    links:
+      - type: traces-to
+        target: REQ-REGISTRY-001
+    fields:
+      priority: must
+      category: functional
+
   - id: REQ-INDEXAUTH-001
     type: requirement
     title: The realm authenticates the line index, not only each artifact

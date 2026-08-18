@@ -1,16 +1,24 @@
-//! REQ-REGISTRY-001 integration against an in-process OCI registry double.
+//! REQ-REGISTRY-001 / REQ-REGISTRY-002 integration against an in-process OCI
+//! registry double.
 //!
 //! The double implements exactly the distribution surface the client uses —
-//! token, manifest-by-tag, blob-by-digest, tags/list — over a real TCP
-//! socket, so the client's HTTP path is exercised for real. The double is a
-//! SOURCE, and sources are untrusted: the accompanying tests prove the same
-//! bytes produce the same verdicts as every other transport, and that a
-//! wrong trust root rejects identically through the registry.
+//! challenge, token realm, manifest-by-tag, blob-by-digest, paginated
+//! tags/list, blob redirect — over a real TCP socket, so the client's HTTP
+//! path is exercised for real. The double is a SOURCE, and sources are
+//! untrusted: the accompanying tests prove the same bytes produce the same
+//! verdicts as every other transport, and that a wrong trust root rejects
+//! identically through the registry.
+//!
+//! For REQ-REGISTRY-002 the double also plays the parts of a registry that is
+//! NOT ghcr.io: it demands a token from a realm at a path nobody would guess,
+//! rejects a wrong credential, hands out one tag per page, insists on the
+//! Docker manifest media type, and redirects blobs to a second server on a
+//! different port that records whether the client leaked its Authorization.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
-use std::sync::Arc;
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 
 use varve_core::{
     DirSource, HighWaterMarks, InstallPolicy, LayerSource, Pin, PinnedKeyVerifier, Store, install,
@@ -87,69 +95,328 @@ fn oci_artifact_manifest_with(
     .unwrap()
 }
 
+/// What the double should do beyond the happy path. Every field here is a
+/// behaviour a spec-compliant registry is allowed to have and GHCR does not,
+/// which is precisely the gap REQ-REGISTRY-002 closes.
+#[derive(Clone, Default)]
+struct DoubleOptions {
+    /// Demand `Authorization: Bearer <token>` on `/v2/`, answering anything
+    /// else with 401 + a `WWW-Authenticate` challenge naming this double's
+    /// own realm.
+    require_token: Option<String>,
+    /// Where the challenge points. Deliberately NOT `/token`: a client that
+    /// guesses the path instead of reading the challenge cannot reach it.
+    token_realm_path: String,
+    /// The exact `Authorization` the token realm accepts. `None` grants
+    /// anonymously.
+    expect_basic: Option<String>,
+    /// The token the realm hands out. When it differs from `require_token`
+    /// the client is issued a token the API then refuses — a real case
+    /// (a token minted for a repository the account may not pull).
+    grant_token: Option<String>,
+    /// Serve `tags/list` this many tags at a time, with `Link: rel="next"`.
+    tags_page_size: Option<usize>,
+    /// Always claim there is another page — a broken or hostile registry.
+    tags_endless: bool,
+    /// Redirect blob requests to this base (`http://host:port`).
+    blob_redirect_to: Option<String>,
+    /// Refuse a manifest request whose `Accept` omits the Docker media type.
+    require_docker_accept: bool,
+}
+
+/// One request the double saw, as far as these tests care.
+#[derive(Clone, Debug)]
+struct Observed {
+    path: String,
+    authorization: Option<String>,
+    accept: Option<String>,
+}
+
+struct Double {
+    reference: String,
+    /// `http://host:port` — what a redirect Location is built from.
+    base: String,
+    observed: Arc<Mutex<Vec<Observed>>>,
+}
+
+impl Double {
+    fn saw(&self) -> Vec<Observed> {
+        self.observed.lock().unwrap().clone()
+    }
+}
+
+const DOCKER_MANIFEST_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
+
+fn respond(stream: &mut TcpStream, status: &str, headers: &[(&str, String)], body: &[u8]) {
+    let mut head = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body);
+}
+
+fn query_param(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == name).then(|| v.to_string())
+    })
+}
+
 /// Serve the minimal OCI distribution surface on an ephemeral port.
 fn serve(content: RegistryContent) -> String {
+    serve_with(content, DoubleOptions::default()).reference
+}
+
+fn serve_with(content: RegistryContent, options: DoubleOptions) -> Double {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let content = Arc::new(content);
+    let observed: Arc<Mutex<Vec<Observed>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut options = options;
+    if options.token_realm_path.is_empty() {
+        // Nothing a client could guess from the registry host alone.
+        options.token_realm_path = "/auth/v1/oauth2/token".to_string();
+    }
+    let options = Arc::new(options);
+    let log = Arc::clone(&observed);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { break };
             let content = Arc::clone(&content);
+            let options = Arc::clone(&options);
+            let log = Arc::clone(&log);
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
                 if reader.read_line(&mut line).is_err() {
                     return;
                 }
-                let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
-                // Drain headers.
+                let target = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let mut authorization = None;
+                let mut accept = None;
                 let mut header = String::new();
                 while reader.read_line(&mut header).is_ok() {
                     if header == "\r\n" || header.is_empty() {
                         break;
                     }
+                    if let Some((name, value)) = header.split_once(':') {
+                        match name.trim().to_ascii_lowercase().as_str() {
+                            "authorization" => authorization = Some(value.trim().to_string()),
+                            "accept" => accept = Some(value.trim().to_string()),
+                            _ => {}
+                        }
+                    }
                     header.clear();
                 }
-                let mut stream = stream;
-                let respond = |stream: &mut std::net::TcpStream, status: &str, body: &[u8]| {
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = stream.write_all(body);
+                log.lock().unwrap().push(Observed {
+                    path: target.clone(),
+                    authorization: authorization.clone(),
+                    accept: accept.clone(),
+                });
+
+                let (path, query) = match target.split_once('?') {
+                    Some((p, q)) => (p.to_string(), q.to_string()),
+                    None => (target.clone(), String::new()),
                 };
-                if path.starts_with("/token") {
+                let mut stream = stream;
+
+                if path == options.token_realm_path {
+                    match &options.expect_basic {
+                        Some(expected) if authorization.as_deref() != Some(expected.as_str()) => {
+                            respond(
+                                &mut stream,
+                                "401 Unauthorized",
+                                &[],
+                                br#"{"errors":[{"code":"UNAUTHORIZED"}]}"#,
+                            );
+                        }
+                        _ => {
+                            let token = options
+                                .grant_token
+                                .clone()
+                                .or_else(|| options.require_token.clone())
+                                .unwrap_or_else(|| "anonymous-test-token".to_string());
+                            respond(
+                                &mut stream,
+                                "200 OK",
+                                &[],
+                                format!(r#"{{"token":"{token}"}}"#).as_bytes(),
+                            );
+                        }
+                    }
+                    return;
+                }
+
+                if let Some(required) = &options.require_token
+                    && path.starts_with("/v2/")
+                    && authorization.as_deref() != Some(format!("Bearer {required}").as_str())
+                {
                     respond(
                         &mut stream,
-                        "200 OK",
-                        br#"{"token":"anonymous-test-token"}"#,
+                        "401 Unauthorized",
+                        &[(
+                            "WWW-Authenticate",
+                            format!(
+                                r#"Bearer realm="http://{addr}{}",service="{addr}",scope="repository:test/layers:pull""#,
+                                options.token_realm_path
+                            ),
+                        )],
+                        br#"{"errors":[{"code":"UNAUTHORIZED"}]}"#,
                     );
-                } else if let Some(tag) = path.strip_prefix("/v2/test/layers/manifests/") {
+                    return;
+                }
+
+                if let Some(tag) = path.strip_prefix("/v2/test/layers/manifests/") {
+                    if options.require_docker_accept
+                        && !accept
+                            .as_deref()
+                            .unwrap_or("")
+                            .contains(DOCKER_MANIFEST_TYPE)
+                    {
+                        respond(&mut stream, "406 Not Acceptable", &[], b"{}");
+                        return;
+                    }
                     match content.manifests.get(tag) {
-                        Some(bytes) => respond(&mut stream, "200 OK", bytes),
-                        None => respond(&mut stream, "404 Not Found", b"{}"),
+                        Some(bytes) => respond(&mut stream, "200 OK", &[], bytes),
+                        None => respond(&mut stream, "404 Not Found", &[], b"{}"),
                     }
                 } else if let Some(digest) = path.strip_prefix("/v2/test/layers/blobs/") {
+                    if let Some(base) = &options.blob_redirect_to {
+                        // What a real registry does: hand the client off to a
+                        // storage host on a different origin.
+                        respond(
+                            &mut stream,
+                            "302 Found",
+                            &[("Location", format!("{base}/v2/test/layers/blobs/{digest}"))],
+                            b"",
+                        );
+                        return;
+                    }
                     match content.blobs.get(digest) {
-                        Some(bytes) => respond(&mut stream, "200 OK", bytes),
-                        None => respond(&mut stream, "404 Not Found", b"{}"),
+                        Some(bytes) => respond(&mut stream, "200 OK", &[], bytes),
+                        None => respond(&mut stream, "404 Not Found", &[], b"{}"),
                     }
                 } else if path == "/v2/test/layers/tags/list" {
-                    let tags: Vec<&String> = content.manifests.keys().collect();
+                    let all: Vec<String> = content.manifests.keys().cloned().collect();
+                    let start = match query_param(&query, "last") {
+                        Some(last) => all.iter().position(|t| *t == last).map_or(0, |i| i + 1),
+                        None => 0,
+                    };
+                    let page_size = options.tags_page_size.unwrap_or(all.len().max(1));
+                    let page: Vec<String> =
+                        all.iter().skip(start).take(page_size).cloned().collect();
                     let body = serde_json::to_vec(
-                        &serde_json::json!({"name": "test/layers", "tags": tags}),
+                        &serde_json::json!({"name": "test/layers", "tags": page}),
                     )
                     .unwrap();
-                    respond(&mut stream, "200 OK", &body);
+                    let more = options.tags_endless || start + page.len() < all.len();
+                    let mut headers = Vec::new();
+                    if more {
+                        // `last` advances on a real page; on an endless one it
+                        // does not have to, and the client must still stop.
+                        let last = page.last().cloned().unwrap_or_else(|| "x".to_string());
+                        headers.push((
+                            "Link",
+                            format!(
+                                "</v2/test/layers/tags/list?n={page_size}&last={last}>; rel=\"next\""
+                            ),
+                        ));
+                    }
+                    respond(&mut stream, "200 OK", &headers, &body);
                 } else {
-                    respond(&mut stream, "404 Not Found", b"{}");
+                    respond(&mut stream, "404 Not Found", &[], b"{}");
                 }
             });
         }
     });
-    format!("oci+http://{addr}/test/layers")
+    Double {
+        reference: format!("oci+http://{addr}/test/layers"),
+        base: format!("http://{addr}"),
+        observed,
+    }
+}
+
+/// A signed layer's registry-side content, ready to serve. Returns the
+/// content, the payload digest a pin would name, and the trust root.
+fn layer_content(tag: &str) -> (RegistryContent, String, Vec<u8>) {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let tool = b"registry-synth".to_vec();
+    let tool_digest = manifest_digest(&tool);
+    let host = varve_core::host_platform();
+    let line = tag.rsplit_once('.').map_or(tag, |(line, _)| line);
+    let payload = format!(
+        r#"{{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "artifactType": "application/vnd.pulseengine.varve.layer.v1+json",
+  "annotations": {{
+    "eu.pulseengine.varve.layer": "{tag}",
+    "eu.pulseengine.varve.line": "{line}",
+    "eu.pulseengine.varve.channel": "rolling",
+    "eu.pulseengine.varve.counter": "1",
+    "org.opencontainers.image.created": "2026-08-07T00:00:00Z"
+  }},
+  "manifests": [
+    {{
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "{tool_digest}",
+      "size": 0,
+      "annotations": {{ "eu.pulseengine.tool": "synth", "eu.pulseengine.platform": "{host}" }}
+    }}
+  ]
+}}"#
+    )
+    .into_bytes();
+    let payload_digest = manifest_digest(&payload);
+    let envelope = varve_core::sign_layer_manifest(&payload, &sk, "test-root").unwrap();
+
+    let mut blobs = BTreeMap::new();
+    blobs.insert(
+        manifest_digest(envelope.as_bytes()),
+        envelope.as_bytes().to_vec(),
+    );
+    blobs.insert(payload_digest.clone(), payload.clone());
+    blobs.insert(tool_digest.clone(), tool.clone());
+    let mut manifests = BTreeMap::new();
+    manifests.insert(
+        tag.to_string(),
+        oci_artifact_manifest(
+            envelope.as_bytes(),
+            &payload_digest,
+            &[(&tool_digest, &tool)],
+        ),
+    );
+    (RegistryContent { manifests, blobs }, payload_digest, pk)
+}
+
+/// Standard base64, written out here so the expected `Authorization` value is
+/// computed independently of the implementation under test.
+fn base64(input: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let n = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | *chunk.get(2).unwrap_or(&0) as u32;
+        out.push(A[(n >> 18) as usize & 63] as char);
+        out.push(A[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            A[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 struct Fixture {
@@ -243,6 +510,14 @@ fn run_install(
     pin: &Pin,
 ) -> Result<varve_core::InstallOutcome, String> {
     let _ = fixture;
+    install_source(source, pk, pin)
+}
+
+fn install_source(
+    source: &dyn LayerSource,
+    pk: &[u8],
+    pin: &Pin,
+) -> Result<varve_core::InstallOutcome, String> {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
     let store = Store::at(&root);
@@ -494,5 +769,266 @@ fn an_oci_install_carries_the_attestations_the_registry_publishes() {
         by_digest.len(),
         2,
         "a digest pin must not lose the evidence"
+    );
+}
+
+// ═══════════════════════ REQ-REGISTRY-002 ═══════════════════════
+// varve speaks the OCI distribution spec, not one registry's dialect. Each
+// test below puts the double into a shape a spec-compliant registry is
+// allowed to have and GHCR does not.
+
+// rivet: verifies REQ-REGISTRY-002
+#[test]
+fn the_token_comes_from_the_realm_the_challenge_names_not_a_guessed_path() {
+    // The double's realm is /auth/v1/oauth2/token. A client that hardcodes
+    // `/token?service=…` — what varve shipped — reaches nothing here, which
+    // is what it also does against Artifactory, Harbor, ECR and GitLab.
+    let (content, payload_digest, pk) = layer_content("2026.08.0");
+    let double = serve_with(
+        content,
+        DoubleOptions {
+            require_token: Some("granted-by-the-realm".to_string()),
+            expect_basic: Some(format!("Basic {}", base64(b"alice:s3cr3t"))),
+            ..Default::default()
+        },
+    );
+    let source = varve_core::RegistrySource::parse(&double.reference)
+        .unwrap()
+        .with_credential("alice", "s3cr3t");
+    let outcome = install_source(&source, &pk, &rolling_pin("")).unwrap();
+    assert_eq!(outcome.digest, payload_digest);
+
+    let saw = double.saw();
+    let token_request = saw
+        .iter()
+        .find(|o| o.path.starts_with("/auth/v1/oauth2/token"))
+        .unwrap_or_else(|| panic!("the realm the challenge named was never asked: {saw:?}"));
+    assert!(
+        !saw.iter().any(|o| o.path.starts_with("/token")),
+        "no path may be guessed: {saw:?}"
+    );
+    // The credential goes to the TOKEN endpoint as Basic…
+    assert!(
+        token_request
+            .authorization
+            .as_deref()
+            .is_some_and(|a| a.starts_with("Basic ")),
+        "the token endpoint must receive Basic: {token_request:?}"
+    );
+    // …and the registry API sees only the bearer token it issued.
+    assert!(
+        saw.iter().any(|o| o.path.starts_with("/v2/")
+            && o.authorization.as_deref() == Some("Bearer granted-by-the-realm")),
+        "the API must be called with the issued token: {saw:?}"
+    );
+    assert!(
+        !saw.iter().any(|o| o.path.starts_with("/v2/")
+            && o.authorization
+                .as_deref()
+                .is_some_and(|a| a.starts_with("Basic"))),
+        "the credential must never be sent to the registry API: {saw:?}"
+    );
+}
+
+// rivet: verifies REQ-REGISTRY-002
+#[test]
+fn a_refused_pull_says_whether_varve_had_no_credential_or_a_bad_one() {
+    let secret = "not-the-password-4711";
+    let options = || DoubleOptions {
+        require_token: Some("granted".to_string()),
+        expect_basic: Some(format!("Basic {}", base64(b"alice:s3cr3t"))),
+        ..Default::default()
+    };
+
+    // Nothing offered. The old client turned this 401 into `None` and the
+    // user saw a confusing downstream error instead of "log in".
+    let (content, _, pk) = layer_content("2026.08.0");
+    let double = serve_with(content, options());
+    let source = varve_core::RegistrySource::parse(&double.reference).unwrap();
+    let err = install_source(&source, &pk, &rolling_pin("")).unwrap_err();
+    assert!(err.contains("offered no credential"), "{err}");
+    assert!(err.contains("VARVE_REGISTRY_AUTH"), "{err}");
+    assert!(!err.contains("rejected it"), "{err}");
+
+    // Offered and refused — a different problem with a different fix.
+    let (content, _, pk) = layer_content("2026.08.0");
+    let double = serve_with(content, options());
+    let source = varve_core::RegistrySource::parse(&double.reference)
+        .unwrap()
+        .with_credential("alice", secret);
+    let err = install_source(&source, &pk, &rolling_pin("")).unwrap_err();
+    assert!(err.contains("rejected it"), "{err}");
+    assert!(!err.contains("offered no credential"), "{err}");
+    assert!(
+        !err.contains(secret),
+        "the secret must never reach an error message: {err}"
+    );
+}
+
+// rivet: verifies REQ-REGISTRY-002
+#[test]
+fn a_digest_pin_survives_a_paginated_tag_list() {
+    // varve#70. Three tags served one per page; the one that matches is on
+    // the last page. A client that reads only the first page answers "no such
+    // layer" — indistinguishable from the layer never having been published.
+    let (mut content, payload_digest, pk) = layer_content("2026.08.0");
+    content
+        .manifests
+        .insert("0001-decoy".to_string(), b"{}".to_vec());
+    content
+        .manifests
+        .insert("0002-decoy".to_string(), b"{}".to_vec());
+    let double = serve_with(
+        content,
+        DoubleOptions {
+            tags_page_size: Some(1),
+            ..Default::default()
+        },
+    );
+    let source = varve_core::RegistrySource::parse(&double.reference).unwrap();
+    let hex = payload_digest.strip_prefix("sha256:").unwrap();
+    let pin = rolling_pin(&format!("digest = \"sha256:{hex}\"\n"));
+    let outcome = install_source(&source, &pk, &pin).unwrap();
+    assert_eq!(outcome.digest, payload_digest);
+
+    let pages = double
+        .saw()
+        .iter()
+        .filter(|o| o.path.starts_with("/v2/test/layers/tags/list"))
+        .count();
+    assert!(
+        pages >= 3,
+        "the client must follow Link rel=next to the end; it asked for {pages} page(s)"
+    );
+}
+
+// rivet: verifies REQ-REGISTRY-002
+#[test]
+fn an_endless_tag_list_stops_with_an_error_rather_than_looping_or_truncating() {
+    // A broken or hostile registry that never stops offering `rel="next"`
+    // must stop the client. The stop is an ERROR: answering from a partial
+    // tag list is the failure this whole clause exists to prevent.
+    let (content, payload_digest, pk) = layer_content("2026.08.0");
+    let double = serve_with(
+        content,
+        DoubleOptions {
+            tags_page_size: Some(1),
+            tags_endless: true,
+            ..Default::default()
+        },
+    );
+    let source = varve_core::RegistrySource::parse(&double.reference).unwrap();
+    let hex = payload_digest.strip_prefix("sha256:").unwrap();
+    let pin = rolling_pin(&format!("digest = \"sha256:{hex}\"\n"));
+    let err = install_source(&source, &pk, &pin).unwrap_err();
+    assert!(
+        err.contains("pages"),
+        "the bound must be reported, not silently applied: {err}"
+    );
+}
+
+// rivet: verifies REQ-REGISTRY-002
+#[test]
+fn a_registry_serving_the_docker_manifest_media_type_is_reachable() {
+    // This double answers 406 unless the Docker schema-2 type is offered —
+    // which is what a registry serving only that type effectively does.
+    let (content, payload_digest, pk) = layer_content("2026.08.0");
+    let double = serve_with(
+        content,
+        DoubleOptions {
+            require_docker_accept: true,
+            ..Default::default()
+        },
+    );
+    let source = varve_core::RegistrySource::parse(&double.reference).unwrap();
+    let outcome = install_source(&source, &pk, &rolling_pin("")).unwrap();
+    assert_eq!(outcome.digest, payload_digest);
+
+    assert!(
+        double.saw().iter().any(|o| o.path.contains("/manifests/")
+            && o.accept
+                .as_deref()
+                .is_some_and(|a| a.contains("application/vnd.oci.image.manifest.v1+json"))),
+        "the OCI type must still be offered alongside the Docker one"
+    );
+}
+
+// rivet: verifies REQ-REGISTRY-002
+#[test]
+fn a_blob_redirect_to_another_host_does_not_carry_the_authorization_header() {
+    // The empirical test of what ureq does with headers on redirect: the CDN
+    // is a SECOND server on a DIFFERENT port, and it records every header it
+    // is sent. If the client leaks the credential cross-origin, it shows up
+    // here.
+    let (content, payload_digest, pk) = layer_content("2026.08.0");
+    let cdn = serve_with(
+        RegistryContent {
+            manifests: BTreeMap::new(),
+            blobs: content.blobs,
+        },
+        DoubleOptions::default(),
+    );
+    let registry = serve_with(
+        RegistryContent {
+            manifests: content.manifests,
+            blobs: BTreeMap::new(),
+        },
+        DoubleOptions {
+            require_token: Some("granted".to_string()),
+            blob_redirect_to: Some(cdn.base.clone()),
+            ..Default::default()
+        },
+    );
+    let source = varve_core::RegistrySource::parse(&registry.reference).unwrap();
+    let outcome = install_source(&source, &pk, &rolling_pin("")).unwrap();
+    assert_eq!(outcome.digest, payload_digest);
+
+    let registry_saw = registry.saw();
+    assert!(
+        registry_saw.iter().any(|o| o.path.starts_with("/v2/")
+            && o.authorization
+                .as_deref()
+                .is_some_and(|a| a.starts_with("Bearer "))),
+        "the registry must have been called WITH a token, or this test proves nothing: \
+         {registry_saw:?}"
+    );
+    let cdn_saw = cdn.saw();
+    assert!(
+        !cdn_saw.is_empty(),
+        "the CDN must have served the redirected blobs"
+    );
+    assert!(
+        cdn_saw.iter().all(|o| o.authorization.is_none()),
+        "the credential must not cross a redirect to another host: {cdn_saw:?}"
+    );
+}
+
+// rivet: verifies REQ-REGISTRY-002
+#[test]
+fn a_token_the_api_still_refuses_is_reported_rather_than_swallowed() {
+    // The realm mints a token and the API refuses it anyway — what a
+    // registry does when the account may reach the token endpoint but not
+    // this repository. The old client turned the second 401 into `None` too.
+    let (content, _, pk) = layer_content("2026.08.0");
+    let double = serve_with(
+        content,
+        DoubleOptions {
+            require_token: Some("the-token-that-works".to_string()),
+            grant_token: Some("a-token-for-somebody-else".to_string()),
+            ..Default::default()
+        },
+    );
+    let source = varve_core::RegistrySource::parse(&double.reference)
+        .unwrap()
+        .with_credential("alice", "s3cr3t");
+    let err = install_source(&source, &pk, &rolling_pin("")).unwrap_err();
+    assert!(
+        err.contains("refused access"),
+        "a 401 that survives the token exchange must be raised, not swallowed: {err}"
+    );
+    assert!(err.contains("rejected it"), "{err}");
+    assert!(
+        !err.contains("s3cr3t"),
+        "the secret must never reach an error message: {err}"
     );
 }

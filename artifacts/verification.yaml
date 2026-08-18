@@ -248,6 +248,56 @@ artifacts:
       - type: verifies
         target: REQ-REGISTRY-001
 
+  - id: VER-REGISTRY-002
+    type: verification
+    title: Spec-compliant registry client — challenge, credentials, pagination, media types, refusals, redirects
+    status: verified
+    release: v0.27.0
+    fields:
+      method: automated-test
+      # One clause at a time. The lib tests are the mutation-gate kill
+      # criteria (`cargo mutants --workspace --lib` cannot be killed by an
+      # integration test); the registry_double tests prove the same clauses
+      # over a real socket against a registry that is deliberately NOT ghcr.io.
+      steps:
+        # (1) the token endpoint comes from the WWW-Authenticate challenge
+        - run: cargo test -p varve-core --lib a_bearer_challenge_yields_realm_service_and_scope
+        - run: cargo test -p varve-core --lib the_token_url_comes_from_the_realm_the_registry_named
+        - run: cargo test -p varve-core --lib a_token_response_is_read_from_either_spelling
+        - run: cargo test -p varve-core --test registry_double the_token_comes_from_the_realm_the_challenge_names_not_a_guessed_path
+        # (2) credentials without exec, and no cleartext realm
+        - run: cargo test -p varve-core --lib a_docker_config_auths_entry_becomes_a_credential
+        - run: cargo test -p varve-core --lib a_credential_helper_is_named_and_never_run
+        - run: cargo test -p varve-core --lib the_environment_variable_is_a_username_colon_password_pair
+        - run: cargo test -p varve-core --lib precedence_prefers_a_real_credential_and_otherwise_keeps_the_explanation
+        - run: cargo test -p varve-core --lib config_files_are_read_in_order_and_a_broken_one_is_skipped
+        - run: cargo test -p varve-core --lib base64_round_trips_and_decodes_a_docker_auth_field
+        - run: cargo test -p varve-core --lib an_https_registry_may_not_redirect_its_token_realm_to_cleartext
+        - run: cargo test -p varve-core --lib a_credential_never_reaches_a_debug_line_or_an_error_message
+        # (3) tags/list pagination, bounded (varve#70)
+        - run: cargo test -p varve-core --lib a_link_header_names_the_next_page_and_only_within_the_origin
+        - run: cargo test -p varve-core --lib a_tags_page_is_parsed_and_a_broken_one_is_not_an_empty_repository
+        - run: cargo test -p varve-core --lib the_first_tags_page_asks_the_registry_to_paginate
+        - run: cargo test -p varve-core --test registry_double a_digest_pin_survives_a_paginated_tag_list
+        - run: cargo test -p varve-core --test registry_double an_endless_tag_list_stops_with_an_error_rather_than_looping_or_truncating
+        # (4) both manifest media types
+        - run: cargo test -p varve-core --lib the_manifest_accept_header_offers_the_docker_type_as_well_as_the_oci_one
+        - run: cargo test -p varve-core --test registry_double a_registry_serving_the_docker_manifest_media_type_is_reachable
+        # (5) refusals are said out loud, and say WHICH
+        - run: cargo test -p varve-core --lib a_refusal_distinguishes_no_credential_from_a_rejected_one
+        - run: cargo test -p varve-core --test registry_double a_refused_pull_says_whether_varve_had_no_credential_or_a_bad_one
+        - run: cargo test -p varve-core --test registry_double a_token_the_api_still_refuses_is_reported_rather_than_swallowed
+        # (6) no Authorization across a redirect. The integration test is
+        # discriminating, not vacuous: the CDN double is on the same host and
+        # a different PORT, and ureq's SameHost setting was measured to
+        # forward the header across a port change — so flipping the config
+        # turns this test red.
+        - run: cargo test -p varve-core --lib the_agent_never_carries_authorization_across_a_redirect
+        - run: cargo test -p varve-core --test registry_double a_blob_redirect_to_another_host_does_not_carry_the_authorization_header
+    links:
+      - type: verifies
+        target: REQ-REGISTRY-002
+
   - id: VER-ENV-001
     type: verification
     title: Idempotent sourced environment and shell completions
