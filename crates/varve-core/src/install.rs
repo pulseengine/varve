@@ -53,6 +53,16 @@ pub struct InstallOutcome {
     /// a newer one is published — an availability failure wearing a security
     /// control's clothes, in the one tool whose purpose is frozen toolchains.
     pub index_high_water: Option<u64>,
+    /// How many attestations travelled with the layer and were persisted into
+    /// its root (REQ-ATTEST-002). Unverified at this point, by design — see
+    /// `attestcarry::carry_from_source`; `varve verify` is what checks them.
+    pub attestations_carried: usize,
+    /// Why carriage was incomplete, when it was. REPORTED, never fatal: a
+    /// mirror that dropped an attestation blob must not be able to make a
+    /// correctly-signed layer uninstallable, but the loss must not be silent
+    /// either — silence is the exact bandersnatch/Verdaccio failure this
+    /// requirement exists to surface.
+    pub attestation_note: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -264,6 +274,26 @@ pub fn install(
         })?;
     }
 
+    // 6b. Carry the layer's attestations into its root (REQ-ATTEST-002).
+    // Registries publish this evidence and mirrors drop it: bandersnatch and
+    // Verdaccio carry none, and every Bazel Central Registry attestation URL
+    // points at github.com — so without this an air-gapped consumer receives
+    // the bytes and none of the accountability, with no error saying so.
+    // Persisting here is also what lets `archive` put it back on the wire.
+    let mut attestations_carried = 0usize;
+    let mut attestation_note = None;
+    if let Some(entry) = store.get(&digest)? {
+        match crate::attestcarry::carry_from_source(source, &layer_ref, &entry.root) {
+            Ok(n) => attestations_carried = n,
+            // Never fatal. The layer's own signature and digests decided the
+            // install several steps ago; a third party's evidence being
+            // missing, malformed, or unfetchable is evidence ABOUT the
+            // evidence, and refusing here would hand a mirror the power to
+            // make a perfectly-signed layer uninstallable.
+            Err(e) => attestation_note = Some(e.to_string()),
+        }
+    }
+
     // 7. Only a fully landed layer advances the high-water mark.
     marks.advance(&manifest)?;
 
@@ -278,6 +308,8 @@ pub fn install(
         counter: manifest.counter,
         staleness_days,
         index_high_water,
+        attestations_carried,
+        attestation_note,
     })
 }
 
@@ -753,6 +785,100 @@ mod tests {
             matches!(err, InstallError::ChannelMismatch { .. }),
             "got: {err}"
         );
+    }
+
+    // rivet: verifies REQ-ATTEST-002
+    #[test]
+    fn install_carries_the_attestations_the_source_holds_into_the_installed_layer() {
+        // The transport half. Binding shipped in v0.22.0 and reached nobody:
+        // an attestation that stays in the producer's CI is not evidence a
+        // consumer has. This asserts the evidence lands in the installed layer
+        // root — the only place `archive` and `verify` can find it later.
+        use crate::attest::{AttestationKind, sign, statement};
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let (_tmp, store, mut marks) = setup();
+        let (bytes, blobs) = july();
+        let layer_digest = manifest_digest(&bytes);
+        let sbom = b"{\"bomFormat\":\"CycloneDX\"}";
+        let st = statement(
+            "2026.07.0",
+            &layer_digest,
+            AttestationKind::Sbom,
+            sbom,
+            "acme-ci",
+        );
+        let envelope = sign(&st, &sk, "root-1").unwrap();
+        let source = memory_source(&bytes, &blobs).with_attestation(envelope.as_bytes(), sbom);
+
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.attestations_carried, 1,
+            "install must report what travelled"
+        );
+        assert_eq!(outcome.attestation_note, None);
+
+        // …and it is really on disk, verbatim, and still binds offline.
+        let entry = store.get(&outcome.digest).unwrap().unwrap();
+        let carried = crate::attestcarry::read_persisted(&entry.root, "2026.07.0").unwrap();
+        assert_eq!(carried.len(), 1, "the evidence reached the installed layer");
+        assert_eq!(
+            carried[0].bytes, sbom,
+            "the attested bytes are stored VERBATIM — varve transports another party's \
+             judgement, it never restates it"
+        );
+        let reports = crate::attestcarry::report(&carried, &layer_digest, "2026.07.0", &pk);
+        assert!(reports[0].binds, "reason: {:?}", reports[0].reason);
+        assert_eq!(reports[0].producer, "acme-ci");
+    }
+
+    // rivet: verifies REQ-ATTEST-002
+    #[test]
+    fn a_source_that_loses_its_attestations_still_installs_but_says_so() {
+        // Deliberate: REPORTING, not refusal. A mirror that drops the evidence
+        // must not gain the power to make a correctly-signed layer
+        // uninstallable — that would make varve's availability a function of
+        // someone else's mirroring. But the loss must not be SILENT either:
+        // silence is precisely the bandersnatch/Verdaccio failure this
+        // requirement exists to surface.
+        struct LosesAttestations(MemorySource);
+        impl LayerSource for LosesAttestations {
+            fn fetch_manifest(&self, layer: &LayerRef) -> Result<Vec<u8>, SourceError> {
+                self.0.fetch_manifest(layer)
+            }
+            fn fetch_blob(&self, digest: &str) -> Result<Vec<u8>, SourceError> {
+                self.0.fetch_blob(digest)
+            }
+            fn fetch_attestations(
+                &self,
+                _layer: &LayerRef,
+            ) -> Result<Vec<crate::attestcarry::CarriedAttestation>, SourceError> {
+                Err(SourceError::Transport("the mirror dropped them".into()))
+            }
+        }
+        let (_tmp, store, mut marks) = setup();
+        let (bytes, blobs) = july();
+        let outcome = install(
+            &pin("2026.07.0"),
+            &LosesAttestations(memory_source(&bytes, &blobs)),
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .expect("a layer whose own signature and digests are good is still a good layer");
+        assert_eq!(outcome.attestations_carried, 0);
+        let note = outcome
+            .attestation_note
+            .expect("the loss must be reported, never swallowed");
+        assert!(note.contains("dropped them"), "note: {note}");
     }
 
     // rivet: verifies REQ-INDEXAUTH-001

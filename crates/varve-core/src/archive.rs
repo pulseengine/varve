@@ -45,6 +45,8 @@ pub enum ArchiveError {
     #[error("layer.json in the core is not a valid manifest: {0}")]
     Manifest(#[from] crate::manifest::ManifestError),
     #[error(transparent)]
+    Carry(#[from] crate::attestcarry::CarryError),
+    #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
     Verify(#[from] VerifyError),
@@ -81,6 +83,16 @@ pub fn export(store: &Store, layer: &InstalledLayer, dest: &Path) -> Result<(), 
             blobs.push((entry.digest.clone(), bytes));
         }
     }
+    // The attestations that travelled into this layer at install time must
+    // travel back out (REQ-ATTEST-002) — otherwise the evidence reaches one
+    // machine and dies there, which is the same mirror-boundary loss one hop
+    // later. Read BEFORE writing anything: the gather-then-write rule above is
+    // what keeps a broken store from producing a half-written artifact of
+    // record. A statement whose bytes are gone is an error here, unlike at
+    // install: this is our own store, not somebody else's mirror, and an
+    // archive is the artifact of record.
+    let carried = crate::attestcarry::read_persisted(&layer.root, &manifest.layer.to_string())?;
+
     write_oci_layout(
         &payload,
         &envelope,
@@ -90,6 +102,9 @@ pub fn export(store: &Store, layer: &InstalledLayer, dest: &Path) -> Result<(), 
         dest,
     )
     .map_err(|(path, source)| ArchiveError::Io { path, source })?;
+    for c in &carried {
+        crate::attestcarry::attach(dest, &c.statement, &c.bytes)?;
+    }
     let _ = store; // reads go through the layer's recorded root; the store itself is untouched
     Ok(())
 }
@@ -243,6 +258,22 @@ impl LayerSource for OciLayoutSource {
         // The archived layout carries its baseline as a line-status referrer
         // (REQ-STATUS-DIST-001). Untrusted bytes — the caller re-verifies.
         crate::linestatus::read_any_from_layout(&self.root)
+            .map_err(|e| SourceError::Transport(e.to_string()))
+    }
+
+    fn fetch_attestations(
+        &self,
+        layer: &LayerRef,
+    ) -> Result<Vec<crate::attestcarry::CarriedAttestation>, SourceError> {
+        // The same referrer machinery line-status uses (REQ-STATUS-DIST-001),
+        // as REQ-ATTEST-002 requires — one shape, not two. Untrusted bytes:
+        // the layout is a mirror's output and `verify` re-checks every
+        // statement against the trust root.
+        let name = match layer {
+            LayerRef::Name(id) => id.to_string(),
+            LayerRef::Digest(d) => d.clone(),
+        };
+        crate::attestcarry::read_all(&self.root, &name)
             .map_err(|e| SourceError::Transport(e.to_string()))
     }
 }
@@ -412,6 +443,111 @@ mod tests {
             crate::reverify::verify_installed(&fresh_store, &entry, &verifier, "test-platform")
                 .unwrap();
         assert_eq!(checked, 1);
+    }
+
+    /// The same signed layer, plus a signed attestation statement carried
+    /// beside it — the producer's side of REQ-ATTEST-002.
+    #[allow(clippy::type_complexity)]
+    fn installed_with_attestation() -> (
+        tempfile::TempDir,
+        Store,
+        InstalledLayer,
+        PinnedKeyVerifier,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+    ) {
+        use crate::attest::{AttestationKind, sign, statement};
+        let (sk, pk) = generate_root_keypair();
+        let tool = b"synth-bytes".to_vec();
+        let blob_digest = manifest_digest(&tool);
+        let payload = manifest_with_tools(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[("synth", &blob_digest)],
+        );
+        let envelope = sign_layer_manifest(&payload, &sk, "varve-root-1").unwrap();
+        let sbom = b"{\"bomFormat\":\"CycloneDX\",\"components\":[]}".to_vec();
+        let st = statement(
+            "2026.07.0",
+            &manifest_digest(&payload),
+            AttestationKind::Sbom,
+            &sbom,
+            "acme-ci",
+        );
+        let statement_envelope = sign(&st, &sk, "varve-root-1").unwrap().into_bytes();
+        let source = MemorySource::new()
+            .with_manifest(envelope.as_bytes())
+            .with_blob(&blob_digest, &tool)
+            .with_attestation(&statement_envelope, &sbom);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let store = Store::at(&root);
+        let mut marks = HighWaterMarks::load(&root).unwrap();
+        let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &verifier,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap();
+        let layer = store.get(&outcome.digest).unwrap().unwrap();
+        (tmp, store, layer, verifier, payload, pk.to_vec(), sbom)
+    }
+
+    // rivet: verifies REQ-ATTEST-002
+    #[test]
+    fn an_attestation_survives_archive_and_an_offline_install_into_a_fresh_core() {
+        // THE requirement, end to end in one process: evidence enters at
+        // install, is re-emitted by `archive` as referrer artifacts, crosses to
+        // a machine that shares nothing with the first but the pinned root, and
+        // is still checkable there with no network. Registries publish this
+        // evidence and mirrors drop it — bandersnatch and Verdaccio carry none,
+        // and every BCR attestation URL points at github.com — so without this
+        // an air-gapped consumer gets the bytes and none of the accountability.
+        let (tmp, store, layer, verifier, payload, pk, sbom) = installed_with_attestation();
+        let dest = tmp.path().join("archive");
+        export(&store, &layer, &dest).unwrap();
+
+        // The archive carries it as referrer entries, in the layout index.
+        let carried = crate::attestcarry::read_all(&dest, "2026.07.0").unwrap();
+        assert_eq!(carried.len(), 1, "archive must re-emit the evidence");
+        assert_eq!(carried[0].bytes, sbom, "carried verbatim");
+
+        // A fresh core, installing from that archive alone.
+        let fresh_root = tmp.path().join("fresh");
+        let fresh_store = Store::at(&fresh_root);
+        let mut fresh_marks = HighWaterMarks::load(&fresh_root).unwrap();
+        let outcome = install(
+            &pin("2026.07.0"),
+            &OciLayoutSource::at(&dest),
+            &verifier,
+            &fresh_store,
+            &mut fresh_marks,
+            &policy(),
+        )
+        .unwrap();
+        assert_eq!(outcome.attestations_carried, 1, "it crossed the gap");
+
+        // …and on the far side it STILL BINDS, offline, against the pinned
+        // root — which is what `varve verify` reports.
+        let entry = fresh_store.get(&outcome.digest).unwrap().unwrap();
+        let reports = crate::attestcarry::report_installed(
+            &entry.root,
+            "2026.07.0",
+            &manifest_digest(&payload),
+            &pk,
+        )
+        .unwrap();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].binds, "reason: {:?}", reports[0].reason);
+        assert_eq!(reports[0].kind, "sbom");
+        assert_eq!(reports[0].producer, "acme-ci");
     }
 
     // rivet: verifies REQ-VERIFY-001

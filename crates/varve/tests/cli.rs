@@ -962,6 +962,178 @@ fn check_attestation_refuses_a_tampered_layer() {
         .failure();
 }
 
+// rivet: verifies REQ-ATTEST-002
+#[test]
+fn an_attestation_travels_through_deposit_archive_and_an_offline_install() {
+    // The carriage half, at the boundary a user actually touches. v0.22.0
+    // shipped BINDING and a review found REQ-ATTEST-001 marked verified with
+    // this half unimplemented: a statement that stays in the producer's CI is
+    // not evidence anyone has. Registries publish this material and mirrors
+    // drop it — bandersnatch and Verdaccio carry none, every BCR attestation
+    // URL points at github.com — so an air-gapped consumer receives the bytes
+    // and none of the accountability, with no error saying so.
+    //
+    // Three cores, sharing nothing but the pinned root: the producer's, the
+    // consumer's, and the disconnected site's on the far side of `archive`.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap().to_path_buf();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("attcarry-root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("attcarry-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    let tool = parent.join("attcarry-synth");
+    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+    let spec = parent.join("attcarry-spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0.0\"\npath = \"{}\"\n",
+            tool.display()
+        ),
+    )
+    .unwrap();
+
+    // 1. CI deposits the layer as an oci-layout.
+    let layout = parent.join("attcarry-layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "test-root", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    // 2. …installs it once to produce an SBOM transcribed from the signed
+    // manifest, and signs a statement binding that SBOM to the layer, ATTACHING
+    // both to the layout as referrer artifacts. This is the step that did not
+    // exist: without it the statement is written to a file and reaches nobody.
+    let producer_root = parent.join("producer-root");
+    let sbom = parent.join("layer.cdx.json");
+    let stmt = parent.join("sbom.statement.dsse");
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["sbom", "--out"])
+        .arg(&sbom)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args([
+            "sign-attestation",
+            "--kind",
+            "sbom",
+            "--producer",
+            "acme-ci",
+            "--file",
+        ])
+        .arg(&sbom)
+        .arg("--key")
+        .arg(&sk_path)
+        .args(["--key-id", "test-root", "--out"])
+        .arg(&stmt)
+        .arg("--attach-to")
+        .arg(&layout)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("attached to layout"));
+
+    // 3. A consumer installs from that layout into a core of its own: the
+    // evidence travels with the layer, and `verify` says what it is and that
+    // it still binds.
+    let consumer_root = parent.join("consumer-root");
+    varve(&fx)
+        .env("VARVE_ROOT", &consumer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("carried 1 attestation(s)"));
+    varve(&fx)
+        .env("VARVE_ROOT", &consumer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("carries 1 attestation(s)"))
+        .stdout(predicate::str::contains(
+            "sbom by acme-ci: binds to this layer",
+        ));
+
+    // 4. That consumer archives the layer for a disconnected site. The archive
+    // must re-emit the attestation as referrer entries — this is the mirror
+    // boundary, and dropping it here is exactly the bug.
+    let air_gapped = parent.join("attcarry-archive");
+    varve(&fx)
+        .env("VARVE_ROOT", &consumer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["archive", "2026.07.0"])
+        .arg(&air_gapped)
+        .assert()
+        .success();
+
+    // 5. The far side: a FRESH core, offline, nothing but the archive and the
+    // pinned root. The evidence is there and still binds.
+    let far_side = parent.join("far-side-root");
+    varve(&fx)
+        .env("VARVE_ROOT", &far_side)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&air_gapped)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("carried 1 attestation(s)"));
+    varve(&fx)
+        .env("VARVE_ROOT", &far_side)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "sbom by acme-ci: binds to this layer",
+        ));
+
+    // 6. Reporting, not refusal — deliberately. Corrupt the carried statement
+    // in the far-side core: `verify` must say the attestation no longer binds
+    // and still PASS the layer, whose own signature and digests are untouched.
+    // Failing here would make varve's verdict depend on a third party's
+    // release cadence, in the one tool whose purpose is frozen toolchains.
+    let store_dir = std::fs::read_dir(far_side.join("core"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("attestations");
+    for e in std::fs::read_dir(&store_dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.to_string_lossy().ends_with(".statement.json") {
+            std::fs::write(&p, b"{\"payload\":\"bm90LWEtc3RhdGVtZW50\"}").unwrap();
+        }
+    }
+    varve(&fx)
+        .env("VARVE_ROOT", &far_side)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("verified: signature OK"))
+        .stdout(predicate::str::contains("DOES NOT BIND"));
+}
+
 // rivet: verifies REQ-SBOM-001
 #[test]
 fn sbom_fails_closed_on_a_layer_it_cannot_verify() {

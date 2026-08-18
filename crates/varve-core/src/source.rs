@@ -84,6 +84,23 @@ pub trait LayerSource {
         Ok(None)
     }
 
+    /// Fetch the attestations this source carries beside the layer as
+    /// referrer artifacts (REQ-ATTEST-002). Same contract as
+    /// `fetch_line_status`: OPAQUE, UNTRUSTED bytes. The source is never
+    /// trusted to have verified a statement — it is the party that would
+    /// benefit from a forged one — so the caller persists them verbatim and
+    /// `varve verify` re-checks each against the trust root.
+    ///
+    /// A source carrying none returns `Ok(vec![])`, which is not an error: most
+    /// layers carry no third-party evidence, and demanding some would make
+    /// varve's availability depend on other people's publishing habits.
+    fn fetch_attestations(
+        &self,
+        _layer: &LayerRef,
+    ) -> Result<Vec<crate::attestcarry::CarriedAttestation>, SourceError> {
+        Ok(Vec::new())
+    }
+
     /// The layer ids this source is willing to serve for a line. Used to
     /// detect OMISSION against the signed index. A source that cannot
     /// enumerate returns `Ok(None)` — distinct from `Ok(Some(vec![]))`, which
@@ -103,6 +120,7 @@ pub struct MemorySource {
     line_status: Option<Vec<u8>>,
     line_index: Option<Vec<u8>>,
     served: Option<Vec<String>>,
+    attestations: Vec<crate::attestcarry::CarriedAttestation>,
 }
 
 impl MemorySource {
@@ -138,6 +156,20 @@ impl MemorySource {
 
     pub fn with_line_status(mut self, envelope: &[u8]) -> Self {
         self.line_status = Some(envelope.to_vec());
+        self
+    }
+
+    /// Carry an attestation beside the layer (REQ-ATTEST-002). The statement's
+    /// digest is derived from the bytes handed over, not declared: a source
+    /// that could name its own content addresses would be trusted about
+    /// something, and it is trusted about nothing.
+    pub fn with_attestation(mut self, statement: &[u8], attested_bytes: &[u8]) -> Self {
+        self.attestations
+            .push(crate::attestcarry::CarriedAttestation {
+                statement_digest: crate::store::manifest_digest(statement),
+                statement: statement.to_vec(),
+                bytes: attested_bytes.to_vec(),
+            });
         self
     }
 }
@@ -226,6 +258,13 @@ impl LayerSource for MemorySource {
     fn fetch_line_status(&self, _layer: &LayerRef) -> Result<Option<Vec<u8>>, SourceError> {
         Ok(self.line_status.clone())
     }
+
+    fn fetch_attestations(
+        &self,
+        _layer: &LayerRef,
+    ) -> Result<Vec<crate::attestcarry::CarriedAttestation>, SourceError> {
+        Ok(self.attestations.clone())
+    }
 }
 
 #[cfg(test)]
@@ -244,6 +283,36 @@ mod tests {
             got.as_deref(),
             Some(envelope.as_slice()),
             "a source that carries a baseline line-status must hand it back for caching"
+        );
+    }
+
+    // rivet: verifies REQ-ATTEST-002
+    #[test]
+    fn a_source_carrying_attestations_hands_over_both_blobs_and_one_without_is_not_an_error() {
+        let source = MemorySource::new().with_attestation(b"a-statement-envelope", b"the-evidence");
+        let got = source
+            .fetch_attestations(&LayerRef::Name("2026.07.0".parse().unwrap()))
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0].bytes, b"the-evidence",
+            "the attested bytes must travel beside the statement — a claim with nothing to \
+             check it against is what crossing the air gap must never produce"
+        );
+        assert_eq!(
+            got[0].statement_digest,
+            crate::store::manifest_digest(b"a-statement-envelope"),
+            "the digest is derived from the bytes; a source never declares its own address"
+        );
+
+        // Absence is emptiness, not failure: most layers carry no third-party
+        // evidence, and requiring some would make availability depend on other
+        // people's publishing habits.
+        assert!(
+            MemorySource::new()
+                .fetch_attestations(&LayerRef::Name("2026.07.0".parse().unwrap()))
+                .unwrap()
+                .is_empty()
         );
     }
 

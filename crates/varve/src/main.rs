@@ -245,6 +245,15 @@ enum Cmd {
         /// Where to write the signed statement.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
+        /// (CI) Also ATTACH the statement and the attestation bytes to a
+        /// deposit layout as referrer artifacts, so the evidence travels with
+        /// the layer through a registry push, an `archive`, and an offline
+        /// install (REQ-ATTEST-002). Without this the statement exists and
+        /// reaches nobody — the mirror-boundary gap where bandersnatch,
+        /// Verdaccio and every github.com-hosted BCR attestation drop the
+        /// evidence and no error says so.
+        #[arg(long = "attach-to", value_name = "DIR")]
+        attach_to: Option<PathBuf>,
     },
     /// Check that an attestation belongs to the pinned layer: verify the
     /// statement against the trust root, then re-hash the carried bytes and
@@ -484,6 +493,7 @@ fn run() -> anyhow::Result<()> {
             key,
             key_id,
             out,
+            attach_to,
         } => sign_attestation(
             &store,
             layer.as_deref(),
@@ -493,6 +503,7 @@ fn run() -> anyhow::Result<()> {
             &key,
             &key_id,
             &out,
+            attach_to.as_deref(),
         ),
         Cmd::CheckAttestation { statement, file } => check_attestation(&store, &statement, &file),
         Cmd::AttachStatus { layout, status } => attach_status(&layout, &status),
@@ -1228,6 +1239,7 @@ fn sign_attestation(
     key: &std::path::Path,
     key_id: &str,
     out: &std::path::Path,
+    attach_to: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let kind: varve_core::attest::AttestationKind = kind.parse()?;
     // Trust first, as everywhere: binding an attestation to a layer we cannot
@@ -1249,7 +1261,21 @@ fn sign_attestation(
     // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
     let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
     let envelope = varve_core::attest::sign(&st, &sk, key_id)?;
-    std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
+    std::fs::write(out, &envelope).with_context(|| format!("cannot write {}", out.display()))?;
+    // Carriage (REQ-ATTEST-002): both blobs go into the layout as referrer
+    // entries — the statement AND the attested bytes verbatim. Carrying only
+    // the statement would put a claim on the far side of the air gap with
+    // nothing to check it against.
+    if let Some(layout) = attach_to {
+        varve_core::attestcarry::attach(layout, envelope.as_bytes(), &bytes).with_context(
+            || {
+                format!(
+                    "cannot attach the attestation to layout {}",
+                    layout.display()
+                )
+            },
+        )?;
+    }
     println!(
         "signed a {kind} attestation statement by {producer} -> {out}\n\
          \u{20}\u{20}attestation digest : {adigest}\n\
@@ -1261,6 +1287,14 @@ fn sign_attestation(
         layer = entry.layer,
         ldigest = st.layer_manifest_digest,
     );
+    if let Some(layout) = attach_to {
+        println!(
+            "attached to layout {} as referrer artifacts — the statement AND the bytes, so it \
+             travels with the layer through a registry push, `varve archive`, and an offline \
+             install",
+            layout.display()
+        );
+    }
     Ok(())
 }
 
@@ -1775,6 +1809,23 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
             outcome.layer
         );
     }
+    // Carriage, reported at the moment the evidence crosses the boundary
+    // (REQ-ATTEST-002). `varve verify` is what says whether each still binds;
+    // this only says what travelled, so a consumer downstream of a mirror can
+    // see a drop instead of inferring it from silence.
+    if outcome.attestations_carried > 0 {
+        println!(
+            "  carried {} attestation(s) with the layer — `varve verify` reports what each \
+             claims and whether it still binds",
+            outcome.attestations_carried
+        );
+    }
+    if let Some(note) = &outcome.attestation_note {
+        eprintln!(
+            "warning: layer {} carried attestations that did not survive the trip: {note}",
+            outcome.layer
+        );
+    }
 
     // A composed layer is only usable once what it composes is installed too.
     // install exited 0 on a composition `verify` rejects, so `run` then
@@ -1872,6 +1923,7 @@ fn verify(
             "layer {} {} verified: signature OK, {checked} tool(s) match their signed digests",
             layer.layer, layer.digest
         );
+        report_attestations(&ctx, &layer)?;
         // A composition is only as trustworthy as every layer in it. Verifying
         // the root alone left an UNSIGNED included layer dispatching while
         // verify reported OK (found by clean-room review) — the included
@@ -1890,6 +1942,62 @@ fn verify(
     // is where environment drift belongs (the precedent REQ-EXPORT-SYNC-001
     // set for stale exports), so this fails rather than warns (varve#66).
     verify_no_shadowing(&ctx, store)?;
+    Ok(())
+}
+
+/// Report the attestations a verified layer carries (REQ-ATTEST-002): what
+/// each claims, who produced it, and whether it STILL binds to this layer and
+/// these bytes under the trust root.
+///
+/// REPORTING, not refusal, and that is a decision rather than an omission. An
+/// attestation that no longer binds is evidence about the evidence — the
+/// consumer must see it — but a layer whose own signature and digests are good
+/// is still a good layer. Failing `verify` on a third party's stale audit would
+/// make varve's verdict depend on someone else's release cadence, in the one
+/// tool whose purpose is frozen toolchains.
+///
+/// Called only AFTER `verify_installed` has re-checked the retained envelope:
+/// the layer's name and digest are local labels until then, and joining an
+/// attestation onto unverified labels is the defect clean-room review already
+/// found in `check-attestation`.
+fn report_attestations(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> anyhow::Result<()> {
+    let root = ctx_root_bytes(ctx)?;
+    let reports = match varve_core::attestcarry::report_installed(
+        &layer.root,
+        &layer.layer.to_string(),
+        &layer.digest,
+        &root,
+    ) {
+        Ok(reports) => reports,
+        // A broken attestation store is surfaced, never fatal — same rule as
+        // the binding verdict itself.
+        Err(e) => {
+            eprintln!("note: attestations carried by layer {} : {e}", layer.layer);
+            return Ok(());
+        }
+    };
+    if reports.is_empty() {
+        return Ok(());
+    }
+    println!("  carries {} attestation(s):", reports.len());
+    for r in &reports {
+        if r.binds {
+            println!(
+                "    {kind} by {producer}: binds to this layer (varve vouches for the \
+                 association and the bytes' integrity — what {producer} CLAIMS is verified \
+                 with {producer}'s own key)",
+                kind = r.kind,
+                producer = r.producer,
+            );
+        } else {
+            println!(
+                "    {kind} by {producer}: DOES NOT BIND — {reason}",
+                kind = r.kind,
+                producer = r.producer,
+                reason = r.reason.as_deref().unwrap_or("unknown"),
+            );
+        }
+    }
     Ok(())
 }
 
