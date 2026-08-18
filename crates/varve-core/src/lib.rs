@@ -47,6 +47,7 @@ pub mod reverify;
 pub mod rollback;
 pub mod sbom;
 pub mod selfverify;
+pub mod shadow;
 pub mod source;
 pub mod store;
 pub mod update;

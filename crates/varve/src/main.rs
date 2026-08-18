@@ -1885,7 +1885,39 @@ fn verify(
     if let Some(path) = lockfile {
         verify_lockfile(&ctx, path)?;
     }
+    // A verified layer that PATH does not actually reach is the gap between
+    // what is signed and what executes — the one varve exists to close. verify
+    // is where environment drift belongs (the precedent REQ-EXPORT-SYNC-001
+    // set for stale exports), so this fails rather than warns (varve#66).
+    verify_no_shadowing(&ctx, store)?;
     Ok(())
+}
+
+/// Fail when PATH would run a different binary than the pin dispatches
+/// (REQ-SHADOW-001 clause 3).
+fn verify_no_shadowing(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
+    let resolved = varve_core::resolve(&ctx.pin, store)?;
+    let path_var = std::env::var_os("PATH");
+    // Our own binary: a shim is a symlink to VARVE, so reaching varve is the
+    // supported route, not a conflict.
+    let me = std::env::current_exe().ok();
+    let mut shadowed = Vec::new();
+    for (name, path) in &resolved.tools {
+        if let varve_core::shadow::Shadowing::Shadowed { found } =
+            varve_core::shadow::check(path_var.as_deref(), name, path, me.as_deref())
+        {
+            shadowed.push(varve_core::shadow::describe(name, path, &found));
+        }
+    }
+    if shadowed.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the layer verifies, but {} of its tool(s) are not what your PATH runs \
+         (REQ-SHADOW-001):\n\n{}",
+        shadowed.len(),
+        shadowed.join("\n\n")
+    );
 }
 
 /// Check a project's lockfile against the pinned layer's `crate` entries
@@ -2113,11 +2145,27 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
                 .join(", ")
         );
     };
+    // STDOUT is the dispatched path, unchanged, so scripts that capture it
+    // keep working (REQ-SHADOW-001 clause 2).
     println!("{}", path.display());
     println!(
         "layer {} ({}) {}",
         resolved.layer.layer, resolved.layer.channel, resolved.layer.digest
     );
+    // …but the answer to "which binary runs here" is false if PATH disagrees,
+    // and that is the README's own words for this command (varve#66).
+    let me = std::env::current_exe().ok();
+    if let varve_core::shadow::Shadowing::Shadowed { found } = varve_core::shadow::check(
+        std::env::var_os("PATH").as_deref(),
+        tool,
+        path,
+        me.as_deref(),
+    ) {
+        eprintln!(
+            "warning: {}",
+            varve_core::shadow::describe(tool, path, &found)
+        );
+    }
     Ok(())
 }
 

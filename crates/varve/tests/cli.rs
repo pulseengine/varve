@@ -48,8 +48,104 @@ fn fixture(pin: Option<&str>, layers: &[(&str, LayerTools)]) -> Fixture {
 
 fn varve(fx: &Fixture) -> Command {
     let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fx.root).current_dir(&fx.project);
+    // A hermetic PATH. Without it these tests inherit the developer's, and
+    // REQ-SHADOW-001 correctly reported a real conflict — a `cargo install`ed
+    // `synth` in ~/.cargo/bin shadowing the fixture's pinned one — turning
+    // three unrelated tests red on one machine and green on another. That is
+    // the check doing its job; a suite whose result depends on what the person
+    // running it happens to have installed is the defect.
+    cmd.env("PATH", "/usr/bin:/bin");
     cmd
+}
+
+// rivet: verifies REQ-SHADOW-001
+#[test]
+fn verify_fails_when_path_runs_a_different_binary_than_the_pin() {
+    // The reported bug (varve#66), end to end. Every individual answer was
+    // correct and the composite was false: `which` printed the store path,
+    // `verify` called the layer perfect — it WAS perfect — and the shell ran
+    // something else. varve's headline claim in the README is `varve which
+    // synth  # which binary runs here`.
+    // A genuinely signed, installed layer — verify must have a trust root, and
+    // the point of this test is that a PERFECT layer still fails the check.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    let tool = parent.join("synth-bin");
+    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+    let spec = parent.join("spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0.0\"\npath = \"{}\"\n",
+            tool.display()
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "k", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    let elsewhere = fx.project.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let impostor = elsewhere.join("synth");
+    std::fs::write(&impostor, "#!/bin/sh\necho WRONG\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&impostor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let shadowed_path = format!("{}:/usr/bin:/bin", elsewhere.display());
+
+    // verify FAILS and says which binary actually wins, and how to fix it.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .env("PATH", &shadowed_path)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not what your PATH runs"))
+        .stderr(predicate::str::contains("varve shim install"));
+
+    // `which` keeps printing the dispatched path on STDOUT so scripts still
+    // work, and warns on STDERR.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .env("PATH", &shadowed_path)
+        .args(["which", "synth"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/bin/synth"))
+        .stderr(predicate::str::contains("on your PATH"));
+
+    // With nothing shadowing it, verify passes — the check must not fire on a
+    // machine that simply has not installed the shims yet.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .env("PATH", "/usr/bin:/bin")
+        .arg("verify")
+        .assert()
+        .success();
 }
 
 // rivet: verifies REQ-PIN-001
@@ -1178,6 +1274,7 @@ fn archive_then_offline_install_round_trips_with_verification_unchanged() {
     // archive with the same trust root, then re-verify offline.
     let fresh_root = fx.project.parent().unwrap().join("fresh-root");
     let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fresh_root)
         .env("VARVE_TRUST_ROOT", &signed.trust_root)
         .current_dir(&fx.project)
@@ -1187,6 +1284,7 @@ fn archive_then_offline_install_round_trips_with_verification_unchanged() {
         .success()
         .stdout(predicate::str::contains("2026.07.0"));
     let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fresh_root)
         .env("VARVE_TRUST_ROOT", &signed.trust_root)
         .current_dir(&fx.project)
@@ -2232,6 +2330,7 @@ fn two_realms_same_layer_name_zero_cross_talk() {
         // Install from each realm's archive; NO VARVE_TRUST_ROOT env — the
         // realm is authoritative and self-contained.
         let mut cmd = Command::cargo_bin("varve").unwrap();
+        cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
         cmd.env("VARVE_ROOT", &fx.root)
             .env_remove("VARVE_TRUST_ROOT")
             .current_dir(&proj)
@@ -2244,6 +2343,7 @@ fn two_realms_same_layer_name_zero_cross_talk() {
 
     // One shim serves both universes: per-invocation resolution.
     let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fx.root)
         .current_dir(parent.join("proj-pulseengine"))
         .args(["shim", "install"])
@@ -2269,6 +2369,7 @@ fn two_realms_same_layer_name_zero_cross_talk() {
     // Cross-acceptance impossible: acme's archive can NEVER install into the
     // pulseengine project (realm root refuses the signature).
     let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fx.root)
         .current_dir(parent.join("proj-pulseengine"))
         .args(["install", "--from"])
