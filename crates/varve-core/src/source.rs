@@ -74,6 +74,24 @@ pub trait LayerSource {
     fn fetch_line_status(&self, _layer: &LayerRef) -> Result<Option<Vec<u8>>, SourceError> {
         Ok(None)
     }
+
+    /// Fetch the realm's signed line-index envelope for this line, if the
+    /// source carries one (REQ-INDEXAUTH-001). Same contract as
+    /// `fetch_line_status`: opaque bytes, re-verified by the caller against
+    /// the trust root. The source is never trusted to have checked it — it is
+    /// precisely the party this document exists to constrain.
+    fn fetch_line_index(&self, _line: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        Ok(None)
+    }
+
+    /// The layer ids this source is willing to serve for a line. Used to
+    /// detect OMISSION against the signed index. A source that cannot
+    /// enumerate returns `Ok(None)` — distinct from `Ok(Some(vec![]))`, which
+    /// means "I enumerate, and I have nothing", and would flag every indexed
+    /// layer as hidden.
+    fn served_layers(&self, _line: &str) -> Result<Option<Vec<String>>, SourceError> {
+        Ok(None)
+    }
 }
 
 /// In-memory source — the test double, and the reference for how little a

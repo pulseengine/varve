@@ -29,6 +29,13 @@ pub struct Realm {
     pub registry: String,
     /// Raw ed25519 root public key bytes.
     pub trust_root: Vec<u8>,
+    /// The realm asserts that it publishes a signed line index
+    /// (REQ-INDEXAUTH-001 clause 5). Where true, a missing index is an ERROR
+    /// rather than a silent fall back to the registry's unauthenticated
+    /// listing — otherwise an attacker need only delete the index to disable
+    /// the check. Defaults to false so every existing realm keeps working:
+    /// failing closed by default would break all of them at once.
+    pub signed_index: bool,
 }
 
 impl Realm {
@@ -95,6 +102,10 @@ struct RawRealm {
     /// …or a key file, relative to the realms file.
     #[serde(rename = "trust-root-file", default)]
     trust_root_file: Option<String>,
+    /// `signed-index = true` — this realm publishes a signed line index and
+    /// consumers must not accept an unauthenticated listing for it.
+    #[serde(rename = "signed-index", default)]
+    signed_index: bool,
 }
 
 /// Find the realms file by walking up from `start`.
@@ -190,6 +201,7 @@ pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
         name: name.to_string(),
         registry: def.registry.clone(),
         trust_root,
+        signed_index: def.signed_index,
     })
 }
 
@@ -317,5 +329,34 @@ trust-root = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 "{name} must refuse"
             );
         }
+    }
+
+    // rivet: verifies REQ-INDEXAUTH-001
+    #[test]
+    fn a_realm_declares_whether_it_publishes_a_signed_index() {
+        // Clause 5. Failing closed by default would break every realm that
+        // exists; failing open with no way to opt in would let an attacker
+        // disable the check by deleting the index. The realm decides, which is
+        // where every other trust question is already settled.
+        let tmp = realms_dir(
+            r#"
+[realm.declaring]
+registry     = "oci://example.test/layers"
+trust-root   = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
+signed-index = true
+
+[realm.silent]
+registry   = "oci://example.test/other"
+trust-root = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
+"#,
+        );
+        assert!(
+            resolve_realm(tmp.path(), "declaring").unwrap().signed_index,
+            "a realm that declares an index must be recorded as declaring it"
+        );
+        assert!(
+            !resolve_realm(tmp.path(), "silent").unwrap().signed_index,
+            "the default must be false, or every existing realm breaks at once"
+        );
     }
 }

@@ -1578,15 +1578,39 @@ artifacts:
     release: v0.26.0
     description: >
       varve signs individual layer manifests and realms, but the LISTING of
-      which layers exist for a line (the index a consumer enumerates) must
-      itself be authenticated by the realm's trust root — otherwise a
-      compromised registry/index host could hide or omit a layer (a freshness
-      /availability attack) even though each artifact it does serve verifies.
-      Guix authenticates its index git-history via signed commits; varve shall
-      have the equivalent: the per-line index is signed, and the anti-rollback
-      high-water mark holds even if the index host is compromised (the Uptane
-      insight — rollback protection must survive a Director/registry
-      compromise, not just artifact tampering).
+      which layers exist for a line is the registry's raw `/tags/list` —
+      unauthenticated. A compromised or merely stale index host can HIDE a
+      layer, and every artifact it does serve still verifies, so nothing
+      detects it. Hiding also breaks digest-pinned resolution, because
+      `LayerRef::Digest` is resolved by enumerating tags. Guix authenticates
+      its index git-history via signed commits; this is varve's equivalent, and
+      it is the Uptane insight that rollback protection must survive a
+      Director/registry compromise rather than only artifact tampering.
+      Stated as discrete clauses, because prose requirements here have four
+      times been marked verified while half-implemented:
+      (1) varve shall define a line-index document — the line, a counter, an
+      issue time, and every layer of that line with its payload digest and
+      channel — carried as a DSSE envelope under its own payload type and
+      verified against the realm's trust root, so a signed something-else
+      cannot be replayed as an index.
+      (2) The index shall carry a monotonic per-line counter, and a presented
+      index whose counter is lower than the cached one shall be REFUSED,
+      naming both counters — the same rule line-status already enforces, for
+      the same reason.
+      (3) When a verified index is available, varve shall refuse an enumeration
+      that OMITS a layer the index names, and shall name the omitted layer and
+      its digest. This is the detection the whole requirement exists for.
+      (4) The anti-rollback high-water mark shall be advanceable from the
+      VERIFIED INDEX rather than only from what the source chose to serve, so a
+      registry that hides the newest layer cannot lower the bar a later install
+      must clear.
+      (5) A realm shall be able to DECLARE that it publishes an index. Where it
+      does, a missing index is an error naming the realm; where it does not,
+      absence stays silent, so existing realms keep working. Failing closed by
+      default would break every realm in existence; failing open with no way to
+      opt in would let an attacker simply delete the index. The pin's realm is
+      what decides, which is the same place every other trust question is
+      settled.
     tags: [core, security]
     links:
       - type: traces-to
