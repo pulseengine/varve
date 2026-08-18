@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
+homepage = "https://github.com/pulseengine/varve"
+documentation = "https://docs.rs/varve"
+rust-version = "1.89"
+keywords = ["toolchain", "supply-chain", "signing", "reproducible", "oci"]
+categories = ["command-line-utilities", "development-tools", "development-tools::build-utils", "cryptography"]
 
 [dependencies]
 anyhow = "1.0.104"

@@ -214,6 +214,20 @@ jobs:
           cp varve-realms.toml release-assets/varve-realms.toml
           ls -la release-assets/
 
+      # ── The bootstrap script (REQ-BOOTSTRAP-001) ───────────────────────
+      # Staged BEFORE the checksum step on purpose: install.sh's own sha256
+      # must be a line in SHA256SUMS.txt, which cosign then signs. That is
+      # what makes "verify the script, then run it" possible at all — a
+      # script published outside the signed sums can only ever be trusted
+      # on transport, which is the thing varve exists to refuse.
+      - name: Stage the install script
+        run: |
+          set -euo pipefail
+          sh -n install.sh   # a syntax error here would ship a bricked bootstrap
+          cp install.sh release-assets/install.sh
+          chmod 0755 release-assets/install.sh
+          ls -la release-assets/install.sh
+
       # cosign is installed early: the rivet fetch below verifies rivet's
       # release with cosign, and the later SHA256SUMS signing reuses it.
       - name: Install cosign
@@ -389,3 +403,84 @@ jobs:
             } > /tmp/notes.md
             gh release edit "$VERSION" --notes-file /tmp/notes.md
           fi
+
+  # ── The bootstrap actually bootstraps (REQ-BOOTSTRAP-001) ─────────────
+  # `install.sh` is the one release artifact whose correctness cannot be
+  # checked by a unit test: it is a shell script talking to a real release
+  # over the network. So it is exercised against the release that was just
+  # published, on both published OS families — happy path plus two negative
+  # controls, because a verifier that cannot be made to refuse is not a
+  # verifier. Runs after the release exists; a failure here does not unpublish
+  # anything, it tells you the bootstrap is broken before users find out.
+  verify-install-script:
+    name: install.sh bootstraps on ${{ matrix.os }}
+    needs: [create-release]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Present on purpose: the happy path must exercise the cosign branch,
+      # not only the sha256 one.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Happy path — the script installs the tagged binary
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          VARVE_INSTALL_DIR="$RUNNER_TEMP/varve-bin" sh ./install.sh --version "$VERSION"
+          REPORTED=$("$RUNNER_TEMP/varve-bin/varve" --version | awk '{print $2}')
+          echo "tag=${VERSION#v}  installed --version=$REPORTED"
+          if [ "${VERSION#v}" != "$REPORTED" ]; then
+            echo "::error::install.sh installed $REPORTED but the release tag is $VERSION"
+            exit 1
+          fi
+          # The docs promise `varve docs bootstrap` works on the installed binary.
+          "$RUNNER_TEMP/varve-bin/varve" docs bootstrap >/dev/null
+
+      - name: Negative control — a checksum mismatch must refuse and write nothing
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          SHIM="$RUNNER_TEMP/shim-sum"; mkdir -p "$SHIM"
+          printf '#!/bin/sh\necho "deadbeef  $1"\n' > "$SHIM/sha256sum"
+          printf '#!/bin/sh\nshift 2\necho "deadbeef  $1"\n' > "$SHIM/shasum"
+          chmod +x "$SHIM/sha256sum" "$SHIM/shasum"
+          if PATH="$SHIM:$PATH" VARVE_INSTALL_DIR="$RUNNER_TEMP/varve-neg" \
+               sh ./install.sh --version "$VERSION"; then
+            echo "::error::install.sh installed despite a checksum mismatch"
+            exit 1
+          fi
+          if [ -e "$RUNNER_TEMP/varve-neg/varve" ]; then
+            echo "::error::a binary was written despite a checksum mismatch"
+            exit 1
+          fi
+          echo "refused, and wrote nothing — correct"
+
+      - name: Negative control — an unsupported platform must refuse, not guess
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          SHIM="$RUNNER_TEMP/shim-uname"; mkdir -p "$SHIM"
+          printf '#!/bin/sh\ncase "$1" in -s) echo OpenBSD;; -m) echo riscv64;; esac\n' > "$SHIM/uname"
+          chmod +x "$SHIM/uname"
+          if PATH="$SHIM:$PATH" VARVE_INSTALL_DIR="$RUNNER_TEMP/varve-neg2" \
+               sh ./install.sh --version "$VERSION"; then
+            echo "::error::install.sh guessed a triple for an unsupported platform"
+            exit 1
+          fi
+          echo "refused an unsupported platform — correct"

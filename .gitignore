@@ -11,3 +11,5 @@ fuzz/Cargo.lock
 # Python bytecode from tools/
 __pycache__/
 *.pyc
+mutants.out/
+mutants.out.old/

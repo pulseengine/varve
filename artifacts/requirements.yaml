@@ -1571,6 +1571,84 @@ artifacts:
       priority: should
       category: functional
 
+  - id: REQ-BOOTSTRAP-001
+    type: requirement
+    title: varve has a documented, verified way to obtain varve
+    status: approved
+    release: v0.26.0
+    description: >
+      A tool for verified toolchain distribution shipped with no verified
+      install path for ITSELF. The README's "Getting started" opened with
+      `varve install` — a command that needs a varve the reader does not have.
+      There was no install script, no crates.io presence, and no topic
+      describing the first hop. `varve self-update` covers every hop after the
+      first, and nothing at all covered the first.
+      Clauses:
+      (1) The repository shall carry a POSIX-sh install script (`install.sh`,
+      not bash) that runs on macOS and Linux, and the release workflow shall
+      stage it as a release asset BEFORE the checksums are computed, so its
+      own sha256 is a line in SHA256SUMS.txt and is therefore covered by the
+      cosign signature over that file. A bootstrap script published outside
+      the signed sums can only ever be trusted on transport, which is the
+      thing varve exists to refuse.
+      (2) The script shall map `uname -s` / `uname -m` onto one of the four
+      published triples and REFUSE, naming them, on anything else. It shall
+      never guess a triple: a guessed triple yields a binary that segfaults or
+      silently runs under emulation.
+      (3) The script shall download the archive and SHA256SUMS.txt and compare
+      the archive's sha256 against that file BEFORE anything is extracted or
+      written, matching the whole filename field rather than a substring so one
+      asset name cannot stand in for another; on mismatch it shall write
+      nothing. Where neither `sha256sum` nor `shasum` exists it shall refuse
+      outright rather than proceed unverified — an unverified install of a
+      verification tool is worse than no install.
+      (4) Where `cosign` is present the script shall additionally verify
+      SHA256SUMS.txt against the release's cosign bundle, pinned to this
+      repository's release workflow identity and the GitHub OIDC issuer, and
+      refuse on failure. Where cosign is absent it shall state plainly that the
+      SIGNATURE was not checked and print the command that checks it. Silence
+      about an unchecked signature is the failure mode this clause exists for:
+      a user who believes an integrity check was an authorship check has been
+      misled by the tool that exists to prevent exactly that.
+      (5) The script shall refuse to run as root unless VARVE_ALLOW_ROOT=1,
+      install to ${VARVE_INSTALL_DIR:-$HOME/.varve/bin}, print the PATH line,
+      and direct the user to `varve self-update` for every subsequent update
+      rather than reimplementing update. It shall contain no piped-to-shell
+      invocation of its own.
+      (6) Both crates shall carry the metadata crates.io requires (description,
+      license, repository, readme, keywords, categories), `varve` shall depend
+      on `varve-core` by version as well as by path (a path-only dependency
+      cannot be published at all), and a workflow shall publish the two in
+      dependency order, idempotently, guarded by an assertion that the tag, the
+      workspace version and the internal dependency version all agree. Every
+      check that can precede the first upload does, because crates.io versions
+      are immutable and a half-published pair cannot be withdrawn.
+      (7) The README and an embedded `bootstrap` topic shall document all three
+      routes — script, one-liner, and the manual path with no script at all —
+      and shall show the VERIFY-THEN-RUN form BEFORE the piped one-liner. The
+      one-liner may appear, marked as the convenience path and named for what
+      it is weaker at. varve's whole argument is that strings should not reach
+      interpreters unverified; leading with a naked pipe into a shell would
+      undercut the product in its own README.
+      (8) The docs shall state what the first hop CANNOT prove — it is trust on
+      first use and no route on the page removes that — and that
+      `cargo install varve` is a SOURCE build covered by neither the release
+      signature nor the DSSE envelope.
+      (9) The bootstrap shall be exercised mechanically against the release it
+      ships with: the release workflow shall run `install.sh` on both published
+      OS families against the just-published tag, assert the installed binary
+      reports that tag, and assert the script REFUSES both a checksum mismatch
+      and an unsupported platform. A verifier that cannot be made to refuse is
+      not a verifier, and a shell script talking to a real release is not
+      reachable by a unit test.
+    tags: [distribution, ergonomics, security]
+    links:
+      - type: traces-to
+        target: REQ-UPDATE-001
+    fields:
+      priority: must
+      category: functional
+
   - id: REQ-SHADOW-001
     type: requirement
     title: varve notices when PATH runs a different binary than the one it pins
@@ -1731,11 +1809,37 @@ artifacts:
     description: >
       The transport half split out of REQ-ATTEST-001 when review found that
       requirement marked verified while this half was unimplemented. Binding
-      shipped in v0.22.0 (`sign-attestation` / `check-attestation`); what has
-      NOT shipped is carriage: attestations attached to a deposit layout and an
-      OCI registry as referrer artifacts, travelling with the layer through
-      `archive` and an offline install, and `varve verify` reporting which
-      attestations a layer carries and whether each still binds.
+      shipped in v0.22.0 (`sign-attestation` / `check-attestation`); carriage is
+      what makes a bound attestation reach anyone.
+      (1) An attestation shall be ATTACHABLE to a deposit layout as referrer
+      artifacts — the signed statement and the attested bytes verbatim, keyed by
+      the statement's own digest so a layer can carry several
+      (`sign-attestation --attach-to`).
+      (2) It shall TRAVEL: an install shall persist whatever attestations its
+      source carries into the installed layer, and `archive` shall re-emit them,
+      so the evidence survives an offline round trip into a core that shares
+      nothing with the producer's but the pinned root.
+      (3) `varve verify` shall REPORT which attestations a layer carries — kind,
+      producer — and whether each still binds, after re-verifying the layer
+      itself.
+      Reporting, not refusal, and deliberately so: an attestation that no longer
+      binds is evidence about the evidence, but a layer whose own signature and
+      digests are good is still a good layer, and failing on a third party's
+      stale audit would make varve's verdict depend on someone else's release
+      cadence. For the same reason a source that drops attestations does not
+      make a correctly-signed layer uninstallable — the loss is reported, never
+      silent.
+      Corrected during implementation. The original text also required
+      attestations "attached to ... an OCI registry as referrer artifacts". varve
+      attaches nothing to a registry and shall not: it runs no server and pushes
+      nothing (README, "No server of our own"; REQ-REGISTRY-001 is pull-only, so
+      that publishing tooling never joins the client trust path). What actually
+      crosses to a registry is the LAYOUT — `oras cp --from-oci-layout` copies
+      the index this requirement writes, referrer entries included — so clause 1
+      is the producing act, and the registry obligation is a READING one:
+      `RegistrySource` shall surface the attestations a registry carries beside
+      a layer, exactly as it already does for line-status. That pull half is NOT
+      yet implemented and this requirement is not satisfied until it is.
       This is the half that closes the mirror-boundary gap the research
       identified: registries do publish this evidence, and mirroring tools drop
       it — bandersnatch and Verdaccio carry no attestations, and every BCR

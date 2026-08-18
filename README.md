@@ -23,10 +23,71 @@
 > or `varve docs threat-model`, which carries the same limits inside the
 > binary and so travels across an air gap.
 
+## Install varve
+
+varve verifies everything it hands you; nothing hands varve to you. So the first
+hop is shown **verified first**, and the convenience form second — a tool whose
+argument is that strings should not reach interpreters unchecked should not lead
+with a naked pipe into a shell.
+
+`install.sh` is a release asset (from v0.26.0), so its own sha256 is a line in
+the release's `SHA256SUMS.txt`, which cosign signs. Check it *before* a shell
+reads it:
+
+```sh
+B="https://github.com/pulseengine/varve/releases/latest/download"
+curl -fsSLO "$B/install.sh"
+curl -fsSLO "$B/SHA256SUMS.txt"
+curl -fsSLO "$B/SHA256SUMS.txt.cosign.bundle"
+
+cosign verify-blob \
+  --bundle SHA256SUMS.txt.cosign.bundle \
+  --certificate-identity-regexp '^https://github\.com/pulseengine/varve/\.github/workflows/release\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS.txt
+
+sha256sum -c --ignore-missing SHA256SUMS.txt   # macOS: shasum -a 256 -c …
+sh install.sh
+```
+
+<details>
+<summary><b>Convenience path</b> — one line, and weaker</summary>
+
+```sh
+curl -fsSL https://github.com/pulseengine/varve/releases/latest/download/install.sh | sh
+```
+
+The bytes reach `sh` before anything checks them: you are trusting the transport
+and GitHub, not a signature. Fine for a scratch container; use the verified form
+above on anything you would not re-image.
+</details>
+
+The script refuses to run as root (override with `VARVE_ALLOW_ROOT=1`), refuses
+an unrecognised OS/arch instead of guessing a triple, verifies the archive's
+sha256 against `SHA256SUMS.txt` **before** extracting anything, refuses outright
+if no `sha256sum`/`shasum` exists rather than install unverified, and says
+plainly when cosign is absent that the *signature* was not checked. It installs
+to `${VARVE_INSTALL_DIR:-$HOME/.varve/bin}` and stops there: every update after
+the first is `varve self-update`, which re-verifies the successor with the
+running binary against the pinned trust root.
+
+From source, on any target Rust supports — a source build, so not covered by the
+release signature:
+
+```sh
+cargo install varve
+```
+
+The **fully manual path** (no script at all), and what the first hop can and
+cannot prove, are in `varve docs bootstrap` — including `varve self-verify`,
+which checks a downloaded release against the signed DSSE envelope with the same
+pinned root that verifies layers.
+
 ## Getting started
 
-Install one PulseEngine toolchain layer, verified, and dispatch its tools —
-the zero-config path uses a **realm**, so no environment variable is needed:
+With varve on `PATH`, install one PulseEngine toolchain layer, verified, and
+dispatch its tools — the zero-config path uses a **realm**, so no environment
+variable is needed:
 
 ```sh
 # 1. In your project, pin a layer and name the realm:

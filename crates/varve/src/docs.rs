@@ -35,6 +35,11 @@ pub const TOPICS: &[Topic] = &[
         "concept-config-reference.md"
     ),
     topic!(
+        "bootstrap",
+        "Bootstrap — getting varve itself, verified",
+        "concept-install.md"
+    ),
+    topic!(
         "getting-started",
         "Getting started — nothing to a dispatched tool",
         "concept-getting-started.md"
@@ -219,6 +224,11 @@ pub fn find(slug: &str) -> Option<&'static Topic> {
 /// why the gate reported green through two audits that found the docs unusable
 /// for exactly those things (REQ-DOCS-003).
 pub const REQUIRED_TOPICS: &[&str] = &[
+    // Step 0. Until v0.26.0 the docs began at `varve install` — which needs a
+    // varve you do not have. A tool for verified distribution that has no
+    // documented verified way to obtain ITSELF is the hole this closes
+    // (REQ-BOOTSTRAP-001).
+    "bootstrap",
     "getting-started",
     "config-reference",
     "environment",
@@ -238,6 +248,10 @@ pub const REQUIRED_TOPICS: &[&str] = &[
 /// files were under 30 words when this was written, and personas recovered the
 /// file formats from serde errors instead.
 pub const TOPICS_NEEDING_EXAMPLES: &[&str] = &[
+    // The bootstrap is nothing BUT commands: describing "verify the script
+    // before running it" without the literal transcript leaves the reader with
+    // the piped one-liner, which is the form this topic exists to demote.
+    "bootstrap",
     "recovery",
     "environment",
     "composition",
@@ -547,6 +561,35 @@ mod tests {
             "only {checked} documented invocation(s) were checked; the shell \
              transcripts are the form users copy most"
         );
+    }
+
+    // rivet: verifies REQ-BOOTSTRAP-001
+    #[test]
+    fn the_bootstrap_topic_states_what_the_first_hop_cannot_prove() {
+        // Clause 8 shipped as prose with no mechanical check, which is exactly
+        // the shape that let requirement text outrun code four releases
+        // running. The honest limits are the most deletable part of a page
+        // whose other job is to make installing easy, so they are the part
+        // that needs a gate.
+        let body = TOPICS.iter().find(|t| t.slug == "bootstrap").unwrap().body;
+        for needle in [
+            // The limit itself, named.
+            "trust on first use",
+            // …and specifically that a signature does not vouch for the signer.
+            "not tell you the repository was not compromised",
+            // What the first hop DOES buy, or a reader concludes it is useless.
+            "self-update",
+            // The refuse-rather-than-degrade stance, which is the reason the
+            // script has no --skip-verify and must not grow one.
+            "refuses rather than degrades",
+        ] {
+            assert!(
+                body.contains(needle),
+                "the bootstrap topic must state `{needle}` — a page that teaches \
+                 people to install a verification tool must say what its own \
+                 first hop does not prove (REQ-BOOTSTRAP-001 clause 8)"
+            );
+        }
     }
 
     // rivet: verifies REQ-DOCS-002
