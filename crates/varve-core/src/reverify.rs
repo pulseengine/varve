@@ -173,6 +173,7 @@ mod tests {
         let mut marks = HighWaterMarks::load(&root).unwrap();
         let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
         let policy = InstallPolicy {
+            index: None,
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
             platform: "test-platform",

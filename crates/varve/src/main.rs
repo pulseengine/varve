@@ -1758,6 +1758,7 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let now = today_rfc3339();
     let policy = varve_core::InstallPolicy {
+        index: None,
         now: &now,
         staleness_threshold_days: 90,
         platform: &platform,

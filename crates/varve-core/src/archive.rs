@@ -269,6 +269,7 @@ mod tests {
 
     fn policy() -> InstallPolicy<'static> {
         InstallPolicy {
+            index: None,
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
             platform: "test-platform",

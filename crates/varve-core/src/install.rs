@@ -46,10 +46,19 @@ pub struct InstallOutcome {
     /// `Some(age_days)` when the accepted layer is older than the staleness
     /// threshold — surfaced, never fatal.
     pub staleness_days: Option<i64>,
+    /// The greatest counter the realm's signed index asserts for this line
+    /// (REQ-INDEXAUTH-001 clause 4). Reported, NOT enforced: the high-water
+    /// mark records what this machine has accepted, and raising it to what
+    /// merely EXISTS would refuse a deliberately-pinned older layer the moment
+    /// a newer one is published — an availability failure wearing a security
+    /// control's clothes, in the one tool whose purpose is frozen toolchains.
+    pub index_high_water: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
+    #[error(transparent)]
+    Index(#[from] crate::lineindex::IndexError),
     #[error(transparent)]
     Source(#[from] SourceError),
     #[error(transparent)]
@@ -96,6 +105,10 @@ pub struct InstallPolicy<'a> {
     /// Target platform (a triple) entries must match. Entries without a
     /// platform annotation are platform-independent (REQ-PLATFORM-001).
     pub platform: &'a str,
+    /// The realm's line-index obligation (REQ-INDEXAUTH-001). `None` where the
+    /// pin names no realm — there is then no root that could have signed an
+    /// index, so there is nothing to check.
+    pub index: Option<crate::lineindex::IndexPolicy<'a>>,
 }
 
 pub fn install(
@@ -144,6 +157,27 @@ pub fn install(
             pinned: pinned_channel.to_string(),
             got: manifest.channel.clone(),
         });
+    }
+
+    // 3b. The realm's signed index (REQ-INDEXAUTH-001). Before anti-rollback,
+    // because the index can RAISE the mark: a registry that hides the newest
+    // layer must not lower the bar this install has to clear. Everything here
+    // is verified against the realm's root — the source is the party being
+    // constrained and is never asked whether its own listing is honest.
+    let line = manifest.layer.line();
+    let mut index_high_water: Option<u64> = None;
+    if let Some(index_policy) = &policy.index {
+        let line_str = line.to_string();
+        let envelope = source.fetch_line_index(&line_str)?;
+        let served = source.served_layers(&line_str)?;
+        let verified = crate::lineindex::check(
+            &line_str,
+            envelope.as_deref(),
+            served.as_deref(),
+            None,
+            index_policy,
+        )?;
+        index_high_water = verified.as_ref().and_then(|i| i.high_water());
     }
 
     // 4. Anti-rollback, before any blob moves.
@@ -243,6 +277,7 @@ pub fn install(
         layer: manifest.layer.clone(),
         counter: manifest.counter,
         staleness_days,
+        index_high_water,
     })
 }
 
@@ -280,6 +315,7 @@ mod tests {
 
     fn policy() -> InstallPolicy<'static> {
         InstallPolicy {
+            index: None,
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
             platform: "test-platform",
@@ -562,6 +598,7 @@ mod tests {
         let (bytes, blobs) = july(); // issued 2026-07-31
         let source = memory_source(&bytes, &blobs);
         let policy = InstallPolicy {
+            index: None,
             now: "2026-12-01T00:00:00Z",
             staleness_threshold_days: 90,
             platform: "test-platform",
@@ -601,6 +638,7 @@ mod tests {
             .with_manifest(&bytes)
             .with_blob(&d_here, &here);
         let policy = InstallPolicy {
+            index: None,
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
             platform: "test-platform",
@@ -639,6 +677,7 @@ mod tests {
             .with_manifest(&bytes)
             .with_blob(&d_there, &there);
         let policy = InstallPolicy {
+            index: None,
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
             platform: "test-platform",
@@ -666,6 +705,7 @@ mod tests {
         let (bytes, blobs) = july(); // fixtures without platform annotations
         let source = memory_source(&bytes, &blobs);
         let policy = InstallPolicy {
+            index: None,
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
             platform: "any-platform-at-all",
@@ -713,5 +753,144 @@ mod tests {
             matches!(err, InstallError::ChannelMismatch { .. }),
             "got: {err}"
         );
+    }
+
+    // rivet: verifies REQ-INDEXAUTH-001
+    #[test]
+    fn install_raises_the_mark_from_the_index_even_when_the_layer_is_hidden() {
+        // Clause 4 end to end, through install() — the Uptane property. The
+        // registry serves ONLY the old layer and its signature is perfect. The
+        // realm's signed index says a newer one exists. Without this, the
+        // registry's silence sets the bar, and the hidden layer's counter
+        // never constrains anything.
+        use crate::lineindex::{IndexPolicy, IndexedLayer, LineIndex};
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let (_tmp, store, mut marks) = setup();
+
+        let (bytes, blobs) = july(); // 2026.07.0, counter 1
+        let mut source = MemorySource::new().with_manifest(&bytes);
+        for (d, b) in &blobs {
+            source = source.with_blob(d, b);
+        }
+        let source = source.with_line_index(
+            LineIndex {
+                line: "2026.07".into(),
+                counter: 1,
+                issued_at: "2026-08-07T00:00:00Z".into(),
+                layers: vec![
+                    IndexedLayer {
+                        layer: "2026.07.0".into(),
+                        digest: manifest_digest(&bytes),
+                        channel: "qualified".into(),
+                        counter: 1,
+                    },
+                    // The layer the registry is not serving.
+                    IndexedLayer {
+                        layer: "2026.07.9".into(),
+                        digest: "sha256:hidden".into(),
+                        channel: "qualified".into(),
+                        counter: 42,
+                    },
+                ],
+            }
+            .sign(&sk, "root-1")
+            .unwrap()
+            .as_bytes(),
+        );
+
+        let policy = InstallPolicy {
+            index: Some(IndexPolicy {
+                realm: "acme",
+                root_public_key: &pk,
+                required: true,
+            }),
+            ..policy()
+        };
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy,
+        )
+        .expect("a pinned layer must install even when the line has moved on");
+
+        // The consumer LEARNS what the realm says the line contains, even
+        // though the registry never offered it.
+        assert_eq!(
+            outcome.index_high_water,
+            Some(42),
+            "the realm's assertion must reach the consumer even when the source \
+             withheld the layer it refers to"
+        );
+        // …and the pinned layer still installed. This assertion is the whole
+        // correction: an earlier draft raised the ENFORCEMENT mark to 42, and
+        // this very install then failed with `rollback refused: presented 1,
+        // high_water 42` — a deliberately-pinned layer made uninstallable by
+        // someone else publishing. varve exists to freeze toolchains; a
+        // freshness control that unfreezes them is not a fix.
+        assert_eq!(outcome.layer.to_string(), "2026.07.0");
+        assert_eq!(
+            marks.mark(&"2026.07".parse().unwrap()),
+            Some(1),
+            "the mark records what this machine ACCEPTED, not what exists"
+        );
+    }
+
+    // rivet: verifies REQ-INDEXAUTH-001
+    #[test]
+    fn install_refuses_a_source_that_hides_an_indexed_layer() {
+        // Clause 3 through install(). Every byte this source serves verifies;
+        // the defect is what it withholds.
+        use crate::lineindex::{IndexPolicy, IndexedLayer, LineIndex};
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let (_tmp, store, mut marks) = setup();
+
+        let (bytes, blobs) = july();
+        let mut source = MemorySource::new().with_manifest(&bytes);
+        for (d, b) in &blobs {
+            source = source.with_blob(d, b);
+        }
+        // It admits to serving only the old layer, while the realm's index
+        // names another.
+        let source = source.serving(&["2026.07.0"]).with_line_index(
+            LineIndex {
+                line: "2026.07".into(),
+                counter: 1,
+                issued_at: "2026-08-07T00:00:00Z".into(),
+                layers: vec![IndexedLayer {
+                    layer: "2026.07.5".into(),
+                    digest: "sha256:withheld".into(),
+                    channel: "qualified".into(),
+                    counter: 5,
+                }],
+            }
+            .sign(&sk, "root-1")
+            .unwrap()
+            .as_bytes(),
+        );
+
+        let policy = InstallPolicy {
+            index: Some(IndexPolicy {
+                realm: "acme",
+                root_public_key: &pk,
+                required: true,
+            }),
+            ..policy()
+        };
+        let err = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy,
+        )
+        .expect_err("a source hiding an indexed layer must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("2026.07.5"), "names the hidden layer: {msg}");
+        // Nothing was laid down on the strength of a dishonest listing.
+        assert!(store.list().unwrap().is_empty(), "no install on a refusal");
     }
 }

@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::install::VerifyError;
-use crate::layer::{LayerId, Line};
+use crate::layer::Line;
 use crate::verify::{dsse_sign_typed, dsse_verify_typed};
 
 /// The authenticated payload type — a signed something-else (a layer manifest,
@@ -43,6 +43,12 @@ pub struct IndexedLayer {
     pub digest: String,
     /// The channel the layer was published on.
     pub channel: String,
+    /// That layer's manifest counter. The anti-rollback high-water mark is
+    /// keyed on a COUNTER, not a layer id, so the index must carry the counter
+    /// or clause 4 cannot feed the mechanism it exists to protect. (An earlier
+    /// draft returned the greatest layer id here, which type-checked and was
+    /// useless.)
+    pub counter: u64,
 }
 
 /// What the realm says a line contains.
@@ -144,20 +150,11 @@ impl LineIndex {
     /// not thereby lower the bar a later install has to clear, which is the
     /// whole point of authenticating the listing.
     ///
-    /// The mark is the greatest layer id the index names, since a layer id is
-    /// ordered within its line and a line's counter tracks its newest layer.
-    pub fn high_water(&self) -> Result<Option<LayerId>, IndexError> {
-        let mut best: Option<LayerId> = None;
-        for entry in &self.layers {
-            let id: LayerId = entry
-                .layer
-                .parse()
-                .map_err(|e: crate::layer::LayerIdError| IndexError::Payload(e.to_string()))?;
-            if best.as_ref().is_none_or(|b| id > *b) {
-                best = Some(id);
-            }
-        }
-        Ok(best)
+    /// The greatest counter the realm asserts for this line. `None` for an
+    /// empty index, which asserts nothing and must not be mistaken for a mark
+    /// of zero.
+    pub fn high_water(&self) -> Option<u64> {
+        self.layers.iter().map(|e| e.counter).max()
     }
 
     /// Clause 2: refuse a presented index older than one already held.
@@ -248,16 +245,19 @@ mod tests {
     use crate::verify::generate_root_keypair;
 
     fn index(counter: u64, layers: &[(&str, &str)]) -> LineIndex {
+        // Layer counters ascend with the layer id, as a real line's do.
         LineIndex {
             line: "2026.08".into(),
             counter,
             issued_at: "2026-08-18T00:00:00Z".into(),
             layers: layers
                 .iter()
-                .map(|(l, d)| IndexedLayer {
+                .enumerate()
+                .map(|(i, (l, d))| IndexedLayer {
                     layer: (*l).into(),
                     digest: (*d).into(),
                     channel: "qualified".into(),
+                    counter: (i as u64) + 1,
                 })
                 .collect(),
         }
@@ -375,14 +375,18 @@ mod tests {
                 ("2026.08.1", "sha256:bb"),
             ],
         );
+        // The mark is a COUNTER — the units HighWaterMarks actually stores.
+        // An earlier draft returned the greatest LayerId here: it type-checked
+        // and could not feed the mechanism clause 4 exists to protect.
         assert_eq!(
-            doc.high_water().unwrap().unwrap().to_string(),
-            "2026.08.2",
-            "the greatest layer the REALM asserts, regardless of publication order \
-             in the document or of what any source served"
+            doc.high_water(),
+            Some(3),
+            "the greatest counter the REALM asserts, regardless of the order \
+             entries appear in the document or of what any source served"
         );
-        // An empty index asserts nothing and must not be mistaken for a mark.
-        assert_eq!(index(1, &[]).high_water().unwrap(), None);
+        // An empty index asserts nothing and must not be read as a mark of 0,
+        // which would be a mark that every layer clears.
+        assert_eq!(index(1, &[]).high_water(), None);
     }
 
     // rivet: verifies REQ-INDEXAUTH-001

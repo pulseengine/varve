@@ -1600,10 +1600,25 @@ artifacts:
       (3) When a verified index is available, varve shall refuse an enumeration
       that OMITS a layer the index names, and shall name the omitted layer and
       its digest. This is the detection the whole requirement exists for.
-      (4) The anti-rollback high-water mark shall be advanceable from the
-      VERIFIED INDEX rather than only from what the source chose to serve, so a
-      registry that hides the newest layer cannot lower the bar a later install
-      must clear.
+      (4) The verified index's greatest counter shall be REPORTED alongside the
+      installed layer's, so a consumer learns what the realm says the line
+      contains even when the source did not offer it.
+      Corrected during implementation, and the correction matters more than the
+      original text. This clause first read "the high-water mark shall be
+      advanceable from the verified index". An integration test through
+      `install` refuted it immediately: raising the ENFORCEMENT mark to the
+      line's newest counter makes a legitimately-pinned older layer
+      uninstallable the moment the realm publishes a newer one — it fails with
+      "rollback refused" on a layer the consumer deliberately chose. That
+      breaks frozen toolchains, which is varve's entire purpose, and it does so
+      to defend against an attack varve's model does not have: Uptane's
+      freshness attack presumes a client that wants the LATEST, while a varve
+      consumer names an exact layer, so withholding a newer one cannot trick
+      them into anything. The real exposure is that they cannot SEE it, which
+      is what clause 3 catches and what reporting addresses. The high-water
+      mark tracks what this machine has ACCEPTED; it is not a statement about
+      what exists, and conflating the two turns a security control into an
+      availability failure.
       (5) A realm shall be able to DECLARE that it publishes an index. Where it
       does, a missing index is an error naming the realm; where it does not,
       absence stays silent, so existing realms keep working. Failing closed by

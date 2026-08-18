@@ -97,6 +97,10 @@ impl HighWaterMarks {
         let line = manifest.layer.line().to_string();
         let mark = self.marks.entry(line).or_insert(0);
         *mark = (*mark).max(manifest.counter);
+        self.persist()
+    }
+
+    fn persist(&self) -> Result<(), RollbackError> {
         let io = |path: &Path, source: std::io::Error| RollbackError::Io {
             path: path.display().to_string(),
             source,

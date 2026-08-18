@@ -101,6 +101,8 @@ pub struct MemorySource {
     manifests: Vec<Vec<u8>>,
     blobs: std::collections::BTreeMap<String, Vec<u8>>,
     line_status: Option<Vec<u8>>,
+    line_index: Option<Vec<u8>>,
+    served: Option<Vec<String>>,
 }
 
 impl MemorySource {
@@ -120,6 +122,20 @@ impl MemorySource {
 
     /// Attach a baseline line-status envelope the source carries beside the
     /// layer (REQ-STATUS-DIST-001).
+    /// Carry a signed line index (REQ-INDEXAUTH-001).
+    pub fn with_line_index(mut self, envelope: &[u8]) -> Self {
+        self.line_index = Some(envelope.to_vec());
+        self
+    }
+
+    /// What this source admits to serving. Setting it makes the source
+    /// enumerable, which is what lets omission be detected — a source that
+    /// never sets it cannot be accused of hiding.
+    pub fn serving(mut self, layers: &[&str]) -> Self {
+        self.served = Some(layers.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
     pub fn with_line_status(mut self, envelope: &[u8]) -> Self {
         self.line_status = Some(envelope.to_vec());
         self
@@ -197,6 +213,14 @@ impl LayerSource for MemorySource {
             .get(digest)
             .cloned()
             .ok_or_else(|| SourceError::NotFound(digest.to_string()))
+    }
+
+    fn fetch_line_index(&self, _line: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        Ok(self.line_index.clone())
+    }
+
+    fn served_layers(&self, _line: &str) -> Result<Option<Vec<String>>, SourceError> {
+        Ok(self.served.clone())
     }
 
     fn fetch_line_status(&self, _layer: &LayerRef) -> Result<Option<Vec<u8>>, SourceError> {
