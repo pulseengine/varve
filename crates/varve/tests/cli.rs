@@ -3947,6 +3947,78 @@ fn an_export_follows_the_composition() {
     );
 }
 
+// rivet: verifies REQ-COMPOSEEXPORT-001
+#[test]
+fn verify_lockfile_follows_the_composition_not_just_the_root() {
+    // REQ-COMPOSEEXPORT-001 clause 1's extension: a lockfile checked against
+    // only the ROOT layer silently asserts nothing about the crates the
+    // INCLUDED layers pin — varve#79 wearing a different hat.
+    //
+    // This clause shipped in v0.27.0 with no test naming it. A clean-room
+    // review replaced the composition walk with a root-only vec and the ENTIRE
+    // workspace suite stayed green; the stub was then swept into a commit by an
+    // unrelated `git add -A` and pushed, still green. A clause no test can
+    // distinguish from its own absence is indistinguishable from unimplemented.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("lockcompose-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    // The crate that will disagree lives ONLY in the included layer.
+    let (up_archive, up_digest) = signed_crate_layer(
+        &fx,
+        "lockcompose-up",
+        "2026.08.0",
+        &sk,
+        &[("serde", "1.0.200", dot_crate("serde", "1.0.200", ""))],
+        &[],
+    );
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "lockcompose-root",
+        "2026.07.0",
+        &sk,
+        &[("rivet-core", "0.32.0", dot_crate("rivet-core", "0.32.0", ""))],
+        &[&up_digest],
+    );
+    install_pinned(&fx, &trust_root, "2026.08.0", &up_archive);
+    install_pinned(&fx, &trust_root, "2026.07.0", &root_archive);
+
+    // The project resolves a DIFFERENT serde than the composed layer pins.
+    // Root-only checking cannot see this: the root layer has no serde at all.
+    let lock = fx.project.join("Cargo.lock");
+    std::fs::write(
+        &lock,
+        "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.99\"\nchecksum = \"aaaa\"\n",
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["verify", "--lockfile"])
+        .arg(&lock)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("1.0.200")
+                .and(predicate::str::contains("1.0.99"))
+                .and(predicate::str::contains("disagree")),
+        );
+
+    // …and agreement with the COMPOSED layer's crate passes.
+    std::fs::write(
+        &lock,
+        "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.200\"\n",
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["verify", "--lockfile"])
+        .arg(&lock)
+        .assert()
+        .success();
+}
+
 // rivet: verifies REQ-COMPOSE-001
 #[test]
 fn verify_walks_a_diamond_once_instead_of_calling_it_a_cycle() {

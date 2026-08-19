@@ -2860,8 +2860,7 @@ fn verify_lockfile(ctx: &ProjectCtx, path: &std::path::Path) -> anyhow::Result<(
         verifier: ctx_verifier(ctx)?,
         realm: ctx_realm_name(ctx),
     };
-    let layers = vec![ComposedLayer { store: target.store.clone(), entry: target.entry.clone(), realm: target.realm.clone() }];
-    let _ = composition_for_export(&target)?;
+    let layers = composition_for_export(&target)?;
     let crates = match collect_verified_crates(&layers) {
         Ok(c) => c,
         Err(e) if e.to_string().contains("carries no `crate` entries") => {
