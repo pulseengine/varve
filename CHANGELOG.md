@@ -64,6 +64,14 @@ honest. **One behaviour change can turn a passing setup red — read it first.**
   re-pointed into place and counted as relocated, exit 0. varve does not write
   through such a link, so the blast radius was bounded — but "a relocated SDK
   is self-contained" was not true. Found by clean-room review.
+- **A per-platform payload could not be exported.** `install` lays down only
+  the host's payloads, but the export path walked EVERY platform's manifest
+  entry and resolved each to the one on-disk file — the payload path is
+  `payloads/<name>/<version>` and carries no platform — then compared the
+  host's bytes against a foreign platform's signed digest. It reported
+  tampering for a payload that had simply been built for another machine.
+  Latent for every per-platform non-tool payload; found by depositing spar's
+  per-platform `.vsix` set into the official layer.
 - **A cause printed twice.** Every error variant that interpolated its
   `{source}` while also declaring `#[source]` printed the underlying error once
   per formatter layer, glued by a stray `: `. varve#7 fixed this for one
