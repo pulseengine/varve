@@ -1032,3 +1032,248 @@ fn a_token_the_api_still_refuses_is_reported_rather_than_swallowed() {
         "the secret must never reach an error message: {err}"
     );
 }
+
+// ─────────────────── REQ-INDEXAUTH-001 over real HTTP ───────────────────
+//
+// The signed line index has to work against the party it constrains: a
+// registry, over the wire, answering `/tags/list` and serving the index under
+// its own per-line tag. A mock that returns canned bytes cannot show that the
+// index is reachable at all, and reachability is exactly what was missing —
+// every source but the in-memory double inherited a `fetch_line_index` that
+// returned `Ok(None)`, so the whole requirement was switched off in the field.
+
+/// An artifact manifest carrying nothing but the line-index envelope, under
+/// the `line-index-<line>` tag.
+fn oci_index_manifest(envelope: &[u8]) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "artifactType": "application/vnd.pulseengine.varve.line-index.v1+json",
+        "config": { "mediaType": "application/vnd.oci.empty.v1+json", "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a", "size": 2 },
+        "layers": [ {
+            "mediaType": "application/json",
+            "digest": manifest_digest(envelope),
+            "size": envelope.len(),
+            "annotations": { "eu.pulseengine.varve.role": "line-index" }
+        } ],
+    }))
+    .unwrap()
+}
+
+struct IndexedRegistry {
+    reference: String,
+    pk: Vec<u8>,
+}
+
+/// Publish `served` layers of the 2026.08 line under one root, plus (unless
+/// `publish_index` is false) a signed index naming `indexed` — each entry as
+/// (layer, counter). An indexed layer that is not served is one the registry
+/// is HIDING, which is the whole point.
+fn indexed_registry(
+    served: &[&str],
+    indexed: &[(&str, u64)],
+    publish_index: bool,
+) -> IndexedRegistry {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let host = varve_core::host_platform();
+    let mut blobs = BTreeMap::new();
+    let mut manifests = BTreeMap::new();
+    let mut digests: BTreeMap<String, String> = BTreeMap::new();
+
+    for tag in served {
+        let tool = format!("tool-for-{tag}").into_bytes();
+        let tool_digest = manifest_digest(&tool);
+        let line = tag.rsplit_once('.').map_or(*tag, |(line, _)| line);
+        let payload = format!(
+            r#"{{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "artifactType": "application/vnd.pulseengine.varve.layer.v1+json",
+  "annotations": {{
+    "eu.pulseengine.varve.layer": "{tag}",
+    "eu.pulseengine.varve.line": "{line}",
+    "eu.pulseengine.varve.channel": "rolling",
+    "eu.pulseengine.varve.counter": "1",
+    "org.opencontainers.image.created": "2026-08-07T00:00:00Z"
+  }},
+  "manifests": [
+    {{
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "{tool_digest}",
+      "size": 0,
+      "annotations": {{ "eu.pulseengine.tool": "synth", "eu.pulseengine.platform": "{host}" }}
+    }}
+  ]
+}}"#
+        )
+        .into_bytes();
+        let payload_digest = manifest_digest(&payload);
+        let envelope = varve_core::sign_layer_manifest(&payload, &sk, "test-root").unwrap();
+        blobs.insert(
+            manifest_digest(envelope.as_bytes()),
+            envelope.as_bytes().to_vec(),
+        );
+        blobs.insert(payload_digest.clone(), payload.clone());
+        blobs.insert(tool_digest.clone(), tool.clone());
+        manifests.insert(
+            (*tag).to_string(),
+            oci_artifact_manifest(
+                envelope.as_bytes(),
+                &payload_digest,
+                &[(&tool_digest, &tool)],
+            ),
+        );
+        digests.insert((*tag).to_string(), payload_digest);
+    }
+
+    if publish_index {
+        let doc = varve_core::LineIndex {
+            line: "2026.08".into(),
+            counter: 1,
+            issued_at: "2026-08-07T00:00:00Z".into(),
+            layers: indexed
+                .iter()
+                .map(|(layer, counter)| varve_core::IndexedLayer {
+                    layer: (*layer).to_string(),
+                    digest: digests
+                        .get(*layer)
+                        .cloned()
+                        // A layer the registry does not serve still has a
+                        // digest in the index — that is what makes the
+                        // refusal actionable.
+                        .unwrap_or_else(|| "sha256:withheld".to_string()),
+                    channel: "rolling".into(),
+                    counter: *counter,
+                })
+                .collect(),
+        };
+        let envelope = doc.sign(&sk, "test-root").unwrap();
+        blobs.insert(
+            manifest_digest(envelope.as_bytes()),
+            envelope.as_bytes().to_vec(),
+        );
+        manifests.insert(
+            varve_core::lineindex::index_tag("2026.08"),
+            oci_index_manifest(envelope.as_bytes()),
+        );
+    }
+
+    IndexedRegistry {
+        reference: serve(RegistryContent { manifests, blobs }),
+        pk,
+    }
+}
+
+fn install_with_index(
+    source: &dyn LayerSource,
+    pk: &[u8],
+    required: bool,
+) -> Result<varve_core::InstallOutcome, String> {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let store = Store::at(&root);
+    let mut marks = HighWaterMarks::load(&root).unwrap();
+    let verifier = PinnedKeyVerifier::from_public_key_bytes(pk).unwrap();
+    let policy = InstallPolicy {
+        index: Some(varve_core::IndexPolicy {
+            realm: "acme",
+            root_public_key: pk,
+            required,
+        }),
+        now: "2026-08-07T00:00:00Z",
+        staleness_threshold_days: 90,
+        platform: &varve_core::host_platform(),
+    };
+    install(
+        &rolling_pin(""),
+        source,
+        &verifier,
+        &store,
+        &mut marks,
+        &policy,
+    )
+    .map_err(|e| e.to_string())
+}
+
+// rivet: verifies REQ-INDEXAUTH-001
+#[test]
+fn a_registry_serves_its_realms_signed_index_and_the_consumer_learns_the_line() {
+    // Clauses 1 and 4 over HTTP. The registry serves 2026.08.0 and nothing
+    // else; the realm's index says the line also holds 2026.08.9 at counter
+    // 42. The pinned layer installs, and the consumer is TOLD what the realm
+    // says exists — the thing a registry's silence would otherwise hide.
+    let fx = indexed_registry(
+        &["2026.08.0", "2026.08.9"],
+        &[("2026.08.0", 1), ("2026.08.9", 42)],
+        true,
+    );
+    let source = varve_core::RegistrySource::parse(&fx.reference).unwrap();
+    let outcome = install_with_index(&source, &fx.pk, true).unwrap();
+    assert_eq!(outcome.layer.to_string(), "2026.08.0");
+    assert_eq!(
+        outcome.index_high_water,
+        Some(42),
+        "the realm's greatest counter must reach the consumer through a real \
+         registry, not merely through the in-memory double"
+    );
+}
+
+// rivet: verifies REQ-INDEXAUTH-001
+#[test]
+fn a_registry_that_hides_an_indexed_layer_is_refused_over_the_wire() {
+    // Clause 3, the attack the requirement exists for, against the party it
+    // constrains. Every byte this registry serves verifies perfectly; the
+    // defect is the tag it does not list.
+    let fx = indexed_registry(&["2026.08.0"], &[("2026.08.0", 1), ("2026.08.5", 5)], true);
+    let source = varve_core::RegistrySource::parse(&fx.reference).unwrap();
+    let err = install_with_index(&source, &fx.pk, true)
+        .expect_err("a registry hiding a layer the signed index names must be refused");
+    assert!(err.contains("2026.08.5"), "names the hidden layer: {err}");
+    assert!(
+        err.contains("still verifies"),
+        "says why per-artifact verification did not catch it: {err}"
+    );
+
+    // The same registry, with the index naming only what it serves, installs.
+    // Without this the test would pass on a client that refuses everything.
+    let ok = indexed_registry(&["2026.08.0"], &[("2026.08.0", 1)], true);
+    let source = varve_core::RegistrySource::parse(&ok.reference).unwrap();
+    assert!(install_with_index(&source, &ok.pk, true).is_ok());
+}
+
+// rivet: verifies REQ-INDEXAUTH-001
+#[test]
+fn a_registry_cannot_switch_the_check_off_by_answering_404_for_the_index() {
+    // Clause 5. Deleting one tag must not disable the control for a realm that
+    // declared it publishes an index — otherwise the check is advisory and the
+    // cheapest attack is a DELETE.
+    let fx = indexed_registry(&["2026.08.0"], &[], false);
+    let source = varve_core::RegistrySource::parse(&fx.reference).unwrap();
+    let err = install_with_index(&source, &fx.pk, true)
+        .expect_err("a declaring realm must not fall back to the raw tag list");
+    assert!(err.contains("acme"), "names the realm: {err}");
+    assert!(err.contains("will not fall back"), "{err}");
+
+    // A realm that never declared one installs from the very same registry —
+    // the default must not break every realm in existence.
+    assert!(install_with_index(&source, &fx.pk, false).is_ok());
+}
+
+// rivet: verifies REQ-INDEXAUTH-001
+#[test]
+fn the_index_tag_is_not_reported_as_a_layer_of_the_line() {
+    // `served_layers` is the registry's answer to "what do you serve for this
+    // line", and it is built from `/tags/list` — which also contains the index
+    // artifact's own tag. Counting that as a layer would let an index that
+    // named `line-index-2026.08` satisfy itself, and would put a non-layer in
+    // every listing this check is measured against.
+    let fx = indexed_registry(&["2026.08.0"], &[("2026.08.0", 1)], true);
+    let source = varve_core::RegistrySource::parse(&fx.reference).unwrap();
+    let served = source
+        .served_layers("2026.08")
+        .unwrap()
+        .expect("a registry CAN enumerate — `None` would switch omission detection off");
+    assert_eq!(served, vec!["2026.08.0".to_string()]);
+    // …and another line's listing is empty rather than borrowed from this one.
+    assert_eq!(source.served_layers("2026.09").unwrap(), Some(Vec::new()));
+}

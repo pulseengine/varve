@@ -175,19 +175,32 @@ pub fn install(
     // is verified against the realm's root — the source is the party being
     // constrained and is never asked whether its own listing is honest.
     let line = manifest.layer.line();
+    let line_str = line.to_string();
+    let index_cache = crate::lineindex::IndexCache::at_root(store.root());
     let mut index_high_water: Option<u64> = None;
+    // The verified index and the bytes it came from, held until the install
+    // lands: a refused install must not leave a raised index behind, for the
+    // same reason it must not burn the high-water mark.
+    let mut accepted_index: Option<(crate::lineindex::LineIndex, Vec<u8>)> = None;
     if let Some(index_policy) = &policy.index {
-        let line_str = line.to_string();
         let envelope = source.fetch_line_index(&line_str)?;
         let served = source.served_layers(&line_str)?;
+        // Clause 2 needs something to compare AGAINST, and it is the cache
+        // that supplies it. Passing `None` here left the whole
+        // presented-older-than-held rule unreachable from the pipeline: it
+        // could only ever fire in a test that called `check` itself.
+        let cached = index_cache.load(&line_str)?;
         let verified = crate::lineindex::check(
             &line_str,
             envelope.as_deref(),
             served.as_deref(),
-            None,
+            cached.as_ref(),
             index_policy,
         )?;
         index_high_water = verified.as_ref().and_then(|i| i.high_water());
+        if let (Some(doc), Some(bytes)) = (verified, envelope) {
+            accepted_index = Some((doc, bytes));
+        }
     }
 
     // 4. Anti-rollback, before any blob moves.
@@ -313,8 +326,12 @@ pub fn install(
         }
     }
 
-    // 7. Only a fully landed layer advances the high-water mark.
+    // 7. Only a fully landed layer advances the high-water mark — or the
+    // cached index it was checked against (REQ-INDEXAUTH-001 clause 2).
     marks.advance(&manifest)?;
+    if let Some((doc, bytes)) = &accepted_index {
+        index_cache.update(&line_str, bytes, doc)?;
+    }
 
     let staleness_days = crate::rollback::staleness_warning(
         &manifest.issued_at,
@@ -1074,6 +1091,136 @@ mod tests {
             marks.mark(&"2026.07".parse().unwrap()),
             Some(1),
             "the mark records what this machine ACCEPTED, not what exists"
+        );
+    }
+
+    // rivet: verifies REQ-INDEXAUTH-001
+    #[test]
+    fn a_replayed_older_index_is_refused_on_the_next_install_not_only_in_theory() {
+        // Clause 2 through the pipeline. `check` has always refused a
+        // regression against a `cached` document — and install passed `None`
+        // for `cached`, so the rule could not fire on any real machine: there
+        // was nothing that REMEMBERED. This test installs twice, and the
+        // second source replays a superseded index.
+        use crate::lineindex::{IndexPolicy, IndexedLayer, LineIndex};
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let (_tmp, store, mut marks) = setup();
+        let (bytes, blobs) = july();
+
+        let signed_index = |counter: u64| {
+            LineIndex {
+                line: "2026.07".into(),
+                counter,
+                issued_at: "2026-08-07T00:00:00Z".into(),
+                layers: vec![IndexedLayer {
+                    layer: "2026.07.0".into(),
+                    digest: manifest_digest(&bytes),
+                    channel: "qualified".into(),
+                    counter: 1,
+                }],
+            }
+            .sign(&sk, "root-1")
+            .unwrap()
+        };
+        // Counting the blob fetches is what makes this test able to tell WHERE
+        // the refusal happened. Without it the test passed with `check` handed
+        // `None` for the cached document, because the cache's own write-time
+        // regression guard raised the identical error — after the layer had
+        // been fetched, laid down, and the mark advanced. Same message, wholly
+        // different behaviour, and the version that only compared messages
+        // could not see the difference.
+        struct CountingSource {
+            inner: MemorySource,
+            blob_fetches: std::cell::Cell<usize>,
+        }
+        impl LayerSource for CountingSource {
+            fn fetch_manifest(&self, layer: &LayerRef) -> Result<Vec<u8>, SourceError> {
+                self.inner.fetch_manifest(layer)
+            }
+            fn fetch_blob(&self, digest: &str) -> Result<Vec<u8>, SourceError> {
+                self.blob_fetches.set(self.blob_fetches.get() + 1);
+                self.inner.fetch_blob(digest)
+            }
+            fn fetch_line_index(&self, line: &str) -> Result<Option<Vec<u8>>, SourceError> {
+                self.inner.fetch_line_index(line)
+            }
+            fn served_layers(&self, line: &str) -> Result<Option<Vec<String>>, SourceError> {
+                self.inner.served_layers(line)
+            }
+        }
+        let source_with = |envelope: &str| {
+            let mut s = MemorySource::new().with_manifest(&bytes);
+            for (d, b) in &blobs {
+                s = s.with_blob(d, b);
+            }
+            CountingSource {
+                inner: s.with_line_index(envelope.as_bytes()),
+                blob_fetches: std::cell::Cell::new(0),
+            }
+        };
+        let policy = InstallPolicy {
+            index: Some(IndexPolicy {
+                realm: "acme",
+                root_public_key: &pk,
+                required: true,
+            }),
+            ..policy()
+        };
+
+        install(
+            &pin("2026.07.0"),
+            &source_with(&signed_index(9)),
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy,
+        )
+        .expect("the first install accepts index #9");
+
+        // A second source — a stale mirror, or an attacker who kept a copy of
+        // a pre-yank index — offers #4. Everything about it verifies.
+        let replay = source_with(&signed_index(4));
+        let err = install(
+            &pin("2026.07.0"),
+            &replay,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy,
+        )
+        .expect_err("a superseded index must not be replayable over the held one");
+        assert_eq!(
+            replay.blob_fetches.get(),
+            0,
+            "the index check runs BEFORE anything is fetched or laid down — a \
+             refusal discovered only when the cache was written would already \
+             have installed the layer and advanced the mark"
+        );
+        assert!(
+            matches!(
+                err,
+                InstallError::Index(crate::lineindex::IndexError::Stale {
+                    presented: 4,
+                    cached: 9,
+                    ..
+                })
+            ),
+            "got: {err}"
+        );
+        assert!(
+            err.to_string().contains('4') && err.to_string().contains('9'),
+            "names both counters: {err}"
+        );
+
+        // …and the held document is still #9, so a third attempt at the same
+        // replay fails the same way rather than sliding down.
+        assert_eq!(
+            crate::lineindex::IndexCache::at_root(store.root())
+                .load("2026.07")
+                .unwrap()
+                .unwrap()
+                .counter,
+            9
         );
     }
 

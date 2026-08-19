@@ -2013,6 +2013,28 @@ artifacts:
         latest; a varve consumer names an exact layer. The clause is now
         REPORTING, and `advance_to` was deleted rather than left as dead
         trust-critical code.
+        THIS RECORD WAS ITSELF FALSE WHEN FIRST WRITTEN, and an independent
+        review caught it. Every step below was a varve-core test calling
+        `install()` with a policy the PRODUCT NEVER CONSTRUCTED: the CLI's only
+        `InstallPolicy` hardcoded `index: None`, and `fetch_line_index` /
+        `served_layers` were implemented by exactly one type — `MemorySource`,
+        the in-memory test double. `RegistrySource`, `OciLayoutSource` and
+        `DirSource` all inherited the trait defaults returning `Ok(None)`, and
+        `realm.signed_index` was parsed and never read. Five clauses were
+        marked verified while unreachable from the shipped binary. That is the
+        same shape as the two mutant-refuted tests above, one level up:
+        evidence that exercises a different entry point than the clause runs
+        through. The fix wires the policy from the resolved realm, implements
+        both source methods on the registry and the layout, gives clause 2 a
+        cache to compare against (it was passed `None`, so the rule could not
+        fire on any real machine), and reports the index at install. The steps
+        now include tests that DRIVE THE EXECUTABLE, because no test that
+        constructs an `InstallPolicy` itself can detect that nothing else does.
+        Ten further mutations were applied, run and reverted for this fix; one
+        survived and exposed a weak test — the clause-2 install test compared
+        error messages, which the cache's own write-time guard produces
+        identically AFTER laying the layer down, so it now counts blob fetches
+        and asserts the refusal precedes them.
       steps:
         - run: cargo test -p varve-core an_index_verifies_only_against_the_realm_that_signed_it
         - run: cargo test -p varve-core a_signed_line_status_cannot_be_replayed_as_an_index
@@ -2024,6 +2046,23 @@ artifacts:
         # Through install(), not through the helpers.
         - run: cargo test -p varve-core install_refuses_a_source_that_hides_an_indexed_layer
         - run: cargo test -p varve-core install_raises_the_mark_from_the_index_even_when_the_layer_is_hidden
+        - run: cargo test -p varve-core a_replayed_older_index_is_refused_on_the_next_install_not_only_in_theory
+        # Through the REAL SOURCES, not the in-memory double: an HTTP registry
+        # double serving the index under its own tag and answering /tags/list,
+        # and an oci-layout carrying it as a referrer.
+        - run: cargo test -p varve-core --test registry_double a_registry_serves_its_realms_signed_index_and_the_consumer_learns_the_line
+        - run: cargo test -p varve-core --test registry_double a_registry_that_hides_an_indexed_layer_is_refused_over_the_wire
+        - run: cargo test -p varve-core --test registry_double a_registry_cannot_switch_the_check_off_by_answering_404_for_the_index
+        - run: cargo test -p varve-core --test registry_double the_index_tag_is_not_reported_as_a_layer_of_the_line
+        - run: cargo test -p varve-core an_index_attached_to_a_layout_is_what_an_offline_install_reads_back
+        - run: cargo test -p varve-core a_producer_cannot_downgrade_or_misfile_a_published_index
+        - run: cargo test -p varve-core the_cache_is_what_gives_clause_two_something_to_compare_against
+        - run: cargo test -p varve-core a_registrys_listing_for_a_line_is_that_lines_layers_and_nothing_else
+        # THROUGH THE BINARY. These are the decisive ones: they are what the
+        # whole-requirement-unreachable defect could not survive.
+        - run: cargo test -p varve --test cli the_binary_verifies_the_realms_index_and_reports_what_the_line_holds
+        - run: cargo test -p varve --test cli the_binary_refuses_a_declaring_realm_whose_index_is_absent
+        - run: cargo test -p varve --test cli a_realm_that_never_promised_an_index_installs_exactly_as_before
     links:
       - type: verifies
         target: REQ-INDEXAUTH-001

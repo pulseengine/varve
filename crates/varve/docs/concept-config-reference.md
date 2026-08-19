@@ -30,9 +30,12 @@ registry        = "oci://ghcr.io/pulseengine/varve/layers"   # required
 trust-root      = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
 # or, instead of an inline key:
 # trust-root-file = "./roots/pulseengine.pub"
+signed-index    = false                                      # default
 ```
 
 `registry` is required even when you never contact it — an air-gapped realm still needs the field; a placeholder is legitimate. `trust-root` is what `varve pubkey` prints.
+
+`signed-index = true` declares that this realm publishes a signed line index (`varve sign-index`). Where it is set, `varve install` refuses to fall back to a source's unauthenticated listing: a missing index is an error naming the realm, and a source that hides a layer the index names is refused. Leave it `false` — the default — until the realm actually publishes one, or every install of it fails closed. Only turn it on once the index is on the registry AND in the layouts you hand out: a bare `manifests/`+`blobs/` directory cannot carry one at all.
 
 ## The deposit spec — producing a layer
 

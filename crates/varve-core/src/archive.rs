@@ -312,6 +312,24 @@ impl LayerSource for OciLayoutSource {
             .map_err(|e| SourceError::Transport(e.to_string()))
     }
 
+    fn fetch_line_index(&self, line: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        // The realm's signed index rides in the layout as its own referrer
+        // (REQ-INDEXAUTH-001), attached by `varve attach-index` beside the
+        // baseline status. Untrusted bytes — the caller re-verifies against
+        // the realm's root.
+        crate::lineindex::read_from_layout(&self.root, line)
+            .map_err(|e| SourceError::Transport(e.to_string()))
+    }
+
+    // `served_layers` is deliberately left at the trait default (`Ok(None)` —
+    // "cannot enumerate"). A layout CAN list its own contents, but its contents
+    // are not a listing OF THE LINE: it is a hand-carried subset, usually one
+    // layer, exported precisely because someone chose it. Answering
+    // `Some(["2026.08.0"])` would make every air-gapped install of a realm with
+    // a multi-layer index fail with `Omitted` — a false accusation of tampering
+    // against the transport varve exists to serve. Omission is a claim only a
+    // party that PURPORTS to list the line can be caught making.
+
     fn fetch_attestations(
         &self,
         layer: &LayerRef,

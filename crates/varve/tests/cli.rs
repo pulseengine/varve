@@ -3259,3 +3259,201 @@ fn list_with_an_empty_core_succeeds_and_says_so() {
         .success()
         .stdout(predicate::str::contains("no layers"));
 }
+
+// ──────────────── REQ-INDEXAUTH-001 through the shipped binary ────────────
+//
+// These drive the real `varve` executable, and that is the point. The whole
+// requirement was implemented in varve-core, fully unit-tested, and reached
+// nobody: the CLI's only `InstallPolicy` hardcoded `index: None`, so every
+// clause was skipped at runtime while the suite stayed green. A test that
+// constructs an `InstallPolicy` itself cannot detect that the product never
+// constructs one — only a test that runs the binary can.
+
+/// A project pinning its own realm, plus a deposited layout of one layer.
+/// Returns (fixture, project dir, signing key, layout dir, payload digest).
+fn realm_project(
+    signed_index: bool,
+) -> (
+    Fixture,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    String,
+) {
+    let fx = fixture(None, &[]);
+    let dir = fx.project.clone();
+    let key = dir.join("root.key");
+    let pubf = dir.join("root.pub");
+    varve(&fx)
+        .args(["keygen", "--out"])
+        .arg(&key)
+        .arg("--pub")
+        .arg(&pubf)
+        .assert()
+        .success();
+    let root = std::fs::read_to_string(&pubf).unwrap().trim().to_string();
+
+    let tool = dir.join("acme-tool");
+    std::fs::write(&tool, b"#!/bin/sh\necho acme\n").unwrap();
+    let layout = dir.join("layout");
+    varve(&fx)
+        .args([
+            "deposit",
+            "--layer",
+            "2026.08.0",
+            "--channel",
+            "qualified",
+            "--counter",
+            "3",
+            "--issued-at",
+            "2026-08-01T00:00:00Z",
+            "--key",
+        ])
+        .arg(&key)
+        .arg("--out")
+        .arg(&layout)
+        .arg("--tool")
+        .arg(format!("acme-tool@1.0.0={}", tool.display()))
+        .assert()
+        .success();
+
+    std::fs::write(
+        dir.join("varve-realms.toml"),
+        format!(
+            "[realm.acme]\nregistry = \"oci://example.invalid/acme\"\n\
+             trust-root = \"{root}\"\nsigned-index = {signed_index}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\nlayer = \"2026.08.0\"\n",
+    )
+    .unwrap();
+
+    // The digest the deposited layer will install under — the entry in the
+    // layout index that is not the signature.
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(layout.join("index.json")).unwrap()).unwrap();
+    let payload_digest = index["manifests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e.get("artifactType").is_none())
+        .and_then(|e| e["digest"].as_str())
+        .expect("the layout names the layer manifest")
+        .to_string();
+
+    (fx, dir, key, layout, payload_digest)
+}
+
+// rivet: verifies REQ-INDEXAUTH-001
+#[test]
+fn the_binary_verifies_the_realms_index_and_reports_what_the_line_holds() {
+    // Clauses 1, 4 and 5 end to end through the executable. The realm declares
+    // `signed-index = true`; the source carries a signed index naming both the
+    // pinned layer and a NEWER one it does not serve. The install must succeed
+    // — the pin stays installable, which is the correction this release made —
+    // and must SAY what the realm asserts, so the consumer learns about the
+    // layer the source withheld instead of inferring it from silence.
+    let (fx, dir, key, layout, payload_digest) = realm_project(true);
+
+    let index_json = dir.join("index-2026.08.json");
+    std::fs::write(
+        &index_json,
+        format!(
+            r#"{{
+  "line": "2026.08",
+  "counter": 2,
+  "issued-at": "2026-08-19T00:00:00Z",
+  "layers": [
+    {{ "layer": "2026.08.0", "digest": "{payload_digest}", "channel": "qualified", "counter": 3 }},
+    {{ "layer": "2026.08.7", "digest": "sha256:notserved", "channel": "qualified", "counter": 9 }}
+  ]
+}}"#
+        ),
+    )
+    .unwrap();
+    let envelope = dir.join("index.dsse.json");
+    varve(&fx)
+        .args(["sign-index", "--file"])
+        .arg(&index_json)
+        .arg("--key")
+        .arg(&key)
+        .arg("--out")
+        .arg(&envelope)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("signed line-index #2"));
+    varve(&fx)
+        .args(["attach-index", "--layout"])
+        .arg(&layout)
+        .arg("--index")
+        .arg(&envelope)
+        .assert()
+        .success();
+
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "installed layer 2026.08.0 (counter 3)",
+        ))
+        // Clause 4: REPORTED, naming the realm, the line, and both counters.
+        .stdout(predicate::str::contains("realm 'acme'"))
+        .stdout(predicate::str::contains("line 2026.08"))
+        .stdout(predicate::str::contains("greatest counter 9"))
+        .stdout(predicate::str::contains("accepted counter 3"));
+
+    // …and the deliberately-pinned older layer really is installed and usable.
+    // An earlier draft of clause 4 raised the ENFORCEMENT mark to 9 here and
+    // this install failed with "rollback refused" — a frozen toolchain broken
+    // by somebody else publishing.
+    varve(&fx).arg("verify").assert().success();
+    varve(&fx)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2026.08.0"));
+}
+
+// rivet: verifies REQ-INDEXAUTH-001
+#[test]
+fn the_binary_refuses_a_declaring_realm_whose_index_is_absent() {
+    // Clause 5, the direction that makes the control a control. The realm says
+    // it publishes an index; the source carries none. If this passed, an
+    // attacker would disable the whole requirement by deleting one file — and
+    // it DID pass, silently, for as long as the CLI hardcoded `index: None`.
+    let (fx, _dir, _key, layout, _digest) = realm_project(true);
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("acme"))
+        .stderr(predicate::str::contains("will not fall back"));
+    // Nothing was laid down on the strength of an unauthenticated listing.
+    varve(&fx)
+        .arg("list")
+        .assert()
+        .stdout(predicate::str::contains("2026.08.0").not());
+}
+
+// rivet: verifies REQ-INDEXAUTH-001
+#[test]
+fn a_realm_that_never_promised_an_index_installs_exactly_as_before() {
+    // The other half of clause 5, and the reason the default is `false`:
+    // failing closed by default would break every realm in existence at once.
+    // The same layout, the same absent index, and no realm declaration.
+    let (fx, _dir, _key, layout, _digest) = realm_project(false);
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("installed layer 2026.08.0"))
+        .stdout(predicate::str::contains("signed index").not());
+    varve(&fx).arg("verify").assert().success();
+}
