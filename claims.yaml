@@ -60,9 +60,14 @@ claims:
       - { kind: workflow, ref: "method: review", file: artifacts/verification.yaml }
       - { kind: workflow, ref: "review-check", file: .github/workflows/ci.yml }
 
+  # v0.27.0 split the single offline-build test in two — one per adapter — when
+  # cargo_offline.rs was rebuilt as a real dependency graph. The claim kept
+  # pointing at the old name, so `claim-check.py` was RED: the claim's evidence
+  # had been renamed out from under it. Both current tests are named here.
   - claim: "A varve-verified crate builds offline through a real Cargo"
     evidence:
-      - { kind: test, ref: a_varve_exported_crate_builds_offline_through_cargo }
+      - { kind: test, ref: a_varve_exported_registry_resolves_a_real_graph_and_builds_it_correctly }
+      - { kind: test, ref: a_varve_vendored_crate_builds_offline_through_cargo }
       - { kind: test, ref: deposit_a_crate_kind_entry_and_export_a_cargo_registry }
 
   - claim: "A released binary reports the version it is tagged as"

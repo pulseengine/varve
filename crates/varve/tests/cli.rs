@@ -3820,8 +3820,19 @@ fn signed_crate_layer(
         blobs.push((d, bytes.clone()));
     }
     for d in includes {
+        // `digest` or `digest@realm`. An include that names a realm is
+        // verified against THAT realm's root, not the includer's — the branch
+        // that made composition worth having, and which no test could reach
+        // while every fixture emitted realm-less includes.
+        let (digest, realm) = match d.split_once('@') {
+            Some((dg, r)) => (dg, Some(r)),
+            None => (*d, None),
+        };
+        let realm_ann = realm
+            .map(|r| format!(r#","eu.pulseengine.varve.include.realm":"{r}""#))
+            .unwrap_or_default();
         entries.push(format!(
-            r#"{{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"{d}","size":0,"annotations":{{"eu.pulseengine.varve.kind":"layer"}}}}"#
+            r#"{{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"{digest}","size":0,"annotations":{{"eu.pulseengine.varve.kind":"layer"{realm_ann}}}}}"#
         ));
     }
     let line = &layer[..layer.rfind('.').unwrap()];
@@ -3944,6 +3955,76 @@ fn an_export_follows_the_composition() {
         vendor_out
             .join("vendor/rivet-core-0.32.0/Cargo.toml")
             .is_file()
+    );
+}
+
+// rivet: verifies REQ-COMPOSEEXPORT-001
+#[test]
+fn an_export_verifies_a_composed_layer_against_its_own_realms_root() {
+    // Clause 1b, which was dead code under test. Every composition-export
+    // fixture emitted includes with NO `include.realm`, so `inc.realm` was
+    // `None` in all of them and the cross-realm branch never ran. A clean-room
+    // review confirmed it twice: swapping in the INCLUDER's verifier (trust
+    // widening across realms) and deleting the branch outright both left the
+    // whole suite green.
+    //
+    // Here the included layer is signed by a DIFFERENT key than the root
+    // layer. Verifying it against the includer's root cannot succeed, so a
+    // passing export is only possible if the realm's own root was used.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (up_sk, up_pk) = varve_core::generate_root_keypair();
+    let (root_sk, root_pk) = varve_core::generate_root_keypair();
+    assert_ne!(up_pk, root_pk, "the two realms must not share a root");
+
+    // `upstream` is a realm of its own, with its own trust root.
+    std::fs::write(
+        parent.join("varve-realms.toml"),
+        format!(
+            "[realm.upstream]\nregistry = \"oci://example.invalid/upstream\"\ntrust-root = \"{}\"\n",
+            hex::encode(&up_pk)
+        ),
+    )
+    .unwrap();
+
+    let (up_archive, up_digest) = signed_crate_layer(
+        &fx,
+        "xrealm-up",
+        "2026.08.0",
+        &up_sk,
+        &[("serde", "1.0.200", dot_crate("serde", "1.0.200", ""))],
+        &[],
+    );
+    // The include NAMES the realm, so the upstream root is the authority.
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "xrealm-root",
+        "2026.07.0",
+        &root_sk,
+        &[("rivet-core", "0.32.0", dot_crate("rivet-core", "0.32.0", ""))],
+        &[&format!("{up_digest}@upstream")],
+    );
+
+    let up_root = parent.join("xrealm-up.pub");
+    std::fs::write(&up_root, hex::encode(&up_pk)).unwrap();
+    let our_root = parent.join("xrealm-root.pub");
+    std::fs::write(&our_root, hex::encode(&root_pk)).unwrap();
+    install_pinned(&fx, &up_root, "2026.08.0", &up_archive);
+    install_pinned(&fx, &our_root, "2026.07.0", &root_archive);
+
+    let out = parent.join("xrealm-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &our_root)
+        .args(["export-cargo", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("following the composition"));
+    // The composed realm's crate is present, so its layer really was verified
+    // and followed rather than skipped.
+    assert!(
+        out.join("registry/serde-1.0.200.crate").is_file(),
+        "the upstream realm's crate is missing from the composed export"
     );
 }
 

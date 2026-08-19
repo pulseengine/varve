@@ -1696,7 +1696,15 @@ artifacts:
   - id: REQ-SYSTEST-001
     type: requirement
     title: varve is exercised as a system, at real scale, not only as units
-    status: draft
+    # `implemented`, not `verified`, and not `draft` either. It sat at `draft`
+    # while VER-SYSTEST-001 read `verified` — an inconsistency a clean-room
+    # review caught, and at the time `verified` was the wrong half: clause 1's
+    # gate could not pass on the code it gates. That is now fixed and both
+    # adapters run green, so the requirement moves up. It stops short of
+    # `verified` because clause 2 is genuinely partial (the OCI round trip is a
+    # real gate; the Bazel --distdir transport is still uncovered — varve#27)
+    # and clause 4 is policy with no mechanical enforcement.
+    status: implemented
     release: v0.27.0
     description: >
       Every significant defect found in the week of 2026-08-13..19 came from
@@ -1830,8 +1838,11 @@ artifacts:
       varve#73. `export-cargo` writes `"deps":[]` and `"features":{}` for every
       crate while Cargo resolves the dependency graph FROM the index, so the
       registry can only satisfy a crate that has neither. Measured against
-      varve's own 250-package lockfile, 226 of 250 crates declare a dependency
-      or a feature — the index line is factually wrong for 90% of the layer.
+      varve's own 250-package lockfile, 228 of 250 crates declare a dependency
+      or a feature — the index line is factually wrong for 91% of the layer.
+      (226/90% appeared here and in the unit-test comment as an earlier
+      estimate; 228 is the count measured through the real export path, and
+      the two numbers disagreeing in one file was found by clean-room review.)
       Three outcomes were observed, in increasing order of harm: a hard
       resolution error (clap); a rustc error after Cargo resolved happily
       (sha2); and a build that EXITS 0 with a crate silently compiled with no

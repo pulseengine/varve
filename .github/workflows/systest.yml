@@ -42,14 +42,18 @@ jobs:
 
   selfhost-cargo:
     name: self-host via export-cargo (clause 1)
-    # SKIP-NEUTRAL GATE: export-cargo cannot yet resolve a real dependency
-    # graph — its local-registry index lines carry "deps":[],"features":{}
-    # (varve#73), so this job fails today at `failed to select a version for
-    # clap … does not have that feature`, exactly the defect the one-crate
-    # fixture could not see. A perpetually-red job is a dead signal, not a
-    # gate (cf. publish-crates.yml): set the repo variable
-    # VARVE_SYSTEST_EXPORT_CARGO=1 the moment the export-cargo fix lands,
-    # and from then on this job is the proof it stays fixed.
+    # This job was skip-neutral until v0.27.0 because export-cargo could not
+    # resolve a real dependency graph — its local-registry index lines carried
+    # "deps":[],"features":{} (varve#73), which the one-crate fixture could not
+    # see. That fix landed in v0.27.0 and VARVE_SYSTEST_EXPORT_CARGO is now
+    # set, so this job runs and is the proof it stays fixed: varve's own 250
+    # packages, exported through export-cargo, built offline in an empty
+    # CARGO_HOME, with a negative control that must fail.
+    #
+    # The flag is kept rather than deleted so the job can be parked again
+    # deliberately if the adapter regresses. A perpetually-red job is a dead
+    # signal, not a gate (cf. publish-crates.yml) — but so is a permanently
+    # skipped one, which is why this comment must not outlive the condition.
     if: vars.VARVE_SYSTEST_EXPORT_CARGO == '1'
     runs-on: ubuntu-latest
     timeout-minutes: 45

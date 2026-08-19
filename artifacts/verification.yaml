@@ -2804,15 +2804,28 @@ artifacts:
         an isolated EMPTY CARGO_HOME, through both adapters claiming a Cargo
         build. A negative control re-runs the offline build without the
         export wiring and requires it to FAIL, so a leak in the isolation
-        cannot green the gate. Run locally 2026-08-19:
-        `export-crates-vendor` PASSES end to end (offline workspace build,
-        negative control red as required); `export-cargo` FAILS at
-        resolution ("package `varve` depends on `clap` with feature `derive`
-        but `clap` does not have that feature") — varve#73 reproduced by the
-        gate on first contact, the defect the one-crate cargo_offline
-        fixture could not see by construction. That job skips NEUTRAL behind
-        repo variable VARVE_SYSTEST_EXPORT_CARGO until the export-cargo fix
-        lands, then becomes the proof it stays fixed. Clause 2 (a system
+        cannot green the gate. On first contact the gate reproduced varve#73
+        immediately: `export-cargo` FAILED at resolution while
+        `export-crates-vendor` passed — the defect the one-crate
+        cargo_offline fixture could not see by construction, and the reason
+        REQ-CRATEIDX-001 exists. That fix landed in this same release.
+        .
+        The gate then went red for a SECOND reason, found by clean-room
+        review: REQ-REPRO-001 made the exported registry/vendor paths
+        relative, and selfhost.sh copied only `.cargo/config.toml` into the
+        consumer, so both adapters failed on a path that resolved against a
+        directory nothing had been carried into. A cross-workstream
+        regression — the repro branch invalidated the systest branch's
+        script, and the merge never re-ran it. The script now copies the
+        whole export.
+        .
+        Re-run locally 2026-08-19 AFTER both fixes, and this is the first run
+        in which clause 1 has actually been demonstrated: BOTH adapters
+        PASS end to end, each with its negative control red as required
+        (`selfhost[export-crates-vendor]: PASS`,
+        `selfhost[export-cargo]: PASS`). The export-cargo job is no longer
+        skip-neutral — repo variable VARVE_SYSTEST_EXPORT_CARGO is set, so it
+        runs and is the proof the adapter stays fixed. Clause 2 (a system
         gate per transport): the OCI round trip (varve#62) runs a REAL
         registry (sha256-pinned zot) and pushes the deposited layout with a
         STANDARD client (oras, the documented `varve docs deploy` recipe),
@@ -2841,8 +2854,14 @@ artifacts:
         # Clause 2 — the OCI round trip is a workflow job, not a recipe.
         - run: grep -q "oci-roundtrip.sh" .github/workflows/systest.yml
         - run: grep -q "oci+http://" tools/systest/oci-roundtrip.sh
-        # Clause 3 — the small fixtures declare their scope.
-        - run: grep -q "CANNOT exercise" crates/varve-core/tests/cargo_offline.rs
+        # Clause 3 — the small fixtures declare their scope. cargo_offline.rs
+        # no longer carries a "CANNOT exercise" disclaimer because it is no
+        # longer a small fixture: v0.27.0 rebuilt it as a REAL GRAPH, so the
+        # honest assertion is that it says so. This step cited the deleted
+        # disclaimer and was RED while `rivet check verification-evidence`
+        # stayed green — that gate resolves cargo-test filters, not greps, so
+        # it could not see it (found by clean-room review).
+        - run: grep -q "REAL GRAPH" crates/varve-core/tests/cargo_offline.rs
         - run: grep -q "CANNOT exercise" crates/varve-core/tests/corrosion_offline.rs
         # The scripts parse (the jobs run them verbatim).
         - run: bash -n tools/systest/selfhost.sh

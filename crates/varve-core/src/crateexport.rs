@@ -835,8 +835,8 @@ mod tests {
     fn an_index_entry_carries_the_crates_real_deps_and_features() {
         // varve#73: `deps:[]` and `features:{}` for EVERY crate, while Cargo
         // resolves the graph FROM the index. Measured on varve's own lockfile,
-        // 226 of 250 crates declare a dependency or a feature — so the stub was
-        // wrong for 90% of a real layer, and its worst outcome was not a
+        // 228 of 250 crates declare a dependency or a feature — so the stub was
+        // wrong for 91% of a real layer, and its worst outcome was not a
         // failure but a build that exits 0 with a crate compiled featureless.
         let e = entry_with(
             "demo",
