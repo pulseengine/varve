@@ -1693,6 +1693,58 @@ artifacts:
       priority: must
       category: functional
 
+  - id: REQ-REPRO-001
+    type: requirement
+    title: What varve emits is a function of the layer, not of the machine or the clock
+    status: draft
+    release: v0.27.0
+    description: >
+      varve's whole argument is that an artifact's identity is its bytes. That
+      argument is weakened every time varve itself emits something that varies
+      between two runs over the same input, because a consumer then cannot tell
+      drift from noise — and an export diff is how REQ-EXPORT-SYNC-001 staleness
+      gets noticed by a human rather than by CI.
+      Audited 2026-08-19, and most of this already holds: the SBOM has stable
+      ordering, no clock of its own, `metadata.timestamp` from the signed
+      `issued-at`, and a serial derived from the manifest digest; the export
+      stamp carries no timestamp; the signed deposit payload is order-
+      independent. The only `SystemTime::now()` outside tests feeds a staleness
+      WARNING and is never written into an artifact.
+      One thing is not: `.cargo/config.toml` embeds an ABSOLUTE path, so the
+      same layer exported twice differs, and a committed export shows a diff on
+      every machine (varve#72). varve made it absolute deliberately in
+      REQ-PRODUCE-002, because a relative `--out` was embedded verbatim and
+      resolved against the invoking cwd, so a copied config pointed at nothing.
+      Clauses:
+      (1) Exporting one layer twice, to two destinations, shall produce
+      byte-identical output apart from the destination path itself — and where
+      a path must appear, it shall be expressed so that copying the export does
+      not break it. Whether cargo resolves a relative `local-registry` against
+      the CONFIG FILE's directory rather than the cwd shall be settled
+      EMPIRICALLY against the `cargo_offline` oracle before anything changes;
+      the v0.25.0 fix reacted to a cwd-relative path, which is a different
+      thing, and reverting it blindly would restore a real bug.
+      (2) Where a machine-specific file cannot be avoided, varve shall separate
+      it from the reproducible part, so a project can commit the bytes that are
+      a function of the layer and generate the rest at use time.
+      (3) varve shall gain a test that EXPORTS THE SAME LAYER TWICE and
+      compares, for every adapter — the check that found varve#72, made
+      permanent, since a new adapter is exactly where a stray timestamp or an
+      unordered map iteration will next appear.
+      (4) varve shall NOT claim its own builds are reproducible until they are.
+      `varve docs threat-model` states plainly today that varve signs what its
+      build produced and does not prove the build was deterministic. That
+      sentence is honest and shall stand until a reproducible-build pipeline
+      makes it false — a claim of determinism is exactly the kind of thing an
+      assessor checks and an attacker relies on nobody checking.
+    tags: [core, supply-chain]
+    links:
+      - type: traces-to
+        target: REQ-EXPORT-SYNC-001
+    fields:
+      priority: should
+      category: non-functional
+
   - id: REQ-EXPORTDECL-001
     type: requirement
     title: A project declares its exports, and verify checks every one of them
