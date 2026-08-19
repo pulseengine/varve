@@ -32,8 +32,18 @@ env:
   # ordeal rejoined at v0.18.0 — its first cosign-signed release (ordeal#116).
   # Entry shape: repo_tool:version[:binary] — binary defaults to the tool
   # name; kiln ships its CLI as `kilnd`.
-  TARBALL_TOOLS: "rivet:v0.32.0 synth:v0.55.0 loom:v1.2.0 meld:v0.42.0 spar:v0.35.0 witness:v0.39.0 ordeal:v0.18.0 kiln:v0.4.4:kilnd"
+  TARBALL_TOOLS: "rivet:v0.33.1 synth:v0.55.0 loom:v1.2.0 meld:v0.42.0 spar:v0.36.0 witness:v0.39.0 ordeal:v0.18.0 kiln:v0.4.4:kilnd"
   WSC_VERSION: v0.10.0
+  # VS Code extensions carried as kind="vsix" payloads (REQ-VSIX-001).
+  # Entry shape: repo:version:extension-name:asset-template, where the
+  # template spells the release asset with %V for the bare version and, when
+  # the extension is per-platform, %P for the VSIX platform tag. An entry
+  # WITHOUT %P is one platform-independent package.
+  #
+  # rivet ships a single portable .vsix; spar ships one per platform, so its
+  # payloads carry varve `platform` values and a consumer resolves only their
+  # own — the same rule the tool payloads follow.
+  VSIX_PACKAGES: "rivet:v0.33.1:rivet-sdlc:rivet-sdlc-%V.vsix spar:v0.36.0:spar-aadl:spar-aadl-%P-%V.vsix"
 
 jobs:
   deposit:
@@ -153,6 +163,77 @@ jobs:
             fetch_asset pulseengine/sigil "$WSC_VERSION" "$wsc_asset"
             cp "downloads/sigil/$wsc_asset" "tools/wsc-$platform"
             add_tool wsc "$BARE_WSC" "$platform" "tools/wsc-$platform" pulseengine/sigil "$WSC_VERSION" "$wsc_asset" "$sha"
+          done
+          # VS Code extensions (REQ-VSIX-001). A vsix is HELD, not dispatched,
+          # so the entry carries no binary and `varve export-vsix` is what
+          # materialises it for `code --install-extension`.
+          add_vsix() { # name version platform path repo release asset sha
+            local plat_line=""
+            [ -n "$3" ] && plat_line="platform = \"$3\""
+            cat >> "$SPEC" <<TOMLEOF
+
+          [[tool]]
+          name = "$1"
+          version = "$2"
+          kind = "vsix"
+          $plat_line
+          path = "$4"
+
+          [tool.source]
+          repo = "$5"
+          release = "$6"
+          asset = "$7"
+          sha256 = "$8"
+          TOMLEOF
+          }
+          # VSIX platform tags are VS Code's, not Rust target triples.
+          vsix_platform_tag() {
+            case "$1" in
+              aarch64-apple-darwin)      echo "darwin-arm64";;
+              x86_64-apple-darwin)       echo "darwin-x64";;
+              aarch64-unknown-linux-gnu) echo "linux-arm64";;
+              x86_64-unknown-linux-gnu)  echo "linux-x64";;
+            esac
+          }
+          for entry in $VSIX_PACKAGES; do
+            repo_name="${entry%%:*}"; rest="${entry#*:}"
+            version="${rest%%:*}";    rest="${rest#*:}"
+            extname="${rest%%:*}";    template="${rest#*:}"
+            bare="${version#v}"
+            repo="pulseengine/$repo_name"
+            verify_release "$repo" "$version"
+            mkdir -p vsix
+            if [ "${template#*%P}" = "$template" ]; then
+              # Platform-independent: exactly one package, no platform field.
+              asset="${template//%V/$bare}"
+              sha="$(asset_sha "$repo" "$asset")"
+              if [ -z "$sha" ]; then
+                echo "::error::$repo $version ships no $asset — declared in VSIX_PACKAGES"
+                exit 1
+              fi
+              fetch_asset "$repo" "$version" "$asset"
+              cp "downloads/$repo_name/$asset" "vsix/$extname-$bare.vsix"
+              add_vsix "$extname" "$bare" "" "vsix/$extname-$bare.vsix" "$repo" "$version" "$asset" "$sha"
+            else
+              found=0
+              for platform in $PLATFORMS; do
+                tag="$(vsix_platform_tag "$platform")"
+                asset="${template//%V/$bare}"; asset="${asset//%P/$tag}"
+                sha="$(asset_sha "$repo" "$asset")"
+                if [ -z "$sha" ]; then
+                  echo "::notice::$extname has no vsix for $platform — layer omits it there"
+                  continue
+                fi
+                fetch_asset "$repo" "$version" "$asset"
+                cp "downloads/$repo_name/$asset" "vsix/$extname-$tag-$bare.vsix"
+                add_vsix "$extname" "$bare" "$platform" "vsix/$extname-$tag-$bare.vsix" "$repo" "$version" "$asset" "$sha"
+                found=$((found+1))
+              done
+              # A per-platform extension that matched NOTHING means the asset
+              # naming changed upstream. Silence would ship a layer missing an
+              # extension it claims to carry.
+              [ "$found" -gt 0 ] || { echo "::error::$extname matched no vsix asset for any platform (template $template)"; exit 1; }
+            fi
           done
           # Strip the heredoc indentation TOML forbids.
           sed -i 's/^          //' "$SPEC"

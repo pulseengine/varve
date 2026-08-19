@@ -1552,8 +1552,25 @@ fn payloads_of_layer(
     let kind = want.as_str();
 
     let mut found = Vec::new();
+    let host = varve_core::host_platform();
     for e in &manifest.entries {
         if e.kind().map_err(|err| anyhow::anyhow!(err.to_string()))? != want {
+            continue;
+        }
+        // Only the payloads THIS host has. `install` platform-filters what it
+        // lays down, so walking every platform's entry meant resolving a
+        // foreign entry to the one on-disk file — the payload path is
+        // name/version and carries no platform — and then comparing the host's
+        // bytes against that entry's signed digest. The mismatch was real and
+        // the conclusion was wrong: it reported tampering for a payload that
+        // was simply built for another machine. Latent for every per-platform
+        // non-tool payload; found by depositing spar's per-platform .vsix set.
+        if !varve_core::platform::entry_matches(
+            e.annotations
+                .get(varve_core::platform::ANN_PLATFORM)
+                .map(String::as_str),
+            &host,
+        ) {
             continue;
         }
         let name = e

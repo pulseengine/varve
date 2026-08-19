@@ -2093,6 +2093,89 @@ fn two_versions_of_one_tool_are_still_refused_and_the_error_names_both() {
 
 // rivet: verifies REQ-VSIX-001, REQ-STORE-002
 #[test]
+fn a_per_platform_payload_exports_the_hosts_bytes_not_another_platforms_digest() {
+    // Found by building the REAL pulseengine layer: spar ships one .vsix per
+    // platform, and a layer carrying them could be deposited and installed but
+    // NOT exported — `export-vsix` failed with "on-disk bytes do not match the
+    // signed digest".
+    //
+    // `install` platform-filters, laying down only the host's payload.
+    // `payloads_of_layer` did not filter at all, so it walked every platform's
+    // manifest entry, resolved each to the ONE on-disk file (the payload path
+    // is name/version and carries no platform), and compared the host's bytes
+    // against a foreign platform's signed digest. The mismatch was real; the
+    // conclusion drawn from it was wrong.
+    //
+    // This is latent for every per-platform non-tool payload, not just vsix —
+    // it stayed hidden because no layer had carried one until now.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("pp-root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("pp-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    let host = varve_core::host_platform();
+    let other = if host == "x86_64-unknown-linux-gnu" {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
+
+    // One extension, one version, DIFFERENT bytes per platform — so exporting
+    // the wrong platform's digest cannot accidentally agree.
+    let mut spec_text =
+        String::from("layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n");
+    for plat in [host.as_str(), other] {
+        let path = parent.join(format!("spar-aadl-{plat}.vsix"));
+        std::fs::write(&path, format!("vsix-bytes-for-{plat}")).unwrap();
+        spec_text.push_str(&format!(
+            "\n[[tool]]\nname = \"spar-aadl\"\nversion = \"0.36.0\"\nkind = \"vsix\"\n\
+             platform = \"{plat}\"\npath = \"{}\"\n",
+            path.display()
+        ));
+    }
+    let spec = parent.join("pp-spec.toml");
+    std::fs::write(&spec, &spec_text).unwrap();
+
+    let layout = parent.join("pp-layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-31T09:14:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "test-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    install_pinned(&fx, &trust_root, "2026.07.0", &layout);
+
+    let out = parent.join("pp-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-vsix", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    // Exactly one file — the host's — carrying the host's bytes.
+    let exported: Vec<_> = std::fs::read_dir(&out)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".vsix"))
+        .collect();
+    assert_eq!(exported.len(), 1, "one platform's vsix, got {exported:?}");
+    let body = std::fs::read_to_string(out.join(&exported[0])).unwrap();
+    assert_eq!(
+        body,
+        format!("vsix-bytes-for-{host}"),
+        "the exported bytes are not the host's"
+    );
+}
+
+// rivet: verifies REQ-VSIX-001
+#[test]
 fn vsix_extensions_deposit_install_verify_and_export_for_code() {
     // varve#68 end to end, at the boundary the user touches. Two extensions,
     // one of them at TWO versions (REQ-STORE-002's identity rule, inherited
