@@ -1693,6 +1693,60 @@ artifacts:
       priority: must
       category: functional
 
+  - id: REQ-SYSTEST-001
+    type: requirement
+    title: varve is exercised as a system, at real scale, not only as units
+    status: draft
+    release: v0.27.0
+    description: >
+      Every significant defect found in the week of 2026-08-13..19 came from
+      exercising varve as a SYSTEM, and none came from its unit tests or its
+      mutation gates: a layer could not hold two versions of one crate
+      (varve#69), `varve which` reported a binary the shell would not run
+      (varve#66), an `oci://` install carried no attestations, the registry
+      client spoke only GHCR's dialect, there was no documented way to obtain
+      varve at all, and `export-cargo` cannot build a real dependency graph
+      (varve#73).
+      The unit tests are good and the mutation gates are real — 261 lib tests,
+      `cargo mutants` clean on the trust-critical files. That is the point.
+      Coverage answers "does the code do what the test says". Mutation testing
+      answers "would the test notice if the code stopped doing it". NEITHER
+      answers "is the test a realistic case", and no amount of either can tell
+      you that the fixture is a toy.
+      The evidence is exact. `cargo_offline` — the oracle cited as proof that
+      consumers build offline against varve-signed crates — builds a consumer
+      against ONE synthetic crate with no dependencies and no features.
+      `corrosion_offline` uses one crate entry. Those tests pass, kill their
+      mutants, and are honest about what they assert; they simply cannot
+      exercise index resolution, feature resolution, or two versions of one
+      name, because a one-crate graph has none of those things. varve#73 was
+      invisible to them by construction.
+      Clauses:
+      (1) varve shall be SELF-HOSTING under test: a gate shall deposit varve's
+      own `Cargo.lock` as a layer — 250 packages, 14 names at more than one
+      version — install it, verify it, and build the workspace OFFLINE from it
+      with an isolated CARGO_HOME, through EVERY adapter that claims to support
+      a Cargo build. An adapter that cannot build varve shall not claim it can
+      build anything.
+      (2) A system gate shall exist for each transport and consumer varve
+      claims: a real OCI registry round trip (varve#62), a zero-network Bazel
+      `--distdir` build (varve#27), and the ten-persona documentation audit,
+      which is system testing under another name and shall be recognised as
+      such rather than treated as a docs chore.
+      (3) Where a fixture is deliberately small, the test shall SAY what it
+      therefore cannot prove, so a one-crate oracle is never again cited as
+      evidence for a real build. A test's scope is part of its evidence.
+      (4) A new export adapter shall not ship without a system test at
+      realistic scale. Two adapters shipped this week; the one exercised only
+      by unit tests is the one that turned out not to work.
+    tags: [verification, methodology]
+    links:
+      - type: traces-to
+        target: REQ-INDEP-001
+    fields:
+      priority: must
+      category: process
+
   - id: REQ-REPRO-001
     type: requirement
     title: What varve emits is a function of the layer, not of the machine or the clock
