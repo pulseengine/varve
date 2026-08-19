@@ -8,7 +8,8 @@ Re-checks the pinned layer offline — or every installed layer with `--all`.
 - Every manifest entry **for this platform** is present and hashes to its signed digest.
 - Each composed layer, recursively, against its own realm's root.
 - The pin does not resolve **below its line's high-water mark** — the anti-rollback verdict `install` applies, now applied here too (varve#76), so the CI gate and the install agree.
-- No binary earlier on `PATH` shadows a pinned tool (REQ-SHADOW-001).
+- **Every export the pin declares**, without being told to (REQ-EXPORTDECL-001). See below.
+- No binary earlier on `PATH` shadows a pinned tool (REQ-SHADOW-001) — unless the pin declared that it would.
 
 ## What it does not check
 
@@ -17,6 +18,40 @@ Re-checks the pinned layer offline — or every installed layer with `--all`.
 - **Yank, support window, `issued-at`.** A yanked layer verifies clean; `varve status` is where withdrawal lives. `issued-at` is never evaluated at all.
 
 `--all` widens the *set of layers*, not the set of checks: the platform and unnamed-file limits above still hold for each one.
+
+## Declared exports
+
+An `[[export]]` entry in `varve.toml` is checked on **every** `verify`, with no flag:
+
+```toml
+manifest-version = 1
+
+[toolchain]
+channel = "qualified"
+layer   = "2026.08.0"
+
+[[export]]
+kind = "crates-vendor"
+out  = "third_party/rust"
+```
+
+```sh
+varve verify
+# declared export /w/third_party/rust (crates-vendor) — fresh: bound to the layer the pin resolves
+```
+
+Anything but *fresh* **fails**, including a declared directory that is not there at all:
+
+```sh
+rm -rf third_party/rust
+varve verify
+# error: 1 declared export(s) in /w/varve.toml are not current (REQ-EXPORTDECL-001):
+#   /w/third_party/rust (crates-vendor) — MISSING: varve.toml declares this export and
+#   there is no .varve-export.json in it. Generate it with
+#   `varve export-crates-vendor --out third_party/rust`.
+```
+
+"I forgot to generate it" and "it is stale" are the same severity to anyone relying on the export, so they are the same verdict. A directory stamped by a *different* adapter fails too: freshness there says nothing, because the declared export was never produced.
 
 `--export DIR` (repeatable) also checks a committed export directory against the current pin: the `.varve-export.json` stamp written by `varve export-*` must name the layer the pin resolves to. If the pin has moved on, the export is stale and verify **fails** (non-zero exit); an absent or malformed stamp is likewise a failure. Run it in CI so a stale vendored tree cannot silently keep serving the old crates (REQ-EXPORT-SYNC-001).
 

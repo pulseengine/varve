@@ -725,6 +725,7 @@ mod tests {
                 source: None,
                 runner: None,
                 kind: None,
+                sdk_prefix: None,
             }],
         };
         let outcome = deposit(&spec, &sk, "k", &dest).unwrap();
@@ -944,6 +945,7 @@ mod tests {
                     source: None,
                     runner: None,
                     kind: None,
+                    sdk_prefix: None,
                 }],
             },
             &sk,
@@ -993,6 +995,7 @@ mod tests {
                     source: None,
                     runner: None,
                     kind: None,
+                    sdk_prefix: None,
                 }],
             },
             &sk,
@@ -1096,6 +1099,7 @@ mod tests {
                     source: None,
                     runner: None,
                     kind: None,
+                    sdk_prefix: None,
                 }],
             },
             &sk,
@@ -1194,6 +1198,7 @@ mod tests {
                 source: None,
                 runner: None,
                 kind: None,
+                sdk_prefix: None,
             }],
         };
         deposit(&spec, &sk, "k", &dest).unwrap();

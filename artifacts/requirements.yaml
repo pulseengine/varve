@@ -1911,7 +1911,7 @@ artifacts:
   - id: REQ-SDK-001
     type: requirement
     title: A tree-shaped payload can be distributed, and relocated as an export
-    status: approved
+    status: verified
     release: v0.27.0
     description: >
       varve#67. `sdk`, `wit` and `zephyr-module` parse and verify but nothing

@@ -180,6 +180,11 @@ pub const TOPICS: &[Topic] = &[
         "cmd-export-vsix.md"
     ),
     topic!(
+        "export-sdk",
+        "export-sdk — a relocated, sourceable SDK tree",
+        "cmd-export-sdk.md"
+    ),
+    topic!(
         "sbom",
         "sbom — the signed manifest as a bill of materials",
         "cmd-sbom.md"
@@ -316,6 +321,12 @@ pub const TOPICS_NEEDING_EXAMPLES: &[&str] = &[
     // --install-extension` line, because the file NAME is what `code`
     // dispatches on. A prose description of that teaches nothing.
     "export-vsix",
+    // REQ-SDK-001 clause 3 + REQ-EXPORTDECL-001 clauses 4-5. Every fact this
+    // topic carries is one a reader is REJECTED for not knowing: an `sdk`
+    // deposited without `sdk-prefix` is refused, a destination longer than the
+    // build prefix is refused, and an undeclared sourced SDK makes `verify`
+    // report a hijack. Prose about any of those teaches nothing.
+    "export-sdk",
     // Both audit-demanded workflow topics are command sequences; prose-only
     // versions would be the stub form this gate exists to refuse.
     "discovery",

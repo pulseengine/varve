@@ -4110,3 +4110,752 @@ fn an_export_that_cannot_follow_the_composition_says_so() {
         "an export that could not follow the composition must not leave a registry"
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// The library surface the SDK workstream left unwired: `export-sdk`, declared
+// exports, the shadowing declaration, and `varve env`. Every test below drives
+// the BINARY. A test that builds the policy itself cannot detect that the
+// product never builds one — which is exactly how REQ-INDEXAUTH-001 shipped a
+// `must` clause that no code path could reach.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The prefix an SDK must have been BUILT for so that `dest` fits inside its
+/// relocation budget.
+///
+/// Not a constant: relocation can only ever SHORTEN a path (the interpreter
+/// field is fixed-size), and a temporary directory is long. A hard-coded prefix
+/// would make these tests pass or fail on the length of `$TMPDIR`, which is the
+/// machine-dependent suite the hermetic PATH exists to prevent.
+fn built_prefix_for(dest: &std::path::Path) -> String {
+    let need = dest.to_str().expect("a utf-8 temp path").len();
+    let mut s = String::from("/opt/poky/4.0.15/sysroots/x86_64-pokysdk-linux");
+    while s.len() < need {
+        s.push('p');
+    }
+    s
+}
+
+/// A synthetic Yocto SDK as the gzip tar a producer signs: a NUL-padded binary
+/// field (the `relocate_sdk.py` half), a text `environment-setup-*` (the
+/// `sed -i` half), an absolute symlink, and a `bin/synth` that will shadow the
+/// pinned tool once the tree is on PATH.
+fn sdk_tarball(built: &str) -> Vec<u8> {
+    use std::io::Write;
+    // A NUL-padded path field, the way an ELF PT_INTERP segment holds one.
+    let field = |s: &str| {
+        let mut v = s.as_bytes().to_vec();
+        v.resize(s.len() + 8, 0);
+        v
+    };
+    let mut binary = b"\x7fELF".to_vec();
+    binary.extend_from_slice(&field(&format!(
+        "{built}/sysroots/x86_64/lib/ld-linux.so.2"
+    )));
+    binary.extend_from_slice(b"\0\0trailer\0");
+    // A REAL environment script: after relocation its PATH line points at the
+    // export, which is what makes `eval "$(varve env)"` testable end to end.
+    let env_setup = format!(
+        "export SDKTARGETSYSROOT=\"{built}/sysroots/cortexa53\"\n\
+         export PATH=\"{built}/bin:$PATH\"\n\
+         export CC=\"aarch64-poky-linux-gcc --sysroot={built}/sysroots/cortexa53\"\n"
+    );
+    let synth = "#!/bin/sh\necho SDK-SYNTH\n";
+
+    let mut tar_bytes = Vec::new();
+    {
+        let mut b = tar::Builder::new(&mut tar_bytes);
+        let mut dir = tar::Header::new_gnu();
+        dir.set_entry_type(tar::EntryType::Directory);
+        dir.set_size(0);
+        dir.set_mode(0o755);
+        b.append_data(&mut dir, "sysroots/", std::io::empty())
+            .unwrap();
+        for (path, mode, bytes) in [
+            (
+                "sysroots/x86_64/usr/bin/aarch64-poky-linux-gcc",
+                0o755u32,
+                binary.as_slice(),
+            ),
+            (
+                "environment-setup-cortexa53-poky-linux",
+                0o644,
+                env_setup.as_bytes(),
+            ),
+            ("bin/synth", 0o755, synth.as_bytes()),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(bytes.len() as u64);
+            h.set_mode(mode);
+            b.append_data(&mut h, path, bytes).unwrap();
+        }
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_size(0);
+        link.set_mode(0o777);
+        // `append_link`, not `set_link_name`: a real SDK's build prefix is
+        // routinely past the 100-byte header field, and tar's GNU LongLink
+        // record is how that is carried. A fixture that could only express a
+        // short target would test a case the requirement is not about.
+        b.append_link(
+            &mut link,
+            "bin/synth-latest",
+            std::path::Path::new(&format!("{built}/bin/synth")),
+        )
+        .unwrap();
+        b.finish().unwrap();
+    }
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(&tar_bytes).unwrap();
+    gz.finish().unwrap()
+}
+
+/// A signed root plus its key files, the two lines every one of these tests
+/// starts with.
+struct Root {
+    key: std::path::PathBuf,
+    trust_root: std::path::PathBuf,
+}
+
+fn root_at(parent: &std::path::Path) -> Root {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let key = parent.join("root.key");
+    std::fs::write(&key, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    Root { key, trust_root }
+}
+
+/// Deposit `spec_text` and install it — every test here needs a real, signed,
+/// installed layer, because `export_target` verifies before it exports.
+fn deposit_and_install(fx: &Fixture, root: &Root, spec_text: &str, tag: &str) {
+    let parent = fx.project.parent().unwrap();
+    let spec = parent.join(format!("{tag}-spec.toml"));
+    std::fs::write(&spec, spec_text).unwrap();
+    let layout = parent.join(format!("{tag}-layout"));
+    varve(fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&root.key)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+}
+
+// rivet: verifies REQ-SDK-001
+#[cfg(unix)]
+#[test]
+fn export_sdk_lays_a_relocated_tree_down_through_the_cli() {
+    // REQ-SDK-001 clause 3, at the boundary a user touches. The library could
+    // relocate a tree since v0.27.0 and NOTHING could ask it to: there was no
+    // subcommand, and no producer path for the signed prefix clause 4 requires.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+
+    let out = parent.join("poky");
+    std::fs::create_dir_all(&out).unwrap();
+    let dest = out.canonicalize().unwrap();
+    let built = built_prefix_for(&dest);
+    let archive = parent.join("poky-sdk.tar.gz");
+    let archive_bytes = sdk_tarball(&built);
+    std::fs::write(&archive, &archive_bytes).unwrap();
+
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"poky-cortexa53\"\nversion = \"4.0.15\"\nkind = \"sdk\"\n\
+             sdk-prefix = \"{built}\"\npath = \"{}\"\n",
+            archive.display()
+        ),
+        "sdk",
+    );
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-sdk", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("exported sdk poky-cortexa53@4.0.15")
+                .and(predicate::str::contains("field(s) patched in place")),
+        );
+
+    // The tree is HERE, relocated: no occurrence of the build prefix survives,
+    // and the destination is what the binaries now name.
+    let gcc = dest.join("sysroots/x86_64/usr/bin/aarch64-poky-linux-gcc");
+    let gcc_bytes = std::fs::read(&gcc).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&gcc_bytes).contains(&built),
+        "the interpreter field still names the build prefix"
+    );
+    assert!(String::from_utf8_lossy(&gcc_bytes).contains(dest.to_str().unwrap()));
+    assert_eq!(
+        gcc_bytes.len(),
+        archive_len_preserving_probe(&built),
+        "a binary field is patched IN PLACE — the file length must not move"
+    );
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&gcc).unwrap().permissions().mode() & 0o111,
+            0o111,
+            "a compiler must survive the export executable"
+        );
+    }
+    let env_script = std::fs::read_to_string(dest.join("environment-setup-cortexa53-poky-linux"))
+        .expect("the sourceable script is part of the tree");
+    assert!(env_script.contains(dest.to_str().unwrap()));
+    assert!(!env_script.contains(&built));
+    assert_eq!(
+        std::fs::read_link(dest.join("bin/synth-latest")).unwrap(),
+        dest.join("bin/synth"),
+        "an SDK-internal absolute symlink is re-pointed into the export"
+    );
+
+    // Clause 2: the store still holds EXACTLY the bytes the producer signed —
+    // nothing on the relocation path writes back into it — so `verify` (which
+    // re-hashes that one file) still passes.
+    let store = varve_core::Store::at(&fx.root);
+    let installed = store
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|l| l.layer.to_string() == "2026.07.0")
+        .unwrap();
+    let held = installed.root.join("payloads/poky-cortexa53/4.0.15");
+    assert_eq!(
+        std::fs::read(&held).unwrap(),
+        archive_bytes,
+        "the store must keep the signed archive, not the relocated tree"
+    );
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+
+    // The stamp says `sdk` EXACTLY — a declaration in varve.toml is compared
+    // against this string, and any other spelling reports the declared export
+    // as never produced.
+    let stamp: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dest.join(".varve-export.json")).unwrap()).unwrap();
+    assert_eq!(stamp["kind"], "sdk");
+    assert_eq!(stamp["layer"], "2026.07.0");
+}
+
+/// The synthetic binary's length, recomputed from the same rule the fixture
+/// builds it with — asserting a NUMBER here would be asserting the fixture.
+fn archive_len_preserving_probe(built: &str) -> usize {
+    // b"\x7fELF" + field(interp) + b"\0\0trailer\0"
+    4 + (format!("{built}/sysroots/x86_64/lib/ld-linux.so.2").len() + 8) + 10
+}
+
+// rivet: verifies REQ-SDK-001
+#[test]
+fn export_sdk_refuses_a_destination_the_sdk_cannot_reach_before_writing_anything() {
+    // Clause 4 through the CLI: the refusal is EARLY (the archive is never
+    // even opened) and names the budget, because "it failed" after relocating
+    // thousands of files is not an answer anyone can act on.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let archive = parent.join("poky-sdk.tar.gz");
+    std::fs::write(&archive, sdk_tarball("/opt/tiny")).unwrap();
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"poky\"\nversion = \"4.0\"\nkind = \"sdk\"\n\
+             sdk-prefix = \"/opt/tiny\"\npath = \"{}\"\n",
+            archive.display()
+        ),
+        "sdk",
+    );
+    let out = parent.join("a-destination-far-longer-than-the-build-prefix");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-sdk", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("cannot relocate this sdk")
+                .and(predicate::str::contains("/opt/tiny"))
+                .and(predicate::str::contains("at most 9 characters")),
+        );
+    assert!(
+        !out.join(".varve-export.json").exists(),
+        "a refused export must not be stamped as one"
+    );
+    assert!(
+        !out.join("bin").exists(),
+        "the refusal must land before any byte of the tree"
+    );
+}
+
+// rivet: verifies REQ-SDK-001
+#[test]
+fn an_sdk_without_the_signed_prefix_cannot_be_deposited_at_all() {
+    // Clause 4's producing half. The budget is attributable or it is nothing:
+    // an sdk with no signed prefix would install, verify, and be impossible to
+    // export — discovered on the far side of an air gap, unfixable without a
+    // re-deposit, because the annotation lives inside the signature.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let archive = parent.join("poky-sdk.tar.gz");
+    std::fs::write(&archive, sdk_tarball("/opt/poky")).unwrap();
+    let spec = parent.join("no-prefix.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"poky\"\nversion = \"4.0\"\nkind = \"sdk\"\npath = \"{}\"\n",
+            archive.display()
+        ),
+    )
+    .unwrap();
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&root.key)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(parent.join("nope"))
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("declares no `sdk-prefix`")
+                .and(predicate::str::contains("export-sdk")),
+        );
+
+    // …and the same field on a payload nobody relocates is refused rather than
+    // signed, ignored, and believed.
+    let bin = parent.join("synth-bin");
+    std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+    let spec = parent.join("prefix-on-a-tool.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0\"\n\
+             sdk-prefix = \"/opt/poky\"\npath = \"{}\"\n",
+            bin.display()
+        ),
+    )
+    .unwrap();
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&root.key)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(parent.join("nope2"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("only a tree payload"));
+}
+
+/// A pin that declares exports, written into the project.
+fn write_pin(fx: &Fixture, exports: &str) {
+    std::fs::write(
+        fx.project.join("varve.toml"),
+        format!("{PIN_JULY}{exports}"),
+    )
+    .unwrap();
+}
+
+// rivet: verifies REQ-EXPORTDECL-001
+#[test]
+fn verify_checks_every_declared_export_without_being_told_to() {
+    // Clause 3, through the binary. The library could classify a declared
+    // export since v0.27.0 and `varve verify` never called it: the set of
+    // checked exports still lived in whichever `--export` flags someone
+    // remembered to type, which is the "only checks what it is told about"
+    // failure the requirement exists to close.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let vsix = parent.join("ext.vsix");
+    std::fs::write(&vsix, b"zip-bytes").unwrap();
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"rust-lang.rust-analyzer\"\nversion = \"0.3.2300\"\n\
+             kind = \"vsix\"\npath = \"{}\"\n",
+            vsix.display()
+        ),
+        "decl",
+    );
+
+    // TWO declarations, neither generated. Both must be reported: a loop that
+    // stops at the first fault checks one export and certifies the rest.
+    write_pin(
+        &fx,
+        "\n[[export]]\nkind = \"vsix\"\nout = \"extensions\"\n\
+         \n[[export]]\nkind = \"bazel-registry\"\nout = \"bazel/registries\"\n",
+    );
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("2 declared export(s)")
+                .and(predicate::str::contains("extensions"))
+                .and(predicate::str::contains("bazel/registries"))
+                .and(predicate::str::contains("MISSING"))
+                // The command that FIXES it, spelled the way it really is:
+                // `bazel-registry` is produced by `varve export-bazel`, so the
+                // obvious format!("export-{kind}") would print a command that
+                // does not exist in the one line whose job is to be run.
+                .and(predicate::str::contains("varve export-bazel --out"))
+                .and(predicate::str::contains("varve export-vsix --out")),
+        );
+
+    // Generate ONE of them: the other is still checked, so this is not a
+    // "declared exports exist" check that any single directory satisfies.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-vsix", "--out", "extensions"])
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("1 declared export(s)")
+                .and(predicate::str::contains("bazel/registries")),
+        );
+
+    // With only the generated one declared, verify passes — and SAYS it looked,
+    // because a silent pass is indistinguishable from a check that was skipped.
+    write_pin(&fx, "\n[[export]]\nkind = \"vsix\"\nout = \"extensions\"\n");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("declared export").and(predicate::str::contains("fresh")));
+
+    // The pin moves and the export does not.
+    let stamp = fx.project.join("extensions/.varve-export.json");
+    std::fs::write(
+        &stamp,
+        r#"{"layer":"2026.06.0","manifest_digest":"sha256:0000","kind":"vsix"}"#,
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("STALE"));
+
+    // A directory produced by a DIFFERENT adapter: freshness there says nothing
+    // about the declared export, which was never produced at all.
+    let current: serde_json::Value = {
+        varve(&fx)
+            .env("VARVE_TRUST_ROOT", &root.trust_root)
+            .args(["export-vsix", "--out", "extensions"])
+            .assert()
+            .success();
+        serde_json::from_slice(&std::fs::read(&stamp).unwrap()).unwrap()
+    };
+    std::fs::write(
+        &stamp,
+        serde_json::to_vec(&serde_json::json!({
+            "layer": current["layer"],
+            "manifest_digest": current["manifest_digest"],
+            "kind": "cargo",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("DECLARED as a vsix export but stamped cargo")
+                .and(predicate::str::contains("says nothing about it")),
+        );
+
+    // And a declared directory that is simply gone is a FAILURE, not a warning:
+    // "I forgot to generate it" and "it is stale" are the same severity to
+    // anyone relying on the export.
+    std::fs::remove_dir_all(fx.project.join("extensions")).unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("MISSING"));
+}
+
+// rivet: verifies REQ-EXPORTDECL-001, REQ-SHADOW-001
+#[cfg(unix)]
+#[test]
+fn a_declared_sdk_environment_is_not_reported_as_a_hijack_by_verify() {
+    // Clause 5 through the binary, in all three verdicts. Without the
+    // declaration consulted here, a legitimately sourced SDK makes `verify`
+    // cry wolf — and a check that fires on the setup the project deliberately
+    // configured is the one people switch off, which is worse than not
+    // checking at all.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+
+    let out = fx.project.join("toolchains/poky");
+    std::fs::create_dir_all(&out).unwrap();
+    let dest = out.canonicalize().unwrap();
+    let built = built_prefix_for(&dest);
+    let archive = parent.join("poky-sdk.tar.gz");
+    std::fs::write(&archive, sdk_tarball(&built)).unwrap();
+    let synth_bin = parent.join("synth-bin");
+    std::fs::write(&synth_bin, b"#!/bin/sh\necho PINNED\n").unwrap();
+
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0.0\"\npath = \"{}\"\n\n\
+             [[tool]]\nname = \"poky\"\nversion = \"4.0.15\"\nkind = \"sdk\"\n\
+             sdk-prefix = \"{built}\"\npath = \"{}\"\n",
+            synth_bin.display(),
+            archive.display()
+        ),
+        "shadow",
+    );
+
+    const DECL: &str = "\n[[export]]\nkind = \"sdk\"\nout = \"toolchains/poky\"\n\
+                        \n[export.env]\nscript = \"environment-setup-cortexa53-poky-linux\"\n";
+    write_pin(&fx, &format!("{DECL}path = \"before-shims\"\n"));
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-sdk", "--out", "toolchains/poky"])
+        .assert()
+        .success();
+
+    // The SDK's own `synth` is what PATH runs — exactly the condition
+    // REQ-SHADOW-001 detects, and exactly what `before-shims` declared.
+    let sdk_path = format!("{}:/usr/bin:/bin", dest.join("bin").display());
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .env("PATH", &sdk_path)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("before-shims").and(predicate::str::contains("not a hijack")),
+        );
+
+    // The SAME PATH under an `after-shims` declaration is a real fault: the
+    // project said varve's pinned tools win, and they do not.
+    write_pin(&fx, &format!("{DECL}path = \"after-shims\"\n"));
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .env("PATH", &sdk_path)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("varve.toml declares that export `after-shims`").and(
+                predicate::str::contains("environment-setup-cortexa53-poky-linux"),
+            ),
+        );
+
+    // …and a binary in no declared export at all is still the ordinary hijack,
+    // with the ordinary fix — the declaration must not blunt the check it
+    // exists to make usable.
+    write_pin(&fx, &format!("{DECL}path = \"before-shims\"\n"));
+    let elsewhere = parent.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let impostor = elsewhere.join("synth");
+    std::fs::write(&impostor, "#!/bin/sh\necho WRONG\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&impostor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .env("PATH", format!("{}:/usr/bin:/bin", elsewhere.display()))
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("not what your PATH runs")
+                .and(predicate::str::contains("varve shim install")),
+        );
+}
+
+// rivet: verifies REQ-EXPORTDECL-001
+#[cfg(unix)]
+#[test]
+fn env_enters_every_declared_environment_in_the_order_that_inverts_the_file() {
+    // Clause 4 through the binary. `env_lines` computed the inverted order in
+    // the library and `varve env` printed the shim fragment alone, so a project
+    // that declared its SDK still had to source it by hand — in whichever order
+    // it guessed.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    // Two sourced exports, one on each side of the shims, so the assertion is
+    // about ORDER and not merely about presence.
+    write_pin(
+        &fx,
+        "\n[[export]]\nkind = \"sdk\"\nout = \"sdk-after\"\n\
+         \n[export.env]\nscript = \"env-after.sh\"\npath = \"after-shims\"\n\
+         \n[[export]]\nkind = \"sdk\"\nout = \"sdk-before\"\n\
+         \n[export.env]\nscript = \"env-before.sh\"\npath = \"before-shims\"\n",
+    );
+    for (dir, marker) in [("sdk-after", "AFTER"), ("sdk-before", "BEFORE")] {
+        let d = fx.project.join(dir);
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        std::fs::write(
+            d.join(format!("env-{}.sh", marker.to_lowercase())),
+            format!("export PATH=\"{}/bin:$PATH\"\n", d.display()),
+        )
+        .unwrap();
+    }
+
+    let out = varve(&fx).arg("env").output().unwrap();
+    assert!(out.status.success());
+    let script = String::from_utf8(out.stdout).unwrap();
+    let at = |needle: &str| {
+        script
+            .find(needle)
+            .unwrap_or_else(|| panic!("`varve env` never mentions {needle}:\n{script}"))
+    };
+    let shims = fx.root.join("shims");
+    assert!(
+        at("env-after.sh") < at(shims.to_str().unwrap()),
+        "an `after-shims` export must be sourced FIRST, so the shims land ahead \
+         of it on PATH:\n{script}"
+    );
+    assert!(
+        at(shims.to_str().unwrap()) < at("env-before.sh"),
+        "a `before-shims` export must be sourced LAST, so its own bin wins:\n{script}"
+    );
+
+    // …and the emitted script actually produces that PATH when a shell runs it,
+    // which is the only claim that matters. Asserting the text alone would
+    // verify the formatter.
+    let probe = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("eval \"$VARVE_ENV\"; printf '%s' \"$PATH\"")
+        .env("VARVE_ENV", &script)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(&fx.project)
+        .output()
+        .unwrap();
+    let path = String::from_utf8_lossy(&probe.stdout);
+    let entries: Vec<&str> = path.split(':').collect();
+    let idx = |needle: &str| {
+        entries
+            .iter()
+            .position(|e| e.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} is not on the resulting PATH: {path}"))
+    };
+    assert!(
+        idx("sdk-before/bin") < idx("shims"),
+        "sourcing PREPENDS, so `before-shims` must end up ahead of the shims: {path}"
+    );
+    assert!(
+        idx("shims") < idx("sdk-after/bin"),
+        "…and `after-shims` behind them: {path}"
+    );
+
+    // fish cannot source a producer's POSIX-sh environment script, so it fails
+    // rather than handing back an environment missing what varve.toml declares.
+    varve(&fx)
+        .args(["env", "--shell", "fish"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("fish cannot source it"));
+
+    // A pin that EXISTS and does not parse is an error, not a fallback: half an
+    // environment, exit 0, is how a declared SDK goes missing without anyone
+    // noticing. (Outside a project there is no pin at all, and the shims stay
+    // the whole answer — `env_is_evaluable_and_idempotent` covers that.)
+    std::fs::write(fx.project.join("varve.toml"), "manifest-version = 1\n").unwrap();
+    varve(&fx)
+        .arg("env")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("varve.toml"));
+}
+
+// rivet: verifies REQ-SDK-001
+#[test]
+fn export_sdk_refuses_a_hostile_archive_member_at_the_cli_boundary() {
+    // Clause 5 where it now actually runs. The tree's invariants were verified
+    // in the library while nothing could reach them; a signed blob is
+    // ATTRIBUTABLE, not benign, and this is the boundary a user types.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+
+    let mut tar_bytes = Vec::new();
+    {
+        let mut b = tar::Builder::new(&mut tar_bytes);
+        let mut h = tar::Header::new_gnu();
+        let payload = b"PWNED";
+        h.set_size(payload.len() as u64);
+        h.set_mode(0o644);
+        // Written into the header DIRECTLY: `set_path` refuses `..` itself, and
+        // an archive built by other software is under no obligation to have
+        // used it. The refusal has to be varve's.
+        {
+            let gnu = h.as_gnu_mut().unwrap();
+            let name = b"../../escaped";
+            gnu.name[..name.len()].copy_from_slice(name);
+        }
+        h.set_cksum();
+        b.append(&h, &payload[..]).unwrap();
+        b.finish().unwrap();
+    }
+    let archive = parent.join("hostile.tar");
+    std::fs::write(&archive, &tar_bytes).unwrap();
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"hostile\"\nversion = \"1.0\"\nkind = \"sdk\"\n\
+             sdk-prefix = \"/opt/poky-with-a-prefix-long-enough-for-any-temporary-directory-so-the-fit-check-is-not-what-refuses-this\"\n\
+             path = \"{}\"\n",
+            archive.display()
+        ),
+        "hostile",
+    );
+
+    let out = parent.join("hostile-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-sdk", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a usable path"));
+    assert!(
+        !parent.join("escaped").exists() && !out.join("escaped").exists(),
+        "a refused tree must leave nothing behind, inside the export or out of it"
+    );
+}

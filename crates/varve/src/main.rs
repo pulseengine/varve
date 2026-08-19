@@ -222,6 +222,31 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
+    /// Unpack and RELOCATE the layer's verified `sdk` tree into a directory
+    /// you can source (REQ-SDK-001 clause 3). The store keeps the archive
+    /// exactly as its producer signed it; the usable tree lives here, with the
+    /// build-time prefix patched to `--out` the way Yocto's own
+    /// `relocate_sdk.py` and `toolchain-shar-relocate.sh` do it.
+    ///
+    /// An SDK's interpreter path is patched IN PLACE into a fixed-size field,
+    /// so it can only move to a path NO LONGER than the one it was built for —
+    /// a destination that does not fit is refused BEFORE anything is written.
+    ExportSdk {
+        /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
+        /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
+        #[arg(long)]
+        layer: Option<String>,
+        /// Output directory — the path the tree is RELOCATED to, and therefore
+        /// the path patched into its binaries. Must be at most as long as the
+        /// prefix the SDK was built for.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// Which `sdk` payload to export, when the layer carries more than one.
+        /// One destination is patched into ONE tree, so a layer with several is
+        /// ambiguous rather than a batch.
+        #[arg(long, value_name = "NAME")]
+        select: Option<String>,
+    },
     /// Emit an SBOM for a verified layer, transcribed from its SIGNED manifest
     /// rather than scanned from disk — every component, version and hash is
     /// copied from what the trust root anchored (REQ-SBOM-001). Answers "which
@@ -535,6 +560,9 @@ fn run() -> anyhow::Result<()> {
             export_bazel_distdir(&store, layer.as_deref(), &out)
         }
         Cmd::ExportVsix { layer, out } => export_vsix(&store, layer.as_deref(), &out),
+        Cmd::ExportSdk { layer, out, select } => {
+            export_sdk(&store, layer.as_deref(), &out, select.as_deref())
+        }
         Cmd::Sbom { layer, format, out } => {
             sbom_cmd(&store, layer.as_deref(), &format, out.as_deref())
         }
@@ -618,14 +646,81 @@ fn env_script_sh(shim_dir: &std::path::Path) -> String {
     )
 }
 
+/// `varve env` — the whole environment in one command (REQ-EXPORTDECL-001
+/// clause 4), not just the shims.
+///
+/// A project that declares a sourced export needs TWO things entered, in an
+/// order that inverts what the file says: sourcing a script PREPENDS its bin to
+/// PATH, so whatever is sourced LAST wins. `varve_core::env_lines` owns that
+/// inversion — emitting the declarations in file order would produce exactly
+/// the PATH the project said it did not want, and `verify` would then report
+/// the shadowing the project had declared away.
+///
+/// The shims are emitted INLINE rather than as `. "$VARVE_ROOT/env"` because
+/// that file is written by `shim install`; the fragment is byte-identical to
+/// its contents, so the position — which is the part that matters — is the
+/// same either way, and `eval "$(varve env)"` keeps working before any shim
+/// has been installed.
 fn print_env(store: &Store, shell: &str) -> anyhow::Result<()> {
     let shim_dir = store.root().join("shims");
+    let env_file = store.root().join("env");
+    // The PIN, not the whole project context: `env` needs the declarations and
+    // the directory they are relative to, and nothing else. Reading it through
+    // `project_ctx` would make entering an environment depend on the realm
+    // resolving — and a realms file that cannot be read would then silently
+    // drop the declared SDK, which is the accepted-ignored-and-believed shape
+    // clause 4 exists to refuse.
+    //
+    // Outside a project there is no pin at all: the shims are the whole answer,
+    // exactly as before. A pin that EXISTS and does not parse is an error, not
+    // a fallback — `eval "$(varve env)"` must not quietly give you half an
+    // environment because varve.toml has a typo in it.
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    let pin = match discover::find_pin(&cwd) {
+        Some(_) => Some(load_pin()?),
+        None => None,
+    };
+    let sourced: Vec<&varve_core::ExportDecl> = pin
+        .as_ref()
+        .map(|(p, _)| p.exports.iter().filter(|d| d.env.is_some()).collect())
+        .unwrap_or_default();
     match shell {
-        "sh" | "bash" | "zsh" => print!("{}", env_script_sh(&shim_dir)),
-        "fish" => println!(
-            "if not contains \"{dir}\" $PATH\n    set -gx PATH \"{dir}\" $PATH\nend",
-            dir = shim_dir.display()
-        ),
+        "sh" | "bash" | "zsh" => {
+            let Some((pin, root)) = pin.as_ref().filter(|_| !sourced.is_empty()) else {
+                print!("{}", env_script_sh(&shim_dir));
+                return Ok(());
+            };
+            for line in varve_core::env_lines(pin, root, Some(&env_file)) {
+                // The shims, inline: the sourced scripts must land around this
+                // exact position, which is why the line is REPLACED rather than
+                // appended somewhere convenient.
+                if line == format!(". \"{}\"", env_file.display()) {
+                    print!("{}", env_script_sh(&shim_dir));
+                } else {
+                    println!("{line}");
+                }
+            }
+        }
+        "fish" => {
+            // A sourced export's script is the producer's POSIX sh
+            // `environment-setup-*`; fish cannot source it, and printing the
+            // shim line alone would hand back an environment that silently
+            // lacks the SDK the project declared.
+            if let Some(first) = sourced.first() {
+                bail!(
+                    "this project declares a sourced export ({} at {}), and its environment \
+                     script is POSIX sh — fish cannot source it, and emitting only the shim \
+                     line would give you an environment missing the very thing varve.toml \
+                     declares. Enter it from sh, bash or zsh: `eval \"$(varve env)\"`.",
+                    first.kind,
+                    first.out
+                );
+            }
+            println!(
+                "if not contains \"{dir}\" $PATH\n    set -gx PATH \"{dir}\" $PATH\nend",
+                dir = shim_dir.display()
+            );
+        }
         other => bail!("unknown shell '{other}' — supported: sh, bash, zsh, fish"),
     }
     Ok(())
@@ -1427,6 +1522,18 @@ struct VerifiedPayload {
     /// The SIGNED digest, `sha256:<hex>`, re-checked against these bytes.
     digest: String,
     bytes: Vec<u8>,
+    /// The entry's signed annotations, carried through so an adapter can read
+    /// the producer's declarations rather than guess them. `export-sdk` needs
+    /// `eu.pulseengine.varve.sdk.prefix` (REQ-SDK-001 clause 4), and a budget
+    /// recovered from anywhere but the signature would not be attributable.
+    annotations: std::collections::BTreeMap<String, String>,
+}
+
+impl VerifiedPayload {
+    /// One signed annotation, by name.
+    fn annotation(&self, key: &str) -> Option<&str> {
+        self.annotations.get(key).map(String::as_str)
+    }
 }
 
 /// Collect the entries of one KIND out of ONE already-verified installed layer.
@@ -1480,6 +1587,7 @@ fn payloads_of_layer(
             version: version.clone(),
             digest: e.digest.clone(),
             bytes,
+            annotations: e.annotations.clone(),
         });
     }
     Ok(found)
@@ -1880,6 +1988,98 @@ fn export_vsix(store: &Store, layer: Option<&str>, out: &std::path::Path) -> any
     Ok(())
 }
 
+/// `varve export-sdk --out D` (REQ-SDK-001 clause 3): materialise the layer's
+/// verified tree payload under D, relocated from the prefix its producer signed
+/// to D itself, and stamp the directory so `varve verify` catches the pin moving
+/// on without the export.
+///
+/// The relocation budget comes from the SIGNED annotation, never from the
+/// archive's contents or from a flag: a consumer able to name a longer prefix
+/// could talk varve into patching a path that does not fit the interpreter
+/// field, which is a tree of binaries that fail to exec with no explanation.
+fn export_sdk(
+    store: &Store,
+    layer: Option<&str>,
+    out: &std::path::Path,
+    select: Option<&str>,
+) -> anyhow::Result<()> {
+    let target = export_target(store, layer)?;
+    let layers = composition_for_export(&target)?;
+    report_composition(&layers);
+    let mut trees = collect_verified_payloads(&layers, varve_core::PayloadKind::Sdk)?;
+    if let Some(name) = select {
+        trees.retain(|p| p.name == name);
+        if trees.is_empty() {
+            bail!(
+                "layer {} carries no `sdk` payload named '{name}'",
+                target.entry.layer
+            );
+        }
+    }
+    // One destination is patched into ONE tree. Two trees relocated into the
+    // same directory would overwrite each other's files and produce a hybrid
+    // that hashes to nothing anyone signed, so ambiguity is refused BY NAME —
+    // with the flag that resolves it, because a refusal without a fix is a
+    // dead end.
+    if trees.len() > 1 {
+        let names: Vec<String> = trees
+            .iter()
+            .map(|p| format!("{}@{}", p.name, p.version))
+            .collect();
+        bail!(
+            "layer {} carries {} `sdk` payloads ({}) and an export relocates ONE tree into \
+             --out: the destination path is patched into the binaries, so two of them in one \
+             directory would overwrite each other. Name the one you want with \
+             `--select <NAME>`.",
+            target.entry.layer,
+            trees.len(),
+            names.join(", ")
+        );
+    }
+    let tree = trees.remove(0);
+    // The budget, from inside the signature (clause 4). `collect_verified_payloads`
+    // hands back bytes; the prefix is an annotation of the manifest ENTRY, which
+    // is why the payload carries its annotations through.
+    let built_prefix = tree
+        .annotation(varve_core::ANN_SDK_PREFIX)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("{}", varve_core::SdkExportError::NoBuiltPrefix))
+        .with_context(|| {
+            format!(
+                "sdk '{}' version {} in layer {}",
+                tree.name, tree.version, target.entry.layer
+            )
+        })?;
+    // Absolute, because the destination is PATCHED INTO the SDK's binaries: a
+    // relative one would resolve against whatever directory a compiler happens
+    // to run in.
+    let out = &absolute_export_dir(out)?;
+    let report = varve_core::export_sdk(&tree.bytes, &built_prefix, out)?;
+    println!(
+        "exported sdk {}@{} to {} — {} dir(s), {} file(s), {} symlink(s); relocated from {} \
+         ({} field(s) patched in place, {} text substitution(s), {} symlink(s) re-pointed)",
+        tree.name,
+        tree.version,
+        out.display(),
+        report.dirs,
+        report.files,
+        report.symlinks,
+        built_prefix,
+        report.patched_fields,
+        report.substitutions,
+        report.relocated_symlinks,
+    );
+    println!(
+        "the store keeps the signed archive untouched — what is here is DERIVED and \
+         deliberately outside the trust path (REQ-SDK-001 clause 2)"
+    );
+    // Exactly `ExportKind::Sdk`, not the string "sdk" spelled again: a
+    // declaration in varve.toml is compared against this stamp, and a
+    // mismatch reports the declared export as never produced at all.
+    write_export_stamp(out, &target.entry, varve_core::ExportKind::Sdk.as_str())?;
+    Ok(())
+}
+
 fn export_crates_vendor(
     store: &Store,
     layer: Option<&str>,
@@ -1949,6 +2149,7 @@ fn deposit_cmd(
                 source: tool.source,
                 runner: tool.runner,
                 kind,
+                sdk_prefix: tool.sdk_prefix,
             });
         }
         let includes = file_spec
@@ -2000,6 +2201,7 @@ fn deposit_cmd(
             source: None,
             runner: None,
             kind: None,
+            sdk_prefix: None,
         });
     }
     run_deposit(
@@ -2140,12 +2342,15 @@ fn archive(
 /// layout and the env-configured trust root.
 struct ProjectCtx {
     pin: Pin,
+    /// The directory holding `varve.toml` — what every declared export
+    /// destination is relative to (REQ-EXPORTDECL-001 clause 2).
+    root: PathBuf,
     store: Store,
     realm: Option<varve_core::Realm>,
 }
 
 fn project_ctx(base: &Store) -> anyhow::Result<ProjectCtx> {
-    let pin = load_pin()?;
+    let (pin, root) = load_pin()?;
     match &pin.realm {
         Some(name) => {
             let cwd = std::env::current_dir().context("cannot determine working directory")?;
@@ -2153,12 +2358,14 @@ fn project_ctx(base: &Store) -> anyhow::Result<ProjectCtx> {
             let store = Store::at(realm.effective_root(base.root()));
             Ok(ProjectCtx {
                 pin,
+                root,
                 store,
                 realm: Some(realm),
             })
         }
         None => Ok(ProjectCtx {
             pin,
+            root,
             store: base.clone(),
             realm: None,
         }),
@@ -2445,6 +2652,11 @@ fn verify(
         // layer's tools are on PATH exactly like the root's.
         verify_composition(&ctx, store, &layer)?;
     }
+    // DECLARED exports first, and without being told (REQ-EXPORTDECL-001
+    // clause 3). `--export DIR` below stays for a directory nobody has declared
+    // yet; a declared one is checked whether or not anyone remembers it, which
+    // is the whole difference between a gate and a habit.
+    verify_declared_exports(&ctx, store)?;
     if !exports.is_empty() {
         let current = varve_core::resolve(&ctx.pin, store)?.layer.digest;
         verify_exports(&current, exports)?;
@@ -2557,7 +2769,17 @@ fn report_attestations(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> 
 }
 
 /// Fail when PATH would run a different binary than the pin dispatches
-/// (REQ-SHADOW-001 clause 3).
+/// (REQ-SHADOW-001 clause 3) — unless the project DECLARED that it would
+/// (REQ-EXPORTDECL-001 clause 5).
+///
+/// A sourced SDK prepends its own bin to PATH, so its compiler shadows the
+/// shims by construction. Whether that is a hijack or the entire point depends
+/// on what the pin declared, and the declaration is why there are three
+/// verdicts rather than two: `before-shims` is expected and must not fail —
+/// a check that fires on the setup the project deliberately configured is one
+/// people switch off, which is worse than not checking — while `after-shims`
+/// means the declaration and the actual PATH disagree, a real fault with a
+/// precise fix rather than the generic hijack report.
 fn verify_no_shadowing(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
     let resolved = varve_core::resolve(&ctx.pin, store)?;
     let path_var = std::env::var_os("PATH");
@@ -2569,7 +2791,37 @@ fn verify_no_shadowing(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
         if let varve_core::shadow::Shadowing::Shadowed { found } =
             varve_core::shadow::check(path_var.as_deref(), name, path, me.as_deref())
         {
-            shadowed.push(varve_core::shadow::describe(name, path, &found));
+            match varve_core::classify_shadowing(&ctx.pin, &ctx.root, &found) {
+                varve_core::ShadowDeclaration::Expected(decl) => {
+                    println!(
+                        "note: {name} resolves to {} — inside the {} export declared \
+                         `before-shims` in varve.toml, so this environment's own tool winning \
+                         is what the project asked for, not a hijack",
+                        found.display(),
+                        decl.out
+                    );
+                }
+                varve_core::ShadowDeclaration::ContradictsDeclaration(decl) => {
+                    shadowed.push(format!(
+                        "{name}: PATH resolves it to {}, inside the {} export at {} — but \
+                         varve.toml declares that export `after-shims`, i.e. that varve's \
+                         pinned tools win. The declaration and PATH disagree: either source \
+                         {} BEFORE varve's env (so the shims land ahead of it — \
+                         `varve env` emits exactly that order), or change the declaration to \
+                         `path = \"before-shims\"` if this environment is meant to win.",
+                        found.display(),
+                        decl.kind,
+                        decl.out,
+                        decl.env
+                            .as_ref()
+                            .map(|e| e.script.clone())
+                            .unwrap_or_default(),
+                    ));
+                }
+                varve_core::ShadowDeclaration::Undeclared => {
+                    shadowed.push(varve_core::shadow::describe(name, path, &found));
+                }
+            }
         }
     }
     if shadowed.is_empty() {
@@ -2763,6 +3015,90 @@ fn verify_composition_inner(
     Ok(())
 }
 
+/// The subcommand that PRODUCES a declared export kind.
+///
+/// Not `format!("export-{kind}")`: `bazel-registry` is produced by
+/// `varve export-bazel`, so the obvious spelling would print a command that
+/// does not exist in the message whose only job is telling the reader what to
+/// run. `docs_names_the_producing_command_for_every_export_kind` asserts each
+/// of these against the real subcommand list.
+fn producing_command(kind: varve_core::ExportKind) -> &'static str {
+    match kind {
+        varve_core::ExportKind::Cargo => "export-cargo",
+        varve_core::ExportKind::CratesVendor => "export-crates-vendor",
+        varve_core::ExportKind::BazelRegistry => "export-bazel",
+        varve_core::ExportKind::BazelDistdir => "export-bazel-distdir",
+        varve_core::ExportKind::Vsix => "export-vsix",
+        varve_core::ExportKind::Sdk => "export-sdk",
+    }
+}
+
+/// Check every export the PIN declares, without being told to
+/// (REQ-EXPORTDECL-001 clause 3).
+///
+/// `--export DIR` catches a stale export only for a directory someone
+/// remembered to name, so the set of checked exports lived in a CI script or a
+/// shell history rather than in the repository. Declared means checked: each
+/// `[[export]]` is looked at on every `verify`, and anything but `Current`
+/// fails. A declared directory that is ABSENT is a failure and not a warning —
+/// "I forgot to generate it" and "it is stale" are the same severity to anyone
+/// relying on the export.
+fn verify_declared_exports(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
+    if ctx.pin.exports.is_empty() {
+        return Ok(());
+    }
+    let current = varve_core::resolve(&ctx.pin, store)?.layer.digest;
+    let mut faults = Vec::new();
+    for decl in &ctx.pin.exports {
+        let dir = decl.dir(&ctx.root);
+        let status = varve_core::check_declared_export(decl, &ctx.root, &current);
+        match status {
+            varve_core::DeclaredExportStatus::Current => println!(
+                "declared export {} ({}) — fresh: bound to the layer the pin resolves",
+                dir.display(),
+                decl.kind
+            ),
+            varve_core::DeclaredExportStatus::Missing => faults.push(format!(
+                "{} ({}) — MISSING: varve.toml declares this export and there is no \
+                 .varve-export.json in it. Generate it with `varve {} --out {}`.",
+                dir.display(),
+                decl.kind,
+                producing_command(decl.kind),
+                decl.out
+            )),
+            varve_core::DeclaredExportStatus::Stale { stamped, current } => faults.push(format!(
+                "{} ({}) — STALE: stamped from {stamped}; the pin now resolves {current}. \
+                 Re-run the export against the current pin.",
+                dir.display(),
+                decl.kind
+            )),
+            varve_core::DeclaredExportStatus::KindMismatch { declared, stamped } => {
+                faults.push(format!(
+                    "{} — DECLARED as a {declared} export but stamped {stamped}: the declared \
+                     export was never produced there, and the {stamped} export's freshness says \
+                     nothing about it",
+                    dir.display()
+                ))
+            }
+            varve_core::DeclaredExportStatus::Unreadable(why) => faults.push(format!(
+                "{} ({}) — UNREADABLE stamp: {why}. Re-running the export is not the fix for a \
+                 permissions fault or a truncated file.",
+                dir.display(),
+                decl.kind
+            )),
+        }
+    }
+    if !faults.is_empty() {
+        bail!(
+            "{} declared export(s) in {} are not current (REQ-EXPORTDECL-001):\n\n{}",
+            faults.len(),
+            ctx.root.join(varve_core::discover::PIN_FILE).display(),
+            faults.join("\n\n")
+        );
+    }
+    Ok(())
+}
+
 /// Check committed export directories against the current pin's manifest digest
 /// (REQ-EXPORT-SYNC-001). A stamp that names a different layer than the pin now
 /// resolves is stale; an absent or malformed stamp is not a verified export.
@@ -2811,7 +3147,13 @@ fn store_root() -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".varve"))
 }
 
-fn load_pin() -> anyhow::Result<Pin> {
+/// The pin, and the directory that holds it — the PROJECT ROOT.
+///
+/// The root is not a convenience: every `[[export]]` destination and every
+/// `[export.env]` script is declared RELATIVE to it (REQ-EXPORTDECL-001
+/// clause 2), so resolving one against the working directory instead would make
+/// `varve verify` pass or fail depending on which subdirectory it was run from.
+fn load_pin() -> anyhow::Result<(Pin, PathBuf)> {
     let cwd = std::env::current_dir().context("cannot determine working directory")?;
     let Some(path) = discover::find_pin(&cwd) else {
         bail!(
@@ -2820,7 +3162,11 @@ fn load_pin() -> anyhow::Result<Pin> {
             cwd.display()
         );
     };
-    Ok(Pin::load(&path)?)
+    let root = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Ok((Pin::load(&path)?, root))
 }
 
 fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
@@ -2854,10 +3200,20 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
         path,
         me.as_deref(),
     ) {
-        eprintln!(
-            "warning: {}",
-            varve_core::shadow::describe(tool, path, &found)
-        );
+        // …and a declared sourced export is not a hijack (REQ-EXPORTDECL-001
+        // clause 5). `verify` consults the declaration, so this must too, or
+        // the two commands contradict each other on one PATH.
+        match varve_core::classify_shadowing(&ctx.pin, &ctx.root, &found) {
+            varve_core::ShadowDeclaration::Expected(decl) => eprintln!(
+                "note: {} comes from the {} export declared `before-shims` in varve.toml",
+                found.display(),
+                decl.out
+            ),
+            _ => eprintln!(
+                "warning: {}",
+                varve_core::shadow::describe(tool, path, &found)
+            ),
+        }
     }
     Ok(())
 }
