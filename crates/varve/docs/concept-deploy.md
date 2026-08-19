@@ -126,4 +126,12 @@ jq '[.manifests[].artifactType]' archived/index.json  # same three
 
 Two ways an archive is legitimately *not* byte-identical to the deposit layout: attestations that entered at install time are re-emitted beside it as extra referrer entries, and the index is re-serialized. Both add evidence; neither changes the layer's identity, because the manifest digest is what the tag points at.
 
-`archive` requires the whole layer to be present locally, so it **fails on a multi-platform layer** installed on one platform — the skipped entries were never laid down (`payload 'gamma@1.0.0' … is not present in the installed layer`). Archive from a machine the layer covers wholly.
+`archive` carries the payloads THIS core holds, which for a multi-platform layer installed on one platform is that platform's. It says so:
+
+```
+9 payloads for aarch64-apple-darwin
+26 entries omitted — this core holds no payload for them: aarch64-unknown-linux-gnu (8), …
+this archive installs on aarch64-apple-darwin only; for another platform, install and archive the layer there.
+```
+
+A consumer on another platform is told plainly rather than shown a digest mismatch. If your air-gapped site is heterogeneous, archive once per platform from a machine of that platform — varve will not fetch other triples' bytes at archive time, because that would put a network operation inside the one command whose purpose is working without one (DD-022).

@@ -59,6 +59,17 @@ pub enum ResolveError {
         "layer {layer} is installed but incomplete: missing {missing:?} — run `varve install` to repair it; refusing to fall back to PATH"
     )]
     PartialLayer { layer: String, missing: Vec<String> },
+    #[error(
+        "this project's pin restricts `tools` to {missing:?}, which layer {layer} does not \
+         contain. It exposes: {available}. Re-installing cannot help — the layer is complete, \
+         the pin asks for something that was never in it. Fix the `tools` list in varve.toml, \
+         or drop it to expose everything the layer carries."
+    )]
+    PinNamesUnknownTool {
+        layer: String,
+        missing: Vec<String>,
+        available: String,
+    },
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(
@@ -190,6 +201,37 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
         }
     }
     if !missing.is_empty() {
+        // A pin restricting `tools` to a name the layer never carried is NOT an
+        // incomplete install, and telling the user to re-install is a fix that
+        // cannot work: install succeeds, changes nothing, and the same error
+        // returns. A ten-persona audit graded this the one true dead end in the
+        // tool — the only error whose stated remedy provably fails.
+        if pin.tools.is_some() {
+            let mut available: Vec<String> = store
+                .manifest_tool_names(&layer)
+                .unwrap_or_default()
+                .into_iter()
+                .chain(composed.iter().map(|(n, _)| n.clone()))
+                .collect();
+            available.sort();
+            available.dedup();
+            let unknown: Vec<String> = missing
+                .iter()
+                .filter(|m| !available.contains(m))
+                .cloned()
+                .collect();
+            if !unknown.is_empty() {
+                return Err(ResolveError::PinNamesUnknownTool {
+                    layer: layer.layer.to_string(),
+                    missing: unknown,
+                    available: if available.is_empty() {
+                        "(nothing)".into()
+                    } else {
+                        available.join(", ")
+                    },
+                });
+            }
+        }
         return Err(ResolveError::PartialLayer {
             layer: layer.layer.to_string(),
             missing,
@@ -557,22 +599,69 @@ mod tests {
     // rivet: verifies REQ-PIN-001
     #[test]
     fn partial_layer_is_an_error_not_a_fallback() {
+        // The layer's MANIFEST declares both tools; only one was laid down.
+        // That is a genuinely incomplete install, and re-installing is the
+        // right advice. The fixture must declare them, or this case cannot be
+        // told apart from the one below.
         let (_tmp, store) = store();
         store
             .lay_down(
-                &fixtures::manifest("2026.07.0", "qualified"),
+                &crate::manifest::fixtures::manifest_with_tools(
+                    "2026.07.0",
+                    "qualified",
+                    1,
+                    "2026-07-01T00:00:00Z",
+                    &[("rivet", "sha256:aa"), ("synth", "sha256:bb")],
+                ),
                 &[("rivet", b"r")],
             )
             .unwrap();
         let p = pin(
             "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\ntools = [\"rivet\", \"synth\"]\n",
         );
-        let err = resolve(&p, &store).unwrap_err();
-        match err {
+        match resolve(&p, &store).unwrap_err() {
             ResolveError::PartialLayer { missing, .. } => {
                 assert_eq!(missing, vec!["synth".to_string()]);
             }
             other => panic!("expected PartialLayer, got: {other}"),
+        }
+    }
+
+    // rivet: verifies REQ-PIN-001
+    #[test]
+    fn a_pin_naming_a_tool_the_layer_never_had_is_not_told_to_reinstall() {
+        // A ten-persona audit graded this the ONE true dead end in the tool:
+        // `tools = ["notathing"]` produced "run `varve install` to repair it",
+        // install succeeded and changed nothing, and the same error returned.
+        // A fix that provably cannot work is worse than no advice, because the
+        // user doubts their machine rather than their pin.
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &crate::manifest::fixtures::manifest_with_tools(
+                    "2026.07.0",
+                    "qualified",
+                    1,
+                    "2026-07-01T00:00:00Z",
+                    &[("rivet", "sha256:aa")],
+                ),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let p = pin(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\ntools = [\"notathing\"]\n",
+        );
+        match resolve(&p, &store).unwrap_err() {
+            ResolveError::PinNamesUnknownTool {
+                missing, available, ..
+            } => {
+                assert_eq!(missing, vec!["notathing".to_string()]);
+                assert!(
+                    available.contains("rivet"),
+                    "names what IS there: {available}"
+                );
+            }
+            other => panic!("expected PinNamesUnknownTool, got: {other}"),
         }
     }
 

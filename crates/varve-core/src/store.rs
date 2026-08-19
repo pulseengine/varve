@@ -434,6 +434,33 @@ impl Store {
 }
 
 /// Compute the store key for manifest bytes: `sha256:<hex>`.
+impl Store {
+    /// Every tool name the layer's SIGNED manifest carries, whatever this host
+    /// laid down. Used to tell "the pin asks for something that was never in
+    /// this layer" apart from "the install is incomplete" — the two need
+    /// opposite advice, and conflating them produced an error whose stated fix
+    /// could not work.
+    pub fn manifest_tool_names(&self, layer: &InstalledLayer) -> Result<Vec<String>, StoreError> {
+        let payload = std::fs::read(layer.root.join("layer.json")).map_err(|e| StoreError::Io {
+            path: layer.root.join("layer.json").display().to_string(),
+            source: e,
+        })?;
+        let json: serde_json::Value = match serde_json::from_slice(&payload) {
+            Ok(j) => j,
+            Err(_) => return Ok(Vec::new()),
+        };
+        Ok(json["manifests"]
+            .as_array()
+            .map(|es| {
+                es.iter()
+                    .filter_map(|e| e["annotations"]["eu.pulseengine.tool"].as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+}
+
 pub fn manifest_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }

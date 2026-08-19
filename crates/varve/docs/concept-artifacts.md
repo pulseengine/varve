@@ -66,11 +66,20 @@ stale when the pin moved.
 
 ## What this does and does not do today
 
-**`export-cargo` cannot build a real dependency graph.** Its registry index
-emits `"deps":[]` and `"features":{}` for every crate, and Cargo resolves the
-graph *from the index* — so it works for a crate with no dependencies and no
-features, and fails on anything else. Use `export-crates-vendor`, which carries
-each crate's real `Cargo.toml`. Tracked as varve#73.
+**`export-cargo` cannot build a real dependency graph, and it does not always
+say so.** Its registry index emits `"deps":[]` and `"features":{}` for every
+crate, while Cargo resolves the graph *from the index*. Three outcomes were
+measured against varve's own 250-crate lockfile:
+
+1. a hard resolution error — `clap does not have that feature`;
+2. a rustc error after Cargo resolved happily — `unresolved import 'digest'`;
+3. **worst: a build that exits 0** with a crate silently compiled with no
+   features at all, not even `default`.
+
+The third is why "it fails" would be the wrong warning: a failure announces
+itself, and this one does not. Use `export-crates-vendor`, which carries each
+crate's real `Cargo.toml` and is proven by an offline build of varve itself.
+Tracked as varve#73.
 
 **Exports do not follow composition.** If your layer composes another realm's,
 `varve which` sees the composed tools but an export contains only your own
