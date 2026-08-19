@@ -55,8 +55,16 @@ mkdir -p "$CONSUMER"
 tar -C "$REPO" \
   --exclude='./.git' --exclude='./target' --exclude='./fuzz/target' \
   -cf - . | tar -xf - -C "$CONSUMER"
-mkdir -p "$CONSUMER/.cargo"
-cp "$EXPORT_DIR/.cargo/config.toml" "$CONSUMER/.cargo/config.toml"
+# The WHOLE export, not just its config. REQ-REPRO-001 made the registry and
+# vendor paths RELATIVE so a committed export survives being cloned to another
+# machine; a relative path resolves against the directory holding `.cargo/`, so
+# copying the config alone left it pointing at a `registry`/`vendor` that was
+# never carried across. Both adapters then failed here — a cross-workstream
+# regression the merge never re-ran this script to catch.
+cp -R "$EXPORT_DIR/." "$CONSUMER/"
+test -f "$CONSUMER/.cargo/config.toml" || {
+  echo "error: the export carried no .cargo/config.toml into the consumer" >&2; exit 1
+}
 
 EMPTY_CARGO_HOME="$WORK/cargo-home-isolated"
 mkdir -p "$EMPTY_CARGO_HOME"
@@ -66,8 +74,11 @@ echo "== offline workspace build via $ADAPTER (CARGO_HOME=$EMPTY_CARGO_HOME, emp
 
 # ── negative control: the isolation itself must be able to fail ─────────────
 echo "== negative control: same offline build WITHOUT the export must fail"
-rm "$CONSUMER/.cargo/config.toml"
-rm -rf "$CONSUMER/target"
+# Remove the whole wiring, not only the config: leaving the registry/vendor
+# tree behind would let a future change satisfy the build another way and the
+# control would stop controlling anything.
+rm -f "$CONSUMER/.cargo/config.toml"
+rm -rf "$CONSUMER/registry" "$CONSUMER/vendor" "$CONSUMER/target"
 CONTROL_HOME="$WORK/cargo-home-control"
 mkdir -p "$CONTROL_HOME"
 if (cd "$CONSUMER" && CARGO_HOME="$CONTROL_HOME" cargo build --workspace --offline --locked) \

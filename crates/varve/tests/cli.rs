@@ -4560,6 +4560,98 @@ fn archive_len_preserving_probe(built: &str) -> usize {
     4 + (format!("{built}/sysroots/x86_64/lib/ld-linux.so.2").len() + 8) + 10
 }
 
+/// The same fixture, plus ONE symlink that is absolute, sits under the build
+/// prefix, and climbs out of the export with `..`.
+fn sdk_tarball_with_escaping_link(built: &str) -> Vec<u8> {
+    use std::io::Write;
+    let inner = sdk_tarball(built);
+    let mut tar_bytes = Vec::new();
+    {
+        let mut b = tar::Builder::new(&mut tar_bytes);
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(inner.as_slice()));
+        for entry in ar.entries().unwrap() {
+            let entry = entry.unwrap();
+            let mut h = entry.header().clone();
+            let path = entry.path().unwrap().into_owned();
+            if let Some(link) = entry.link_name().unwrap() {
+                b.append_link(&mut h, &path, &link).unwrap();
+            } else {
+                let mut bytes = Vec::new();
+                {
+                    use std::io::Read;
+                    let mut e = entry;
+                    e.read_to_end(&mut bytes).unwrap();
+                }
+                h.set_size(bytes.len() as u64);
+                b.append_data(&mut h, &path, bytes.as_slice()).unwrap();
+            }
+        }
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_size(0);
+        link.set_mode(0o777);
+        b.append_link(
+            &mut link,
+            "bin/escape-abs-dotdot",
+            std::path::Path::new(&format!(
+                "{built}/../../../../../../../../tmp/varve-pwned"
+            )),
+        )
+        .unwrap();
+        b.finish().unwrap();
+    }
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(&tar_bytes).unwrap();
+    gz.finish().unwrap()
+}
+
+// rivet: verifies REQ-SDK-001
+#[test]
+fn export_sdk_refuses_an_absolute_symlink_that_climbs_out_of_the_export() {
+    // Clause 5 at the boundary that found it. A clean-room review reproduced
+    // this end to end through the RELEASE binary: a symlink that is absolute,
+    // starts with the SDK's own build prefix, and then climbs out with `..`
+    // was re-pointed into the export and reported as "1 symlink(s)
+    // re-pointed" — exit 0. The branch that re-points an SDK's internal
+    // absolute links stripped the prefix without walking the remainder, while
+    // the relative branch beside it had always walked its target.
+    //
+    // The library test for this lives in sdkexport.rs. It is repeated here
+    // because "the invariant was verified in the library while nothing could
+    // reach it" is a defect this very release shipped once already.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    // Long enough that the clause-4 fit check (destination must be no longer
+    // than the build prefix) passes and clause 5 is what actually decides.
+    let built = "/opt/poky/3.1/sysroots/x86_64-pokysdk-linux/usr/share/long-enough-prefix/padding";
+    let archive = parent.join("escaping-sdk.tar.gz");
+    std::fs::write(&archive, sdk_tarball_with_escaping_link(built)).unwrap();
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"poky\"\nversion = \"4.0\"\nkind = \"sdk\"\n\
+             sdk-prefix = \"{built}\"\npath = \"{}\"\n",
+            archive.display()
+        ),
+        "sdk",
+    );
+    let out = parent.join("escaping-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-sdk", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("escape-abs-dotdot"));
+    assert!(
+        !out.join(".varve-export.json").exists(),
+        "a refused export must not be stamped as one"
+    );
+}
+
 // rivet: verifies REQ-SDK-001
 #[test]
 fn export_sdk_refuses_a_destination_the_sdk_cannot_reach_before_writing_anything() {

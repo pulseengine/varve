@@ -457,6 +457,26 @@ fn resolve_link_target(
             return Ok((dest.to_string(), true));
         }
         if let Some(rest) = target.strip_prefix(&format!("{built}/")) {
+            // Being under the build prefix is not the same as staying under
+            // it. `<built>/../../../tmp/x` starts with the prefix and lands
+            // outside the export, so the remainder is walked exactly as the
+            // relative branch below walks its target — that branch always did,
+            // this one did not, and the asymmetry WAS the hole: the escape was
+            // accepted and counted as a re-pointed symlink, exit 0.
+            let mut depth: isize = 0;
+            for component in rest.split('/') {
+                match component {
+                    "" | "." => {}
+                    ".." => {
+                        depth -= 1;
+                        // Climbing above the export root, not merely within it.
+                        if depth < 0 {
+                            return Err(escapes());
+                        }
+                    }
+                    _ => depth += 1,
+                }
+            }
             return Ok((format!("{dest}/{rest}"), true));
         }
         return Err(escapes());
@@ -999,6 +1019,53 @@ mod tests {
             matches!(err, SdkExportError::SymlinkEscapes { .. }),
             "got {err}"
         );
+
+        // 2b. absolute, UNDER the build prefix, climbing out with `..`.
+        //     The branch that re-points an SDK's own internal absolute links
+        //     stripped the prefix and re-pointed the remainder WITHOUT walking
+        //     it, so this shape was accepted and reported as "1 symlink(s)
+        //     re-pointed" — exit 0. Found by clean-room review, reproduced
+        //     end to end through the release binary. The relative branch below
+        //     had always walked its target; only this one did not.
+        let err = export_members(
+            &[Member {
+                path: "bin/link".into(),
+                body: MemberBody::Symlink {
+                    target: format!("{BUILT}/../../../../../../../../tmp/varve-pwned"),
+                },
+            }],
+            BUILT,
+            &out,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SdkExportError::SymlinkEscapes { .. }),
+            "got {err}"
+        );
+
+        // …while `..` that stays INSIDE the export is ordinary and must still
+        // work, or the fix would just be a ban on `..`.
+        let ok = export_members(
+            &[
+                Member {
+                    path: "lib/sub/link".into(),
+                    body: MemberBody::Symlink {
+                        target: format!("{BUILT}/lib/sub/../real"),
+                    },
+                },
+                Member {
+                    path: "lib/real".into(),
+                    body: MemberBody::File {
+                        bytes: b"x".to_vec(),
+                        mode: 0o644,
+                    },
+                },
+            ],
+            BUILT,
+            &out,
+        )
+        .expect("`..` inside the export is legal");
+        assert_eq!(ok.relocated_symlinks, 1);
 
         // 3. …and the pair that is the actual CVE class: a link out, then a
         //    write THROUGH it. Refused as a pair — neither member is unsafe on
