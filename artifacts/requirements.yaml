@@ -1750,7 +1750,7 @@ artifacts:
   - id: REQ-REPRO-001
     type: requirement
     title: What varve emits is a function of the layer, not of the machine or the clock
-    status: draft
+    status: implemented
     release: v0.27.0
     description: >
       varve's whole argument is that an artifact's identity is its bytes. That
@@ -1791,6 +1791,28 @@ artifacts:
       sentence is honest and shall stand until a reproducible-build pipeline
       makes it false — a claim of determinism is exactly the kind of thing an
       assessor checks and an attacker relies on nobody checking.
+      SETTLED 2026-08-19, empirically, against cargo 1.97.0, before any code
+      changed: Cargo resolves a relative `local-registry` (and a relative
+      `directory`) against the directory that HOLDS `.cargo/` — NOT against the
+      invoking cwd. With the config at `<root>/.cargo/config.toml` naming
+      `reg`, and the build run from `<root>/sub`, the registry at `<root>/reg`
+      resolves and builds; moving it to `<root>/sub/reg` (the cwd-relative
+      candidate) or to `<root>/.cargo/reg` (beside the config) fails with
+      "local registry path is not a directory: <root>/reg". Both negative
+      controls were run. Clause 1's first branch therefore applies and clause 2
+      does NOT: there is no machine-specific file left to separate out, because
+      varve emits the bare subdirectory constants `registry` and `vendor`.
+      CORRECTION TO REQ-PRODUCE-002's shipped evidence. Its test
+      `a_relative_out_still_yields_an_absolute_path_in_the_generated_config`
+      asserted the WRONG property. The defect that fix reacted to was real — a
+      relative `--out` embedded VERBATIM, and so resolved against whatever cwd
+      the build later ran in — but "absolute" was the wrong remedy: it made the
+      export unreproducible (varve#72) and broke the moment the export moved.
+      The test is renamed `a_relative_out_is_resolved_not_embedded_verbatim`
+      and now pins BOTH halves — the emitted string is not the user's argument,
+      and it names the registry where Cargo actually resolves it from. The
+      REQ-PRODUCE-002 clause text about absolute paths should be read through
+      this correction.
     tags: [core, supply-chain]
     links:
       - type: traces-to
@@ -1802,7 +1824,7 @@ artifacts:
   - id: REQ-CRATEIDX-001
     type: requirement
     title: An exported Cargo registry index describes the crates it contains
-    status: draft
+    status: implemented
     release: v0.27.0
     description: >
       varve#73. `export-cargo` writes `"deps":[]` and `"features":{}` for every
@@ -1828,6 +1850,15 @@ artifacts:
       dependencies, features and two versions of one name — not a
       single-crate fixture. `cargo_offline` passes today precisely because its
       fixture has none of those.
+      Measured again 2026-08-19 through the real export path: 228 of 250 index
+      entries for varve's own lockfile declare a dependency or a feature.
+      Clause 2 is implemented as a CLOSED allow-list of dependency keys, so a
+      construct varve has never seen is refused rather than ignored — an
+      ignored key is a changed meaning. All 250 of varve's own crates pass it.
+      The proof of clause 3 RUNS the consumer rather than building it: the
+      worst outcome of the stub compiled cleanly, and the mutation that drops
+      `default-features = false` is caught only by the program's behaviour
+      (17164 instead of 11564), never by the exit code.
     tags: [distribution]
     links:
       - type: traces-to
@@ -1839,7 +1870,7 @@ artifacts:
   - id: REQ-COMPOSEEXPORT-001
     type: requirement
     title: An export follows the composition, or says it did not
-    status: draft
+    status: implemented
     release: v0.27.0
     description: >
       varve#79. `resolve()` unions composed TOOLS so `which` and `run` see
@@ -1860,6 +1891,15 @@ artifacts:
       both realms, because two realms then disagree about what those bytes are.
       (3) Where an export cannot follow the composition it shall SAY SO in its
       output rather than produce a quietly incomplete directory.
+      Clause 1 extends to `verify --lockfile`, found blind in the same way
+      while implementing this: a lockfile checked against the root layer alone
+      silently asserts nothing about the crates the INCLUDED layers pin.
+      Clause 3 has a reachable failure path that `install` and `resolve` do not
+      cover — an export named with `--layer` takes neither of their guards, so
+      a composed layer removed from the store AFTER installation would have
+      produced a directory missing an entire layer's crates. That path is the
+      one the clause-3 test exercises; without it the "silently skip a missing
+      include" mutation SURVIVED.
     tags: [distribution, core]
     links:
       - type: traces-to

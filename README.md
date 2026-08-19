@@ -286,10 +286,17 @@ re-checks the integrity on its own terms. Proven end to end by a real
 `cargo build --offline` against an exported registry.
 
 ```sh
-varve export-cargo --layer 2026.08.0 --out ./vendored
-# copy ./vendored/.cargo/config.toml into your project's .cargo/, then:
+# Export into your project root: `registry/` lands beside `.cargo/config.toml`,
+# which is where Cargo resolves the (relative) registry path from.
+varve export-cargo --layer 2026.08.0 --out .
 cargo build --offline
 ```
+
+The generated `.cargo/config.toml` names `registry` **relative** to the
+directory holding it, never an absolute path — so the export is byte-identical
+between two runs and keeps working when it is copied, committed or relocated
+(REQ-REPRO-001). Export the whole directory together; the config alone is not
+enough.
 
 Every export is **pinned to the layer that produced it**: `--layer` defaults to
 the resolved project pin, and each export writes a `.varve-export.json` stamp

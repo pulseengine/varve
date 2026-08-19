@@ -1125,10 +1125,20 @@ fn run_tool(
 /// explicitly; `None` defaults to the resolved project pin, so an export with
 /// no `--layer` tracks the pin (REQ-EXPORT-SYNC-001). Returns the store the
 /// layer lives in (realm-aware on the pin path) and the verified entry.
-fn export_target(
-    base: &Store,
-    layer: Option<&str>,
-) -> anyhow::Result<(Store, varve_core::store::InstalledLayer)> {
+/// The verified root of an export: which store the layer lives in, the layer,
+/// and the trust root that vouched for it. The verifier travels with the target
+/// because an export must follow the layer's COMPOSITION
+/// (REQ-COMPOSEEXPORT-001), and each included layer is checked against its own
+/// realm's root, falling back to this one where an include names no realm.
+struct ExportTarget {
+    store: Store,
+    entry: varve_core::store::InstalledLayer,
+    verifier: varve_core::PinnedKeyVerifier,
+    /// The realm whose root vouched for the root layer, named for messages.
+    realm: String,
+}
+
+fn export_target(base: &Store, layer: Option<&str>) -> anyhow::Result<ExportTarget> {
     match layer {
         Some(l) => {
             // Search the PROJECT'S store, not the top-level core. Realms
@@ -1137,14 +1147,19 @@ fn export_target(
             // root configured" (when one was) and "layer X is not installed"
             // (when it was). This is the README's headline example
             // (REQ-STORE-001).
-            let (store, verifier) = match project_ctx(base) {
+            let (store, verifier, realm) = match project_ctx(base) {
                 Ok(ctx) => {
                     let v = ctx_verifier(&ctx)?;
-                    (ctx.store, v)
+                    let realm = ctx_realm_name(&ctx);
+                    (ctx.store, v, realm)
                 }
                 // Outside a project there is no realm: the top-level core and
                 // the environment's trust root are the only answer available.
-                Err(_) => (base.clone(), trust_root()?),
+                Err(_) => (
+                    base.clone(),
+                    trust_root()?,
+                    "the environment's trust root".to_string(),
+                ),
             };
             let wanted: varve_core::LayerId = l.parse()?;
             let entry = store
@@ -1153,7 +1168,12 @@ fn export_target(
                 .find(|e| e.layer == wanted)
                 .with_context(|| format!("layer {l} is not installed — varve install it first"))?;
             varve_core::verify_installed(&store, &entry, &verifier, &varve_core::host_platform())?;
-            Ok((store, entry))
+            Ok(ExportTarget {
+                store,
+                entry,
+                verifier,
+                realm,
+            })
         }
         None => {
             let ctx = project_ctx(base)?;
@@ -1165,9 +1185,166 @@ fn export_target(
                 &verifier,
                 &varve_core::host_platform(),
             )?;
-            Ok((ctx.store, resolved.layer))
+            Ok(ExportTarget {
+                realm: ctx_realm_name(&ctx),
+                store: ctx.store,
+                entry: resolved.layer,
+                verifier,
+            })
         }
     }
+}
+
+/// How to name the realm that vouches for a project's own layers, in a message
+/// a reader can act on.
+fn ctx_realm_name(ctx: &ProjectCtx) -> String {
+    match &ctx.realm {
+        Some(r) => r.name.clone(),
+        None => "this project's own trust root".to_string(),
+    }
+}
+
+/// One layer of a composition, VERIFIED against the trust root of the realm
+/// that vouches for it (REQ-COMPOSEEXPORT-001 clause 1).
+struct ComposedLayer {
+    /// The store partition the layer lives in — a cross-realm include lives
+    /// under the INCLUDED realm's fingerprint, not the including project's.
+    store: Store,
+    entry: varve_core::store::InstalledLayer,
+    /// The realm that vouched for it, for the collision message.
+    realm: String,
+}
+
+/// Every layer an export must cover: the root plus everything it composes,
+/// root first, each verified against its own realm's root.
+///
+/// varve#79: `resolve()` already unions composed TOOLS so `which`/`run` see
+/// them, and `verify` already checks each included layer — but every export
+/// adapter read ONE `layer.json`, so an extender composing pulseengine's layer
+/// got only their own crates and no error at all. Trust does not widen here:
+/// each layer is checked against the root of the realm the include names, and
+/// a layer that is not installed is an error naming it (clause 3), never a
+/// quietly shorter export.
+fn composition_for_export(target: &ExportTarget) -> anyhow::Result<Vec<ComposedLayer>> {
+    let mut out = vec![ComposedLayer {
+        store: target.store.clone(),
+        entry: target.entry.clone(),
+        realm: target.realm.clone(),
+    }];
+    let mut ancestors = vec![target.entry.digest.clone()];
+    walk_composition(
+        &target.store,
+        &target.entry,
+        &target.verifier,
+        &target.realm,
+        &mut ancestors,
+        &mut out,
+    )?;
+    Ok(out)
+}
+
+/// The recursive half of `composition_for_export`. Bounded and cycle-guarded
+/// for the same reason `verify` is: "refused" and "followed until the process
+/// aborts" are not the same answer.
+///
+/// `ancestors` is a PATH, pushed and popped — a digest reappearing on its own
+/// path is a cycle, while a digest reachable by two paths is a DIAMOND (two
+/// layers sharing a base), the most ordinary composition there is. Conflating
+/// the two is the bug `compose::walk` was fixed for; this walker must not
+/// reintroduce it.
+fn walk_composition(
+    store: &Store,
+    layer: &varve_core::store::InstalledLayer,
+    own_verifier: &varve_core::PinnedKeyVerifier,
+    own_realm: &str,
+    ancestors: &mut Vec<String>,
+    out: &mut Vec<ComposedLayer>,
+) -> anyhow::Result<()> {
+    if ancestors.len() > varve_core::compose::MAX_DEPTH {
+        bail!(
+            "composition is more than {} layers deep while collecting an export — refusing to \
+             walk further",
+            varve_core::compose::MAX_DEPTH
+        );
+    }
+    let Ok(bytes) = std::fs::read(layer.root.join("layer.json")) else {
+        return Ok(());
+    };
+    let view = varve_core::compose::view(&bytes)?;
+    if view.includes.is_empty() {
+        return Ok(());
+    }
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    for inc in &view.includes {
+        if ancestors.contains(&inc.digest) {
+            bail!(
+                "composition cycle while collecting an export: layer {} ({}) includes {} , \
+                 which is already on its own path — refusing to follow it",
+                layer.layer,
+                layer.digest,
+                inc.digest
+            );
+        }
+        // Clause 3: an export that cannot follow the composition SAYS SO. A
+        // missing include is an error naming it and its corrective install,
+        // not a directory that is quietly missing that layer's crates.
+        let Some((owner, entry)) = store.find_anywhere(&inc.digest)? else {
+            bail!(
+                "layer {} composes {}, which is not installed — this export would silently \
+                 omit its payloads. `varve install` it, then re-run the export \
+                 (REQ-COMPOSEEXPORT-001 clause 3)",
+                layer.layer,
+                inc.layer.clone().unwrap_or_else(|| inc.digest.clone())
+            );
+        };
+        // A layer reachable by two paths is exported once, not refused.
+        if out.iter().any(|c| c.entry.digest == entry.digest) {
+            continue;
+        }
+        // Whose root vouches for this layer? The include names a realm, and
+        // that realm's root is authoritative for it — not ours.
+        let named_realm = match &inc.realm {
+            Some(name) => {
+                let realm = varve_core::resolve_realm(&cwd, name).with_context(|| {
+                    format!(
+                        "layer {} composes a layer from realm '{name}', but that realm is not \
+                         defined here — add it to varve-realms.toml so its trust root can \
+                         verify what it vouches for",
+                        layer.layer
+                    )
+                })?;
+                Some((
+                    varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?,
+                    name.clone(),
+                ))
+            }
+            None => None,
+        };
+        let (verifier, realm) = match &named_realm {
+            Some((v, name)) => (v, name.as_str()),
+            None => (own_verifier, own_realm),
+        };
+        varve_core::verify_installed(&owner, &entry, verifier, &varve_core::host_platform())
+            .with_context(|| {
+                format!(
+                    "composed layer {} failed verification against realm '{realm}' — refusing \
+                     to export payloads varve cannot vouch for. If the included layer comes \
+                     from a DIFFERENT realm, this is the expected result of an `[[include]]` \
+                     with no `realm =`",
+                    entry.layer
+                )
+            })?;
+        out.push(ComposedLayer {
+            store: owner.clone(),
+            entry: entry.clone(),
+            realm: realm.to_string(),
+        });
+        ancestors.push(entry.digest.clone());
+        walk_composition(&owner, &entry, verifier, realm, ancestors, out)?;
+        ancestors.pop();
+    }
+    Ok(())
 }
 
 /// Bind an export directory to the layer that produced it: write a
@@ -1195,26 +1372,51 @@ fn write_export_stamp(
 }
 
 fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> anyhow::Result<()> {
-    let (_store, entry) = export_target(store, layer)?;
-    let payload = std::fs::read(entry.root.join("layer.json"))?;
-    let manifest = varve_core::LayerManifest::parse(&payload)?;
-    let export = varve_core::bazel::export(&manifest);
+    let target = export_target(store, layer)?;
+    let layers = composition_for_export(&target)?;
+    report_composition(&layers);
+    // One registry per TOOL, unioned across the composition. A tool name is
+    // dispatchable, so the tool rule applies here rather than the payload rule
+    // (REQ-COMPOSEEXPORT-001 clause 2): two layers claiming one name is
+    // ambiguous unless they agree byte for byte.
+    let mut registries: std::collections::BTreeMap<String, (serde_json::Value, String)> =
+        std::collections::BTreeMap::new();
+    for l in &layers {
+        let payload = std::fs::read(l.entry.root.join("layer.json"))?;
+        let manifest = varve_core::LayerManifest::parse(&payload)?;
+        let export = varve_core::bazel::export(&manifest);
+        for (tool, json) in export.registries {
+            if let Some((first, first_realm)) = registries.get(&tool)
+                && first != &json
+            {
+                bail!(
+                    "tool '{tool}' is described differently by two layers in this composition \
+                     (realm '{first_realm}' and realm '{}') — refusing to choose which \
+                     checksum registry is the real one",
+                    l.realm
+                );
+            }
+            registries.insert(tool, (json, l.realm.clone()));
+        }
+        for (tool, platform, reason) in &export.skipped {
+            eprintln!("skipped {tool} ({platform}): {reason}");
+        }
+    }
     std::fs::create_dir_all(out)?;
-    for (tool, json) in &export.registries {
+    for (tool, (json, _)) in &registries {
         let path = out.join(format!("{tool}.json"));
         std::fs::write(&path, serde_json::to_vec_pretty(json)?)?;
         println!("wrote {}", path.display());
     }
-    for (tool, platform, reason) in &export.skipped {
-        eprintln!("skipped {tool} ({platform}): {reason}");
-    }
-    if export.registries.is_empty() {
+    if registries.is_empty() {
         bail!(
-            "nothing exported — no entry in layer {} carries source provenance",
-            entry.layer
+            "nothing exported — no entry in layer {} (or the {} layer(s) it composes) carries \
+             source provenance",
+            target.entry.layer,
+            layers.len() - 1
         );
     }
-    write_export_stamp(out, &entry, "bazel-registry")?;
+    write_export_stamp(out, &target.entry, "bazel-registry")?;
     Ok(())
 }
 
@@ -1227,12 +1429,13 @@ struct VerifiedPayload {
     bytes: Vec<u8>,
 }
 
-/// Collect the entries of one KIND out of an already-verified installed layer.
+/// Collect the entries of one KIND out of ONE already-verified installed layer.
 /// The shared front-half of every export adapter: the layer was verified by
-/// `export_target`, and each blob is still re-hashed against its signed digest
-/// before it can leave the store. Shared so the `crate` and `vsix` paths cannot
-/// drift apart on the part that matters — which bytes are allowed out.
-fn collect_verified_payloads(
+/// `export_target` (or, for a composed layer, against its own realm's root),
+/// and each blob is still re-hashed against its signed digest before it can
+/// leave the store. Shared so the `crate` and `vsix` paths cannot drift apart
+/// on the part that matters — which bytes are allowed out.
+fn payloads_of_layer(
     store: &Store,
     entry: &varve_core::store::InstalledLayer,
     want: varve_core::PayloadKind,
@@ -1279,24 +1482,59 @@ fn collect_verified_payloads(
             bytes,
         });
     }
-    if found.is_empty() {
-        bail!(
-            "nothing exported — layer {} carries no `{kind}` entries",
-            entry.layer
-        );
-    }
     Ok(found)
 }
 
-/// Collect the verified `crate`-kind entries of an already-verified installed
-/// layer as CrateEntry values — the shared front-half of every Cargo-facing
-/// export.
+/// Collect the entries of one KIND out of EVERY layer in the composition
+/// (REQ-COMPOSEEXPORT-001 clause 1), applying the payload collision rule —
+/// which is not the tool rule (clause 2).
+fn collect_verified_payloads(
+    layers: &[ComposedLayer],
+    want: varve_core::PayloadKind,
+) -> anyhow::Result<Vec<VerifiedPayload>> {
+    let kind = want.as_str();
+    let mut offered = Vec::new();
+    for l in layers {
+        for p in payloads_of_layer(&l.store, &l.entry, want)? {
+            offered.push((
+                varve_core::compose::PayloadOrigin {
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    digest: p.digest.clone(),
+                    realm: l.realm.clone(),
+                    layer: l.entry.layer.to_string(),
+                },
+                p,
+            ));
+        }
+    }
+    let kept =
+        varve_core::compose::union_payloads(offered).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if kept.is_empty() {
+        let root = &layers[0].entry;
+        if layers.len() > 1 {
+            bail!(
+                "nothing exported — layer {} and the {} layer(s) it composes carry no `{kind}` \
+                 entries",
+                root.layer,
+                layers.len() - 1
+            );
+        }
+        bail!(
+            "nothing exported — layer {} carries no `{kind}` entries",
+            root.layer
+        );
+    }
+    Ok(kept.into_iter().map(|(_, p)| p).collect())
+}
+
+/// Collect the verified `crate`-kind entries of a whole composition as
+/// CrateEntry values — the shared front-half of every Cargo-facing export.
 fn collect_verified_crates(
-    store: &Store,
-    entry: &varve_core::store::InstalledLayer,
+    layers: &[ComposedLayer],
 ) -> anyhow::Result<Vec<varve_core::crateexport::CrateEntry>> {
     let mut crates = Vec::new();
-    for p in collect_verified_payloads(store, entry, varve_core::PayloadKind::Crate)? {
+    for p in collect_verified_payloads(layers, varve_core::PayloadKind::Crate)? {
         let cksum = p
             .digest
             .strip_prefix("sha256:")
@@ -1310,6 +1548,22 @@ fn collect_verified_crates(
         });
     }
     Ok(crates)
+}
+
+/// One line telling the reader how many layers an export actually covered
+/// (REQ-COMPOSEEXPORT-001 clause 3). A composed export that says nothing is
+/// indistinguishable from an export that silently followed only the root.
+fn report_composition(layers: &[ComposedLayer]) {
+    if layers.len() < 2 {
+        return;
+    }
+    println!("following the composition: {} layers —", layers.len());
+    for l in layers {
+        println!(
+            "  {} {} (verified against realm '{}')",
+            l.entry.layer, l.entry.digest, l.realm
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1392,7 +1646,7 @@ fn sign_attestation(
     let kind: varve_core::attest::AttestationKind = kind.parse()?;
     // Trust first, as everywhere: binding an attestation to a layer we cannot
     // verify would assert an association we have no basis for.
-    let (_store, entry) = export_target(store, layer)?;
+    let entry = export_target(store, layer)?.entry;
     let bytes = std::fs::read(file)
         .with_context(|| format!("cannot read attestation {}", file.display()))?;
     let st = varve_core::attest::statement(
@@ -1461,7 +1715,7 @@ fn check_attestation(
     // parsed from layer.json, neither authenticated until verify_installed
     // re-checks the retained envelope. This is the command a disconnected
     // consumer runs; it must not be the one that trusts unverified local state.
-    let (_store, entry) = export_target(store, None)?;
+    let entry = export_target(store, None)?.entry;
     let envelope = std::fs::read(statement)
         .with_context(|| format!("cannot read statement {}", statement.display()))?;
     let bytes = std::fs::read(file)
@@ -1497,7 +1751,7 @@ fn sbom_cmd(
         format.parse().map_err(|e: String| anyhow::anyhow!(e))?;
     // Trust first: an SBOM for a layer we cannot verify would describe bytes
     // nobody vouched for — worse than none, because it looks authoritative.
-    let (_store, entry) = export_target(store, layer)?;
+    let entry = export_target(store, layer)?.entry;
     let payload = std::fs::read(entry.root.join("layer.json"))?;
     let manifest = varve_core::LayerManifest::parse(&payload)?;
     let doc = varve_core::sbom::emit(&manifest, &entry.digest, format);
@@ -1526,10 +1780,14 @@ fn sbom_cmd(
     Ok(())
 }
 
-/// An absolute path for an export directory, created if needed. Paths that end
-/// up inside a generated `.cargo/config.toml` must be absolute: that file is
-/// copied into a project and read from a different working directory than the
-/// one the export ran in.
+/// An export directory, created if needed, resolved to an absolute path for
+/// the MESSAGES varve prints — a line telling the reader where the export went
+/// has to be pasteable from another shell.
+///
+/// Nothing absolute reaches the generated `.cargo/config.toml` any more: Cargo
+/// resolves a relative `local-registry` against the directory that holds
+/// `.cargo/`, so the export carries a bare subdirectory name and two exports of
+/// one layer are byte-identical (REQ-REPRO-001 clause 1).
 fn absolute_export_dir(out: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
     out.canonicalize()
@@ -1537,29 +1795,30 @@ fn absolute_export_dir(out: &std::path::Path) -> anyhow::Result<std::path::PathB
 }
 
 fn export_cargo(store: &Store, layer: Option<&str>, out: &std::path::Path) -> anyhow::Result<()> {
-    let (store, entry) = export_target(store, layer)?;
-    // The generated .cargo/config.toml is meant to be COPIED into a project,
-    // so a relative --out embedded verbatim produced a config that resolves
-    // against the wrong directory and a build that fails — while the tool
-    // printed instructions saying it would work.
+    let target = export_target(store, layer)?;
+    let layers = composition_for_export(&target)?;
+    report_composition(&layers);
     let out = &absolute_export_dir(out)?;
-    let crates = collect_verified_crates(&store, &entry)?;
-    let registry_dir = out.join("registry");
+    let crates = collect_verified_crates(&layers)?;
+    let registry_dir = out.join(varve_core::crateexport::REGISTRY_SUBDIR);
     let n = varve_core::crateexport::export_local_registry(&crates, &registry_dir)?;
     let cargo_dir = out.join(".cargo");
     std::fs::create_dir_all(&cargo_dir)?;
     let config = cargo_dir.join("config.toml");
     std::fs::write(
         &config,
-        varve_core::crateexport::cargo_config_toml(&registry_dir),
+        varve_core::crateexport::cargo_config_toml(varve_core::crateexport::REGISTRY_SUBDIR),
     )?;
     println!(
-        "exported {n} verified crate(s) to a local registry at {} — copy {} into \
-         .cargo/config.toml and `cargo build --offline`",
+        "exported {n} verified crate(s) to a local registry at {} — the generated {} names \
+         `{}` RELATIVE to {}, which is where Cargo resolves it from, so export straight into \
+         your project root (`--out .`) or copy the whole directory; then `cargo build --offline`",
         registry_dir.display(),
-        config.display()
+        config.display(),
+        varve_core::crateexport::REGISTRY_SUBDIR,
+        out.display(),
     );
-    write_export_stamp(out, &entry, "cargo")?;
+    write_export_stamp(out, &target.entry, "cargo")?;
     Ok(())
 }
 
@@ -1568,8 +1827,10 @@ fn export_bazel_distdir(
     layer: Option<&str>,
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let (store, entry) = export_target(store, layer)?;
-    let crates = collect_verified_crates(&store, &entry)?;
+    let target = export_target(store, layer)?;
+    let layers = composition_for_export(&target)?;
+    report_composition(&layers);
+    let crates = collect_verified_crates(&layers)?;
     let n = varve_core::crateexport::export_distdir(&crates, out)?;
     println!(
         "wrote {n} verified .crate tarball(s) to the Bazel distdir {} — with a pre-generated \
@@ -1577,7 +1838,7 @@ fn export_bazel_distdir(
         out.display(),
         out.display()
     );
-    write_export_stamp(out, &entry, "bazel-distdir")?;
+    write_export_stamp(out, &target.entry, "bazel-distdir")?;
     Ok(())
 }
 
@@ -1586,12 +1847,14 @@ fn export_bazel_distdir(
 /// directly, and stamp the directory so `varve verify --export D` catches the
 /// pin moving on without the export.
 fn export_vsix(store: &Store, layer: Option<&str>, out: &std::path::Path) -> anyhow::Result<()> {
-    let (store, entry) = export_target(store, layer)?;
+    let target = export_target(store, layer)?;
+    let layers = composition_for_export(&target)?;
+    report_composition(&layers);
     // Absolute, because the whole point of the printed line is that it can be
     // pasted into a different shell in a different directory.
     let out = &absolute_export_dir(out)?;
     let extensions: Vec<varve_core::VsixEntry> =
-        collect_verified_payloads(&store, &entry, varve_core::PayloadKind::Vsix)?
+        collect_verified_payloads(&layers, varve_core::PayloadKind::Vsix)?
             .into_iter()
             .map(|p| varve_core::VsixEntry {
                 name: p.name,
@@ -1613,7 +1876,7 @@ fn export_vsix(store: &Store, layer: Option<&str>, out: &std::path::Path) -> any
                 .display()
         );
     }
-    write_export_stamp(out, &entry, "vsix")?;
+    write_export_stamp(out, &target.entry, "vsix")?;
     Ok(())
 }
 
@@ -1622,27 +1885,31 @@ fn export_crates_vendor(
     layer: Option<&str>,
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let (store, entry) = export_target(store, layer)?;
-    // Same reason as export_cargo: the config is copied elsewhere.
+    let target = export_target(store, layer)?;
+    let layers = composition_for_export(&target)?;
+    report_composition(&layers);
     let out = &absolute_export_dir(out)?;
-    let crates = collect_verified_crates(&store, &entry)?;
-    let vendor_dir = out.join("vendor");
+    let crates = collect_verified_crates(&layers)?;
+    let vendor_dir = out.join(varve_core::crateexport::VENDOR_SUBDIR);
     let n = varve_core::crateexport::export_vendor_dir(&crates, &vendor_dir)?;
     let cargo_dir = out.join(".cargo");
     std::fs::create_dir_all(&cargo_dir)?;
     let config = cargo_dir.join("config.toml");
     std::fs::write(
         &config,
-        varve_core::crateexport::vendored_config_toml(&vendor_dir),
+        varve_core::crateexport::vendored_config_toml(varve_core::crateexport::VENDOR_SUBDIR),
     )?;
     println!(
         "vendored {n} verified crate(s) to {} — a cargo-vendor tree bare Cargo and Corrosion \
-         build against offline; copy {} into .cargo/config.toml (rules_rust needs BUILD files \
-         on top — not yet emitted, REQ-VENDOR-002)",
+         build against offline; the generated {} names `{}` RELATIVE to {}, so export straight \
+         into your project root (`--out .`) or copy the whole directory (rules_rust needs BUILD \
+         files on top — not yet emitted, REQ-VENDOR-002)",
         vendor_dir.display(),
-        config.display()
+        config.display(),
+        varve_core::crateexport::VENDOR_SUBDIR,
+        out.display(),
     );
-    write_export_stamp(out, &entry, "crates-vendor")?;
+    write_export_stamp(out, &target.entry, "crates-vendor")?;
     Ok(())
 }
 
@@ -2332,7 +2599,17 @@ fn verify_lockfile(ctx: &ProjectCtx, path: &std::path::Path) -> anyhow::Result<(
 
     // Only a layer that genuinely pins nothing may pass quietly, and it says
     // plainly that the check asserted nothing rather than implying agreement.
-    let crates = match collect_verified_crates(&ctx.store, &resolved.layer) {
+    // The composition, not just the root: a lockfile checked against one
+    // layer of a composition silently asserts nothing about the crates the
+    // INCLUDED layers pin, which is varve#79 wearing a different hat.
+    let target = ExportTarget {
+        store: ctx.store.clone(),
+        entry: resolved.layer.clone(),
+        verifier: ctx_verifier(ctx)?,
+        realm: ctx_realm_name(ctx),
+    };
+    let layers = composition_for_export(&target)?;
+    let crates = match collect_verified_crates(&layers) {
         Ok(c) => c,
         Err(e) if e.to_string().contains("carries no `crate` entries") => {
             println!(

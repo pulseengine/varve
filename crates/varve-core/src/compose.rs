@@ -111,6 +111,101 @@ pub enum ComposeError {
         first: String,
         second: String,
     },
+    /// Boxed: six strings inline would make every `ComposeError` — and so
+    /// every `ResolveError` — large enough to move on the happy path.
+    #[error(transparent)]
+    ConflictingPayload(#[from] Box<PayloadConflict>),
+}
+
+/// Two layers of one composition offering the same (name, version) as
+/// different bytes (REQ-COMPOSEEXPORT-001 clause 2).
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error(
+    "{name} {version} is offered by two layers in this composition with DIFFERENT bytes: \
+     {first} has {first_digest}, {second} has {second_digest} — refusing to choose. \
+     Two realms disagreeing about what one name-and-version IS cannot both be exported; \
+     a name at different VERSIONS is legal and both export, but one (name, version) must \
+     be one artifact. Re-deposit one of the layers against the other's bytes, or drop the \
+     duplicate from the composition."
+)]
+pub struct PayloadConflict {
+    pub name: String,
+    pub version: String,
+    pub first: String,
+    pub first_digest: String,
+    pub second: String,
+    pub second_digest: String,
+}
+
+/// Where one payload of a composition came from and what it claims to be. The
+/// identity the collision rule is stated over (REQ-COMPOSEEXPORT-001 clause 2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayloadOrigin {
+    pub name: String,
+    pub version: String,
+    /// `sha256:<hex>` of the bytes, as the signed manifest records it.
+    pub digest: String,
+    /// The realm whose trust root vouched for the layer offering it, and the
+    /// layer itself — both, because the error must name the realms that
+    /// disagree, not merely the layers.
+    pub realm: String,
+    pub layer: String,
+}
+
+impl PayloadOrigin {
+    /// How this payload is named in an error: realm first, since the realms
+    /// are what disagree.
+    fn describe(&self) -> String {
+        format!("realm '{}' layer {}", self.realm, self.layer)
+    }
+}
+
+/// Union the payloads every layer of a composition offers, applying the rule
+/// that is NOT the tool rule (REQ-COMPOSEEXPORT-001 clause 2).
+///
+/// A tool name in two layers is ambiguous because dispatch must pick ONE
+/// binary for a bare name — so `union_tools` refuses it. A payload is not
+/// dispatched: it is placed in a registry keyed by (name, version), and two
+/// versions of one crate are the ordinary case a lockfile requires. So:
+///
+/// * the same name at DIFFERENT versions — both export;
+/// * the same name AND version with the SAME digest — one copy (a diamond
+///   offers a shared base twice; that is agreement, not conflict);
+/// * the same name AND version with DIFFERENT digests — an ERROR naming both
+///   realms, because two realms then disagree about what those bytes are and
+///   varve does not pick a winner.
+///
+/// Order is preserved (root layer first), so the export is a function of the
+/// composition rather than of a map's iteration order.
+pub fn union_payloads<T>(
+    items: Vec<(PayloadOrigin, T)>,
+) -> Result<Vec<(PayloadOrigin, T)>, ComposeError> {
+    let mut first_seen: BTreeMap<(String, String), PayloadOrigin> = BTreeMap::new();
+    let mut out = Vec::new();
+    for (origin, payload) in items {
+        let key = (origin.name.clone(), origin.version.clone());
+        match first_seen.get(&key) {
+            Some(first) if first.digest != origin.digest => {
+                return Err(ComposeError::ConflictingPayload(Box::new(
+                    PayloadConflict {
+                        name: origin.name.clone(),
+                        version: origin.version.clone(),
+                        first: first.describe(),
+                        first_digest: first.digest.clone(),
+                        second: origin.describe(),
+                        second_digest: origin.digest,
+                    },
+                )));
+            }
+            // Same bytes, offered twice: export one copy, not an error.
+            Some(_) => continue,
+            None => {
+                first_seen.insert(key, origin.clone());
+                out.push((origin, payload));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The layers a view directly composes, in manifest order.
@@ -346,6 +441,78 @@ mod tests {
             includes(&root).len(),
             1,
             "but the include is still declared"
+        );
+    }
+
+    /// One payload offered by a named realm.
+    fn offered(realm: &str, name: &str, version: &str, digest: &str) -> (PayloadOrigin, ()) {
+        (
+            PayloadOrigin {
+                name: name.into(),
+                version: version.into(),
+                digest: format!("sha256:{digest}"),
+                realm: realm.into(),
+                layer: "2026.08.0".into(),
+            },
+            (),
+        )
+    }
+
+    // rivet: verifies REQ-COMPOSEEXPORT-001
+    #[test]
+    fn two_versions_of_one_crate_both_export() {
+        // Clause 2: the collision rule is NOT the tool rule. `serde 1.0.200`
+        // and `serde 1.0.210` are not ambiguous — a lockfile that names two
+        // majors of one crate NEEDS both present to build offline, and varve's
+        // own lockfile has 14 such names.
+        let kept = union_payloads(vec![
+            offered("pulseengine", "serde", "1.0.200", "aa"),
+            offered("bytecodealliance", "serde", "1.0.210", "bb"),
+        ])
+        .unwrap();
+        assert_eq!(kept.len(), 2);
+        let mut vers: Vec<&str> = kept.iter().map(|(o, _)| o.version.as_str()).collect();
+        vers.sort();
+        assert_eq!(vers, ["1.0.200", "1.0.210"]);
+    }
+
+    // rivet: verifies REQ-COMPOSEEXPORT-001
+    #[test]
+    fn the_same_name_and_version_with_the_same_bytes_exports_once() {
+        // A diamond: two layers each including the same base. Both offer the
+        // same crate at the same digest — that is two realms AGREEING, and
+        // exporting the bytes twice or refusing them both would be wrong.
+        let kept = union_payloads(vec![
+            offered("pulseengine", "cfg-if", "1.0.0", "aa"),
+            offered("bytecodealliance", "cfg-if", "1.0.0", "aa"),
+        ])
+        .unwrap();
+        assert_eq!(kept.len(), 1, "one copy of agreed bytes: {kept:?}");
+        assert_eq!(kept[0].0.realm, "pulseengine", "the first offer wins");
+    }
+
+    // rivet: verifies REQ-COMPOSEEXPORT-001
+    #[test]
+    fn the_same_name_and_version_with_different_bytes_names_both_realms() {
+        // Clause 2's error case. Two realms disagree about what `cfg-if 1.0.0`
+        // IS; picking either would put bytes one realm never vouched for into
+        // an export the consumer believes is verified. The message must name
+        // BOTH realms, or the reader cannot tell which side to fix.
+        let err = union_payloads(vec![
+            offered("pulseengine", "cfg-if", "1.0.0", "aa"),
+            offered("bytecodealliance", "cfg-if", "1.0.0", "bb"),
+        ])
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, ComposeError::ConflictingPayload(_)), "{msg}");
+        assert!(msg.contains("cfg-if") && msg.contains("1.0.0"), "{msg}");
+        assert!(
+            msg.contains("pulseengine") && msg.contains("bytecodealliance"),
+            "both realms must be named: {msg}"
+        );
+        assert!(
+            msg.contains("sha256:aa") && msg.contains("sha256:bb"),
+            "both digests must be named: {msg}"
         );
     }
 
