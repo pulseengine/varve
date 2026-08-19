@@ -87,6 +87,11 @@ pub const TOPICS: &[Topic] = &[
         "concept-composition.md"
     ),
     topic!(
+        "artifacts",
+        "Shipping artifacts that are not executables",
+        "concept-artifacts.md"
+    ),
+    topic!(
         "recovery",
         "Recovery — repairing, removing, and going back",
         "concept-recovery.md"

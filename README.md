@@ -71,8 +71,9 @@ to `${VARVE_INSTALL_DIR:-$HOME/.varve/bin}` and stops there: every update after
 the first is `varve self-update`, which re-verifies the successor with the
 running binary against the pinned trust root.
 
-From source, on any target Rust supports — a source build, so not covered by the
-release signature:
+From source, on any target Rust supports — a source build, so covered by neither
+the release signature nor the DSSE envelope. **Not available until v0.26.0 is
+published to crates.io**; until then use a route above:
 
 ```sh
 cargo install varve

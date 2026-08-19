@@ -1,5 +1,70 @@
 # Changelog
 
+## v0.26.0 — 2026-08-19
+
+Trust hardening, a way to obtain varve at all, and payloads that scale.
+**Two behaviour changes can turn a passing CI red — read those first.**
+
+### Breaking
+
+- **`varve verify` now fails when PATH would run a different binary than the
+  pin dispatches.** `which` printed the store path, `verify` called the layer
+  perfect — it was — and the shell ran something else. Any machine with a
+  distro- or cargo-installed copy of a pinned tool earlier on PATH will now go
+  red. Fix: `varve shim install` and put the shim directory first, or remove the
+  earlier entry. The error says both. (varve#66)
+- **`varve verify` now fails when the pin resolves below its line's
+  anti-rollback high-water mark.** verify was documented as "the install-time
+  verdict, repeated" and did not repeat this one, so a downgraded pin passed the
+  gate CI runs. (varve#76)
+
+### Fixed — silent corruption
+
+- **`varve archive` wrote the wrong bytes under the right digests for any
+  multi-platform layer**, including varve's own. Measured on `2026.08.2`: 37
+  blobs, 26 not matching their digest filename. Tool names repeat across
+  platforms while install lays down only the host's, so one host binary was
+  written under four platforms' digests — exit 0, "artifact of record". Now
+  platform-filtered, every blob digest-checked before any write, and the command
+  says what it carried and what it omitted. (varve#80)
+- **`varve archive` dropped the attached line-status**, so an air-gapped
+  consumer — the one the baseline advisory exists for — had a permanently broken
+  `varve status`. (varve#77)
+- **A layer could not hold two versions of one crate.** deposit keyed identity
+  on (name, platform), ignoring version, so varve could not express its own
+  dependency graph. Identity now follows dispatchability. (varve#69)
+
+### Added
+
+- **`install.sh`**, a signed release asset that verifies before extracting, and
+  a crates.io publish workflow. Previously the README's Getting started began at
+  step 3 and there was no documented way to obtain varve. (REQ-BOOTSTRAP-001)
+- **The realm's signed line index** — an unauthenticated `/tags/list` let a
+  compromised or stale host hide a layer while everything it served still
+  verified. With `varve sign-index` / `attach-index` on the producer side.
+  (REQ-INDEXAUTH-001)
+- **Attestations travel** with the layer through install, archive, an offline
+  install and registry referrers. (REQ-ATTEST-002)
+- **Spec-compliant registry support** — challenge-based token discovery instead
+  of a guessed URL, credentials from config and env (never by executing a
+  helper), paginated tags, both manifest media types. (REQ-REGISTRY-002)
+- **`kind = "vsix"` + `varve export-vsix`** — pinned, verified VS Code
+  extensions. (REQ-VSIX-001)
+- **`varve docs artifacts`**, and corrections to twelve false statements the
+  ten-persona audit found in the embedded docs. (varve#78)
+
+### Known limitations, stated rather than discovered
+
+- **`export-cargo` cannot build a real dependency graph.** Its index emits
+  `"deps":[]` and `"features":{}`, and Cargo resolves from the index. **Use
+  `export-crates-vendor`**, which is proven by an offline build of varve itself
+  from 250 of its own crates. (varve#73)
+- **Exports do not follow composition** — a composed layer's crates and
+  extensions are silently omitted. (varve#79)
+- `sdk`, `wit` and `zephyr-module` are declarable and verifiable, not yet
+  distributable. (varve#67)
+- `cargo install varve` works only once this release reaches crates.io.
+
 ## v0.25.0 — 2026-08-14
 
 The documentation release. Two ten-persona audits reached the same verdict:

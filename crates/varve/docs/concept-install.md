@@ -122,6 +122,12 @@ are covered by the cosign signature over `SHA256SUMS.txt`.
 cargo install varve
 ```
 
+**This route does not work until varve is published to crates.io** — planned
+with the v0.26.0 release, and `cargo install varve` will fail with
+`could not find 'varve' in registry` before then. Documenting a route in the
+present tense before it exists is the same defect class as a fabricated trust
+root: the reader trusts the page over the error.
+
 crates.io is the third route on purpose. It gets you a binary on any target Rust
 supports, including the ones with no release archive — but it is a **source**
 build, so nothing about it is covered by the release signature or the DSSE

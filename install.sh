@@ -7,9 +7,11 @@
 # running binary against the pinned trust root (old-verifies-new). This script
 # deliberately does not reimplement that.
 #
-# It is itself a release asset, so its own sha256 is in the release's signed
-# SHA256SUMS.txt: you can verify this file before you run it. See the README,
-# or `varve docs bootstrap`, for the verify-then-run form.
+# From the v0.26.0 release onward this script is itself a release asset, so its
+# own sha256 is in that release's signed SHA256SUMS.txt and you can verify this
+# file before you run it. Earlier releases do NOT carry it — check the release's
+# asset list rather than assuming. See the README, or `varve docs bootstrap`,
+# for the verify-then-run form.
 #
 #   sh install.sh [--version <TAG>] [--dir <DIR>]
 #
