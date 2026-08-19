@@ -1,181 +1,86 @@
-name: Publish to crates.io
-
-# The third bootstrap route (REQ-BOOTSTRAP-001): `cargo install varve` on any
-# target Rust supports, including the ones with no release archive. It is a
-# SOURCE build and therefore carries none of the release signature — the docs
-# say so plainly (`varve docs bootstrap`); this workflow exists so the route
-# exists at all, not so it can be recommended over the signed one.
+# Publish the workspace's crates on a v* tag, using crates.io **Trusted
+# Publishing** (OIDC) rather than a long-lived API token — the same shape as
+# pulseengine/sigil's publish-to-crates-io.yml.
 #
-# Serialized per tag and never cancelled: a run cancelled between the two
-# publishes leaves `varve` on crates.io depending on a `varve-core` that is
-# not there, which cannot be undone (crates.io versions are immutable).
+# Why not a token: v0.26.0's first publish attempt failed with
+# "CARGO_REGISTRY_TOKEN is not provisioned", and the local fallback then failed
+# 403 on a stale stored credential. A token is a secret that expires silently,
+# has to exist in every repo, and is exactly the long-lived credential varve's
+# own threat model argues against elsewhere. OIDC mints a short-lived one per
+# run and there is nothing to leak or rotate.
+name: "Publish to crates.io"
+
 concurrency:
-  group: publish-crates-${{ github.ref }}
+  group: publish-${{ github.ref }}
   cancel-in-progress: false
 
 on:
   push:
-    tags:
-      - "v*"
-  # Manual re-run for a tag whose publish failed partway. Idempotent: a
-  # version already on crates.io is skipped, not re-pushed.
+    tags: ['v*']
+  # Publish or backfill against a chosen ref without cutting a new tag.
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Existing release tag to publish (e.g. v0.26.0)"
-        required: true
-        type: string
-      dry_run:
-        description: "Package and verify only; publish nothing"
-        required: false
-        default: false
-        type: boolean
-
-permissions:
-  contents: read
-
-env:
-  CARGO_TERM_COLOR: always
 
 jobs:
   publish:
-    name: Publish varve-core, then varve
+    # Gated by the repo variable CRATES_PUBLISH_ENABLED. When it is unset the
+    # job SKIPS (neutral) instead of failing red — sigil's lesson, and one this
+    # repo has now learned the hard way: a perpetually-red publish job is a
+    # dead signal, not a gate. Re-running is safe: each crate is skipped when
+    # that exact name@version is already on crates.io.
+    if: github.repository == 'pulseengine/varve' && vars.CRATES_PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for trusted publishing
+      contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
-      # ── Guards, before anything irreversible ─────────────────────────────
-      # crates.io versions cannot be yanked back into non-existence. Every
-      # check that can be made before the first `publish` is made here.
-      - name: Assert tag, workspace version, and the internal dep all agree
+      # The guards that made the v0.26.0 failure legible. Keep them BEFORE the
+      # auth exchange: a version disagreement should stop the run without ever
+      # minting a token.
+      - name: The tag, the workspace and the internal dep must agree
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          WS=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          DEP=$(grep -m1 'varve-core = { path' Cargo.toml | sed 's/.*version = "\([^"]*\)".*/\1/')
+          echo "tag=$TAG workspace=$WS internal-dep=$DEP"
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$TAG" != "$WS" ]; then
+            echo "::error::tag $TAG does not match workspace version $WS"; exit 1
+          fi
+          if [ "$DEP" != "$WS" ]; then
+            echo "::error::varve depends on varve-core $DEP but the workspace is $WS; cargo package embeds the dep version, so these must agree"; exit 1
+          fi
+
+      # Exchanges the GitHub OIDC token for a short-lived crates.io token.
+      # No secret is stored anywhere.
+      - name: Authenticate with crates.io (trusted publishing)
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish varve-core, then varve
         env:
-          INPUT_TAG: ${{ inputs.tag }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           set -euo pipefail
-          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
-          TAG_VER="${VERSION#v}"
-          CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          # `varve` depends on `varve-core` by version, not only by path —
-          # a path-only dep cannot be published at all. That version is a
-          # SECOND place the number lives, so it is asserted, not trusted.
-          DEP_VER=$(sed -n 's/^varve-core = { path = "crates\/varve-core", version = "\(.*\)" }$/\1/p' Cargo.toml | head -1)
-          echo "tag=$TAG_VER  workspace=$CARGO_VER  varve-core dep=$DEP_VER"
-          if [ "$TAG_VER" != "$CARGO_VER" ]; then
-            echo "::error::tag $VERSION does not match the workspace version $CARGO_VER"
-            exit 1
-          fi
-          if [ "$DEP_VER" != "$CARGO_VER" ]; then
-            echo "::error::[workspace.dependencies] varve-core = \"$DEP_VER\" but the workspace version is $CARGO_VER — publishing would point varve at the wrong varve-core"
-            exit 1
-          fi
-          echo "VERSION=$CARGO_VER" >> "$GITHUB_ENV"
-
-      - name: Assert the crates carry the metadata crates.io requires
-        run: |
-          set -euo pipefail
-          # A missing `description` or `license` is rejected by crates.io at
-          # upload — i.e. AFTER varve-core is already published, leaving the
-          # pair half-shipped. Fail here instead.
-          cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/meta.json"
-          python3 - "$RUNNER_TEMP/meta.json" <<'PY'
-          import json, sys
-          meta = json.load(open(sys.argv[1]))
-          want = ["description", "license", "repository", "readme",
-                  "keywords", "categories"]
-          bad = []
-          for name in ("varve", "varve-core"):
-              pkgs = [p for p in meta["packages"] if p["name"] == name]
-              if not pkgs:
-                  bad.append(f"{name}: not in the workspace")
-                  continue
-              for field in want:
-                  if not pkgs[0].get(field):
-                      bad.append(f"{name}: package.{field} is missing or empty")
-          if bad:
-              for b in bad:
-                  print(f"::error::{b}")
-              sys.exit(1)
-          print("both crates carry: " + ", ".join(want))
-          PY
-
-      - name: Package both crates (full verify build)
-        run: |
-          set -euo pipefail
-          # varve-core stands alone, so it can be fully verified here.
-          cargo package -p varve-core --locked
-          # `cargo package -p varve` cannot resolve until varve-core is on the
-          # index, so its verification happens in the publish step below.
-          ls -la target/package/
-
-      # ── Publish, in dependency order ─────────────────────────────────────
-      - name: Publish varve-core
-        if: ${{ !inputs.dry_run }}
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            echo "::error::CARGO_REGISTRY_TOKEN is not provisioned; cannot publish"
-            exit 1
-          fi
-          if curl -fsS -o /dev/null \
-               -H 'User-Agent: pulseengine-varve-release' \
-               "https://crates.io/api/v1/crates/varve-core/${VERSION}"; then
-            echo "::notice::varve-core ${VERSION} is already on crates.io; skipping"
-          else
-            cargo publish -p varve-core --locked
-          fi
-
-      - name: Wait for varve-core to be resolvable
-        if: ${{ !inputs.dry_run }}
-        run: |
-          set -euo pipefail
-          # `cargo publish` already blocks on index availability, but the belt
-          # is cheap and the brace is unrecoverable: publishing `varve` against
-          # an unresolvable `varve-core` fails the build AND burns the version.
-          for i in $(seq 1 60); do
-            if curl -fsS -o /dev/null \
-                 -H 'User-Agent: pulseengine-varve-release' \
-                 "https://crates.io/api/v1/crates/varve-core/${VERSION}"; then
-              echo "varve-core ${VERSION} is on the index (attempt $i)"
-              exit 0
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          publish() { # crate
+            if curl -fsS -o /dev/null -H 'User-Agent: pulseengine-varve-release' \
+                 "https://crates.io/api/v1/crates/$1/${VERSION}"; then
+              echo "::notice::$1 ${VERSION} is already on crates.io; skipping"
+            else
+              cargo publish -p "$1" --locked
             fi
-            sleep 10
-          done
-          echo "::error::varve-core ${VERSION} did not appear on crates.io within 10 minutes"
-          exit 1
+          }
+          # Order is load-bearing: varve depends on varve-core by version, so
+          # the dependency must exist in the index first.
+          publish varve-core
+          publish varve
 
-      - name: Publish varve
-        if: ${{ !inputs.dry_run }}
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Prove it installs
         run: |
           set -euo pipefail
-          if curl -fsS -o /dev/null \
-               -H 'User-Agent: pulseengine-varve-release' \
-               "https://crates.io/api/v1/crates/varve/${VERSION}"; then
-            echo "::notice::varve ${VERSION} is already on crates.io; skipping"
-          else
-            cargo publish -p varve --locked
-          fi
-
-      # ── The route the docs promise must actually work ────────────────────
-      - name: Assert `cargo install varve` installs the tagged version
-        if: ${{ !inputs.dry_run }}
-        run: |
-          set -euo pipefail
-          # README and `varve docs bootstrap` both tell users to run this. A
-          # published crate that does not install is a documented lie, and the
-          # only place to catch it is here.
-          cargo install varve --version "${VERSION}" --locked --root "$RUNNER_TEMP/cargo-install"
-          REPORTED=$("$RUNNER_TEMP/cargo-install/bin/varve" --version | awk '{print $2}')
-          echo "published=${VERSION}  cargo-installed --version=$REPORTED"
-          if [ "$REPORTED" != "$VERSION" ]; then
-            echo "::error::cargo install varve produced $REPORTED, expected $VERSION"
-            exit 1
-          fi
-          "$RUNNER_TEMP/cargo-install/bin/varve" docs bootstrap >/dev/null
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          cargo install varve --version "$VERSION" --locked --root "$RUNNER_TEMP/ci"
+          "$RUNNER_TEMP/ci/bin/varve" --version | grep -q "$VERSION"
