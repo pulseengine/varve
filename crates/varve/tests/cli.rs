@@ -1921,6 +1921,228 @@ fn two_versions_of_one_tool_are_still_refused_and_the_error_names_both() {
         );
 }
 
+// rivet: verifies REQ-VSIX-001, REQ-STORE-002
+#[test]
+fn vsix_extensions_deposit_install_verify_and_export_for_code() {
+    // varve#68 end to end, at the boundary the user touches. Two extensions,
+    // one of them at TWO versions (REQ-STORE-002's identity rule, inherited
+    // rather than re-implemented), through deposit -> install -> verify ->
+    // export-vsix, and out the other side as files `code --install-extension`
+    // consumes directly.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    // Stand-in .vsix zips — varve never looks inside one; the bytes are
+    // anchored by the signed digest and the NAME comes from the manifest.
+    let payloads: [(&str, &str, &[u8]); 3] = [
+        ("rust-lang.rust-analyzer", "0.3.2260", b"ra-old-zip-bytes"),
+        ("rust-lang.rust-analyzer", "0.3.2300", b"ra-new-zip-bytes"),
+        ("vadimcn.vscode-lldb", "1.11.4", b"lldb-zip-bytes"),
+    ];
+    let mut spec_text =
+        String::from("layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n");
+    for (name, version, bytes) in payloads {
+        let path = parent.join(format!("{name}-{version}.vsix"));
+        std::fs::write(&path, bytes).unwrap();
+        spec_text.push_str(&format!(
+            "\n[[tool]]\nname = \"{name}\"\nversion = \"{version}\"\nkind = \"vsix\"\n\
+             path = \"{}\"\n",
+            path.display()
+        ));
+    }
+    let spec = parent.join("vsix-spec.toml");
+    std::fs::write(&spec, &spec_text).unwrap();
+
+    let layout = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    // Every entry verifies against its own signed digest — the digest check is
+    // kind-agnostic (DD-003), so a `vsix` needed nothing new here (clause 1).
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+
+    // Clause 2 + clause 4 IN THE STORE: three distinct files, each holding its
+    // own bytes, none of them executable.
+    let store = varve_core::Store::at(&fx.root);
+    let installed = store
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|l| l.layer.to_string() == "2026.07.0")
+        .expect("the layer is installed");
+    for (name, version, bytes) in payloads {
+        let path = installed.root.join("payloads").join(name).join(version);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "{name}@{version} must be stored under its own path with its own bytes"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o111,
+                0,
+                "clause 2: a .vsix is an archive, not a program — {name}@{version} \
+                 was laid down mode {mode:o}"
+            );
+        }
+        // …and it is NOT dispatchable: nothing landed in bin/ under its name.
+        assert!(
+            !installed.root.join("bin").join(name).exists(),
+            "an extension must never occupy a dispatch path"
+        );
+    }
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["which", "rust-lang.rust-analyzer"])
+        .assert()
+        .failure();
+
+    // Clause 3: export for `code`.
+    let out = parent.join("extensions");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-vsix", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("3 verified VS Code extension(s)")
+                .and(predicate::str::contains("code --install-extension")),
+        );
+
+    for (name, version, bytes) in payloads {
+        // The marketplace's own asset name: `code` dispatches on the .vsix
+        // suffix, and a human tells two versions apart by this name alone.
+        let file = out.join(format!("{name}-{version}.vsix"));
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            bytes,
+            "{} must hold ITS OWN verified bytes",
+            file.display()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o111,
+                0,
+                "clause 2 must survive the export too: {} is mode {mode:o}",
+                file.display()
+            );
+        }
+    }
+
+    // Clause 3's second half: the stamp, so `verify --export` catches drift.
+    let stamp: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join(".varve-export.json")).unwrap()).unwrap();
+    assert_eq!(stamp["kind"], "vsix");
+    assert_eq!(stamp["layer"], "2026.07.0");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["verify", "--export"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fresh"));
+
+    // And it goes STALE when the pin moves — the whole reason for the stamp.
+    std::fs::write(
+        out.join(".varve-export.json"),
+        r#"{"layer":"2026.06.0","manifest_digest":"sha256:0000","kind":"vsix"}"#,
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["verify", "--export"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("STALE"));
+}
+
+// rivet: verifies REQ-VSIX-001
+#[test]
+fn export_vsix_refuses_a_layer_with_no_extensions_rather_than_writing_an_empty_directory() {
+    // An export directory that exists and is empty is worse than an error: a
+    // consumer installs from it, gets nothing, and believes the pin carries no
+    // extensions. Every other adapter fails closed here; so does this one.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    let bin = parent.join("synth-bin");
+    std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+    let spec = parent.join("spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"0.45.0\"\npath = \"{}\"\n",
+            bin.display()
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    let out = parent.join("extensions");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-vsix", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("carries no `vsix` entries"));
+    assert!(
+        !out.join(".varve-export.json").exists(),
+        "a refused export must not be stamped as one"
+    );
+}
+
 // rivet: verifies REQ-PRODUCE-002
 #[test]
 fn a_relative_out_still_yields_an_absolute_path_in_the_generated_config() {

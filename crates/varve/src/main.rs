@@ -196,6 +196,19 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
+    /// Lay the layer's verified `vsix` entries out as
+    /// `publisher.name-version.vsix` files, so `code --install-extension
+    /// <file>` installs an editor extension whose bytes varve signed rather
+    /// than whatever the marketplace serves today (REQ-VSIX-001).
+    ExportVsix {
+        /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
+        /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
+        #[arg(long)]
+        layer: Option<String>,
+        /// Output directory for the `.vsix` files.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
     /// Emit an SBOM for a verified layer, transcribed from its SIGNED manifest
     /// rather than scanned from disk — every component, version and hash is
     /// copied from what the trust root anchored (REQ-SBOM-001). Answers "which
@@ -473,6 +486,7 @@ fn run() -> anyhow::Result<()> {
         Cmd::ExportBazelDistdir { layer, out } => {
             export_bazel_distdir(&store, layer.as_deref(), &out)
         }
+        Cmd::ExportVsix { layer, out } => export_vsix(&store, layer.as_deref(), &out),
         Cmd::Sbom { layer, format, out } => {
             sbom_cmd(&store, layer.as_deref(), &format, out.as_deref())
         }
@@ -1104,43 +1118,48 @@ fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
     Ok(())
 }
 
-/// Collect the verified `crate`-kind entries of an already-verified installed
-/// layer as CrateEntry values — the shared front-half of every Cargo-facing
-/// export. The layer was verified by `export_target`; each blob is still
-/// re-hashed against its signed digest before it can leave the store.
-fn collect_verified_crates(
+/// One payload lifted out of a verified layer, ready for an export adapter.
+struct VerifiedPayload {
+    name: String,
+    version: String,
+    /// The SIGNED digest, `sha256:<hex>`, re-checked against these bytes.
+    digest: String,
+    bytes: Vec<u8>,
+}
+
+/// Collect the entries of one KIND out of an already-verified installed layer.
+/// The shared front-half of every export adapter: the layer was verified by
+/// `export_target`, and each blob is still re-hashed against its signed digest
+/// before it can leave the store. Shared so the `crate` and `vsix` paths cannot
+/// drift apart on the part that matters — which bytes are allowed out.
+fn collect_verified_payloads(
     store: &Store,
     entry: &varve_core::store::InstalledLayer,
-) -> anyhow::Result<Vec<varve_core::crateexport::CrateEntry>> {
+    want: varve_core::PayloadKind,
+) -> anyhow::Result<Vec<VerifiedPayload>> {
     let payload = std::fs::read(entry.root.join("layer.json"))?;
     let manifest = varve_core::LayerManifest::parse(&payload)?;
+    let kind = want.as_str();
 
-    let mut crates = Vec::new();
+    let mut found = Vec::new();
     for e in &manifest.entries {
-        if e.kind().map_err(|err| anyhow::anyhow!(err.to_string()))?
-            != varve_core::PayloadKind::Crate
-        {
+        if e.kind().map_err(|err| anyhow::anyhow!(err.to_string()))? != want {
             continue;
         }
         let name = e
             .annotations
             .get("eu.pulseengine.tool")
-            .context("crate entry missing its name annotation")?;
+            .with_context(|| format!("{kind} entry missing its name annotation"))?;
         let version = e
             .annotations
             .get("eu.pulseengine.tool.version")
-            .context("crate entry missing its version annotation")?;
-        let cksum = e
-            .digest
-            .strip_prefix("sha256:")
-            .with_context(|| format!("crate '{name}' digest is not sha256:<hex>"))?
-            .to_string();
+            .with_context(|| format!("{kind} entry missing its version annotation"))?;
         // Locate by ENTRY, not by name: a layer may hold several versions of
-        // one crate, each under its own path, and `serde@1.0.200` must export
+        // one payload, each under its own path, and `serde@1.0.200` must export
         // its OWN bytes rather than whichever version landed last
         // (REQ-STORE-002 clause 5).
         let bytes_path = store.entry_path(entry, e).with_context(|| {
-            format!("crate '{name}' version {version} is not present in the store")
+            format!("{kind} '{name}' version {version} is not present in the store")
         })?;
         let bytes = std::fs::read(&bytes_path)?;
         // Defense in depth: re-hash the on-disk bytes against the signed digest
@@ -1148,23 +1167,47 @@ fn collect_verified_crates(
         // exact bytes the trust root anchored.
         if varve_core::manifest_digest(&bytes) != e.digest {
             bail!(
-                "crate '{name}' version {version} on-disk bytes do not match the signed \
+                "{kind} '{name}' version {version} on-disk bytes do not match the signed \
                  digest {}",
                 e.digest
             );
         }
-        crates.push(varve_core::crateexport::CrateEntry {
+        found.push(VerifiedPayload {
             name: name.clone(),
             version: version.clone(),
-            cksum,
+            digest: e.digest.clone(),
             bytes,
         });
     }
-    if crates.is_empty() {
+    if found.is_empty() {
         bail!(
-            "nothing exported — layer {} carries no `crate` entries",
+            "nothing exported — layer {} carries no `{kind}` entries",
             entry.layer
         );
+    }
+    Ok(found)
+}
+
+/// Collect the verified `crate`-kind entries of an already-verified installed
+/// layer as CrateEntry values — the shared front-half of every Cargo-facing
+/// export.
+fn collect_verified_crates(
+    store: &Store,
+    entry: &varve_core::store::InstalledLayer,
+) -> anyhow::Result<Vec<varve_core::crateexport::CrateEntry>> {
+    let mut crates = Vec::new();
+    for p in collect_verified_payloads(store, entry, varve_core::PayloadKind::Crate)? {
+        let cksum = p
+            .digest
+            .strip_prefix("sha256:")
+            .with_context(|| format!("crate '{}' digest is not sha256:<hex>", p.name))?
+            .to_string();
+        crates.push(varve_core::crateexport::CrateEntry {
+            name: p.name,
+            version: p.version,
+            cksum,
+            bytes: p.bytes,
+        });
     }
     Ok(crates)
 }
@@ -1435,6 +1478,42 @@ fn export_bazel_distdir(
         out.display()
     );
     write_export_stamp(out, &entry, "bazel-distdir")?;
+    Ok(())
+}
+
+/// `varve export-vsix --out D` (REQ-VSIX-001 clause 3): lay the layer's
+/// verified `.vsix` files out under names `code --install-extension` consumes
+/// directly, and stamp the directory so `varve verify --export D` catches the
+/// pin moving on without the export.
+fn export_vsix(store: &Store, layer: Option<&str>, out: &std::path::Path) -> anyhow::Result<()> {
+    let (store, entry) = export_target(store, layer)?;
+    // Absolute, because the whole point of the printed line is that it can be
+    // pasted into a different shell in a different directory.
+    let out = &absolute_export_dir(out)?;
+    let extensions: Vec<varve_core::VsixEntry> =
+        collect_verified_payloads(&store, &entry, varve_core::PayloadKind::Vsix)?
+            .into_iter()
+            .map(|p| varve_core::VsixEntry {
+                name: p.name,
+                version: p.version,
+                bytes: p.bytes,
+            })
+            .collect();
+    let n = varve_core::export_vsix(&extensions, out)?;
+    println!(
+        "exported {n} verified VS Code extension(s) to {} — install them with:",
+        out.display()
+    );
+    // Every file, named: an extension is installed one at a time, and the
+    // reader needs the exact argument, not a glob they have to expand.
+    for e in &extensions {
+        println!(
+            "  code --install-extension {}",
+            out.join(varve_core::vsixexport::vsix_file_name(&e.name, &e.version))
+                .display()
+        );
+    }
+    write_export_stamp(out, &entry, "vsix")?;
     Ok(())
 }
 

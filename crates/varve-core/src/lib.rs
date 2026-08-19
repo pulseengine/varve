@@ -52,6 +52,7 @@ pub mod source;
 pub mod store;
 pub mod update;
 pub mod verify;
+pub mod vsixexport;
 
 pub use archive::{ArchiveError, OciLayoutSource, export as export_archive};
 pub use deposit::{
@@ -87,3 +88,4 @@ pub use store::{InstalledLayer, Store, StoreError, manifest_digest};
 pub use verify::{
     LAYER_PAYLOAD_TYPE, PinnedKeyVerifier, generate_root_keypair, sign_layer_manifest,
 };
+pub use vsixexport::{VsixEntry, VsixExportError, export_vsix};

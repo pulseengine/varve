@@ -160,6 +160,11 @@ pub const TOPICS: &[Topic] = &[
         "cmd-export-bazel-distdir.md"
     ),
     topic!(
+        "export-vsix",
+        "export-vsix — VS Code extensions `code` installs",
+        "cmd-export-vsix.md"
+    ),
+    topic!(
         "sbom",
         "sbom — the signed manifest as a bill of materials",
         "cmd-sbom.md"
@@ -270,6 +275,11 @@ pub const TOPICS_NEEDING_EXAMPLES: &[&str] = &[
     "realms",
     "pins",
     "air-gap",
+    // REQ-VSIX-001 clause 5. The topic's whole job is a worked example: the
+    // spec stanza that deposits an extension and the exact `code
+    // --install-extension` line, because the file NAME is what `code`
+    // dispatches on. A prose description of that teaches nothing.
+    "export-vsix",
 ];
 
 /// Required topics that are missing entirely.

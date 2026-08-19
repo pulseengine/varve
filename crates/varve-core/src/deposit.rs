@@ -171,7 +171,7 @@ pub struct SpecTool {
     #[serde(default)]
     pub runner: Option<RunnerSpec>,
     /// Payload kind (REQ-KIND-001): tool|crate|wit|zephyr-module|sdk|
-    /// wasm-component. Absent = tool.
+    /// wasm-component|vsix. Absent = tool.
     #[serde(default)]
     pub kind: Option<String>,
 }
@@ -701,6 +701,92 @@ mod tests {
         assert_ne!(
             entries[0]["digest"], entries[1]["digest"],
             "two versions are two artifacts"
+        );
+    }
+
+    // rivet: verifies REQ-VSIX-001
+    #[test]
+    fn extensions_deposit_as_vsix_entries_at_several_versions() {
+        // Clause 1: the kind reaches the SIGNED payload as `vsix`, spelled that
+        // way — the annotation is what a consumer's `export-vsix` keys on, and
+        // it is inside the DSSE payload, so it cannot be corrected afterwards.
+        // Clause 4: an extension is not dispatched by name, so its identity is
+        // (name, version) and two versions of one extension is a layer, not a
+        // duplicate — the same rule REQ-STORE-002 established for crates,
+        // reached here through `is_dispatchable` rather than a second list.
+        use crate::kind::PayloadKind;
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        spec.tools = vec![
+            payload(
+                "rust-lang.rust-analyzer",
+                "0.3.2260",
+                Some(PayloadKind::Vsix),
+                None,
+            ),
+            payload(
+                "rust-lang.rust-analyzer",
+                "0.3.2300",
+                Some(PayloadKind::Vsix),
+                None,
+            ),
+            payload(
+                "vadimcn.vscode-lldb",
+                "1.11.4",
+                Some(PayloadKind::Vsix),
+                None,
+            ),
+        ];
+        let outcome = deposit(&spec, &sk, "k", &tmp.path().join("d")).unwrap();
+
+        let hex = outcome.digest.strip_prefix("sha256:").unwrap();
+        let payload_bytes = std::fs::read(tmp.path().join("d/blobs/sha256").join(hex)).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        let entries = json["manifests"].as_array().unwrap();
+        assert_eq!(entries.len(), 3, "all three extensions must be signed in");
+        for e in entries {
+            assert_eq!(
+                e["annotations"][crate::kind::ANN_KIND],
+                "vsix",
+                "every entry must carry the vsix kind in the SIGNED payload"
+            );
+        }
+        let ids: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e["annotations"]["eu.pulseengine.tool"].as_str().unwrap(),
+                    e["annotations"]["eu.pulseengine.tool.version"]
+                        .as_str()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("rust-lang.rust-analyzer", "0.3.2260"),
+                ("rust-lang.rust-analyzer", "0.3.2300"),
+                ("vadimcn.vscode-lldb", "1.11.4"),
+            ]
+        );
+        assert_ne!(
+            entries[0]["digest"], entries[1]["digest"],
+            "two versions of one extension are two artifacts"
+        );
+
+        // …and one version deposited twice is still a true duplicate.
+        let mut dup = spec;
+        dup.tools = vec![
+            payload("pub.ext", "1.0.0", Some(PayloadKind::Vsix), None),
+            payload("pub.ext", "1.0.0", Some(PayloadKind::Vsix), None),
+        ];
+        let err = deposit(&dup, &sk, "k", &tmp.path().join("e")).unwrap_err();
+        assert!(
+            matches!(&err, DepositError::DuplicatePayload { name, version, .. }
+                     if name == "pub.ext" && version == "1.0.0"),
+            "got: {err}"
         );
     }
 

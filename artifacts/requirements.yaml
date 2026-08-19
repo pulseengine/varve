@@ -1693,6 +1693,54 @@ artifacts:
       priority: must
       category: functional
 
+  - id: REQ-EXPORTDECL-001
+    type: requirement
+    title: A project declares its exports, and verify checks every one of them
+    status: draft
+    release: v0.27.0
+    description: >
+      `varve verify --export <DIR>` is repeatable and MANUAL, so
+      REQ-EXPORT-SYNC-001 catches a stale export only for a directory someone
+      remembered to name. An export nobody names is an export that never goes
+      stale, because nothing looks at it — the set of exports lives in a CI
+      script or a shell history rather than in the repository. That is the same
+      failure shape as a gate that only checks what it is told about, and it
+      got worse as the adapter count went from four to five with a sixth
+      (export-sdk, varve#67) coming.
+      Clauses:
+      (1) A project shall declare its exports as `[[export]]` entries in
+      `varve.toml` — the pin already says which layer the project consumes, and
+      these say how it consumes it. One file, and `verify` already reads it, so
+      there is no second discovery path to get wrong.
+      (2) An entry shall name the adapter and the destination, and shall be
+      able to select a SUBSET of the layer rather than all of it — a project
+      exporting one extension or three crates into a dedicated area is the
+      ordinary case, not a special one.
+      (3) `varve verify` shall check every declared export WITHOUT being told
+      to. Declared means checked. A declared directory that is absent shall
+      fail, not warn: "I forgot to generate it" and "it is stale" are the same
+      severity to anyone relying on the export, and distinguishing them mainly
+      helps the person who made the mistake.
+      (4) For a payload whose consumption requires entering an environment
+      rather than pointing at a path — a Yocto SDK is sourced, setting CC,
+      SYSROOT, CFLAGS and prepending its own bin to PATH — the entry shall
+      record how the environment is entered, and `varve env` shall be able to
+      emit that sourcing so one command sets up the whole environment.
+      (5) The entry shall declare where such an environment sits RELATIVE TO
+      varve's shims on PATH. An SDK environment script prepending its bin
+      shadows the shims, which is exactly the condition REQ-SHADOW-001 detects:
+      undeclared, `varve verify` will either catch a genuine hijack — the SDK's
+      compiler silently winning over the pinned one — or fire spuriously on a
+      legitimate setup. Both are damaging, and the spurious one is worse,
+      because a check that cries wolf is a check people switch off.
+    tags: [distribution, ergonomics]
+    links:
+      - type: traces-to
+        target: REQ-EXPORT-SYNC-001
+    fields:
+      priority: should
+      category: functional
+
   - id: REQ-STORE-002
     type: requirement
     title: A layer can hold many payloads, including several versions of one name
