@@ -1791,7 +1791,7 @@ artifacts:
   - id: REQ-VSIX-001
     type: requirement
     title: VS Code extensions are a payload kind, pinned and verified like anything else
-    status: approved
+    status: verified
     release: v0.26.0
     description: >
       Requested (varve#68). A reproducible development environment pins its

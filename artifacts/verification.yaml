@@ -2235,3 +2235,74 @@ artifacts:
     links:
       - type: verifies
         target: REQ-STORE-002
+
+  - id: VER-VSIX-001
+    type: verification
+    title: A VS Code extension is a pinned, verified, non-executable payload `code` installs
+    status: verified
+    release: v0.26.0
+    tags: [distribution, ergonomics]
+    fields:
+      method: test
+      baseline: >
+        varve#68: a reproducible environment pins its compiler, its linker and
+        its test runner, then installs editor extensions from a marketplace
+        with no verification at all. A `.vsix` is one zip file, so it needed no
+        tree-shaped store (varve#67) and could ship in this release.
+        Clauses 2 and 4 required NO new code. REQ-STORE-002 (06069af) had
+        already made identity and layout follow `PayloadKind::is_dispatchable`,
+        so adding one non-dispatchable variant gave a `.vsix`
+        `payloads/<name>/<version>` at mode 0644 and a (name, version) identity
+        for free. That was verified by running, not assumed: mutating
+        `is_dispatchable` to include Vsix and mutating store.rs's mode to a
+        constant 0o755 each turned the end-to-end CLI test red.
+        Implemented: `PayloadKind::Vsix` (`kind = "vsix"`, parsed, round-tripped
+        through the SIGNED annotation, not dispatchable); the `export-vsix`
+        adapter, which names each file `publisher.name-version.vsix` — the
+        marketplace convention, and `code --install-extension` dispatches on the
+        `.vsix` suffix, treating anything else as a marketplace id to FETCH;
+        the shared `.varve-export.json` stamp, so `varve verify --export`
+        catches the pin moving on without the export; and the `export-vsix`
+        docs topic, added to TOPICS_NEEDING_EXAMPLES so its worked example is
+        gated rather than trusted.
+        Fail-closed properties the clauses did not name, all from the
+        REQ-STORE-002 lesson: every destination is resolved BEFORE any bytes are
+        written, so an unexportable id leaves the directory untouched rather
+        than half-populated; two entries that would share a file name are a
+        Collision error, not a last-writer-wins overwrite; an id containing `/`
+        (a signed name is attributable, not benign) or starting with `-` (which
+        `code` would parse as a flag) is refused; and a layer carrying no `vsix`
+        entries fails rather than producing an empty directory a consumer would
+        install from and believe complete.
+        Proven end to end on the RELEASE binary: a layer holding two extensions,
+        one of them at two versions, plus a tool — deposited, installed,
+        verified (4 payloads against their own signed digests), and exported.
+        Store listing showed `bin/synth` at 0755 and
+        `payloads/rust-lang.rust-analyzer/{0.3.2260,0.3.2300}` plus
+        `payloads/vadimcn.vscode-lldb/1.11.4` at 0644; the export directory
+        showed three `.vsix` files at 0644 with the stamp; `verify --export`
+        read fresh; `varve which rust-lang.rust-analyzer` was refused while
+        `varve which synth` resolved.
+        13 hand-applied mutations, all killed — including is_dispatchable
+        returning true for Vsix, the signed wire string changing to
+        `vsix-package`, store.rs handing every payload 0o755, the `.vsix`
+        suffix being dropped from the exported name, the export setting 0o755,
+        validation moving from the plan to the write loop, the stamp not being
+        written, and the topic shipping with empty fences.
+      evidence:
+        - run: cargo test -p varve-core only_a_tool_is_dispatched_by_name
+        - run: cargo test -p varve-core every_kind_round_trips_through_its_wire_string
+        - run: cargo test -p varve-core the_kind_list_the_other_tests_iterate_holds_every_variant
+        - run: cargo test -p varve-core extensions_deposit_as_vsix_entries_at_several_versions
+        - run: cargo test -p varve-core the_file_name_is_the_one_code_and_a_human_both_read
+        - run: cargo test -p varve-core an_id_that_could_escape_or_look_like_a_flag_is_refused
+        - run: cargo test -p varve-core nothing_is_written_when_one_entry_is_unexportable
+        - run: cargo test -p varve-core two_entries_that_would_share_a_file_are_refused_not_overwritten
+        - run: cargo test -p varve-core every_extension_lands_with_its_own_bytes_and_no_execute_bit
+        - run: cargo test -p varve-core a_tool_keeps_bin_and_a_held_payload_never_borrows_it
+        - run: cargo test -p varve --test cli vsix_extensions_deposit_install_verify_and_export_for_code
+        - run: cargo test -p varve --test cli export_vsix_refuses_a_layer_with_no_extensions_rather_than_writing_an_empty_directory
+        - run: cargo run -p varve -- docs check --coverage --strict
+    links:
+      - type: verifies
+        target: REQ-VSIX-001

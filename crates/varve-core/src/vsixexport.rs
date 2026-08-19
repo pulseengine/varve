@@ -247,6 +247,22 @@ mod tests {
         for good in ["rust-lang.rust-analyzer", "vadimcn.vscode-lldb", "my_ext"] {
             assert!(validate_extension_id(good).is_ok(), "{good} is a real id");
         }
+        // The refusal must name the ACTUAL fault, or the depositor applies the
+        // wrong fix. `.` and `..` are relative path elements — a distinct
+        // problem from a hidden dotfile, with a distinct correction.
+        for (bad, why) in [
+            (".", "a relative path element"),
+            ("..", "a relative path element"),
+            (".hidden", "hides the exported file"),
+            ("--force", "`code` would read as a flag"),
+            ("pub/name", "contains '/'"),
+        ] {
+            let msg = validate_extension_id(bad).unwrap_err().to_string();
+            assert!(
+                msg.contains(why),
+                "the refusal of {bad:?} must say {why:?}, got: {msg}"
+            );
+        }
         for bad in ["../1.0.0", "1.0/0", "", "-1.0.0"] {
             assert!(
                 validate_extension_version("pub.name", bad).is_err(),
