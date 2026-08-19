@@ -297,6 +297,37 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
+    /// (CI) Validate and sign a line-index document — the realm's statement of
+    /// which layers a line contains (REQ-INDEXAUTH-001). Without one, the
+    /// listing a consumer resolves against is the registry's unauthenticated
+    /// `/tags/list`, and a host that HIDES a layer is undetectable: every
+    /// artifact it does serve still verifies.
+    SignIndex {
+        /// The index document JSON (line, counter, issued-at, layers[] of
+        /// layer/digest/channel/counter). See `varve docs sign-index`.
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// Signing key file: 128 hex characters — a 32-byte ed25519 seed
+        /// followed by its 32-byte public key. Mint one with `varve keygen`.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        #[arg(long, default_value = "varve-root-1")]
+        key_id: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// (CI) Attach a signed line-index envelope to a deposit layout, so an
+    /// offline consumer of a realm declaring `signed-index = true` can obtain
+    /// it (REQ-INDEXAUTH-001). On a registry the same envelope is pushed under
+    /// the `line-index-<line>` tag — see `varve docs attach-index`.
+    AttachIndex {
+        /// The oci-layout directory produced by `varve deposit`.
+        #[arg(long, value_name = "DIR")]
+        layout: PathBuf,
+        /// The signed line-index DSSE envelope (from `varve sign-index`).
+        #[arg(long, value_name = "ENVELOPE")]
+        index: PathBuf,
+    },
     /// (CI) Attach a signed line-status envelope to a deposit layout as its
     /// baseline, so `varve status` works after an offline install and the
     /// registry can carry it (REQ-STATUS-DIST-001).
@@ -524,6 +555,13 @@ fn run() -> anyhow::Result<()> {
         ),
         Cmd::CheckAttestation { statement, file } => check_attestation(&store, &statement, &file),
         Cmd::AttachStatus { layout, status } => attach_status(&layout, &status),
+        Cmd::SignIndex {
+            file,
+            key,
+            key_id,
+            out,
+        } => sign_index(&file, &key, &key_id, &out),
+        Cmd::AttachIndex { layout, index } => attach_index(&layout, &index),
         Cmd::Shim(ShimCmd::Install { extra_tools }) => shim_install(&store, &extra_tools),
         Cmd::Env { shell } => print_env(&store, &shell),
         Cmd::Completions { shell } => {
@@ -723,6 +761,51 @@ fn attach_status(layout: &std::path::Path, status: &std::path::Path) -> anyhow::
     println!(
         "attached baseline line-status #{counter} for line {line} to {}",
         layout.display()
+    );
+    Ok(())
+}
+
+fn attach_index(layout: &std::path::Path, index: &std::path::Path) -> anyhow::Result<()> {
+    let envelope = std::fs::read(index)
+        .with_context(|| format!("cannot read index envelope {}", index.display()))?;
+    let (line, counter) = varve_core::attach_index_envelope_to_layout(layout, &envelope)?;
+    println!(
+        "attached signed line-index #{counter} for line {line} to {}",
+        layout.display()
+    );
+    Ok(())
+}
+
+fn sign_index(
+    file: &std::path::Path,
+    key: &std::path::Path,
+    key_id: &str,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let bytes = std::fs::read(file)
+        .with_context(|| format!("cannot read index document {}", file.display()))?;
+    // Validate through the typed model before signing: an index is the
+    // document a consumer refuses installs on the strength of, so CI must not
+    // be able to sign a malformed one and discover it at the far end.
+    let doc: varve_core::LineIndex =
+        serde_json::from_slice(&bytes).context("index document does not match the schema")?;
+    // The line must be a real line, not merely a string that round-trips —
+    // an index for "twenty twenty six" verifies fine and matches nothing.
+    doc.line()?;
+    let hex_key = std::fs::read_to_string(key)
+        .with_context(|| format!("cannot read signing key {}", key.display()))?;
+    // Refuse a key that cannot produce verifiable signatures BEFORE signing,
+    // as every other producing path does (REQ-PRODUCER-001).
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
+    let envelope = doc.sign(&sk, key_id)?;
+    std::fs::write(out, envelope)
+        .with_context(|| format!("cannot write envelope {}", out.display()))?;
+    println!(
+        "signed line-index #{} for line {} ({} layer(s)) -> {}",
+        doc.counter,
+        doc.line,
+        doc.layers.len(),
+        out.display()
     );
     Ok(())
 }
@@ -1878,8 +1961,20 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
     let source = &*source;
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let now = today_rfc3339();
+    // The realm's line-index obligation (REQ-INDEXAUTH-001). The realm is
+    // where every other trust question is settled, so it is where this one is
+    // read: its name for the error, its trust root as the ONLY key an index
+    // may verify against, and its `signed-index` declaration deciding whether
+    // absence is fatal (clause 5). A realmless pin gets `None` — there is then
+    // no root that could have signed an index, so there is nothing to check
+    // and nothing that could be hidden from a check that cannot exist.
+    let index = ctx.realm.as_ref().map(|realm| varve_core::IndexPolicy {
+        realm: &realm.name,
+        root_public_key: &realm.trust_root,
+        required: realm.signed_index,
+    });
     let policy = varve_core::InstallPolicy {
-        index: None,
+        index,
         now: &now,
         staleness_threshold_days: 90,
         platform: &platform,
@@ -1889,6 +1984,23 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         "installed layer {} (counter {}) {}",
         outcome.layer, outcome.counter, outcome.digest
     );
+    // Clause 4: REPORT what the realm asserts the line contains, beside what
+    // this install accepted. Reported and NOT enforced, deliberately — raising
+    // the anti-rollback mark to the newest counter that merely EXISTS would
+    // make a deliberately-pinned older layer uninstallable the moment the realm
+    // publishes a newer one, which breaks frozen toolchains to defend against
+    // an attack varve does not have (a consumer naming an exact layer cannot be
+    // tricked by a withheld newer one). What they CANNOT do is see it — so it
+    // is said out loud here.
+    if let Some(high_water) = outcome.index_high_water {
+        let realm = ctx.realm.as_ref().map(|r| r.name.as_str()).unwrap_or("-");
+        println!(
+            "  realm '{realm}' signed index for line {}: greatest counter {high_water}; this \
+             install accepted counter {} (reported, not enforced — your pin stays installable)",
+            pin.layer.line(),
+            outcome.counter
+        );
+    }
     if let Some(age) = outcome.staleness_days {
         eprintln!(
             "warning: layer {} was issued {age} days ago — check whether a newer deposit of \

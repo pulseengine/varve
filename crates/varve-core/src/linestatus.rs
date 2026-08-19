@@ -401,7 +401,7 @@ fn parse_unverified(envelope: &[u8]) -> Result<LineStatus, LineStatusError> {
 /// The line a deposit layout's own manifest declares, if it can be read. Best
 /// effort: a layout we cannot introspect is not blocked from being annotated,
 /// but one that plainly disagrees is.
-fn layout_line(layout: &Path) -> Option<String> {
+pub(crate) fn layout_line(layout: &Path) -> Option<String> {
     let index: serde_json::Value =
         serde_json::from_slice(&std::fs::read(layout.join("index.json")).ok()?).ok()?;
     for m in index["manifests"].as_array()? {

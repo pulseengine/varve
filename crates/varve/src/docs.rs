@@ -194,6 +194,16 @@ pub const TOPICS: &[Topic] = &[
         "attach-status — attach a baseline status (CI)",
         "cmd-attach-status.md"
     ),
+    topic!(
+        "sign-index",
+        "sign-index — sign a line index (CI)",
+        "cmd-sign-index.md"
+    ),
+    topic!(
+        "attach-index",
+        "attach-index — publish the signed line index (CI)",
+        "cmd-attach-index.md"
+    ),
     topic!("shim", "shim — PATH dispatchers", "cmd-shim.md"),
     topic!("env", "env — shell setup", "cmd-env.md"),
     topic!(

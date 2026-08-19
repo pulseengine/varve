@@ -229,6 +229,19 @@ impl LayerSource for DirSource {
             Err(e) => Err(SourceError::Transport(e.to_string())),
         }
     }
+
+    // `fetch_line_index` and `served_layers` stay at the trait defaults, and
+    // both defaults are the truthful answer rather than a stub
+    // (REQ-INDEXAUTH-001). This layout is `manifests/` + `blobs/` addressed by
+    // digest: it has nowhere to carry a per-line document, and its manifest
+    // directory is whatever someone copied there — not a listing of the line.
+    // `Ok(None)` for `served_layers` therefore means "cannot enumerate", which
+    // is exactly right; returning `Ok(Some(...))` of the files present would
+    // accuse an honest air-gapped copy of hiding every layer it was not given.
+    // A realm that declares `signed-index = true` consequently cannot be
+    // installed from a bare DirSource at all — it fails closed, naming the
+    // realm, which is the correct outcome for a transport that cannot carry
+    // the evidence the realm promised. Use an oci-layout archive instead.
 }
 
 impl LayerSource for MemorySource {

@@ -64,6 +64,11 @@ pub use install::{
 };
 pub use kind::{ANN_KIND, PayloadKind, UnknownKind};
 pub use layer::{LayerId, LayerIdError, Line};
+pub use lineindex::{
+    IndexCache, IndexError, IndexPolicy, IndexedLayer, LineIndex,
+    attach_envelope_to_layout as attach_index_envelope_to_layout,
+    attach_to_layout as attach_index_to_layout, read_from_layout as read_index_from_layout,
+};
 pub use linestatus::{
     KnownProblem, LayerStatusReport, LineStatus, LineStatusError, StatusCache,
     attach_envelope_to_layout as attach_status_envelope_to_layout,

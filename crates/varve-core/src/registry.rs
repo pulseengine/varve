@@ -58,6 +58,11 @@ pub const ROLE_PAYLOAD: &str = "payload";
 /// registry (REQ-STATUS-DIST-001), so `varve status` works after an
 /// `oci://` install with no local layout.
 pub const ROLE_LINE_STATUS: &str = "line-status";
+/// The realm's signed line-index envelope (REQ-INDEXAUTH-001), carried under
+/// its own per-line tag rather than beside a layer: the index has to be
+/// obtainable when the layer a consumer wants is precisely the one being
+/// withheld, so it must not be reachable only THROUGH a layer.
+pub const ROLE_LINE_INDEX: &str = "line-index";
 /// A carried attestation's signed STATEMENT (REQ-ATTEST-002). Many per layer,
 /// unlike line-status which is one per line — so these are found by scanning
 /// all layers, not by taking the first match.
@@ -98,6 +103,25 @@ const MAX_TOKEN_BYTES: u64 = 1024 * 1024;
 /// The digest of the first layer in an OCI artifact manifest carrying the
 /// given `eu.pulseengine.varve.role` annotation, if present. Pure — the
 /// unit-testable heart of registry blob discovery.
+/// The tags of a repository that name layers of one line — what a registry is
+/// willing to SERVE for that line, which is what omission is measured against
+/// (REQ-INDEXAUTH-001 clause 3). Pure, so the filter is unit-testable: the
+/// mutation gate runs `--lib`, and an over-eager filter here would report a
+/// served layer as hidden and accuse an honest registry of tampering.
+///
+/// A tag that is not a canonical `YYYY.MM.P` cannot be a layer this line
+/// contains — a signed index names layers by that grammar and nothing else —
+/// so junk tags, other lines' layers, and the `line-index-*` tag carrying the
+/// index itself are all excluded rather than reported as extra layers.
+fn layers_of_line(tags: Vec<String>, line: &str) -> Vec<String> {
+    tags.into_iter()
+        .filter(|tag| {
+            tag.parse::<crate::layer::LayerId>()
+                .is_ok_and(|id| id.line().to_string() == line)
+        })
+        .collect()
+}
+
 fn layer_digest_for_role(manifest: &serde_json::Value, role: &str) -> Option<String> {
     manifest["layers"]
         .as_array()?
@@ -971,6 +995,25 @@ impl RegistrySource {
         }
     }
 
+    /// The realm's signed line-index envelope for a line, if this registry
+    /// carries one (REQ-INDEXAUTH-001 clause 1). Absence — no such tag, or a
+    /// tag carrying no index layer — is `Ok(None)`, never an error: whether
+    /// absence is tolerable is the REALM's call (clause 5), settled in
+    /// `lineindex::check`, and a registry must not get to decide it by
+    /// answering 404. Opaque, untrusted bytes: the caller verifies them
+    /// against the realm's root, and the registry is the party they constrain.
+    fn line_index_for_tag(&self, tag: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        let manifest = match self.artifact_manifest_for_tag(tag) {
+            Ok(manifest) => manifest,
+            Err(SourceError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        match layer_digest_for_role(&manifest, ROLE_LINE_INDEX) {
+            Some(digest) => self.fetch_blob(&digest).map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// Every attestation a tag's artifact manifest references
     /// (REQ-ATTEST-002). A statement whose bytes are absent from the manifest
     /// is an ERROR, not a skipped entry: evidence that did not travel is the
@@ -1102,6 +1145,24 @@ impl LayerSource for RegistrySource {
         }
     }
 
+    fn fetch_line_index(&self, line: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        self.line_index_for_tag(&crate::lineindex::index_tag(line))
+    }
+
+    fn served_layers(&self, line: &str) -> Result<Option<Vec<String>>, SourceError> {
+        // A registry CAN enumerate, so it answers `Some(..)` — including
+        // `Some(vec![])` when it serves nothing of this line, which against a
+        // signed index means it is hiding everything. `None` here would mean
+        // "cannot enumerate" and would switch clause 3 off for every registry.
+        //
+        // `tags()` raises rather than returning a short list, and that is
+        // load-bearing here: a truncated page would look like a registry that
+        // legitimately serves fewer layers, so omission detection would report
+        // a hidden layer that is not hidden — or, worse, a hostile registry
+        // could truncate its way to any listing it liked.
+        Ok(Some(layers_of_line(self.tags()?, line)))
+    }
+
     fn fetch_attestations(
         &self,
         layer: &LayerRef,
@@ -1195,6 +1256,55 @@ mod tests {
             "layers": [{"digest": "sha256:aaa", "annotations": {ANN_ROLE: ROLE_ENVELOPE}}]
         });
         assert_eq!(layer_digest_for_role(&bare, ROLE_LINE_STATUS), None);
+        // Each signed document has its OWN role. Sharing one would let the
+        // line-status blob be handed over where the index was asked for; the
+        // payload-type check would then reject it, but only after the source
+        // had chosen which document the consumer got (REQ-INDEXAUTH-001).
+        assert_ne!(ROLE_LINE_INDEX, ROLE_LINE_STATUS);
+        assert_eq!(layer_digest_for_role(&manifest, ROLE_LINE_INDEX), None);
+        let indexed = serde_json::json!({
+            "layers": [
+                {"digest": "sha256:ccc", "annotations": {ANN_ROLE: ROLE_LINE_STATUS}},
+                {"digest": "sha256:ddd", "annotations": {ANN_ROLE: ROLE_LINE_INDEX}},
+            ]
+        });
+        assert_eq!(
+            layer_digest_for_role(&indexed, ROLE_LINE_INDEX),
+            Some("sha256:ddd".to_string())
+        );
+    }
+
+    // rivet: verifies REQ-INDEXAUTH-001
+    #[test]
+    fn a_registrys_listing_for_a_line_is_that_lines_layers_and_nothing_else() {
+        // What `served_layers` answers with, and therefore what omission is
+        // measured against (clause 3). Both directions matter and neither is
+        // obvious: including a tag that is not a layer of this line would
+        // let an index name it and be satisfied by junk, while EXCLUDING a
+        // layer that is served would accuse an honest registry of hiding it.
+        let tags = vec![
+            "2026.08.0".to_string(),
+            "2026.08.10".to_string(),
+            "2026.09.0".to_string(),          // another line
+            "line-index-2026.08".to_string(), // the index's own tag
+            "latest".to_string(),             // a floating tag some pipeline pushed
+            "2026.08.01".to_string(),         // non-canonical: leading zero
+            "2026.08".to_string(),            // a line, not a layer
+        ];
+        assert_eq!(
+            layers_of_line(tags.clone(), "2026.08"),
+            vec!["2026.08.0".to_string(), "2026.08.10".to_string()],
+        );
+        assert_eq!(
+            layers_of_line(tags, "2026.09"),
+            vec!["2026.09.0".to_string()]
+        );
+        // A repository with no layer of this line enumerates EMPTY, which
+        // against a signed index means it is hiding everything. That is a
+        // different statement from "cannot enumerate", and the distinction is
+        // the difference between catching a hostile registry and refusing
+        // every air-gapped install.
+        assert!(layers_of_line(vec!["latest".to_string()], "2026.08").is_empty());
     }
 
     // ─────────────── clause 1: the challenge, not a guess ───────────────
