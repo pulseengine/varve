@@ -1911,7 +1911,7 @@ artifacts:
   - id: REQ-SDK-001
     type: requirement
     title: A tree-shaped payload can be distributed, and relocated as an export
-    status: draft
+    status: approved
     release: v0.27.0
     description: >
       varve#67. `sdk`, `wit` and `zephyr-module` parse and verify but nothing
@@ -1928,20 +1928,51 @@ artifacts:
       which means relocating INTO the store would frequently be impossible.
       Clauses:
       (1) The store shall hold a tree-shaped payload, addressed by
-      (name, version, platform) like any other held payload.
+      (name, version, platform) like any other held payload — as the single
+      archive its producer SIGNED, not unpacked. CORRECTED during
+      implementation; the original clause said the store "cannot hold a tree at
+      all" and implied unpacking one there. Unpacking in the store is not
+      merely unnecessary, it CONTRADICTS clause 2 and clause 4 of this same
+      requirement: `verify` and `archive` re-hash ONE file at
+      `Store::entry_path` against ONE signed digest, so an unpacked store entry
+      would be neither verifiable nor archivable; and relocation can only ever
+      shorten a path, while the store path is ~90 characters before any
+      content, so an SDK could not be relocated INTO the store even if it were
+      unpacked there. The premise was also already out of date: REQ-STORE-002
+      gave every non-dispatchable payload a `payloads/<name>/<version>` place,
+      so an `sdk` entry is held by (name, version, platform) today and two
+      Yocto releases coexist. The tree is materialised where it is USED — in
+      the export — which is what clause 3 asks for.
       (2) The signed tree shall remain immutable and verifiable; varve shall
       verify only what the producer signed, never what relocation produced.
+      Nothing on the relocation path writes back into the store.
       (3) `varve export-sdk --out D` shall unpack and relocate into D and write
       the `.varve-export.json` stamp, so `verify --export` catches drift.
       Rejected: recording a post-relocation digest, which would put the
       relocator inside the trust path.
+      Relocation covers both halves the Yocto installer performs: the
+      in-place, NUL-padded, length-preserving field patch of `relocate_sdk.py`
+      and the free-length text substitution of `toolchain-shar-relocate.sh`,
+      plus re-pointing the SDK's own absolute symlinks.
       (4) It shall refuse EARLY and by name when the destination path is too
       long for the SDK's interpreter field, rather than after relocating
-      thousands of files.
+      thousands of files. The check is complete as a single comparison — every
+      patched field holds `<prefix><suffix>` and only the prefix changes — so
+      it runs before the archive is opened. The producer's build-time prefix is
+      carried in the SIGNED annotation `eu.pulseengine.varve.sdk.prefix`, so
+      the relocation budget is attributable rather than guessed.
+      (5) Laying a tree out shall hold the same invariants
+      `Store::lay_down_payloads` holds for a single payload, over the tree's
+      far larger attack surface: every component of every member validated,
+      all destinations resolved before any byte is written, colliding members
+      refused, and — the escape a per-component check cannot see — a symlink
+      that leaves the export, or a member written THROUGH one, refused as well.
     tags: [distribution]
     links:
       - type: traces-to
         target: REQ-KIND-001
+      - type: traces-to
+        target: REQ-STORE-002
     fields:
       priority: should
       category: functional
@@ -1949,7 +1980,7 @@ artifacts:
   - id: REQ-EXPORTDECL-001
     type: requirement
     title: A project declares its exports, and verify checks every one of them
-    status: draft
+    status: approved
     release: v0.27.0
     description: >
       `varve verify --export <DIR>` is repeatable and MANUAL, so
@@ -1969,16 +2000,35 @@ artifacts:
       able to select a SUBSET of the layer rather than all of it — a project
       exporting one extension or three crates into a dedicated area is the
       ordinary case, not a special one.
+      The adapter name shall be one this varve can actually produce, spelled
+      exactly as the adapters already stamp it in `.varve-export.json`, so a
+      declaration and the stamp it is checked against compare without a
+      translation table. The destination shall be RELATIVE to the directory
+      holding `varve.toml`, so a declaration checked into a repository means
+      the same thing on every machine and cannot address anything outside the
+      checkout. Two entries shall not share one destination: each adapter
+      writes one stamp, so the second would overwrite the first's and `verify`
+      would then check one export twice and the other never.
       (3) `varve verify` shall check every declared export WITHOUT being told
       to. Declared means checked. A declared directory that is absent shall
       fail, not warn: "I forgot to generate it" and "it is stale" are the same
       severity to anyone relying on the export, and distinguishing them mainly
-      helps the person who made the mistake.
+      helps the person who made the mistake. A directory whose stamp names a
+      DIFFERENT adapter shall fail too — freshness there says nothing, because
+      the declared export was never produced at all.
       (4) For a payload whose consumption requires entering an environment
       rather than pointing at a path — a Yocto SDK is sourced, setting CC,
       SYSROOT, CFLAGS and prepending its own bin to PATH — the entry shall
       record how the environment is entered, and `varve env` shall be able to
       emit that sourcing so one command sets up the whole environment.
+      Only an export that IS entered as an environment may carry that record.
+      On one that is pointed at — a local Cargo registry, a distdir — the block
+      would be accepted, ignored, and believed, which is the same failure shape
+      as an export nobody names.
+      The emitted order INVERTS the declared order, and must: sourcing a script
+      prepends its bin to PATH, so what is sourced last ends up first on PATH.
+      An environment declared to sit before the shims is therefore sourced
+      AFTER them.
       (5) The entry shall declare where such an environment sits RELATIVE TO
       varve's shims on PATH. An SDK environment script prepending its bin
       shadows the shims, which is exactly the condition REQ-SHADOW-001 detects:
@@ -1986,10 +2036,19 @@ artifacts:
       compiler silently winning over the pinned one — or fire spuriously on a
       legitimate setup. Both are damaging, and the spurious one is worse,
       because a check that cries wolf is a check people switch off.
+      The declaration shall be REQUIRED rather than defaulted — a default is a
+      guess about PATH order made on the project's behalf, and being wrong in
+      either direction is what this clause exists to prevent. It yields three
+      distinct verdicts, not two: a binary inside an export declared to sit
+      before the shims is EXPECTED; one inside an export declared to sit after
+      them CONTRADICTS the declaration and is a real fault with its own fix;
+      anything else is the ordinary hijack.
     tags: [distribution, ergonomics]
     links:
       - type: traces-to
         target: REQ-EXPORT-SYNC-001
+      - type: traces-to
+        target: REQ-SHADOW-001
     fields:
       priority: should
       category: functional
