@@ -252,7 +252,7 @@ artifacts:
     type: verification
     title: Spec-compliant registry client — challenge, credentials, pagination, media types, refusals, redirects
     status: verified
-    release: v0.27.0
+    release: v0.26.0
     fields:
       method: automated-test
       # One clause at a time. The lib tests are the mutation-gate kill
@@ -1735,6 +1735,13 @@ artifacts:
         fixed and the most-read surface was not.
         All five mutations are now killed and the README claim is gone, each
         re-run against the reviewer's own mutant to confirm it fails.
+        A SECOND SECRET LEAK was found while auditing rather than reported:
+        `RegistrySource` derived Debug over `token: RefCell<Option<String>>`,
+        so any `{:?}` of the source printed the bearer token in clear. It has a
+        manual redacting Debug now, and un-redacting it fails a test. Both this
+        and the redirect leak predate credentials and would have become live
+        the moment credentials landed — which is why clause 6 shipped WITH
+        clause 2 rather than after it.
       evidence:
         # Clause: the error names both channels AND what each means. The old
         # tests asserted struct FIELDS and never rendered the message.
@@ -2063,3 +2070,101 @@ artifacts:
     links:
       - type: verifies
         target: REQ-SHADOW-001
+
+  - id: VER-ATTEST-002
+    type: verification
+    title: Attestations travel with the layer — layout, store, archive, offline install, registry
+    status: verified
+    release: v0.26.0
+    tags: [supply-chain]
+    fields:
+      method: test
+      baseline: >
+        Carriage, proven by a real round trip on the release binary: deposit ->
+        attach -> install -> verify -> archive -> install into a BRAND NEW core,
+        offline -> verify, with the carried bytes byte-identical to what was
+        signed. That last check is not decoration: varve carries another
+        party's judgement verbatim and never restates it (DD-021), so a
+        round trip that altered the bytes would defeat the purpose.
+        Two security defects were found while wiring, both in code written
+        earlier in the same release. `read_all` used an index-supplied digest
+        as a PATH COMPONENT, so a layout naming `sha256:../../..` escaped the
+        layout directory. `persist` named files from the digest the SOURCE
+        declared rather than from the bytes, so a hostile source could name a
+        file inside the layer root, where layer.json and the retained envelope
+        live. Both are refused now, and removing either guard fails a named
+        test.
+        The registry clause landed last and was the one that mattered most: an
+        `oci://` install carried NOTHING, so varve's most-used transport was
+        reproducing the exact mirror-boundary loss the requirement exists to
+        close. Statements pair with their bytes by the
+        `eu.pulseengine.varve.attests` annotation rather than by position, and
+        the test serves TWO attestations precisely so a first-match reader
+        (the line-status shape) cannot pass it.
+        Deliberate and stated: reporting, not refusal. A layer whose own
+        signature and digests are good is a good layer, and failing an install
+        on a third party's stale audit would make varve's verdict depend on
+        someone else's release cadence. An unverified statement's own claims
+        are never echoed as fact.
+        `cargo mutants` under the CI gate's `--workspace --lib` config:
+        install.rs 12 caught / 0 missed; attestcarry.rs 32 caught / 0 missed,
+        after two rounds of strengthening — the first found a surviving `&&` in
+        the traversal guard, the second found `attach`'s retain predicate
+        surviving because counting alone cannot see the index accumulating a
+        stale entry per CI re-run.
+      evidence:
+        - run: cargo test -p varve-core an_attestation_travels_with_the_layer_and_still_binds
+        - run: cargo test -p varve-core a_statement_whose_evidence_did_not_travel_is_an_error_not_a_skip
+        - run: cargo test -p varve-core many_attestations_travel_together_and_reattaching_is_idempotent
+        - run: cargo test -p varve-core evidence_survives_the_store_and_can_be_re_emitted
+        - run: cargo test -p varve-core a_layout_naming_a_blob_outside_itself_is_refused_before_anything_is_read
+        - run: cargo test -p varve-core persist_names_files_after_the_bytes_not_after_what_the_source_declared
+        - run: cargo test -p varve-core an_attestation_survives_archive_and_an_offline_install_into_a_fresh_core
+        # The registry clause, through the real HTTP double.
+        - run: cargo test -p varve-core --test registry_double an_oci_install_carries_the_attestations_the_registry_publishes
+        - run: cargo test -p varve --test cli an_attestation_travels_through_deposit_archive_and_an_offline_install
+    links:
+      - type: verifies
+        target: REQ-ATTEST-002
+
+  - id: VER-BOOTSTRAP-001
+    type: verification
+    title: There is a documented, verified way to obtain varve itself
+    status: verified
+    release: v0.26.0
+    tags: [distribution, ergonomics]
+    fields:
+      method: test
+      baseline: >
+        Reported from use: the README's Getting started jumped straight to
+        `varve install` with no step 0, there was no install script, and no
+        crates.io publish workflow — so `cargo install varve` did not work
+        either. A tool for verified toolchain distribution had no documented
+        verified path to itself.
+        install.sh was run against the REAL v0.25.0 release and installed a
+        binary reporting 0.25.0. The negative control is the load-bearing part:
+        with sha256sum and shasum shimmed to return a wrong digest it exits 1
+        with "The bytes you received are not the bytes this release published"
+        and creates nothing — a verifier that cannot fail is not a verifier.
+        Refusal to run as root, refusal when no sha256 tool exists, and the
+        unsupported-platform path were each exercised the same way.
+        Clause 8 — state what the first hop CANNOT prove — shipped as prose
+        with no mechanical check, which is the exact shape that let requirement
+        text outrun code four releases running, and the honest-limits section
+        is the most deletable part of a page whose other job is making
+        installation easy. It is gated now: deleting it fails a named test.
+        Scope stated rather than implied: install.sh entering SHA256SUMS.txt is
+        verified by workflow ORDERING only (staged before the checksum step)
+        and becomes true at the first v0.26.0 tag; `cargo package -p varve`
+        cannot fully succeed until varve-core is actually published; and no
+        Linux binary was executed — the triple mapping was proven with a faked
+        `uname`. The release workflow's verify-install-script job closes the
+        last of these on the first tag.
+      evidence:
+        - run: cargo test -p varve --bin varve the_bootstrap_topic_states_what_the_first_hop_cannot_prove
+        - run: cargo test -p varve --bin varve topics_a_user_must_act_on_show_a_worked_example
+        - run: cargo test -p varve --bin varve every_documented_command_is_a_real_command
+        - run: cargo test -p varve --bin varve every_cli_subcommand_has_a_documented_topic
+    links:
+      - type: verifies
+        target: REQ-BOOTSTRAP-001

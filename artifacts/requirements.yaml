@@ -1574,7 +1574,7 @@ artifacts:
   - id: REQ-BOOTSTRAP-001
     type: requirement
     title: varve has a documented, verified way to obtain varve
-    status: approved
+    status: verified
     release: v0.26.0
     description: >
       A tool for verified toolchain distribution shipped with no verified
@@ -1652,7 +1652,7 @@ artifacts:
   - id: REQ-SHADOW-001
     type: requirement
     title: varve notices when PATH runs a different binary than the one it pins
-    status: approved
+    status: verified
     release: v0.26.0
     description: >
       Reported from use and reproduced (varve#66). With a different `rivet`
@@ -1780,7 +1780,7 @@ artifacts:
   - id: REQ-REGISTRY-002
     type: requirement
     title: varve speaks the OCI distribution spec, not one registry's dialect
-    status: approved
+    status: verified
     release: v0.26.0
     description: >
       varve's registry client works against GHCR and would fail elsewhere, and
@@ -1846,7 +1846,7 @@ artifacts:
   - id: REQ-INDEXAUTH-001
     type: requirement
     title: The realm authenticates the line index, not only each artifact
-    status: approved
+    status: verified
     release: v0.26.0
     description: >
       varve signs individual layer manifests and realms, but the LISTING of
@@ -1954,7 +1954,7 @@ artifacts:
   - id: REQ-ATTEST-002
     type: requirement
     title: A layer transports its attestations as OCI referrers, and verify reports them
-    status: approved
+    status: verified
     release: v0.26.0
     description: >
       The transport half split out of REQ-ATTEST-001 when review found that
