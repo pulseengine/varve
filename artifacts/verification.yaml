@@ -1742,7 +1742,7 @@ artifacts:
         and the redirect leak predate credentials and would have become live
         the moment credentials landed — which is why clause 6 shipped WITH
         clause 2 rather than after it.
-      evidence:
+      steps:
         # Clause: the error names both channels AND what each means. The old
         # tests asserted struct FIELDS and never rendered the message.
         - run: cargo test -p varve-core the_channel_refusal_names_both_channels_and_what_they_cost
@@ -1792,7 +1792,7 @@ artifacts:
         until the PARSER accepted it, which is how a shape check certifies a
         false fact. The published root is a fact, so the test compares against
         trust-roots/rolling.pub — the file the release actually ships.
-      evidence:
+      steps:
         - run: cargo test -p varve --bin varve the_docs_teach_the_facts_a_user_is_rejected_for_not_knowing
         - run: cargo test -p varve --bin varve the_task_topics_walk_a_user_through_a_sequence
         # composition and threat-model previously had NO content assertion
@@ -1832,7 +1832,7 @@ artifacts:
         content, and `the_gate_detects_a_broken_topic_set_not_merely_a_healthy_one`
         hands the functions a set it KNOWS is broken, so a gate that stops
         looking fails instead of passing quietly.
-      evidence:
+      steps:
         - run: cargo test -p varve --bin varve every_documented_file_example_parses_with_the_real_parser
         - run: cargo test -p varve --bin varve every_documented_command_is_a_real_command
         - run: cargo test -p varve --bin varve the_gate_detects_a_broken_topic_set_not_merely_a_healthy_one
@@ -1863,7 +1863,7 @@ artifacts:
         adapter applies", false in both directions: export-bazel ignores kind
         and keys on `platform` plus `[tool.source]` — named in no topic and no
         --help — while three adapters share `kind = "crate"`.
-      evidence:
+      steps:
         - run: cargo test -p varve --bin varve the_recovery_topic_states_what_repairs_and_what_is_refused
         - run: cargo test -p varve --bin varve the_adapter_topic_names_every_adapter_and_what_selects_it
         - run: cargo test -p varve --bin varve the_workflow_topics_exist
@@ -1896,7 +1896,7 @@ artifacts:
         Scope stated honestly: no CI job runs a real OCI client, so "resolves
         in any OCI client" rests on the annotation being the standard one, not
         on an executed `oras cp`. Tracked in issue #62.
-      evidence:
+      steps:
         - run: cargo test -p varve-core export_writes_a_standard_oci_image_layout
     links:
       - type: verifies
@@ -1968,7 +1968,7 @@ artifacts:
         envelope is a sibling index entry rather than referenced from the
         tagged manifest, so a tag-scoped `oras cp` may drop the signature.
         Both are issue #62 — not claimed as verified here.
-      evidence:
+      steps:
         - run: cargo test -p varve --bin varve a_topic_showing_the_published_realm_shows_the_published_key
         - run: cargo test -p varve --bin varve the_gate_detects_a_broken_topic_set_not_merely_a_healthy_one
         - run: cargo test -p varve --bin varve every_documented_command_is_a_real_command
@@ -2013,7 +2013,7 @@ artifacts:
         latest; a varve consumer names an exact layer. The clause is now
         REPORTING, and `advance_to` was deleted rather than left as dead
         trust-critical code.
-      evidence:
+      steps:
         - run: cargo test -p varve-core an_index_verifies_only_against_the_realm_that_signed_it
         - run: cargo test -p varve-core a_signed_line_status_cannot_be_replayed_as_an_index
         - run: cargo test -p varve-core a_source_that_hides_a_layer_the_index_names_is_refused
@@ -2060,7 +2060,7 @@ artifacts:
         Four PATH configurations were checked end to end against the release
         binary: shims first (pass), no shims (pass), foreign binary before the
         shims (fail), foreign binary after the shims (pass).
-      evidence:
+      steps:
         - run: cargo test -p varve-core a_different_binary_earlier_on_path_is_reported_as_shadowing
         - run: cargo test -p varve-core a_real_shim_symlinked_to_varve_itself_agrees
         - run: cargo test -p varve-core a_tool_absent_from_path_is_not_shadowed
@@ -2112,7 +2112,7 @@ artifacts:
         the traversal guard, the second found `attach`'s retain predicate
         surviving because counting alone cannot see the index accumulating a
         stale entry per CI re-run.
-      evidence:
+      steps:
         - run: cargo test -p varve-core an_attestation_travels_with_the_layer_and_still_binds
         - run: cargo test -p varve-core a_statement_whose_evidence_did_not_travel_is_an_error_not_a_skip
         - run: cargo test -p varve-core many_attestations_travel_together_and_reattaching_is_idempotent
@@ -2160,7 +2160,7 @@ artifacts:
         Linux binary was executed — the triple mapping was proven with a faked
         `uname`. The release workflow's verify-install-script job closes the
         last of these on the first tag.
-      evidence:
+      steps:
         - run: cargo test -p varve --bin varve the_bootstrap_topic_states_what_the_first_hop_cannot_prove
         - run: cargo test -p varve --bin varve topics_a_user_must_act_on_show_a_worked_example
         - run: cargo test -p varve --bin varve every_documented_command_is_a_real_command
@@ -2218,18 +2218,18 @@ artifacts:
         (name, platform) again — varve#69 restored). `cargo mutants` over the
         CI-gated files changed: install.rs and reverify.rs, 28 mutants, 25
         caught, 3 unviable, 0 missed; store.rs 0 missed.
-      evidence:
-        - run: cargo test -p varve-core two_versions_of_one_name_are_two_files_not_one_overwritten
+      steps:
+        - run: cargo test -p varve-core two_versions_of_one_name_are_two_files_neither_overwriting_the_other
         - run: cargo test -p varve-core two_payloads_claiming_one_path_are_refused_before_anything_is_written
         - run: cargo test -p varve-core a_name_or_version_that_escapes_the_layer_is_refused
         - run: cargo test -p varve-core a_layer_installed_before_this_change_still_resolves_its_crate
         - run: cargo test -p varve-core only_a_tool_is_dispatched_by_name
         - run: cargo test -p varve-core two_versions_of_one_crate_are_a_layer_not_a_duplicate
-        - run: cargo test -p varve-core a_tool_may_not_appear_twice_for_one_platform
-        - run: cargo test -p varve-core the_signed_digest_does_not_depend_on_the_order_entries_appear_in
-        - run: cargo test -p varve-core each_version_of_one_name_is_hashed_against_its_own_signed_digest
+        - run: cargo test -p varve-core a_tool_may_not_appear_twice_under_one_name_however_its_versions_differ
+        - run: cargo test -p varve-core the_signed_digest_does_not_depend_on_the_order_versions_are_listed_in
+        - run: cargo test -p varve-core each_version_of_one_name_is_checked_against_its_own_signed_digest
         - run: cargo test -p varve-core a_registry_exported_from_a_layer_offers_every_version_it_pins
-        - run: cargo test -p varve-core a_layer_pinning_two_versions_of_one_crate_agrees_with_a_lockfile_naming_both
+        - run: cargo test -p varve-core a_layer_pinning_two_versions_of_one_crate_agrees_with_a_lockfile_holding_both
         - run: cargo test -p varve --test cli a_layer_holding_two_versions_of_one_crate_deposits_installs_verifies_and_exports_both
         - run: cargo test -p varve --test cli two_versions_of_one_tool_are_still_refused_and_the_error_names_both
     links:
@@ -2289,7 +2289,7 @@ artifacts:
         suffix being dropped from the exported name, the export setting 0o755,
         validation moving from the plan to the write loop, the stamp not being
         written, and the topic shipping with empty fences.
-      evidence:
+      steps:
         - run: cargo test -p varve-core only_a_tool_is_dispatched_by_name
         - run: cargo test -p varve-core every_kind_round_trips_through_its_wire_string
         - run: cargo test -p varve-core the_kind_list_the_other_tests_iterate_holds_every_variant
