@@ -2356,3 +2356,151 @@ artifacts:
     links:
       - type: verifies
         target: REQ-VSIX-001
+
+  - id: VER-SDK-001
+    type: verification
+    title: A tree payload is held as its signed archive and relocated only into an export
+    status: verified
+    release: v0.27.0
+    tags: [distribution]
+    fields:
+      method: test
+      baseline: >
+        Library-level, on a SYNTHETIC tree rather than a real Yocto SDK: a
+        "binary" carrying two NUL-padded path fields, an `environment-setup`
+        text file, an SDK-internal absolute symlink, and a directory, packed as
+        a gzip tar and also as a plain one.
+        Clause 1 is verified in the STORE, where a tree payload is held as the
+        single archive its producer signed at `payloads/<name>/<version>` —
+        two Yocto releases of one SDK coexist, each resolving from its own
+        manifest entry, and neither borrows `bin/`. That clause was CORRECTED
+        during implementation: unpacking a tree in the store would leave
+        `verify` and `archive` with no single file to hash against the single
+        signed digest (contradicting clause 2), and the store path is ~90
+        characters before any content, so an SDK could not be relocated into it
+        anyway (clause 4's own arithmetic).
+        Clause 4 is the constraint everything else follows from, transcribed
+        from `relocate_sdk.py` rather than recalled: `len(new_dl_path) >=
+        p_filesz` fails. A destination one character longer than the build
+        prefix is refused BEFORE the archive is opened, by name, with the
+        budget in the message and nothing written; a destination exactly at the
+        budget is accepted, because the rule is "no longer", and an off-by-one
+        here refuses legitimate destinations. The field-level guard is kept as
+        well and fires on a field too small, refusing rather than truncating —
+        a truncated interpreter path is a binary that cannot exec with nothing
+        to point at.
+        Clause 3 covers both halves of the real installer: a binary's field is
+        patched IN PLACE and re-padded with NUL so the file length and every
+        offset survive; a text file is substituted freely and may change
+        length; an SDK-internal absolute symlink is re-pointed into the export.
+        Clause 2 is asserted as a difference: the exported bytes are NOT the
+        signed bytes, and the archive handed in is byte-identical afterwards —
+        nothing on this path writes back into the store or records a
+        post-relocation digest.
+        Clause 5 is the tree's larger attack surface: every component of every
+        member is validated (`../../evil`, `/etc/passwd`, `a/../../evil`, `a//b`,
+        `a/./b`, ``, `..` all refused) and the good member does not land either;
+        two members claiming one path are a Collision; a symlink to the host, a
+        relative symlink climbing out, and — the escape a per-component check
+        cannot see — a link out followed by a write THROUGH it are each refused
+        with nothing written outside the export. An archive whose member name
+        was written into the tar header directly, bypassing tar-rs's own `..`
+        check, is refused by varve rather than by the dependency.
+        11 hand-applied mutations against these tests, every one killed: the
+        destination fit check disabled; the absolute-destination check
+        disabled; the NUL re-padding removed; the field guard weakened to `>`;
+        every file treated as binary; the symlink left un-repointed; `..`
+        accepted as a path component; the write-through-symlink check disabled;
+        an absolute escaping link accepted; the member collision check
+        disabled; gzip detection disabled; and a hostile archive member
+        silently SKIPPED instead of refused.
+        Not verified here: a real multi-gigabyte Yocto SDK, real ELF PT_INTERP
+        parsing (the field is located by its NUL-terminated string, not by
+        reading program headers), and the CLI wiring of `varve export-sdk`,
+        which lands with the subcommand.
+      steps:
+        - run: cargo test -p varve-core a_tree_shaped_payload_is_held_by_name_and_version_like_any_other
+        - run: cargo test -p varve-core a_destination_longer_than_the_build_prefix_is_refused_before_anything_is_written
+        - run: cargo test -p varve-core a_relative_or_prefixless_destination_is_refused
+        - run: cargo test -p varve-core a_nul_padded_field_is_patched_in_place_and_the_file_length_is_preserved
+        - run: cargo test -p varve-core a_field_too_small_for_the_new_path_is_refused_rather_than_truncated
+        - run: cargo test -p varve-core a_text_file_is_substituted_and_may_change_length
+        - run: cargo test -p varve-core the_whole_synthetic_tree_lands_relocated_and_the_source_bytes_are_untouched
+        - run: cargo test -p varve-core a_member_whose_path_escapes_the_export_is_refused_and_nothing_is_written
+        - run: cargo test -p varve-core a_symlink_that_leaves_the_export_is_refused_even_though_every_component_is_safe
+        - run: cargo test -p varve-core two_members_claiming_one_path_are_refused_before_anything_is_written
+        - run: cargo test -p varve-core a_signed_archive_unpacks_and_relocates_and_the_archive_is_never_modified
+        - run: cargo test -p varve-core an_archive_member_that_escapes_is_refused_before_the_tree_is_written
+    links:
+      - type: verifies
+        target: REQ-SDK-001
+
+  - id: VER-EXPORTDECL-001
+    type: verification
+    title: Declared exports parse, are checked without being named, and explain a shadowed shim
+    status: verified
+    release: v0.27.0
+    tags: [distribution, ergonomics]
+    fields:
+      method: test
+      baseline: >
+        `[[export]]` entries parse out of the pin varve.toml already is, so
+        there is no second discovery path: a project declaring a `cargo`
+        export, a `vsix` export with a two-name subset, and a sourced `sdk`
+        export with its environment round-trips to the adapter, the
+        destination, the selection and the environment, and a pin with no
+        exports still parses — every varve.toml already in the world has none.
+        Refusals, each with the correction in the message: an adapter this
+        varve cannot produce (the refusal lists all six, and each wire string
+        is asserted equal to the one the adapters already stamp, so a
+        declaration and a stamp compare without a translation table); a
+        destination that is absolute, climbs out with `..`, or names no
+        directory; two entries sharing one destination, which would overwrite
+        one stamp and leave `verify` checking one export twice and the other
+        never; a subset selection that is a path rather than a payload name; a
+        selection present but empty.
+        Clause 3 is checked as a set rather than per directory: with nothing
+        generated, EVERY declared export reports Missing — a failure, not a
+        warning; once generated they read Current; when the pin moves they read
+        Stale; a directory stamped by a DIFFERENT adapter is a KindMismatch,
+        because freshness there says nothing about the declared export; and an
+        unreadable stamp is its own verdict, since "re-run the export" is not
+        the fix for a truncated file.
+        Clauses 4 and 5 are the SDK half. An `[export.env]` is refused on a
+        kind that is pointed at rather than sourced, and refused without a
+        declared shim order — the message names both answers AND
+        REQ-SHADOW-001, because the reason is the point: undeclared, `verify`
+        must either miss a genuine hijack or fire on a legitimate sourced SDK.
+        The classification yields three verdicts, not two: a binary inside an
+        export declared `before-shims` is Expected; the same binary under an
+        `after-shims` declaration ContradictsDeclaration; anything else — a
+        distro gcc, or a binary inside a vendor directory that is never sourced
+        — is Undeclared.
+        The emitted `varve env` ordering is asserted to INVERT the declaration,
+        which is why it is computed and not written by hand: sourcing prepends
+        to PATH, so `after-shims` is sourced FIRST and `before-shims` LAST.
+        12 hand-applied mutations against these tests, every one killed:
+        exports dropped from the parse; an unknown adapter guessed as `cargo`;
+        `..` accepted in a destination; the duplicate-destination check
+        disabled; a path accepted as a selection; the shim order defaulted
+        instead of required; `[export.env]` allowed on a pointed-at kind; a
+        missing export reported Current; the two shim-order verdicts swapped;
+        and the emitted sourcing order un-inverted.
+        Not verified here: the CLI wiring — `varve verify` iterating the
+        declared exports, `varve env` printing the lines, and
+        `verify_no_shadowing` consulting the classification — which lands with
+        the CLI change.
+      steps:
+        - run: cargo test -p varve-core a_project_declares_its_exports_in_the_pin_it_already_has
+        - run: cargo test -p varve-core the_declared_kind_is_one_varve_can_actually_produce
+        - run: cargo test -p varve-core a_destination_that_leaves_the_repository_is_refused
+        - run: cargo test -p varve-core two_exports_may_not_share_one_directory
+        - run: cargo test -p varve-core a_subset_selection_names_payloads_not_paths
+        - run: cargo test -p varve-core an_environment_must_say_where_it_sits_relative_to_the_shims
+        - run: cargo test -p varve-core only_an_export_that_is_sourced_may_declare_an_environment
+        - run: cargo test -p varve-core every_declared_export_is_checked_and_an_absent_one_fails
+        - run: cargo test -p varve-core a_declared_sdk_environment_is_not_reported_as_a_hijack
+        - run: cargo test -p varve-core one_command_sources_the_whole_environment_in_the_declared_path_order
+    links:
+      - type: verifies
+        target: REQ-EXPORTDECL-001
