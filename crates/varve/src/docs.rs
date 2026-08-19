@@ -106,6 +106,16 @@ pub const TOPICS: &[Topic] = &[
         "Deploying a layer — the push, and what consumers need",
         "concept-deploy.md"
     ),
+    topic!(
+        "discovery",
+        "Discovery — learning which layers exist, and what does not answer",
+        "concept-discovery.md"
+    ),
+    topic!(
+        "ci",
+        "CI — the producer pipeline in order, and the key",
+        "concept-ci.md"
+    ),
     // ── one per CLI subcommand (slug == clap name) ────────────────────
     topic!("which", "which — which binary runs here", "cmd-which.md"),
     topic!("list", "list — layers in the core", "cmd-list.md"),
@@ -261,6 +271,17 @@ pub const REQUIRED_TOPICS: &[&str] = &[
     // that fails to read has no documented way out, and the fix every command
     // suggested was one they had already been refused.
     "recovery",
+    // Five of ten personas hit the same hole from three directions: no way to
+    // learn a layer name, an [[include]] digest, or what a signed line-index
+    // says (varve#59). The answer that exists — install it, then `varve list`
+    // — was stated nowhere.
+    "discovery",
+    // Seven subcommands are tagged (CI) and nothing composed them into an
+    // order; both CI personas ranked this the #1 gap. The ordering constraints
+    // are load-bearing (deposit first, never re-deposit after attaching,
+    // attestation needs an installed layer) and there was no key-into-CI story
+    // at all (varve#56).
+    "ci",
 ];
 
 /// Topics a user must ACT on, which therefore have to show a literal example
@@ -295,6 +316,16 @@ pub const TOPICS_NEEDING_EXAMPLES: &[&str] = &[
     // --install-extension` line, because the file NAME is what `code`
     // dispatches on. A prose description of that teaches nothing.
     "export-vsix",
+    // Both audit-demanded workflow topics are command sequences; prose-only
+    // versions would be the stub form this gate exists to refuse.
+    "discovery",
+    "ci",
+    // The three one-sentence stubs the audit called out beside a complete
+    // sign-index next door. Once brought up to standard, they must not be
+    // re-stubbable.
+    "sign-status",
+    "attach-status",
+    "sign-sums",
 ];
 
 /// Required topics that are missing entirely.
@@ -645,6 +676,112 @@ mod tests {
                  varve cannot produce a cross-platform archive offline"
             );
         }
+    }
+
+    // rivet: verifies REQ-DOCS-002
+    #[test]
+    fn the_boundary_sections_the_second_audit_demanded_cannot_quietly_vanish() {
+        // The 2026-08 ten-persona audit's verdict: "The scope is adequate;
+        // the boundaries are not. Every serious finding is a boundary." Each
+        // needle below is a boundary statement verified against the binary
+        // before it was written — and boundary statements are the most
+        // deletable part of a page, so they are the part that gets a gate.
+        let cases: &[(&str, &[&str])] = &[
+            (
+                // What composition does NOT carry (all three confirmed by
+                // running the binary): archive carries one layer of the
+                // graph; sbom omits composed tools; which/run attribute a
+                // composed tool to the composing layer.
+                "composition",
+                &[
+                    "What composition does not carry",
+                    "one archive per layer of the graph",
+                    "omits composed tools",
+                    "COMPOSING layer",
+                    "VARVE_LAYER",
+                ],
+            ),
+            (
+                // The archive contents contract — the two undocumented rows:
+                // the line-status baseline crosses, the signed line-index
+                // does not.
+                "archive",
+                &[
+                    "What an archive carries",
+                    "line-status",
+                    "line-index",
+                    "varve attach-index",
+                    "high-water marks",
+                ],
+            ),
+            (
+                // A facility with NO connected machine has an entry point:
+                // deposit writes the same oci-layout install --from consumes.
+                "air-gap",
+                &[
+                    "born inside the gap",
+                    "entire producer path is offline",
+                    "placeholder registry",
+                ],
+            ),
+            (
+                // varve#59, three directions of one hole — including the
+                // stated-nowhere answer (install it, then `varve list`) and
+                // the honest "not possible today" list.
+                "discovery",
+                &[
+                    "install the upstream layer, then read `varve list`",
+                    "no varve command that reads a line-index back",
+                    "base64 -d",
+                    "Not possible today",
+                    "No `varve search`",
+                ],
+            ),
+            (
+                // varve#56: the ordering constraints discovered only by
+                // experiment, and the key-into-CI story. `/dev/stdin` and
+                // process substitution were verified against the binary.
+                "ci",
+                &[
+                    "Never re-run `deposit`",
+                    "silently drops every referrer",
+                    "must be INSTALLED",
+                    "no trust root configured",
+                    "/dev/stdin",
+                    "process substitution",
+                    "rotation and no revocation",
+                ],
+            ),
+            (
+                // The three former one-sentence stubs: each now states what
+                // the command refuses and points at its schema or consumer.
+                "sign-status",
+                &["config-reference", "refuses", "signs fine and then fires"],
+            ),
+            (
+                "attach-status",
+                &["counter regression", "idempotent", "not the raw"],
+            ),
+            ("sign-sums", &["self-verify", "FILE NAME", "sha256sum"]),
+        ];
+        for (slug, needles) in cases {
+            let text = body(slug);
+            for needle in *needles {
+                assert!(
+                    text.contains(needle),
+                    "topic '{slug}' must state `{needle}` — a boundary the audit found \
+                     the docs denying, verified against the binary before writing"
+                );
+            }
+        }
+        // A composing consumer needs TWO realm tables in ONE file ("not
+        // merged, nearest wins" makes separate files a trap) — varve#57. The
+        // example must actually show two.
+        let realms = body("realms");
+        assert!(
+            realms.matches("[realm.").count() >= 2,
+            "the realms topic must show two [realm.*] tables in one file (varve#57)"
+        );
     }
 
     // rivet: verifies REQ-DOCS-003
