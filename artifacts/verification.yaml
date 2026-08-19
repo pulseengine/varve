@@ -1767,9 +1767,12 @@ artifacts:
         # Clause: install refuses a composition whose include is missing. The
         # cited test contained no composition at all.
         - run: cargo test -p varve --test cli install_refuses_a_composition_whose_include_is_not_installed
-        # Clause: export paths are absolute. Every export test passed an
-        # ABSOLUTE --out, so the bug was unreachable from its own evidence.
-        - run: cargo test -p varve --test cli a_relative_out_still_yields_an_absolute_path_in_the_generated_config
+        # Clause: a relative --out is RESOLVED, not embedded verbatim. Every
+        # export test passed an ABSOLUTE --out, so the bug was unreachable from
+        # its own evidence. Renamed in v0.27.0: the property is no longer
+        # "absolute" but "not the user's argument, and resolvable where Cargo
+        # resolves it" — see REQ-REPRO-001 clause 1 for the empirical basis.
+        - run: cargo test -p varve --test cli a_relative_out_is_resolved_not_embedded_verbatim
         # Clause: nothing shipped claims deposit publishes — README included.
         - run: cargo test -p varve --bin varve nothing_shipped_claims_varve_publishes
         # Clause: the deploy page carries a sequence a producer can run.
@@ -2356,3 +2359,199 @@ artifacts:
     links:
       - type: verifies
         target: REQ-VSIX-001
+
+  - id: VER-CRATEIDX-001
+    type: verification
+    title: An exported Cargo registry index describes the crates it contains
+    status: verified
+    release: v0.27.0
+    tags: [distribution]
+    fields:
+      method: test
+      baseline: >
+        varve#73. `export-cargo` wrote `"deps":[]` and `"features":{}` for every
+        crate while Cargo resolves the dependency graph FROM the index. Measured
+        again here on varve's own 250-package lockfile through the real export:
+        228 of 250 index entries now declare a dependency or a feature, so the
+        stub was wrong for 91% of a real layer.
+        Implemented: `read_crate_meta` opens the `Cargo.toml` inside the SIGNED
+        `.crate` tarball — the same tarball `export_vendor_dir` already
+        unpacks — and transcribes `[dependencies]`, `[dev-dependencies]`,
+        `[build-dependencies]`, their `[target."cfg(...)"]` forms, `[features]`,
+        `package.links` and `package.rust-version` into the index shape
+        crates.io uses: `deps` with `req`/`features`/`optional`/
+        `default_features`/`target`/`kind`/`registry`/`package`, and features
+        split into `features`/`features2` behind `"v":2` for namespaced (`dep:`)
+        and weak (`?/`) values, exactly as Cargo publishes them. The line is
+        built by a derived `Serialize`, so key order is fixed at the declaration
+        order and nothing is interpolated into JSON by hand.
+        Clause 2 (faithful or refuse) is a closed allow-list: a dependency
+        carrying `git`, unresolved `workspace = true`, a `registry` ALIAS, a
+        `path` with no version, a non-string `version`, a non-boolean flag, or
+        ANY key varve does not know how to transcribe is an error naming the
+        crate, the dependency and the construct — never a dropped entry.
+        `export_local_registry` computes every line BEFORE writing anything, so
+        a refusal leaves no half-written registry.
+        Clause 3 (a REAL graph): `cargo_offline` no longer passes with one
+        dependency-free crate. Its fixture is four packaged crates with
+        transitive dependencies, a non-default feature requested OF a
+        dependency, `default-features = false`, a RENAMED dependency and TWO
+        versions of one name — and the consumer is RUN, not merely built,
+        because the worst observed outcome of the stub was a build that exits 0
+        with a crate compiled featureless.
+        DOGFOOD (the acceptance test): varve's own 250 crates.io packages taken
+        from `~/.cargo/registry/cache`, deposited as `kind = "crate"`,
+        installed, verified (250 payloads against their signed digests),
+        `export-cargo`ed, and then `cargo build --offline --workspace` in an
+        ISOLATED, empty `CARGO_HOME` with no crates.io index present at all —
+        exit 0, 171 crates unpacked from varve's registry. Negative control:
+        the same run with the v0.26.0 stub index restored exits 101 with
+        "package `varve` depends on `clap` with feature `derive` but `clap` does
+        not have that feature" — the exact failure varve#73 reported.
+        Mutations, all applied and reverted: the v0.26.0 stub restored (killed);
+        the crate's own feature map dropped while deps are kept (killed);
+        `default-features = false` silently dropped — the SILENT class, which
+        builds and exits 0 and is caught only by the behavioural assertion,
+        17164 vs 11564 (killed); `[target.*]` dependencies dropped (killed);
+        `features2` emitted without `"v":2` (killed); the git branch and the
+        workspace-inheritance branch deleted (killed, by the message assertion);
+        writing before validating (killed).
+      steps:
+        - run: cargo test -p varve-core an_index_entry_carries_the_crates_real_deps_and_features
+        - run: cargo test -p varve-core namespaced_and_weak_features_go_to_features2_behind_v2
+        - run: cargo test -p varve-core a_dependency_the_index_cannot_express_is_an_error_naming_the_crate
+        - run: cargo test -p varve-core a_feature_the_index_cannot_express_is_an_error_naming_the_crate
+        - run: cargo test -p varve-core a_crate_tarball_without_a_cargo_toml_is_refused_not_stubbed
+        # Clause 3: the REAL graph, RUN rather than merely built.
+        - run: cargo test -p varve-core --test cargo_offline a_varve_exported_registry_resolves_a_real_graph_and_builds_it_correctly
+        - run: cargo test -p varve-core --test cargo_offline an_index_entry_varve_wrote_is_the_entry_cargo_reads
+        # Full CLI path: deposit crate-kind -> install -> export-cargo, with the
+        # deps and features carried through.
+        - run: cargo test -p varve --test cli deposit_a_crate_kind_entry_and_export_a_cargo_registry
+    links:
+      - type: verifies
+        target: REQ-CRATEIDX-001
+
+  - id: VER-COMPOSEEXPORT-001
+    type: verification
+    title: An export follows the composition, or says it did not
+    status: verified
+    release: v0.27.0
+    tags: [distribution, core]
+    fields:
+      method: test
+      baseline: >
+        varve#79. `resolve()` unioned composed TOOLS and `verify` checked each
+        included layer, but every export adapter read ONE `layer.json` — so an
+        extender composing pulseengine's layer ran `export-cargo` and got only
+        their own crates, with no error.
+        Implemented: `composition_for_export` walks the graph from the export
+        target, cycle-guarded on an ancestor PATH (pushed and popped, so a
+        DIAMOND is walked once rather than refused as a cycle) and bounded by
+        `compose::MAX_DEPTH`, verifying each included layer against the trust
+        root of the realm the include NAMES — the including layer's root does
+        not speak for another realm. Every adapter now goes through it:
+        export-cargo, export-crates-vendor, export-bazel-distdir, export-vsix
+        and export-bazel, plus `verify --lockfile`, which was blind in the same
+        way.
+        Clause 2's rule is stated as its own function, `compose::union_payloads`,
+        with its own error type: a name at DIFFERENT versions exports both; the
+        same name AND version at the SAME digest exports once (two realms
+        AGREEING is the ordinary diamond, not a conflict); the same name and
+        version at DIFFERENT digests is an error naming both realms, both
+        layers and both digests. It is deliberately NOT `union_tools`: a tool
+        name is dispatched and must resolve to one binary, a payload is placed
+        in a registry keyed by (name, version) and two versions are what a
+        lockfile requires.
+        Clause 3: a composed layer that is not installed is an error naming it
+        and its corrective install ("this export would silently omit its
+        payloads"), and a composed export prints every layer it followed with
+        the realm that vouched for it.
+        Mutations, all applied and reverted: `composition_for_export` returning
+        only the root — varve#79 restored (killed); the verification of a
+        composed layer ignored (killed); a missing include silently skipped
+        (killed — and this one SURVIVED until the clause-3 test existed, which
+        is why it exists); the conflicting-digest arm disabled (killed); the
+        conflicting-digest arm made unconditional, so agreement is refused
+        (killed); the collision key reduced to the name, so two versions clash
+        (killed); the CLI skipping `union_payloads` entirely (killed).
+      steps:
+        - run: cargo test -p varve-core two_versions_of_one_crate_both_export
+        - run: cargo test -p varve-core the_same_name_and_version_with_the_same_bytes_exports_once
+        - run: cargo test -p varve-core the_same_name_and_version_with_different_bytes_names_both_realms
+        - run: cargo test -p varve --test cli an_export_follows_the_composition
+        - run: cargo test -p varve --test cli an_export_refuses_a_composed_layer_it_cannot_vouch_for
+        - run: cargo test -p varve --test cli an_export_refuses_two_layers_that_disagree_about_one_crate
+        - run: cargo test -p varve --test cli an_export_that_cannot_follow_the_composition_says_so
+    links:
+      - type: verifies
+        target: REQ-COMPOSEEXPORT-001
+
+  - id: VER-REPRO-001
+    type: verification
+    title: What varve emits is a function of the layer, not of the machine
+    status: verified
+    release: v0.27.0
+    tags: [core, supply-chain]
+    fields:
+      method: test
+      baseline: >
+        varve#72: one layer exported twice differed only in
+        `.cargo/config.toml`, which embedded an ABSOLUTE path.
+        THE EMPIRICAL QUESTION, settled before anything changed, as clause 1
+        required. Cargo resolves a relative `local-registry` (and a relative
+        `directory`) against the directory that HOLDS `.cargo/` — never against
+        the invoking cwd. Demonstrated against cargo 1.97.0 with a real
+        registry: config at `<root>/.cargo/config.toml` saying
+        `local-registry = "reg"`, build run from `<root>/sub`; with the registry
+        at `<root>/reg` the build succeeds and Cargo prints the resolved
+        absolute path; with the registry moved to `<root>/sub/reg` (the
+        cwd-relative candidate) or to `<root>/.cargo/reg` (beside the config
+        itself) it fails with "local registry path is not a directory:
+        <root>/reg". Both negative controls ran.
+        So clause 1's first branch applies and clause 2 does not: there is no
+        machine-specific file to separate out. varve emits the bare
+        subdirectory constants `registry` / `vendor`, which are a function of
+        the layer alone and keep working when the export is copied, committed
+        or relocated.
+        CORRECTION TO A SHIPPED TEST. REQ-PRODUCE-002's
+        `a_relative_out_still_yields_an_absolute_path_in_the_generated_config`
+        asserted the WRONG property. The bug it was written for was real — a
+        relative `--out` embedded VERBATIM, and so resolved against whatever cwd
+        the build later ran in — but "absolute" was the wrong fix for it. The
+        test is now
+        `a_relative_out_is_resolved_not_embedded_verbatim`, and it pins both
+        halves: the emitted string is not the user's argument, AND it names the
+        registry where Cargo resolves it from.
+        Clause 3: `every_export_adapter_is_byte_identical_between_two_runs`
+        exports one layer twice, to destinations that differ in NAME as well as
+        location, and compares the complete file tree — every path, every byte,
+        the `.varve-export.json` stamp included — for ALL FIVE adapters
+        (export-cargo, export-crates-vendor, export-bazel-distdir, export-vsix,
+        export-bazel), over a fixture carrying a source-provenance tool, three
+        crates including two versions of one name, and two `.vsix`.
+        Clause 4 is unchanged and deliberately so: `varve docs threat-model`
+        still says varve signs what its build produced and does not prove the
+        build was deterministic. Nothing here makes that sentence false.
+        Mutations, all applied and reverted: `export-cargo` embedding the
+        destination path in the config — varve#72 exactly (killed);
+        `export-crates-vendor` doing the same (killed); the export stamp
+        carrying the destination (killed); `cargo_config_toml` made absolute
+        again (killed, by the corrected REQ-PRODUCE-002 test).
+        One EQUIVALENT mutant, reported rather than hidden: switching
+        `export-bazel`'s registry map to a `HashMap` survives, because the map's
+        iteration order affects only the order of printed lines — each
+        `<tool>.json` file's content is independent of it. The output bytes are
+        unchanged, so there is nothing for a test to catch.
+      steps:
+        - run: cargo test -p varve --test cli every_export_adapter_is_byte_identical_between_two_runs
+        - run: cargo test -p varve --test cli a_relative_out_is_resolved_not_embedded_verbatim
+        - run: cargo test -p varve-core config_redirects_crates_io_to_the_local_registry
+        # The empirical answer, made permanent: the oracle builds from a
+        # subdirectory of the export root and asserts that no registry exists
+        # at either the cwd-relative or the config-dir-relative candidate.
+        - run: cargo test -p varve-core --test cargo_offline a_varve_exported_registry_resolves_a_real_graph_and_builds_it_correctly
+        - run: cargo test -p varve-core --test cargo_offline a_varve_vendored_crate_builds_offline_through_cargo
+    links:
+      - type: verifies
+        target: REQ-REPRO-001
