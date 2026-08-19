@@ -51,8 +51,11 @@ enum Cmd {
         #[arg(long, value_name = "TRIPLE")]
         platform: Option<String>,
     },
-    /// Re-verify the pinned layer against its retained signature and the
-    /// signed digests — the install-time verdict, repeated offline.
+    /// Re-check the pinned layer offline: retained signature, the signed
+    /// digest of every entry FOR THIS PLATFORM, each composed layer, the
+    /// line's anti-rollback mark, and PATH shadowing. Entries for other
+    /// platforms and files the manifest does not name are NOT checked — see
+    /// `varve docs verify`.
     Verify {
         /// Verify every installed layer instead of only the pinned one.
         #[arg(long)]
@@ -2026,6 +2029,46 @@ fn verify(
     // is where environment drift belongs (the precedent REQ-EXPORT-SYNC-001
     // set for stale exports), so this fails rather than warns (varve#66).
     verify_no_shadowing(&ctx, store)?;
+    // varve#76: verify claimed to be "the install-time verdict, repeated
+    // offline" and was not — the install-time verdict includes anti-rollback
+    // and verify's did not, so a pin downgraded to an already-installed older
+    // layer verified clean, exit 0. The docs tell people to run verify in CI
+    // AS THE GATE, so the downgrade passed the gate. Per-line offline
+    // anti-rollback is varve's most defensible property; the command a
+    // consumer runs to check it must check it.
+    verify_no_rollback(&ctx, store)?;
+    Ok(())
+}
+
+/// Fail when the layer the PIN resolves to sits below its line's high-water
+/// mark (varve#76).
+///
+/// Scoped to the resolved layer deliberately. An older layer merely PRESENT in
+/// the store is not a danger — a consumer may keep one around — but the layer
+/// the pin dispatches being stale is precisely the attack anti-rollback
+/// exists to stop. Checking every installed layer would fail on legitimately
+/// retained ones, and a check that fires on correct setups is one people
+/// switch off (the REQ-SHADOW-001 lesson).
+fn verify_no_rollback(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
+    let resolved = varve_core::resolve(&ctx.pin, store)?;
+    let payload = std::fs::read(resolved.layer.root.join("layer.json"))?;
+    let manifest = varve_core::LayerManifest::parse(&payload)?;
+    let marks = varve_core::HighWaterMarks::load(store.root())?;
+    if let varve_core::RollbackVerdict::Rollback {
+        line,
+        presented,
+        high_water,
+    } = marks.check(&manifest)
+    {
+        bail!(
+            "the layer verifies, but the pin resolves to a STALE layer: {} presents counter \
+             {presented} while the {line} line's high-water mark is {high_water}. A \
+             validly-signed older layer is exactly what anti-rollback exists to refuse — \
+             `install` would have refused this. Move the pin forward, or if you are \
+             deliberately going back, see `varve docs recovery`.",
+            manifest.layer
+        );
+    }
     Ok(())
 }
 
@@ -2240,20 +2283,40 @@ fn verify_composition_inner(
             // No realm named: the including layer's own root applies.
             None => ctx_verifier(ctx)?,
         };
+        // How the root was chosen, in words a reader can act on. `<including
+        // layer's>` used to leak into BOTH messages verbatim — an unrendered
+        // template placeholder in the output of the command whose whole job is
+        // to be believed (varve#78).
+        let vouched_by = match &inc.realm {
+            Some(name) => format!("realm '{name}'"),
+            None => "this project's own trust root (the include names no realm)".to_string(),
+        };
         let checked =
             varve_core::verify_installed(store, &entry, &verifier, &varve_core::host_platform())
                 .with_context(|| {
-                    format!(
-                        "composed layer {} (from realm '{}') failed verification",
-                        entry.layer,
-                        inc.realm.as_deref().unwrap_or("<including layer's>")
-                    )
+                    let mut msg = format!(
+                        "composed layer {} failed verification against {vouched_by}",
+                        entry.layer
+                    );
+                    // The commonest cause is not tampering. An `[[include]]`
+                    // with no `realm` is checked against the PIN's root, so a
+                    // layer another realm signed — the entire point of
+                    // composition — is accused of a bad signature. Say so, or
+                    // the reader goes hunting for an attacker.
+                    if inc.realm.is_none() {
+                        msg.push_str(
+                            ". If the included layer comes from a DIFFERENT realm, this is the \
+                             expected result of an `[[include]]` with no `realm =` — its own \
+                             realm's root is the one that vouches for it. Add `realm` to the \
+                             include and re-deposit; the annotation is inside the signed payload, \
+                             so it cannot be added afterwards",
+                        );
+                    }
+                    msg
                 })?;
         println!(
-            "  composes {} {} — verified against realm '{}': {checked} tool(s) match",
-            entry.layer,
-            entry.digest,
-            inc.realm.as_deref().unwrap_or("<including layer's>")
+            "  composes {} {} — verified against {vouched_by}: {checked} tool(s) match",
+            entry.layer, entry.digest,
         );
         // Composition is a graph: verify what this layer composes too, on a
         // path that remembers where it has been.

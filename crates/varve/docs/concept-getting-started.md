@@ -48,7 +48,7 @@ rivet --version        # dispatched from the pinned layer
 ```sh
 varve which rivet      # which binary runs here, and from which layer
 varve verify           # re-run the install-time verdict, offline
-varve list             # every layer installed, by realm
+varve list             # every layer installed; realm rows labelled by fingerprint
 varve status           # support window, yanks, known problems
 ```
 

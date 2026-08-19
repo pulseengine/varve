@@ -40,5 +40,5 @@ provenance recorded at deposit`, and if nothing qualifies it fails with
 deposit spec (`varve docs config-reference`).
 
 Every adapter writes a `.varve-export.json` stamp binding the directory to the
-layer that produced it, so `varve verify --exports` fails when your pin moves
+layer that produced it, so `varve verify --export DIR` fails when your pin moves
 and the export does not.
