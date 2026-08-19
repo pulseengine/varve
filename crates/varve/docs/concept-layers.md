@@ -4,8 +4,16 @@ A layer is one signed, dated bundle of tools and artifacts — `YYYY.MM.P`. The
 initial deposit of a line is `.0`; a patch inside a frozen line is `.1`, `.2`, …
 Layers are content-addressed by their signed manifest digest and coexist in the
 core, so switching a project between layers costs no download — it is a pin edit.
-Every layer carries a monotonic release counter and issued-at inside the signed
-payload, so a stale-but-valid layer cannot be passed off as current.
+Every layer carries a monotonic release counter and an issued-at date inside the
+signed payload. **The counter is what stops a stale-but-valid layer**: `install`
+refuses one below its line's high-water mark, and since varve#76 `verify`
+refuses a pin that *resolves* to one, so the CI gate and the install agree.
+
+`issued-at` is **not** part of that verdict. It feeds one advisory at install —
+`warning: layer 1990.01.0 was issued 13379 days ago` past 90 days, exit 0 — and
+nothing at all in `verify`. Nor is a *future* date questioned: a layer stamped
+`2099-01-01` installs and verifies clean. Treat issued-at as a label on the
+layer, not a control.
 
 ## Composition
 
@@ -15,4 +23,19 @@ varve does not choose between layers: a tool exposed by two of them is an error 
 
 `varve verify` walks the composition and verifies each included layer against its own realm's trust root, recursing — a composition is only as trustworthy as every layer in it, and the included layer's tools are on PATH exactly like the root's.
 
-Produce one with `[[include]]` tables in a deposit spec file (`digest`, and optionally `realm` and `layer`). An included layer must already be installed; fetching one transitively is not yet implemented, so resolution and verification both fail naming the missing layer and its corrective `varve install` (REQ-COMPOSE-001).
+Produce one with `[[include]]` tables in a deposit spec file: `digest` **and
+`realm`**, plus an optional `layer` used only in error messages. An included
+layer must already be installed; fetching one transitively is not yet
+implemented, so resolution and verification both fail naming the missing layer
+and its corrective `varve install` (REQ-COMPOSE-001).
+
+The parser will accept an include without `realm`. It is nonetheless
+**required in practice**.
+Omit it and no `include.realm` annotation is written into the signed
+payload, so `verify` falls back to the *pinned project's* trust root. That is
+right only when the included layer happens to be signed by the same key — and
+composition exists precisely because it usually is not. In the cross-realm case
+the layer installs cleanly, then `verify` reports the included layer's signature
+as failing, which is untrue: the bytes are perfectly signed, by a root nobody
+asked. Because the annotation lives inside the signed payload, the only fix is
+to re-deposit.

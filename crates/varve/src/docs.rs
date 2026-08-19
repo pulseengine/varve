@@ -73,7 +73,7 @@ pub const TOPICS: &[Topic] = &[
     topic!("air-gap", "Air-gapped operation", "concept-air-gap.md"),
     topic!(
         "environment",
-        "Environment — VARVE_ROOT, VARVE_TRUST_ROOT, and precedence",
+        "Environment — every variable varve reads, and precedence",
         "concept-environment.md"
     ),
     topic!(
@@ -515,6 +515,102 @@ mod tests {
                 threat.contains(needle),
                 "the threat-model topic must state the limit `{needle}` — a reader \
                  who cannot reach SECURITY.md has only this"
+            );
+        }
+    }
+
+    fn body(slug: &str) -> &'static str {
+        TOPICS
+            .iter()
+            .find(|t| t.slug == slug)
+            .unwrap_or_else(|| panic!("topic {slug} must exist"))
+            .body
+    }
+
+    // rivet: verifies REQ-DOCS-002
+    #[test]
+    fn the_topics_state_the_limits_a_ten_persona_audit_found_them_denying() {
+        // varve#78. Each of these was a documented claim that the binary
+        // contradicts. The claim is cheap to reintroduce and expensive to
+        // catch by review, so each correction is pinned by the phrase that
+        // carries it — a doc that says the true thing passes, and the false
+        // predecessor cannot come back quietly.
+
+        // THE one a security reviewer's mental model rests on: a planted file
+        // is not inert. `run`, `which` and `shim install` all take it, because
+        // dispatch enumerates the DIRECTORY and the signature covers only what
+        // the manifest names.
+        let threat = body("threat-model");
+        for needle in [
+            "unnamed files ARE dispatched",
+            "enumerates the **directory**",
+            "varve shim install",
+            "equivalent to code execution",
+        ] {
+            assert!(
+                threat.contains(needle),
+                "the threat-model topic must say `{needle}` — the previous text \
+                 read as though a planted file were inert, and it is dispatched"
+            );
+        }
+
+        // An `[[include]]` with no `realm` is not "optional": it installs
+        // clean and then accuses a correctly-signed layer of a bad signature.
+        for slug in ["layers", "config-reference"] {
+            let t = body(slug);
+            assert!(
+                t.contains("required in practice"),
+                "{slug} must not present `[[include]].realm` as merely optional"
+            );
+            assert!(
+                t.contains("re-deposit") || t.contains("re-depositing"),
+                "{slug} must say the include annotation is inside the SIGNED \
+                 payload, so it cannot be added afterwards"
+            );
+        }
+
+        // The parser knows seven `[[tool]]` kinds; the reference listed six.
+        let cfg = body("config-reference");
+        for kind in [
+            "tool",
+            "crate",
+            "wit",
+            "zephyr-module",
+            "sdk",
+            "wasm-component",
+            "vsix",
+        ] {
+            assert!(
+                cfg.contains(kind),
+                "config-reference must list the `{kind}` payload kind"
+            );
+        }
+
+        // `varve list` labels by trust-root FINGERPRINT; a realm name appears
+        // only when a realms file in scope maps it back.
+        let env = body("environment");
+        assert!(
+            env.contains("fingerprint") && env.contains("varve-realms.toml"),
+            "environment must say `list` labels by fingerprint, not by realm"
+        );
+        // The variable that appeared in no topic at all.
+        for needle in ["VARVE_REGISTRY_AUTH", "VARVE_UPDATE_API", "VARVE_ROOT"] {
+            assert!(env.contains(needle), "environment must document {needle}");
+        }
+
+        // The claim I wrote after testing only the happy path: re-installing
+        // does NOT repair a layer once its line's counter has moved past it.
+        let rec = body("recovery");
+        for needle in [
+            "does not work",
+            "rollback refused",
+            "Deleting the layer directory does not help",
+            "verify --all",
+        ] {
+            assert!(
+                rec.contains(needle),
+                "recovery must state `{needle}` — repair-in-place holds only \
+                 while no higher counter in the line has been installed"
             );
         }
     }

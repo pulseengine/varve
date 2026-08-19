@@ -1419,6 +1419,130 @@ fn a_rolled_back_layer_is_refused_by_the_cli() {
         .stderr(predicate::str::contains("rollback").or(predicate::str::contains("high-water")));
 }
 
+/// Deposit one layer of a line under a caller-supplied key, so several layers
+/// share ONE trust root — `signed_layer_fixture` mints a fresh keypair per
+/// call, and anti-rollback is a property of a line, which needs two layers a
+/// single `verify` can check against a single root.
+fn deposit_under(
+    fx: &Fixture,
+    key: &std::path::Path,
+    layer: &str,
+    counter: u64,
+) -> std::path::PathBuf {
+    let dir = fx.project.parent().unwrap();
+    let tool = dir.join(format!("synth-{layer}"));
+    std::fs::write(&tool, format!("#!/bin/sh\necho {layer}\n")).unwrap();
+    let layout = dir.join(format!("layout-{layer}"));
+    varve(fx)
+        .args([
+            "deposit",
+            "--layer",
+            layer,
+            "--channel",
+            "qualified",
+            "--counter",
+            &counter.to_string(),
+            "--issued-at",
+            "2026-08-01T00:00:00Z",
+            "--key",
+        ])
+        .arg(key)
+        .arg("--out")
+        .arg(&layout)
+        .arg("--tool")
+        .arg(format!("synth@1.0.0={}", tool.display()))
+        .assert()
+        .success();
+    layout
+}
+
+// rivet: verifies REQ-ROLLBACK-001, REQ-VERIFY-001
+#[test]
+fn verify_refuses_a_pin_that_resolves_below_the_lines_high_water_mark() {
+    // varve#76. `verify` called itself "the install-time verdict, repeated
+    // offline" and was not: the install-time verdict includes anti-rollback
+    // and verify's did not. So a pin edited back to an already-installed
+    // OLDER layer verified clean, exit 0 — and the docs tell people to run
+    // `verify` in CI AS THE GATE, so the downgrade passed the gate. The layer
+    // is genuinely signed and its digests genuinely match; every individual
+    // answer was true and the composite was false.
+    let fx = fixture(None, &[]);
+    let dir = fx.project.parent().unwrap();
+    let key = dir.join("root.key");
+    let pubf = dir.join("root.pub");
+    varve(&fx)
+        .args(["keygen", "--out"])
+        .arg(&key)
+        .arg("--pub")
+        .arg(&pubf)
+        .assert()
+        .success();
+
+    let old = deposit_under(&fx, &key, "2026.08.0", 1);
+    let new = deposit_under(&fx, &key, "2026.08.5", 5);
+    let pin = |layer: &str| {
+        std::fs::write(
+            fx.project.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"{layer}\"\n"
+            ),
+        )
+        .unwrap()
+    };
+
+    // Install the old one, then the new one: the line's high-water mark rises
+    // to 5 while BOTH layers stay on disk, which is legitimate — a consumer
+    // may keep an older layer around.
+    pin("2026.08.0");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &pubf)
+        .args(["install", "--from"])
+        .arg(&old)
+        .assert()
+        .success();
+    pin("2026.08.5");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &pubf)
+        .args(["install", "--from"])
+        .arg(&new)
+        .assert()
+        .success();
+
+    // At the mark, verify passes — the check must not fire on a correct
+    // setup, or it becomes a check people switch off.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &pubf)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("verified"));
+
+    // Edit the pin back to the older, already-installed layer. Nothing about
+    // the layer is wrong; what is wrong is that the pin now DISPATCHES it.
+    pin("2026.08.0");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &pubf)
+        .arg("verify")
+        .assert()
+        .failure()
+        // Both counters, so the reader can see the gap and not just the
+        // verdict — and the layer it resolved to, so they know which pin.
+        .stderr(
+            predicate::str::contains("2026.08.0")
+                .and(predicate::str::contains("counter 1"))
+                .and(predicate::str::contains("high-water mark is 5")),
+        );
+
+    // …and `install` refuses the same downgrade, which is the verdict verify
+    // now repeats. The two commands must not disagree.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &pubf)
+        .args(["install", "--from"])
+        .arg(&old)
+        .assert()
+        .failure();
+}
+
 // rivet: verifies REQ-OFFLINE-001
 #[test]
 fn archive_then_offline_install_round_trips_with_verification_unchanged() {

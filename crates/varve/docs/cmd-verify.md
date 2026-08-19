@@ -1,6 +1,22 @@
 # varve verify [--all] [--export DIR]...
 
-Re-runs the install-time verdict offline against the retained signature and signed digests — for the pinned layer, or every installed layer with `--all`. The gate, repeated.
+Re-checks the pinned layer offline — or every installed layer with `--all`.
+
+## What it checks
+
+- The retained DSSE envelope verifies against the pinned trust root, and the signed payload is byte-identical to the stored `layer.json`.
+- Every manifest entry **for this platform** is present and hashes to its signed digest.
+- Each composed layer, recursively, against its own realm's root.
+- The pin does not resolve **below its line's high-water mark** — the anti-rollback verdict `install` applies, now applied here too (varve#76), so the CI gate and the install agree.
+- No binary earlier on `PATH` shadows a pinned tool (REQ-SHADOW-001).
+
+## What it does not check
+
+- **Other platforms.** Entries annotated for another target triple are skipped silently and there is no `--platform` override on `verify`. A three-entry layer with one Linux entry reports `2 tool(s) match` and exits 0 on macOS. `verify` says nothing about the third.
+- **Files the manifest does not name.** A binary planted in an installed layer's `bin/` passes verify untouched — and is dispatched. See `varve docs threat-model`.
+- **Yank, support window, `issued-at`.** A yanked layer verifies clean; `varve status` is where withdrawal lives. `issued-at` is never evaluated at all.
+
+`--all` widens the *set of layers*, not the set of checks: the platform and unnamed-file limits above still hold for each one.
 
 `--export DIR` (repeatable) also checks a committed export directory against the current pin: the `.varve-export.json` stamp written by `varve export-*` must name the layer the pin resolves to. If the pin has moved on, the export is stale and verify **fails** (non-zero exit); an absent or malformed stamp is likewise a failure. Run it in CI so a stale vendored tree cannot silently keep serving the old crates (REQ-EXPORT-SYNC-001).
 

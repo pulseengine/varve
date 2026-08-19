@@ -31,6 +31,8 @@ pub const REF_NAME: &str = "org.opencontainers.image.ref.name";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
+    #[error("the layer's baseline line-status could not be carried into the archive: {0}")]
+    LineStatus(String),
     #[error("io error at {path}: {source}")]
     Io {
         path: String,
@@ -130,7 +132,31 @@ pub fn export(store: &Store, layer: &InstalledLayer, dest: &Path) -> Result<(), 
     for c in &carried {
         crate::attestcarry::attach(dest, &c.statement, &c.bytes)?;
     }
-    let _ = store; // reads go through the layer's recorded root; the store itself is untouched
+    // Carry the line's baseline advisory across the gap (varve#77). Without
+    // this, `archive` dropped it: the deposit layout held three manifests and
+    // the archive held two, so the AIR-GAPPED consumer — the one the baseline
+    // exists for, and the one who cannot ask a registry instead — got a
+    // permanently broken `varve status`. The one transport that most needs a
+    // yank to arrive was the one discarding it. The attestation carriage added
+    // alongside this already did it correctly; line-status was simply never
+    // given the same treatment.
+    //
+    // The bytes are re-attached VERBATIM from the cache and re-verified by the
+    // far side against its own trust root. Archiving is a transport, not a
+    // place where a signed document is re-shaped.
+    // `store.root()`, not `varve_root()`: install writes the cache at the
+    // store's own root and `varve status` reads it there, so a realm
+    // partition keeps its baseline under `realms/<fingerprint>/state`.
+    // Reading from the varve root instead would have found nothing for every
+    // realm install — the same drop this fix exists to close, one layer down.
+    let cache = crate::linestatus::StatusCache::at_root(store.root());
+    if let Some(envelope) = cache
+        .envelope_bytes(layer.layer.line())
+        .map_err(|e| ArchiveError::LineStatus(e.to_string()))?
+    {
+        crate::linestatus::attach_to_layout(dest, layer.layer.line(), &envelope)
+            .map_err(|e| ArchiveError::LineStatus(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -573,6 +599,133 @@ mod tests {
         assert!(reports[0].binds, "reason: {:?}", reports[0].reason);
         assert_eq!(reports[0].kind, "sbom");
         assert_eq!(reports[0].producer, "acme-ci");
+    }
+
+    // rivet: verifies REQ-STATUS-DIST-001
+    #[test]
+    fn a_yank_survives_archive_and_an_offline_install_into_a_fresh_core() {
+        // varve#77. `archive` dropped the line-status: the deposit layout held
+        // three manifests and the archive held two, so the AIR-GAPPED consumer
+        // — the one who cannot ask a registry instead — got a permanently
+        // broken `varve status`. The one transport that most needs a yank to
+        // arrive was the one discarding it.
+        //
+        // The assertion is the YANK, deliberately, not a manifest count: a
+        // count passes when the WRONG blob travels, and a yank that does not
+        // reach the far side is the whole defect.
+        use crate::linestatus::{LineStatus, StatusCache};
+        let (sk, pk) = generate_root_keypair();
+        let tool = b"synth-bytes".to_vec();
+        let blob_digest = manifest_digest(&tool);
+        let payload = manifest_with_tools(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[("synth", &blob_digest)],
+        );
+        let envelope = sign_layer_manifest(&payload, &sk, "varve-root-1").unwrap();
+        let doc = LineStatus {
+            line: "2026.07".into(),
+            counter: 3,
+            issued_at: "2026-08-07T00:00:00Z".into(),
+            support_until: Some("2028-07-31".into()),
+            yanked: std::collections::BTreeMap::from([(
+                "2026.07.0".to_string(),
+                "CVE-2026-0001 in synth".to_string(),
+            )]),
+            known_problems: Vec::new(),
+        };
+        let status_envelope = doc.sign(&sk, "varve-root-1").unwrap().into_bytes();
+        let source = MemorySource::new()
+            .with_manifest(envelope.as_bytes())
+            .with_blob(&blob_digest, &tool)
+            .with_line_status(&status_envelope);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let store = Store::at(&root);
+        let mut marks = HighWaterMarks::load(&root).unwrap();
+        let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &verifier,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap();
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        // What `varve install` does next: verify the carried baseline against
+        // the trust root and cache it so `status` answers offline.
+        let cached = crate::linestatus::cache_baseline_from_source(
+            &source,
+            &LayerRef::Name("2026.07.0".parse().unwrap()),
+            &line,
+            &pk,
+            store.root(),
+        )
+        .unwrap();
+        assert_eq!(cached, Some(3), "the near side cached the advisory");
+        let layer = store.get(&outcome.digest).unwrap().unwrap();
+
+        let dest = tmp.path().join("archive");
+        export(&store, &layer, &dest).unwrap();
+
+        // A fresh core on the far side of the gap: nothing in common with the
+        // first but the pinned root and this directory.
+        let fresh_root = tmp.path().join("fresh");
+        let fresh = Store::at(&fresh_root);
+        let mut fresh_marks = HighWaterMarks::load(&fresh_root).unwrap();
+        let far = OciLayoutSource::at(&dest);
+        install(
+            &pin("2026.07.0"),
+            &far,
+            &verifier,
+            &fresh,
+            &mut fresh_marks,
+            &policy(),
+        )
+        .unwrap();
+        let carried = crate::linestatus::cache_baseline_from_source(
+            &far,
+            &LayerRef::Name("2026.07.0".parse().unwrap()),
+            &line,
+            &pk,
+            fresh.root(),
+        )
+        .unwrap();
+        assert_eq!(carried, Some(3), "the advisory crossed the gap");
+
+        // …and on the far side it is READ BACK as a yank, re-verified against
+        // that machine's own trust root — which is what `varve status` prints.
+        let there = StatusCache::at_root(fresh.root())
+            .load(&line, &pk)
+            .unwrap()
+            .expect("the far side has a cached status document");
+        let report = there.report_for(&"2026.07.0".parse().unwrap());
+        assert_eq!(
+            report.yanked_reason.as_deref(),
+            Some("CVE-2026-0001 in synth"),
+            "the YANK is what had to arrive, not merely some blob"
+        );
+    }
+
+    // rivet: verifies REQ-STATUS-DIST-001
+    #[test]
+    fn exporting_a_layer_whose_line_has_no_cached_status_is_not_an_error() {
+        // Carrying the baseline must not turn `archive` into a command that
+        // demands one. Most lines have no advisory, and an archive of a clean
+        // line is still the artifact of record.
+        let (tmp, store, layer, _verifier, _payload) = installed();
+        let dest = tmp.path().join("archive");
+        export(&store, &layer, &dest).unwrap();
+        assert!(
+            crate::linestatus::read_any_from_layout(&dest)
+                .unwrap()
+                .is_none()
+        );
     }
 
     // rivet: verifies REQ-STORE-002
