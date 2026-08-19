@@ -449,6 +449,9 @@ pub fn deposit(
         &blobs,
         &spec.layer.to_string(),
         &spec.channel,
+        // A deposit carries every platform the producer built, so it makes no
+        // single-platform claim — unlike an archive (varve#80).
+        None,
         dest,
     )
     .map_err(|(path, source)| DepositError::Io { path, source })?;

@@ -613,6 +613,23 @@ mod tests {
                  while no higher counter in the line has been installed"
             );
         }
+
+        // varve#80. An archive carries ONE platform, because `archive` can only
+        // export what this machine installed. An operator carrying a USB stick
+        // to a mixed site has to read that before they travel, not discover it
+        // on the far side of the gap — so both topics must say it.
+        for slug in ["archive", "air-gap"] {
+            let t = body(slug);
+            assert!(
+                t.contains("one platform") || t.contains("ONE platform"),
+                "{slug} must say an archive carries one platform's payloads"
+            );
+            assert!(
+                t.contains("one archive per platform"),
+                "{slug} must say a mixed site needs one archive per platform — \
+                 varve cannot produce a cross-platform archive offline"
+            );
+        }
     }
 
     // rivet: verifies REQ-DOCS-003
