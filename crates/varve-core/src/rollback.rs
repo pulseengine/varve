@@ -39,7 +39,10 @@ pub struct HighWaterMarks {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RollbackError {
-    #[error("io error at {path}: {source}")]
+    // The io source is NOT repeated in the message: anyhow's `{err:#}` chain
+    // already appends every source, and including it here printed the cause
+    // twice (varve#60).
+    #[error("io error at {path}")]
     Io {
         path: String,
         #[source]

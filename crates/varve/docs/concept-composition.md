@@ -70,3 +70,56 @@ Each included layer is checked against **its own** realm's trust root, recursing
 - A **diamond**, where two layers share a base, is legal and walked once.
 - Depth is bounded at 8.
 - A tool exposed by **two** layers is an error naming both. varve does not choose a winner, for the same reason a pin that does not resolve uniquely is an error rather than a fallback.
+
+## What composition does not carry
+
+Composition is followed by `install`, `verify`, `run`, `which` and shims —
+and by nothing else. Three commands you might reasonably expect to walk the
+graph do not, and each gap is invisible until it bites on the far side of an
+air gap or in an assessor's reading:
+
+**`varve archive` archives one layer, not the graph.** The `[[include]]`
+reference itself survives — it is inside the signed payload and cannot be
+dropped — but the included layer's manifest and payloads do not cross.
+Installing the archive on the far side succeeds for the composing layer and
+then fails with `composes 1 layer(s) that are not installed`, naming each
+missing layer and realm. Carry **one archive per layer of the graph** and
+install them included-layers-first, exactly as online:
+
+```sh
+varve archive 2026.09.0 ./arch-own       # the composing layer
+cd upstream && varve archive 2026.08.0 ../arch-up   # the included one, separately
+```
+
+**`varve sbom` omits composed tools entirely.** The SBOM is transcribed from
+the layer's own signed manifest, and in that manifest an included layer is
+one entry: a component whose name is the manifest digest
+(`sha256-4ac5fd749abf9083…`, type `platform`), with no tool names, no
+versions, nothing an SBOM consumer can match a CVE against. The composed
+tools appear in **the included layer's own SBOM** — emit one per layer of the
+graph:
+
+```sh
+varve sbom --layer 2026.09.0 --out own.cdx.json
+varve sbom --layer 2026.08.0 --out upstream.cdx.json   # its realm's qualification, its SBOM
+```
+
+**`varve which` and the `run` provenance stamp attribute a composed tool to
+the COMPOSING layer.** The printed path is honest — it points into the
+included layer's store partition — but the `layer …` line under it, and the
+`VARVE_LAYER` / `VARVE_LAYER_MANIFEST_DIGEST` a dispatched tool receives,
+name the layer the PIN resolves to, even when the binary came from an
+included realm:
+
+```sh
+varve which uptool
+# /…/realms/7fee098c…/core/sha256-4ac5fd…/bin/uptool   ← the included layer's bytes
+# layer 2026.09.0 (qualified) sha256:40083c48…          ← the composing layer's identity
+```
+
+For provenance purposes that is a defensible statement — "produced under
+this composition" — but it is not "produced by layer 2026.08.0", and tooling
+that joins `VARVE_LAYER` against an SBOM will join against the one document
+that (see above) does not list the tool. If the record must name the layer
+that owns the binary, resolve it from the printed path or pin the included
+layer directly in a separate project directory.
