@@ -1693,11 +1693,95 @@ artifacts:
       priority: must
       category: functional
 
+  - id: REQ-STORE-002
+    type: requirement
+    title: A layer can hold many payloads, including several versions of one name
+    status: approved
+    release: v0.26.0
+    description: >
+      Raised from use and reproduced (varve#69): a layer CANNOT hold two
+      versions of the same crate. `deposit` dedups on (name, platform),
+      ignoring `version` and `kind`, so `serde@1.0.200` plus `serde@1.0.210` is
+      refused as "duplicate tool name 'serde'".
+      For a `tool` that key is correct — one `synth` per platform, and install
+      platform-filters so exactly one lands. For versioned payloads it is
+      wrong, and not at the margin: multiple versions of one crate is the
+      ordinary shape of a dependency graph. varve's OWN Cargo.lock has 252
+      packages and 14 names at more than one version, `getrandom` at three. So
+      varve cannot express its own dependency graph as a layer, `export-cargo`
+      can never satisfy a real lockfile, and REQ-LOCKPIN-001's agreement gate
+      is capped at lockfiles with no duplicate names.
+      There is a second, latent half that makes the first load-bearing:
+      `Store::lay_down` writes every payload to `bin/<name>`. Relaxing the
+      deposit check ALONE would turn a clean error into a SILENT OVERWRITE —
+      the second entry's bytes land under the first's name, and verification
+      then fails on the other entry with nothing explaining why. The two shall
+      be fixed together.
+      Clauses:
+      (1) Payload identity shall be (name, version, platform) for kinds that
+      are not dispatched by name, and (name, platform) for `tool`, which is
+      dispatched by name and must therefore resolve uniquely.
+      (2) The store shall lay a non-dispatchable payload down under a path that
+      includes its version, so two versions of one name coexist and neither
+      overwrites the other.
+      (3) `deposit` shall refuse only true duplicates under the identity of
+      clause 1, and its error shall name the version as well as the name.
+      (4) `archive` and re-verification shall round-trip a layer holding
+      several versions of one name without loss — a payload that cannot be
+      archived cannot cross an air gap, which is the whole point.
+      (5) A layer holding several versions of one crate shall export a Cargo
+      registry offering all of them, since a lockfile that names two majors
+      needs both present to build offline.
+    tags: [core, distribution]
+    links:
+      - type: traces-to
+        target: REQ-KIND-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-VSIX-001
+    type: requirement
+    title: VS Code extensions are a payload kind, pinned and verified like anything else
+    status: approved
+    release: v0.26.0
+    description: >
+      Requested (varve#68). A reproducible development environment pins its
+      compiler, its linker and its test runner, and then installs editor
+      extensions from a marketplace with no verification at all — the one part
+      of the toolchain nobody checks. A `.vsix` is a single zip file, so unlike
+      an SDK it needs no tree-shaped store (varve#67) and can ship now.
+      Clauses:
+      (1) `kind = "vsix"` shall be depositable, signed and verified exactly as
+      any other payload — the digest check is kind-agnostic (DD-003) and shall
+      stay so.
+      (2) A `.vsix` shall NOT be laid down with the execute bit. Every payload
+      today gets 0o755 because every payload used to be a tool; an extension
+      archive is not executable and marking it so is wrong.
+      (3) `varve export-vsix --out D` shall lay the extensions out so that
+      `code --install-extension <file>` consumes them directly, and shall write
+      the `.varve-export.json` stamp every other adapter writes, so
+      `varve verify --exports` catches the export going stale when the pin
+      moves.
+      (4) Several extensions, and several versions of one extension, shall
+      coexist in a layer — the same identity rule as REQ-STORE-002, on which
+      this depends.
+      (5) `varve docs` shall carry a topic with a worked example, since the
+      coverage gate requires one per subcommand and a topic without a fenced
+      example fails the strict gate.
+    tags: [distribution, ergonomics]
+    links:
+      - type: traces-to
+        target: REQ-STORE-002
+    fields:
+      priority: should
+      category: functional
+
   - id: REQ-REGISTRY-002
     type: requirement
     title: varve speaks the OCI distribution spec, not one registry's dialect
     status: approved
-    release: v0.27.0
+    release: v0.26.0
     description: >
       varve's registry client works against GHCR and would fail elsewhere, and
       the failures are quiet. Decision 2026-08-18: support potentially ANY
