@@ -3795,15 +3795,19 @@ fn install_pinned(
         .success();
 }
 
-/// A SIGNED layer holding `crate`-kind payloads, optionally composing another
-/// layer by digest. Returns (archive directory, this layer's manifest digest).
+/// A SIGNED layer holding `crate`-kind payloads, optionally composing other
+/// layers by digest. Returns (archive directory, this layer's manifest digest).
+///
+/// `includes` is a slice, not an `Option`: a layer composing TWO others is the
+/// shape that produces a diamond, and a helper that could only express one
+/// include is why no test covered the diamond at the CLI boundary.
 fn signed_crate_layer(
     fx: &Fixture,
     tag: &str,
     layer: &str,
     sk: &[u8],
     crates: &[(&str, &str, Vec<u8>)],
-    include: Option<&str>,
+    includes: &[&str],
 ) -> (std::path::PathBuf, String) {
     let mut entries: Vec<String> = Vec::new();
     let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
@@ -3815,7 +3819,7 @@ fn signed_crate_layer(
         ));
         blobs.push((d, bytes.clone()));
     }
-    if let Some(d) = include {
+    for d in includes {
         entries.push(format!(
             r#"{{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"{d}","size":0,"annotations":{{"eu.pulseengine.varve.kind":"layer"}}}}"#
         ));
@@ -3862,7 +3866,7 @@ fn an_export_follows_the_composition() {
             ("cfg-if", "1.0.0", dot_crate("cfg-if", "1.0.0", "")),
             ("serde", "1.0.200", dot_crate("serde", "1.0.200", "")),
         ],
-        None,
+        &[],
     );
     // The pinned layer: its own crate, plus `serde` at a DIFFERENT version —
     // legal, and both must export (clause 2).
@@ -3879,7 +3883,7 @@ fn an_export_follows_the_composition() {
             ),
             ("serde", "1.0.210", dot_crate("serde", "1.0.210", "")),
         ],
-        Some(&up_digest),
+        &[&up_digest],
     );
     // `install` follows the pin, so the extender installs the upstream layer
     // under its own pin and then moves the pin to their own — the sequence a
@@ -3943,6 +3947,129 @@ fn an_export_follows_the_composition() {
     );
 }
 
+// rivet: verifies REQ-COMPOSE-001
+#[test]
+fn verify_walks_a_diamond_once_instead_of_calling_it_a_cycle() {
+    // A diamond — two layers sharing a base — is the most ordinary composition
+    // there is, and both `docs composition` and `docs layers` promise it is
+    // "walked once and is perfectly legal". `compose::walk` was fixed for this
+    // in v0.23.0; `verify_composition_inner` is an INDEPENDENT reimplementation
+    // in the CLI that kept the bug, so `varve verify` exited 1 on a store that
+    // `install`, `run`, `which` and every export handled correctly. Found by a
+    // persona audit driving the real binary — no unit test could see it,
+    // because the broken walker lives in the binary crate and the correct one
+    // in the library.
+    //
+    // Shape: root composes MID and BASE; MID also composes BASE.
+    //   root ─┬─> mid ──> base
+    //         └─────────> base
+    // BASE is reachable by two paths and is on NEITHER path twice.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("diamond-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    let (base_archive, base_digest) = signed_crate_layer(
+        &fx,
+        "diamond-base",
+        "2026.08.0",
+        &sk,
+        &[("cfg-if", "1.0.0", dot_crate("cfg-if", "1.0.0", ""))],
+        &[],
+    );
+    let (mid_archive, mid_digest) = signed_crate_layer(
+        &fx,
+        "diamond-mid",
+        "2026.08.1",
+        &sk,
+        &[("serde", "1.0.200", dot_crate("serde", "1.0.200", ""))],
+        &[&base_digest],
+    );
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "diamond-root",
+        "2026.07.0",
+        &sk,
+        &[("rivet-core", "0.32.0", dot_crate("rivet-core", "0.32.0", ""))],
+        &[&mid_digest, &base_digest],
+    );
+
+    // `install` follows the pin, so each layer is installed under its own pin
+    // before the pin moves to the root — the sequence a real consumer performs.
+    install_pinned(&fx, &trust_root, "2026.08.0", &base_archive);
+    install_pinned(&fx, &trust_root, "2026.08.1", &mid_archive);
+    install_pinned(&fx, &trust_root, "2026.07.0", &root_archive);
+
+    // The whole finding: this exited 1 with "composition cycle while verifying".
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("composes"));
+}
+
+// rivet: verifies REQ-COMPOSE-001
+#[test]
+fn verify_does_not_mistake_a_wide_composition_for_a_deep_one() {
+    // The second defect of the same wrong data structure, and the reason the
+    // fix is a path rather than a bigger set. `verify` guarded depth with
+    // `path.len() > MAX_DEPTH` on an insert-only set, so the counter measured
+    // every layer VISITED, not how deep the walk had gone. A root composing
+    // MAX_DEPTH+2 sibling layers is one level deep and was refused as "more
+    // than 8 layers deep".
+    //
+    // A cycle, by contrast, is deliberately NOT tested at this boundary: an
+    // include is content-addressed, so a layer including itself would need its
+    // own digest to depend on its own content, and a hand-edited layer.json is
+    // refused earlier by the tamper check ("the core entry was modified after
+    // install"). The cycle guard is retained as defence in depth against a
+    // future non-content-addressed include, not because a test can reach it.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("wide-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    let width = varve_core::compose::MAX_DEPTH + 2;
+    let mut archives = Vec::new();
+    let mut digests = Vec::new();
+    for i in 0..width {
+        let (archive, digest) = signed_crate_layer(
+            &fx,
+            &format!("wide-{i}"),
+            // Distinct layer ids so each installs under its own pin.
+            &format!("2026.08.{i}"),
+            &sk,
+            &[("cfg-if", &format!("1.0.{i}"), dot_crate("cfg-if", &format!("1.0.{i}"), ""))],
+            &[],
+        );
+        archives.push((format!("2026.08.{i}"), archive));
+        digests.push(digest);
+    }
+    let refs: Vec<&str> = digests.iter().map(|d| d.as_str()).collect();
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "wide-root",
+        "2026.07.0",
+        &sk,
+        &[("rivet-core", "0.32.0", dot_crate("rivet-core", "0.32.0", ""))],
+        &refs,
+    );
+
+    for (layer, archive) in &archives {
+        install_pinned(&fx, &trust_root, layer, archive);
+    }
+    install_pinned(&fx, &trust_root, "2026.07.0", &root_archive);
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+}
+
 // rivet: verifies REQ-COMPOSEEXPORT-001
 #[test]
 fn an_export_refuses_a_composed_layer_it_cannot_vouch_for() {
@@ -3970,7 +4097,7 @@ fn an_export_refuses_a_composed_layer_it_cannot_vouch_for() {
             "0.32.0",
             dot_crate("rivet-core", "0.32.0", ""),
         )],
-        Some(&up_digest),
+        &[&up_digest],
     );
     varve(&fx)
         .env("VARVE_TRUST_ROOT", &trust_root)
@@ -4012,7 +4139,7 @@ fn an_export_refuses_two_layers_that_disagree_about_one_crate() {
         "2026.08.0",
         &sk,
         &[("cfg-if", "1.0.0", dot_crate("cfg-if", "1.0.0", ""))],
-        None,
+        &[],
     );
     // Same name, same version, DIFFERENT bytes.
     let (root_archive, _) = signed_crate_layer(
@@ -4025,7 +4152,7 @@ fn an_export_refuses_two_layers_that_disagree_about_one_crate() {
             "1.0.0",
             dot_crate("cfg-if", "1.0.0", "[features]\nstd = []\n"),
         )],
-        Some(&up_digest),
+        &[&up_digest],
     );
     install_pinned(&fx, &trust_root, "2026.08.0", &up_archive);
     install_pinned(&fx, &trust_root, "2026.07.0", &root_archive);
@@ -4064,7 +4191,7 @@ fn an_export_that_cannot_follow_the_composition_says_so() {
         "2026.08.0",
         &sk,
         &[("cfg-if", "1.0.0", dot_crate("cfg-if", "1.0.0", ""))],
-        None,
+        &[],
     );
     let (root_archive, _) = signed_crate_layer(
         &fx,
@@ -4076,7 +4203,7 @@ fn an_export_that_cannot_follow_the_composition_says_so() {
             "0.32.0",
             dot_crate("rivet-core", "0.32.0", ""),
         )],
-        Some(&up_digest),
+        &[&up_digest],
     );
     install_pinned(&fx, &trust_root, "2026.08.0", &up_archive);
     install_pinned(&fx, &trust_root, "2026.07.0", &root_archive);
@@ -4800,6 +4927,32 @@ fn env_enters_every_declared_environment_in_the_order_that_inverts_the_file() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("varve.toml"));
+}
+
+// rivet: verifies REQ-PIN-001
+#[test]
+fn a_schema_mistake_in_the_pin_is_reported_once_not_twice() {
+    // varve#7 fixed this for the `Layer` variant and left its siblings alone:
+    // every variant that both interpolates `{source}` into its Display AND
+    // declares `#[source]` prints its cause twice, glued by a stray `: `. That
+    // is eleven lines of output for a one-line problem, on the errors a
+    // newcomer hits first — a missing field in varve.toml. Found by a persona
+    // audit, which ranked it the highest friction-removed-per-line-changed
+    // fix in the tool.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    std::fs::write(fx.project.join("varve.toml"), "[toolchain]\n").unwrap();
+    let out = varve(&fx).arg("which").arg("rivet").assert().failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert_eq!(
+        stderr.matches("missing field").count(),
+        1,
+        "the parse error is printed once, not once per formatter layer:\n{stderr}"
+    );
+    // …and no orphaned separator left behind by the removed interpolation.
+    assert!(
+        !stderr.contains("\n: "),
+        "stray `: ` gluing a doubled cause:\n{stderr}"
+    );
 }
 
 // rivet: verifies REQ-SDK-001

@@ -228,13 +228,13 @@ pub struct Pin {
 /// Why a pin failed to parse or validate.
 #[derive(Debug, thiserror::Error)]
 pub enum PinError {
-    #[error("failed to read {path}: {source}")]
+    #[error("failed to read {path}")]
     Io {
         path: String,
         #[source]
         source: std::io::Error,
     },
-    #[error("{path}: not valid varve.toml: {source}")]
+    #[error("{path}: not valid varve.toml")]
     Toml {
         path: String,
         #[source]

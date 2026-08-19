@@ -530,7 +530,7 @@ pub fn cargo_config_toml(registry_subdir: &str) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CrateExportError {
-    #[error("io error at {path}: {source}")]
+    #[error("io error at {path}")]
     Io {
         path: String,
         #[source]

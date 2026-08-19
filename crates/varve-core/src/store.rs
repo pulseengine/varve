@@ -159,7 +159,7 @@ pub struct Store {
 /// to another layer" — the API cannot express fallback.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("io error at {path}: {source}")]
+    #[error("io error at {path}")]
     Io {
         path: String,
         #[source]

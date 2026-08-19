@@ -90,7 +90,7 @@ pub struct SdkExportReport {
 /// Why a tree payload could not be exported or relocated.
 #[derive(Debug, thiserror::Error)]
 pub enum SdkExportError {
-    #[error("io error at {path}: {source}")]
+    #[error("io error at {path}")]
     Io {
         path: String,
         #[source]

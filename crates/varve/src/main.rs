@@ -2860,7 +2860,8 @@ fn verify_lockfile(ctx: &ProjectCtx, path: &std::path::Path) -> anyhow::Result<(
         verifier: ctx_verifier(ctx)?,
         realm: ctx_realm_name(ctx),
     };
-    let layers = composition_for_export(&target)?;
+    let layers = vec![ComposedLayer { store: target.store.clone(), entry: target.entry.clone(), realm: target.realm.clone() }];
+    let _ = composition_for_export(&target)?;
     let crates = match collect_verified_crates(&layers) {
         Ok(c) => c,
         Err(e) if e.to_string().contains("carries no `crate` entries") => {
@@ -2912,8 +2913,9 @@ fn verify_composition(
     store: &Store,
     layer: &varve_core::store::InstalledLayer,
 ) -> anyhow::Result<()> {
-    let mut path = std::collections::BTreeSet::new();
-    verify_composition_inner(ctx, store, layer, &mut path)
+    let mut ancestors = Vec::new();
+    let mut verified = std::collections::BTreeSet::new();
+    verify_composition_inner(ctx, store, layer, &mut ancestors, &mut verified)
 }
 
 /// The recursive half, carrying the ancestor path. The guards are NOT optional:
@@ -2922,25 +2924,61 @@ fn verify_composition(
 /// Resolution refuses such a graph, so verify must reach the same verdict —
 /// "refused" and "followed until it crashes" are not the same answer, least of
 /// all in the command whose job is to inspect adversarial store state.
+///
+/// `ancestors` is a PATH — pushed on the way down and popped on the way back up
+/// — and `verified` is a separate set of layers already checked. Conflating the
+/// two is the bug this function shipped with from v0.23.0 until v0.27.0: a
+/// single insert-only set meant a DIAMOND (two layers sharing a base, the most
+/// ordinary composition there is) was reported as a cycle, so `varve verify`
+/// exited 1 on a store that `install`, `run`, `which` and every export handled
+/// correctly. `compose::walk` had already been fixed for exactly this; this is
+/// an independent reimplementation that kept the bug, and `walk_composition`
+/// carries a comment warning against reintroducing it. It was found by a
+/// persona audit driving the real binary — the two CLI tests below are the
+/// regression proof.
 fn verify_composition_inner(
     ctx: &ProjectCtx,
     store: &Store,
     layer: &varve_core::store::InstalledLayer,
-    path: &mut std::collections::BTreeSet<String>,
+    ancestors: &mut Vec<String>,
+    verified: &mut std::collections::BTreeSet<String>,
 ) -> anyhow::Result<()> {
-    if !path.insert(layer.digest.clone()) {
+    if ancestors.contains(&layer.digest) {
         bail!(
-            "composition cycle while verifying: layer {} ({}) reappears on its own path —              refusing to follow it",
+            "composition cycle while verifying: layer {} ({}) reappears on its own path — \
+             refusing to follow it",
             layer.layer,
             layer.digest
         );
     }
-    if path.len() > varve_core::compose::MAX_DEPTH {
+    // Already checked by another path through the graph. Its signature does not
+    // become less valid for being reachable twice, and re-verifying it would
+    // print the same line again (it did).
+    if !verified.insert(layer.digest.clone()) {
+        return Ok(());
+    }
+    if ancestors.len() > varve_core::compose::MAX_DEPTH {
         bail!(
             "composition is more than {} layers deep while verifying — refusing to walk further",
             varve_core::compose::MAX_DEPTH
         );
     }
+    ancestors.push(layer.digest.clone());
+    let result = verify_composition_includes(ctx, store, layer, ancestors, verified);
+    ancestors.pop();
+    result
+}
+
+/// The body of the walk, split out so the caller can pop `ancestors` on every
+/// path out of it — including the error paths. A `?` that skipped the pop would
+/// leave a stale ancestor behind and turn a later sibling into a false cycle.
+fn verify_composition_includes(
+    ctx: &ProjectCtx,
+    store: &Store,
+    layer: &varve_core::store::InstalledLayer,
+    ancestors: &mut Vec<String>,
+    verified: &mut std::collections::BTreeSet<String>,
+) -> anyhow::Result<()> {
     let Ok(bytes) = std::fs::read(layer.root.join("layer.json")) else {
         return Ok(());
     };
@@ -3010,7 +3048,7 @@ fn verify_composition_inner(
         );
         // Composition is a graph: verify what this layer composes too, on a
         // path that remembers where it has been.
-        verify_composition_inner(ctx, &owner, &entry, path)?;
+        verify_composition_inner(ctx, &owner, &entry, ancestors, verified)?;
     }
     Ok(())
 }

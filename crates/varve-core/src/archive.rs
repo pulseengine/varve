@@ -41,7 +41,7 @@ pub const ANN_ARCHIVED_FOR: &str = "eu.pulseengine.varve.archived-for";
 pub enum ArchiveError {
     #[error("the layer's baseline line-status could not be carried into the archive: {0}")]
     LineStatus(String),
-    #[error("io error at {path}: {source}")]
+    #[error("io error at {path}")]
     Io {
         path: String,
         #[source]

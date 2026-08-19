@@ -77,7 +77,7 @@ pub enum RealmError {
         path: String,
         reason: String,
     },
-    #[error("io error at {path}: {source}")]
+    #[error("io error at {path}")]
     Io {
         path: String,
         #[source]
