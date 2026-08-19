@@ -825,6 +825,8 @@ mod tests {
             &[],
             layer,
             "qualified",
+            // A test fixture layout, not a real archive: no platform stamp.
+            None,
             &dest,
         )
         .unwrap();

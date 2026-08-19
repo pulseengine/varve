@@ -73,6 +73,17 @@ artifacts:
         - run: cargo test -p varve-core an_archived_layer_installs_into_a_fresh_core_with_verification_unchanged
         - run: cargo test -p varve-core export_refuses_a_layer_without_its_envelope
         - run: cargo test -p varve archive_then_offline_install_round_trips_with_verification_unchanged
+        # varve#80: a MULTI-platform layer, where one tool name repeats across
+        # triples. Every fixture before these had one platform, and with one
+        # platform the name does not repeat and every blob is correct — which
+        # is why an archive holding 26 mislabelled blobs shipped.
+        - run: cargo test -p varve-core a_multi_platform_layer_archives_only_this_platforms_payloads
+        - run: cargo test -p varve-core a_multi_platform_archive_reinstalls_and_reverifies_on_its_own_platform
+        - run: cargo test -p varve-core a_consumer_on_another_platform_is_told_the_archive_carries_none_for_it
+        - run: cargo test -p varve-core a_payload_whose_bytes_do_not_match_its_signed_digest_is_never_archived
+        - run: cargo test -p varve-core an_archive_that_would_carry_no_payload_at_all_is_refused
+        - run: cargo test -p varve-core a_blob_missing_from_an_archive_of_this_platform_is_not_blamed_on_the_platform
+        - run: cargo test -p varve archive_of_a_multi_platform_layer_says_what_it_carries_and_refuses_elsewhere
     links:
       - type: verifies
         target: REQ-OFFLINE-001

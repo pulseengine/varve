@@ -3457,3 +3457,98 @@ fn a_realm_that_never_promised_an_index_installs_exactly_as_before() {
         .stdout(predicate::str::contains("signed index").not());
     varve(&fx).arg("verify").assert().success();
 }
+
+// rivet: verifies REQ-OFFLINE-001
+#[test]
+fn archive_of_a_multi_platform_layer_says_what_it_carries_and_refuses_elsewhere() {
+    // varve#80, at the boundary an operator actually touches. A tool name
+    // repeats across triples while `install` lays down only the host's, so
+    // `archive` used to write ONE host binary under every platform's digest and
+    // exit 0 calling it the artifact of record. What matters here is that the
+    // command SAYS which platform it carried and how much it left behind — an
+    // operator carrying media to a mixed site must learn that before they
+    // travel — and that a consumer on another platform is told so plainly.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("mp-root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("mp-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    for (file, bytes) in [("kilnd-a", b"kilnd-for-a"), ("kilnd-b", b"kilnd-for-b")] {
+        std::fs::write(parent.join(file), bytes).unwrap();
+    }
+    let spec = parent.join("mp-spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"kilnd\"\nversion = \"1.0.0\"\n\
+             platform = \"platform-a\"\npath = \"{a}\"\n\n\
+             [[tool]]\nname = \"kilnd\"\nversion = \"1.0.0\"\n\
+             platform = \"platform-b\"\npath = \"{b}\"\n",
+            a = parent.join("kilnd-a").display(),
+            b = parent.join("kilnd-b").display(),
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("mp-layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "k", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .args(["--platform", "platform-a"])
+        .assert()
+        .success();
+
+    // The archive names the platform it carries AND the entries it omits.
+    let air_gapped = parent.join("mp-archive");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["archive", "2026.07.0"])
+        .arg(&air_gapped)
+        .args(["--platform", "platform-a"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("1 payload for platform-a")
+                .and(predicate::str::contains("1 entry omitted"))
+                .and(predicate::str::contains("platform-b (1)")),
+        );
+
+    // Every blob holds the bytes its digest names — CONTENT, not a count.
+    for e in std::fs::read_dir(air_gapped.join("blobs/sha256")).unwrap() {
+        let e = e.unwrap();
+        let name = e.file_name().to_string_lossy().to_string();
+        let bytes = std::fs::read(e.path()).unwrap();
+        assert_eq!(
+            varve_core::manifest_digest(&bytes),
+            format!("sha256:{name}"),
+            "blob {name} does not hold the bytes it is named for"
+        );
+    }
+
+    // And the platform-b consumer is told what this archive is, not accused of
+    // tampering — before varve#80 this was `does not match its signed digest`.
+    varve(&fx)
+        .env("VARVE_ROOT", parent.join("mp-far-root"))
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&air_gapped)
+        .args(["--platform", "platform-b"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("carries no payload for platform-b")
+                .and(predicate::str::contains("archived for platform-a")),
+        );
+}

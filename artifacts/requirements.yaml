@@ -2200,6 +2200,52 @@ artifacts:
         cost, two verification steps for the consumer, is paid once and is
         stated in the tool's own output.
 
+  - id: DD-022
+    type: design-decision
+    title: An archive carries ONE platform, and says so, rather than pretending to carry all
+    status: accepted
+    release: v0.26.0
+    description: >
+      `varve archive` exports an INSTALLED layer, and `varve install` fetches
+      only the payloads of the platform it installed for, so the bytes for any
+      other triple are not on the machine doing the archiving. Two options were
+      on the table (varve#80): treat the archive as host-platform-only by
+      definition, or let `varve archive --platform` produce a cross-platform
+      artifact for a heterogeneous air-gapped site.
+      Host-platform-only is chosen. Producing a cross-platform archive would
+      mean fetching the other platforms' blobs from a registry at archive time —
+      a network operation, in the one command whose entire purpose is to work
+      without one, and one that would make `archive` a second, partial
+      implementation of `install` + `deposit`. A site with mixed architectures
+      makes one archive per platform, each on (or installed for) that platform;
+      a producer who wants a single all-platform layout already has `varve
+      deposit`, which is built from the producer's own bytes for every platform
+      at once.
+      What the decision COSTS is paid explicitly rather than discovered on the
+      far side of an air gap: `archive` platform-filters exactly as `install`
+      and `verify` do, prints the payload count it carried and the entries it
+      omitted per platform, refuses outright to write a layout that would carry
+      no payload at all, stamps `eu.pulseengine.varve.archived-for` in the
+      layout index, and a consumer on another platform is told "this archive
+      carries no payload for <triple> — it was archived for <other>" instead of
+      a digest mismatch. `--platform` on `archive` selects which platform's
+      payloads to take FROM THIS CORE (for a core laid down with `varve install
+      --platform`); it never fetches.
+    links:
+      - type: satisfies
+        target: REQ-OFFLINE-001
+    fields:
+      rationale: >
+        The defect this decision closes was silent corruption, not a missing
+        feature: `archive` located payloads by NAME, so a tool name repeating
+        across four triples wrote one host binary under four digests and exited
+        0. Fixing the location bug alone would have left the archive quietly
+        single-platform, which is the same class of failure one step later — an
+        operator learns what their media does not contain after carrying it
+        across the gap. A limit that is stated, printed, stamped in the artifact
+        and enforced at both ends is honest; an unstated one is a second defect
+        waiting for a mixed site.
+
   - id: REQ-TRACEPACK-001
     type: requirement
     title: A release carries its rivet traceability as queryable, assessor-importable evidence

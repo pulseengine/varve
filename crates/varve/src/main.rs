@@ -75,11 +75,21 @@ enum Cmd {
     },
     /// Extract the core: export an installed layer as a directory-shaped
     /// OCI image layout — the offline artifact of record.
+    ///
+    /// The archive carries ONE platform's payloads: it exports what this
+    /// machine installed, and `varve install` fetches only its own platform's
+    /// bytes. A mixed air-gapped site needs one archive per platform, each made
+    /// on (or installed for) that platform.
     Archive {
         /// Layer to export, e.g. `2026.07.0`.
         layer: String,
         /// Destination directory for the oci-layout.
         dest: PathBuf,
+        /// The platform this core was installed for (target triple) — the one
+        /// whose payloads the archive will carry. Defaults to this machine;
+        /// pass it when the core was laid down with `varve install --platform`.
+        #[arg(long, value_name = "TRIPLE")]
+        platform: Option<String>,
     },
     /// Dispatch a tool from the pinned layer, with the layer identity in the
     /// environment (VARVE_LAYER, VARVE_LAYER_MANIFEST_DIGEST) so provenance
@@ -478,7 +488,11 @@ fn run() -> anyhow::Result<()> {
             export,
             lockfile,
         } => verify(&store, all, &export, lockfile.as_deref()),
-        Cmd::Archive { layer, dest } => archive(&store, &layer, &dest),
+        Cmd::Archive {
+            layer,
+            dest,
+            platform,
+        } => archive(&store, &layer, &dest, platform),
         Cmd::Run {
             varve,
             tool_and_args,
@@ -1785,7 +1799,13 @@ fn run_deposit(
     Ok(())
 }
 
-fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result<()> {
+fn archive(
+    store: &Store,
+    layer: &str,
+    dest: &std::path::Path,
+    platform: Option<String>,
+) -> anyhow::Result<()> {
+    let platform = platform.unwrap_or_else(varve_core::host_platform);
     // Use the PROJECT'S store. `archive` filtered the ambient top-level core,
     // so for a realm-pinned layer it reported "not installed" while `list`,
     // `verify`, `which`, `run` and `sbom` all resolved it — and its corrective
@@ -1811,13 +1831,39 @@ fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result
              not supported yet; clean up the core first"
         ),
     };
-    varve_core::export_archive(&store, &entry, dest)?;
+    let summary = varve_core::export_archive(&store, &entry, dest, &platform)?;
     println!(
         "archived layer {} {} as oci-layout at {}",
         entry.layer,
         entry.digest,
         dest.display()
     );
+    // What crossed, and what did not. An archive holds one platform's payloads
+    // because that is all this machine installed, and an operator carrying this
+    // media to a mixed site has to learn that BEFORE they travel, not from a
+    // failed install on the far side of the gap (varve#80).
+    println!(
+        "  {} payload{} for {}",
+        summary.archived,
+        if summary.archived == 1 { "" } else { "s" },
+        summary.platform
+    );
+    if !summary.omitted.is_empty() {
+        let total: usize = summary.omitted.values().sum();
+        let detail = summary
+            .omitted
+            .iter()
+            .map(|(p, n)| format!("{p} ({n})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "  {total} entr{} omitted — this core holds no payload for them: {detail}\n  \
+             this archive installs on {} only; for another platform, install and archive the \
+             layer there.",
+            if total == 1 { "y" } else { "ies" },
+            summary.platform
+        );
+    }
     Ok(())
 }
 
@@ -1953,7 +1999,10 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         } else {
             let path = std::path::Path::new(from);
             if path.join("oci-layout").is_file() {
-                Box::new(varve_core::OciLayoutSource::at(path))
+                // Tell the layout which platform we want, so a payload it does
+                // not carry is reported as the single-platform archive it is
+                // rather than as a bare missing digest (varve#80).
+                Box::new(varve_core::OciLayoutSource::at(path).for_platform(&platform))
             } else {
                 Box::new(varve_core::DirSource::at(path))
             }

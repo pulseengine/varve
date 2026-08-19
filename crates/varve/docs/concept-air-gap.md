@@ -19,6 +19,8 @@ varve archive 2026.08.2 ./core      # write the offline artifact of record
 
 `archive` requires the layer to be INSTALLED, and one directory holds exactly one layer. Carry `./core` across on whatever media you use.
 
+**One archive carries one platform.** `archive` exports what the archiving machine installed, and `install` fetches only its own platform's payloads, so an archive of a four-platform layer holds the payloads for the archiving host and nothing for the other three. `archive` prints the count it carried and the entries it omitted. A mixed site needs one archive per platform, each made on that platform — nothing in varve can produce a cross-platform archive offline, because the other platforms' bytes are not on the machine. Installing an archive on a platform it does not carry is refused before anything lands, naming both triples.
+
 Inside the gap:
 
 ```sh

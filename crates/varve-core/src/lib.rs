@@ -54,7 +54,7 @@ pub mod update;
 pub mod verify;
 pub mod vsixexport;
 
-pub use archive::{ArchiveError, OciLayoutSource, export as export_archive};
+pub use archive::{ArchiveError, ExportSummary, OciLayoutSource, export as export_archive};
 pub use deposit::{
     DepositError, DepositFileSpec, DepositOutcome, DepositSpec, DepositTool, RunnerSpec,
     ToolSource, deposit, parse_deposit_spec,

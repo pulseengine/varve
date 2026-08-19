@@ -53,6 +53,22 @@ pub enum LayerRef {
 pub enum SourceError {
     #[error("source has no layer matching {0}")]
     NotFound(String),
+    /// Absence with a KNOWN cause: the source is an archive of one platform and
+    /// the caller wants another. Distinct from `NotFound` because the operator's
+    /// next move is different — nothing is corrupt, nothing is missing from the
+    /// archive that belongs in it, and no amount of re-copying the media will
+    /// help (varve#80).
+    #[error(
+        "this archive carries no payload for {wanted} — it was archived for {archived_for}, and \
+         `varve archive` exports only the payloads the archiving machine installed, so it holds \
+         {archived_for} payloads and nothing else (blob {digest} is not in it). Install the layer \
+         on a machine running {wanted} and archive it there to carry {wanted} across the gap."
+    )]
+    NoPayloadForPlatform {
+        digest: String,
+        wanted: String,
+        archived_for: String,
+    },
     #[error("source transport error: {0}")]
     Transport(String),
 }
