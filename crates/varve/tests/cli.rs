@@ -4084,7 +4084,11 @@ fn an_export_verifies_a_composed_layer_against_its_own_realms_root() {
         "xrealm-root",
         "2026.07.0",
         &root_sk,
-        &[("rivet-core", "0.32.0", dot_crate("rivet-core", "0.32.0", ""))],
+        &[(
+            "rivet-core",
+            "0.32.0",
+            dot_crate("rivet-core", "0.32.0", ""),
+        )],
         &[&format!("{up_digest}@upstream")],
     );
 
@@ -4143,7 +4147,11 @@ fn verify_lockfile_follows_the_composition_not_just_the_root() {
         "lockcompose-root",
         "2026.07.0",
         &sk,
-        &[("rivet-core", "0.32.0", dot_crate("rivet-core", "0.32.0", ""))],
+        &[(
+            "rivet-core",
+            "0.32.0",
+            dot_crate("rivet-core", "0.32.0", ""),
+        )],
         &[&up_digest],
     );
     install_pinned(&fx, &trust_root, "2026.08.0", &up_archive);
@@ -4227,7 +4235,11 @@ fn verify_walks_a_diamond_once_instead_of_calling_it_a_cycle() {
         "diamond-root",
         "2026.07.0",
         &sk,
-        &[("rivet-core", "0.32.0", dot_crate("rivet-core", "0.32.0", ""))],
+        &[(
+            "rivet-core",
+            "0.32.0",
+            dot_crate("rivet-core", "0.32.0", ""),
+        )],
         &[&mid_digest, &base_digest],
     );
 
@@ -4278,7 +4290,11 @@ fn verify_does_not_mistake_a_wide_composition_for_a_deep_one() {
             // Distinct layer ids so each installs under its own pin.
             &format!("2026.08.{i}"),
             &sk,
-            &[("cfg-if", &format!("1.0.{i}"), dot_crate("cfg-if", &format!("1.0.{i}"), ""))],
+            &[(
+                "cfg-if",
+                &format!("1.0.{i}"),
+                dot_crate("cfg-if", &format!("1.0.{i}"), ""),
+            )],
             &[],
         );
         archives.push((format!("2026.08.{i}"), archive));
@@ -4290,7 +4306,11 @@ fn verify_does_not_mistake_a_wide_composition_for_a_deep_one() {
         "wide-root",
         "2026.07.0",
         &sk,
-        &[("rivet-core", "0.32.0", dot_crate("rivet-core", "0.32.0", ""))],
+        &[(
+            "rivet-core",
+            "0.32.0",
+            dot_crate("rivet-core", "0.32.0", ""),
+        )],
         &refs,
     );
 
@@ -4757,9 +4777,7 @@ fn sdk_tarball_with_escaping_link(built: &str) -> Vec<u8> {
         b.append_link(
             &mut link,
             "bin/escape-abs-dotdot",
-            std::path::Path::new(&format!(
-                "{built}/../../../../../../../../tmp/varve-pwned"
-            )),
+            std::path::Path::new(&format!("{built}/../../../../../../../../tmp/varve-pwned")),
         )
         .unwrap();
         b.finish().unwrap();

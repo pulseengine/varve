@@ -1295,6 +1295,73 @@ path   = "before-shims"
         ));
     }
 
+    // rivet: verifies REQ-EXPORTDECL-001
+    #[test]
+    fn is_current_is_false_for_every_status_that_is_not_current() {
+        // `is_current` was asserted TRUE in one place and false in none, so
+        // replacing its whole body with `true` survived the mutation gate: a
+        // stale, missing, mismatched or unreadable export would have reported
+        // itself fresh and `verify` would have exited 0 on the drift the
+        // declaration exists to catch. Found by cargo mutants in CI.
+        assert!(DeclaredExportStatus::Current.is_current());
+        for status in [
+            DeclaredExportStatus::Missing,
+            DeclaredExportStatus::Stale {
+                stamped: "sha256:aaaa".into(),
+                current: "sha256:bbbb".into(),
+            },
+            DeclaredExportStatus::KindMismatch {
+                declared: "vsix".into(),
+                stamped: "cargo".into(),
+            },
+            DeclaredExportStatus::Unreadable("truncated".into()),
+        ] {
+            assert!(
+                !status.is_current(),
+                "{status:?} must not report itself current"
+            );
+        }
+    }
+
+    // rivet: verifies REQ-EXPORTDECL-001, REQ-SHADOW-001
+    #[test]
+    fn an_export_reached_through_a_symlink_is_the_same_export() {
+        // `is_within` is `lexical || canonical`, and every existing test
+        // satisfied BOTH halves, so flipping it to `&&` survived. The `||` is
+        // load-bearing in exactly one direction: a checkout reached through a
+        // symlink gives a path that does NOT lexically start with the declared
+        // directory but canonicalises into it. Under `&&` such an export reads
+        // as undeclared, and a declared SDK's compiler gets reported as a
+        // hijack — the cry-wolf failure clause 5 exists to prevent.
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().join("real/export");
+        // The binary must really exist: `canonicalize` resolves whole paths,
+        // so a fixture that only creates directories tests the not-generated
+        // branch instead of the symlink one.
+        std::fs::create_dir_all(real_dir.join("bin")).unwrap();
+        std::fs::write(real_dir.join("bin/gcc"), b"#!/bin/sh\n").unwrap();
+        let link = tmp.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tmp.path().join("real"), &link).unwrap();
+        #[cfg(not(unix))]
+        return;
+
+        // Reached through the symlink: lexically outside, canonically inside.
+        let through_link = link.join("export/bin/gcc");
+        assert!(
+            !through_link.starts_with(&real_dir),
+            "the fixture must be lexically outside, or it proves nothing"
+        );
+        assert!(
+            is_within(&real_dir, &through_link),
+            "an export reached through a symlinked checkout is the same export"
+        );
+
+        // …and a genuinely unrelated path is still outside, so the fix is
+        // containment rather than `is_within` answering true for everything.
+        assert!(!is_within(&real_dir, &tmp.path().join("elsewhere/bin/gcc")));
+    }
+
     // rivet: verifies REQ-EXPORTDECL-001, REQ-SHADOW-001
     #[test]
     fn a_declared_sdk_environment_is_not_reported_as_a_hijack() {
