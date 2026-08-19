@@ -30,9 +30,12 @@ registry        = "oci://ghcr.io/pulseengine/varve/layers"   # required
 trust-root      = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
 # or, instead of an inline key:
 # trust-root-file = "./roots/pulseengine.pub"
+signed-index    = false                                      # default
 ```
 
 `registry` is required even when you never contact it — an air-gapped realm still needs the field; a placeholder is legitimate. `trust-root` is what `varve pubkey` prints.
+
+`signed-index = true` declares that this realm publishes a signed line index (`varve sign-index`). Where it is set, `varve install` refuses to fall back to a source's unauthenticated listing: a missing index is an error naming the realm, and a source that hides a layer the index names is refused. Leave it `false` — the default — until the realm actually publishes one, or every install of it fails closed. Only turn it on once the index is on the registry AND in the layouts you hand out: a bare `manifests/`+`blobs/` directory cannot carry one at all.
 
 ## The deposit spec — producing a layer
 
@@ -48,7 +51,8 @@ name     = "rivet"
 version  = "0.32.0"
 path     = "./dist/rivet"      # relative to this file
 platform = "x86_64-unknown-linux-gnu"   # optional; absent = any platform
-kind     = "tool"              # tool | crate | wit | zephyr-module | sdk | wasm-component
+kind     = "tool"              # tool | crate | wit | zephyr-module | sdk | wasm-component | vsix
+                               # seven; `vsix` is a VS Code extension package (`varve docs payload-kinds`)
 
 [tool.source]                  # optional upstream provenance
 repo    = "pulseengine/rivet"
@@ -56,11 +60,27 @@ release = "v0.32.0"
 asset   = "rivet-v0.32.0-x86_64-unknown-linux-gnu.tar.gz"
 sha256  = "9f2c1d8e5a3b7c04e6d9128f3a5b7c0d4e6f8a2b5c7d9e1f3a5b7c9d1e3f5a70"
 
-[[include]]                    # optional; compose another layer
+[[include]]                    # optional table; compose another layer
 digest = "sha256:8b65864f2d9c7a3e1b5f8d2c6a9e4b7d3f1c8a5e2b9d6c3f7a4e1b8d5c2f9a6e"
-realm  = "bytecodealliance"
-layer  = "2026.08.0"
+realm  = "bytecodealliance"    # REQUIRED in practice — see below
+layer  = "2026.08.0"           # optional; used only in error messages
 ```
+
+**`realm` on an `[[include]]` is required in practice**, even though the parser
+accepts the table without it. Omitting it writes no `include.realm` annotation
+into the signed payload, so `verify` falls back to the *pinned project's* trust
+root. The layer then installs cleanly and fails verify afterwards:
+
+```
+error: composed layer 2026.11.0 failed verification against this project's own
+trust root (the include names no realm) … : signature does not verify against
+the trust root: No valid signatures
+```
+
+Nothing is tampered with — the included layer is correctly signed, by the realm
+that owns it, which is the entire point of composing. Omit `realm` only when the
+included layer is signed by the same root the project pins. Because the
+annotation is inside the signed payload, adding it later means re-depositing.
 
 **`kind = "crate"` on a `[[tool]]` table is how you deposit a crate** — there is no `[[crate]]`. That is what the export adapters and `verify --lockfile` consume.
 

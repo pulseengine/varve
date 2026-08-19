@@ -35,6 +35,11 @@ pub const TOPICS: &[Topic] = &[
         "concept-config-reference.md"
     ),
     topic!(
+        "bootstrap",
+        "Bootstrap — getting varve itself, verified",
+        "concept-install.md"
+    ),
+    topic!(
         "getting-started",
         "Getting started — nothing to a dispatched tool",
         "concept-getting-started.md"
@@ -68,7 +73,7 @@ pub const TOPICS: &[Topic] = &[
     topic!("air-gap", "Air-gapped operation", "concept-air-gap.md"),
     topic!(
         "environment",
-        "Environment — VARVE_ROOT, VARVE_TRUST_ROOT, and precedence",
+        "Environment — every variable varve reads, and precedence",
         "concept-environment.md"
     ),
     topic!(
@@ -80,6 +85,11 @@ pub const TOPICS: &[Topic] = &[
         "composition",
         "Composition — one pin, two trust universes",
         "concept-composition.md"
+    ),
+    topic!(
+        "artifacts",
+        "Shipping artifacts that are not executables",
+        "concept-artifacts.md"
     ),
     topic!(
         "recovery",
@@ -155,6 +165,11 @@ pub const TOPICS: &[Topic] = &[
         "cmd-export-bazel-distdir.md"
     ),
     topic!(
+        "export-vsix",
+        "export-vsix — VS Code extensions `code` installs",
+        "cmd-export-vsix.md"
+    ),
+    topic!(
         "sbom",
         "sbom — the signed manifest as a bill of materials",
         "cmd-sbom.md"
@@ -183,6 +198,16 @@ pub const TOPICS: &[Topic] = &[
         "attach-status",
         "attach-status — attach a baseline status (CI)",
         "cmd-attach-status.md"
+    ),
+    topic!(
+        "sign-index",
+        "sign-index — sign a line index (CI)",
+        "cmd-sign-index.md"
+    ),
+    topic!(
+        "attach-index",
+        "attach-index — publish the signed line index (CI)",
+        "cmd-attach-index.md"
     ),
     topic!("shim", "shim — PATH dispatchers", "cmd-shim.md"),
     topic!("env", "env — shell setup", "cmd-env.md"),
@@ -219,6 +244,11 @@ pub fn find(slug: &str) -> Option<&'static Topic> {
 /// why the gate reported green through two audits that found the docs unusable
 /// for exactly those things (REQ-DOCS-003).
 pub const REQUIRED_TOPICS: &[&str] = &[
+    // Step 0. Until v0.26.0 the docs began at `varve install` — which needs a
+    // varve you do not have. A tool for verified distribution that has no
+    // documented verified way to obtain ITSELF is the hole this closes
+    // (REQ-BOOTSTRAP-001).
+    "bootstrap",
     "getting-started",
     "config-reference",
     "environment",
@@ -238,6 +268,10 @@ pub const REQUIRED_TOPICS: &[&str] = &[
 /// files were under 30 words when this was written, and personas recovered the
 /// file formats from serde errors instead.
 pub const TOPICS_NEEDING_EXAMPLES: &[&str] = &[
+    // The bootstrap is nothing BUT commands: describing "verify the script
+    // before running it" without the literal transcript leaves the reader with
+    // the piped one-liner, which is the form this topic exists to demote.
+    "bootstrap",
     "recovery",
     "environment",
     "composition",
@@ -256,6 +290,11 @@ pub const TOPICS_NEEDING_EXAMPLES: &[&str] = &[
     "realms",
     "pins",
     "air-gap",
+    // REQ-VSIX-001 clause 5. The topic's whole job is a worked example: the
+    // spec stanza that deposits an extension and the exact `code
+    // --install-extension` line, because the file NAME is what `code`
+    // dispatches on. A prose description of that teaches nothing.
+    "export-vsix",
 ];
 
 /// Required topics that are missing entirely.
@@ -495,6 +534,119 @@ mod tests {
         }
     }
 
+    fn body(slug: &str) -> &'static str {
+        TOPICS
+            .iter()
+            .find(|t| t.slug == slug)
+            .unwrap_or_else(|| panic!("topic {slug} must exist"))
+            .body
+    }
+
+    // rivet: verifies REQ-DOCS-002
+    #[test]
+    fn the_topics_state_the_limits_a_ten_persona_audit_found_them_denying() {
+        // varve#78. Each of these was a documented claim that the binary
+        // contradicts. The claim is cheap to reintroduce and expensive to
+        // catch by review, so each correction is pinned by the phrase that
+        // carries it — a doc that says the true thing passes, and the false
+        // predecessor cannot come back quietly.
+
+        // THE one a security reviewer's mental model rests on: a planted file
+        // is not inert. `run`, `which` and `shim install` all take it, because
+        // dispatch enumerates the DIRECTORY and the signature covers only what
+        // the manifest names.
+        let threat = body("threat-model");
+        for needle in [
+            "unnamed files ARE dispatched",
+            "enumerates the **directory**",
+            "varve shim install",
+            "equivalent to code execution",
+        ] {
+            assert!(
+                threat.contains(needle),
+                "the threat-model topic must say `{needle}` — the previous text \
+                 read as though a planted file were inert, and it is dispatched"
+            );
+        }
+
+        // An `[[include]]` with no `realm` is not "optional": it installs
+        // clean and then accuses a correctly-signed layer of a bad signature.
+        for slug in ["layers", "config-reference"] {
+            let t = body(slug);
+            assert!(
+                t.contains("required in practice"),
+                "{slug} must not present `[[include]].realm` as merely optional"
+            );
+            assert!(
+                t.contains("re-deposit") || t.contains("re-depositing"),
+                "{slug} must say the include annotation is inside the SIGNED \
+                 payload, so it cannot be added afterwards"
+            );
+        }
+
+        // The parser knows seven `[[tool]]` kinds; the reference listed six.
+        let cfg = body("config-reference");
+        for kind in [
+            "tool",
+            "crate",
+            "wit",
+            "zephyr-module",
+            "sdk",
+            "wasm-component",
+            "vsix",
+        ] {
+            assert!(
+                cfg.contains(kind),
+                "config-reference must list the `{kind}` payload kind"
+            );
+        }
+
+        // `varve list` labels by trust-root FINGERPRINT; a realm name appears
+        // only when a realms file in scope maps it back.
+        let env = body("environment");
+        assert!(
+            env.contains("fingerprint") && env.contains("varve-realms.toml"),
+            "environment must say `list` labels by fingerprint, not by realm"
+        );
+        // The variable that appeared in no topic at all.
+        for needle in ["VARVE_REGISTRY_AUTH", "VARVE_UPDATE_API", "VARVE_ROOT"] {
+            assert!(env.contains(needle), "environment must document {needle}");
+        }
+
+        // The claim I wrote after testing only the happy path: re-installing
+        // does NOT repair a layer once its line's counter has moved past it.
+        let rec = body("recovery");
+        for needle in [
+            "does not work",
+            "rollback refused",
+            "Deleting the layer directory does not help",
+            "verify --all",
+        ] {
+            assert!(
+                rec.contains(needle),
+                "recovery must state `{needle}` — repair-in-place holds only \
+                 while no higher counter in the line has been installed"
+            );
+        }
+
+        // varve#80. An archive carries ONE platform, because `archive` can only
+        // export what this machine installed. An operator carrying a USB stick
+        // to a mixed site has to read that before they travel, not discover it
+        // on the far side of the gap — so both topics must say it.
+        for slug in ["archive", "air-gap"] {
+            let t = body(slug);
+            assert!(
+                t.contains("one platform") || t.contains("ONE platform"),
+                "{slug} must say an archive carries one platform's payloads"
+            );
+            assert!(
+                t.contains("one archive per platform"),
+                "{slug} must say a mixed site needs one archive per platform — \
+                 varve cannot produce a cross-platform archive offline"
+            );
+        }
+    }
+
     // rivet: verifies REQ-DOCS-003
     #[test]
     fn every_documented_command_is_a_real_command() {
@@ -547,6 +699,35 @@ mod tests {
             "only {checked} documented invocation(s) were checked; the shell \
              transcripts are the form users copy most"
         );
+    }
+
+    // rivet: verifies REQ-BOOTSTRAP-001
+    #[test]
+    fn the_bootstrap_topic_states_what_the_first_hop_cannot_prove() {
+        // Clause 8 shipped as prose with no mechanical check, which is exactly
+        // the shape that let requirement text outrun code four releases
+        // running. The honest limits are the most deletable part of a page
+        // whose other job is to make installing easy, so they are the part
+        // that needs a gate.
+        let body = TOPICS.iter().find(|t| t.slug == "bootstrap").unwrap().body;
+        for needle in [
+            // The limit itself, named.
+            "trust on first use",
+            // …and specifically that a signature does not vouch for the signer.
+            "not tell you the repository was not compromised",
+            // What the first hop DOES buy, or a reader concludes it is useless.
+            "self-update",
+            // The refuse-rather-than-degrade stance, which is the reason the
+            // script has no --skip-verify and must not grow one.
+            "refuses rather than degrades",
+        ] {
+            assert!(
+                body.contains(needle),
+                "the bootstrap topic must state `{needle}` — a page that teaches \
+                 people to install a verification tool must say what its own \
+                 first hop does not prove (REQ-BOOTSTRAP-001 clause 8)"
+            );
+        }
     }
 
     // rivet: verifies REQ-DOCS-002

@@ -23,6 +23,7 @@
 
 pub mod archive;
 pub mod attest;
+pub mod attestcarry;
 pub mod bazel;
 pub mod compose;
 pub mod crateexport;
@@ -33,6 +34,7 @@ pub mod install;
 pub mod keys;
 pub mod kind;
 pub mod layer;
+pub mod lineindex;
 pub mod linestatus;
 pub mod lockpin;
 pub mod manifest;
@@ -45,12 +47,14 @@ pub mod reverify;
 pub mod rollback;
 pub mod sbom;
 pub mod selfverify;
+pub mod shadow;
 pub mod source;
 pub mod store;
 pub mod update;
 pub mod verify;
+pub mod vsixexport;
 
-pub use archive::{ArchiveError, OciLayoutSource, export as export_archive};
+pub use archive::{ArchiveError, ExportSummary, OciLayoutSource, export as export_archive};
 pub use deposit::{
     DepositError, DepositFileSpec, DepositOutcome, DepositSpec, DepositTool, RunnerSpec,
     ToolSource, deposit, parse_deposit_spec,
@@ -60,6 +64,11 @@ pub use install::{
 };
 pub use kind::{ANN_KIND, PayloadKind, UnknownKind};
 pub use layer::{LayerId, LayerIdError, Line};
+pub use lineindex::{
+    IndexCache, IndexError, IndexPolicy, IndexedLayer, LineIndex,
+    attach_envelope_to_layout as attach_index_envelope_to_layout,
+    attach_to_layout as attach_index_to_layout, read_from_layout as read_index_from_layout,
+};
 pub use linestatus::{
     KnownProblem, LayerStatusReport, LineStatus, LineStatusError, StatusCache,
     attach_envelope_to_layout as attach_status_envelope_to_layout,
@@ -84,3 +93,4 @@ pub use store::{InstalledLayer, Store, StoreError, manifest_digest};
 pub use verify::{
     LAYER_PAYLOAD_TYPE, PinnedKeyVerifier, generate_root_keypair, sign_layer_manifest,
 };
+pub use vsixexport::{VsixEntry, VsixExportError, export_vsix};

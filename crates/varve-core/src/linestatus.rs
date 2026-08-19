@@ -176,6 +176,24 @@ impl StatusCache {
         Ok(())
     }
 
+    /// The cached envelope bytes for a line, unparsed, if any.
+    ///
+    /// Used by `archive` to carry the baseline across an air gap (varve#77).
+    /// Deliberately opaque: the caller re-attaches the bytes verbatim, and the
+    /// far side re-verifies against its own trust root — archiving must not
+    /// become a place where a document is re-signed or re-shaped.
+    pub fn envelope_bytes(&self, line: &Line) -> Result<Option<Vec<u8>>, LineStatusError> {
+        let path = self.envelope_path(line);
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(LineStatusError::Io {
+                path: path.display().to_string(),
+                source,
+            }),
+        }
+    }
+
     /// Load and re-verify the cached envelope for a line.
     pub fn load(
         &self,
@@ -383,7 +401,7 @@ fn parse_unverified(envelope: &[u8]) -> Result<LineStatus, LineStatusError> {
 /// The line a deposit layout's own manifest declares, if it can be read. Best
 /// effort: a layout we cannot introspect is not blocked from being annotated,
 /// but one that plainly disagrees is.
-fn layout_line(layout: &Path) -> Option<String> {
+pub(crate) fn layout_line(layout: &Path) -> Option<String> {
     let index: serde_json::Value =
         serde_json::from_slice(&std::fs::read(layout.join("index.json")).ok()?).ok()?;
     for m in index["manifests"].as_array()? {

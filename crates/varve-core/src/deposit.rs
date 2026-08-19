@@ -171,7 +171,7 @@ pub struct SpecTool {
     #[serde(default)]
     pub runner: Option<RunnerSpec>,
     /// Payload kind (REQ-KIND-001): tool|crate|wit|zephyr-module|sdk|
-    /// wasm-component. Absent = tool.
+    /// wasm-component|vsix. Absent = tool.
     #[serde(default)]
     pub kind: Option<String>,
 }
@@ -202,8 +202,28 @@ pub enum DepositError {
     Spec(String),
     #[error("deposit has no tools — an empty layer is not a toolchain")]
     NoTools,
-    #[error("duplicate tool name '{0}' in deposit")]
-    DuplicateTool(String),
+    #[error(
+        "tool '{name}' is deposited twice for platform {platform} (versions {first} and \
+         {second}) — a tool is DISPATCHED BY NAME (`varve run {name}`, `varve which {name}`, the \
+         argv[0] shims), so one name must resolve to exactly one binary per platform. Deposit the \
+         other version as a separate layer, or give it a distinct name."
+    )]
+    DuplicateTool {
+        name: String,
+        platform: String,
+        first: String,
+        second: String,
+    },
+    #[error(
+        "payload '{name}' version {version} is deposited twice for platform {platform} — a layer \
+         may hold several VERSIONS of one name, but not one version twice: the two would be the \
+         same payload, and only one set of bytes could land."
+    )]
+    DuplicatePayload {
+        name: String,
+        version: String,
+        platform: String,
+    },
     #[error(transparent)]
     Sign(#[from] VerifyError),
     #[error("io error at {path}: {source}")]
@@ -212,6 +232,53 @@ pub enum DepositError {
         #[source]
         source: std::io::Error,
     },
+}
+
+/// How a platform reads in an error when the entry claims none.
+fn platform_label(platform: Option<&String>) -> String {
+    platform
+        .cloned()
+        .unwrap_or_else(|| "any (unstamped)".to_string())
+}
+
+/// Refuse only TRUE duplicates, under the identity of REQ-STORE-002 clause 1
+/// (clause 3).
+///
+/// A `tool` is dispatched by name, so its identity is (name, platform) and two
+/// versions of one tool in one layer is a genuine error — `varve run synth`
+/// would have no answer. Every other kind is held, not dispatched: its identity
+/// is (name, version, platform), so `serde@1.0.200` beside `serde@1.0.210` is
+/// the ORDINARY shape of a dependency graph and must be accepted. varve's own
+/// Cargo.lock has 14 names at more than one version; refusing them meant varve
+/// could not express its own dependency graph as a layer.
+fn check_identities(tools: &[&DepositTool]) -> Result<(), DepositError> {
+    // (name, platform) -> the version already seen, for dispatchable payloads.
+    let mut dispatched: std::collections::BTreeMap<(&str, Option<&String>), &str> =
+        std::collections::BTreeMap::new();
+    // (name, version, platform) -> seen, for everything else.
+    let mut held: std::collections::BTreeSet<(&str, &str, Option<&String>)> =
+        std::collections::BTreeSet::new();
+    for tool in tools {
+        let dispatchable = tool.kind.unwrap_or_default().is_dispatchable();
+        let platform = tool.platform.as_ref();
+        if dispatchable {
+            if let Some(first) = dispatched.insert((&tool.name, platform), &tool.version) {
+                return Err(DepositError::DuplicateTool {
+                    name: tool.name.clone(),
+                    platform: platform_label(platform),
+                    first: first.to_string(),
+                    second: tool.version.clone(),
+                });
+            }
+        } else if !held.insert((&tool.name, &tool.version, platform)) {
+            return Err(DepositError::DuplicatePayload {
+                name: tool.name.clone(),
+                version: tool.version.clone(),
+                platform: platform_label(platform),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Assemble, sign, and write a layer as an OCI image layout at `dest`.
@@ -225,12 +292,13 @@ pub fn deposit(
         return Err(DepositError::NoTools);
     }
     let mut tools: Vec<&DepositTool> = spec.tools.iter().collect();
-    tools.sort_by(|a, b| (&a.name, &a.platform).cmp(&(&b.name, &b.platform)));
-    for pair in tools.windows(2) {
-        if pair[0].name == pair[1].name && pair[0].platform == pair[1].platform {
-            return Err(DepositError::DuplicateTool(pair[0].name.clone()));
-        }
-    }
+    // Sorted by the FULL identity, so the payload order is deterministic even
+    // when one name appears at several versions — the digest is the identity a
+    // pin freezes against, and it must not depend on spec order.
+    tools.sort_by(|a, b| {
+        (&a.name, &a.version, &a.platform).cmp(&(&b.name, &b.version, &b.platform))
+    });
+    check_identities(&tools)?;
 
     // Assemble the payload deterministically: sorted tools, fixed key order
     // (serde_json sorts map keys), no timestamps beyond the caller-supplied
@@ -381,6 +449,9 @@ pub fn deposit(
         &blobs,
         &spec.layer.to_string(),
         &spec.channel,
+        // A deposit carries every platform the producer built, so it makes no
+        // single-platform claim — unlike an archive (varve#80).
+        None,
         dest,
     )
     .map_err(|(path, source)| DepositError::Io { path, source })?;
@@ -497,6 +568,7 @@ mod tests {
         let mut marks = HighWaterMarks::load(&root).unwrap();
         let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
         let policy = InstallPolicy {
+            index: None,
             now: "2026-08-07T00:00:00Z",
             staleness_threshold_days: 90,
             platform: "test-platform",
@@ -571,9 +643,281 @@ mod tests {
         ));
         let mut dup = spec();
         dup.tools[1].name = "synth".into();
-        assert!(matches!(
-            deposit(&dup, &sk, "k", &tmp.path().join("y")).unwrap_err(),
-            DepositError::DuplicateTool(name) if name == "synth"
-        ));
+        let err = deposit(&dup, &sk, "k", &tmp.path().join("y")).unwrap_err();
+        assert!(
+            matches!(&err, DepositError::DuplicateTool { name, .. } if name == "synth"),
+            "got: {err}"
+        );
+    }
+
+    /// One entry of a given kind, at a given version and platform.
+    fn payload(
+        name: &str,
+        version: &str,
+        kind: Option<crate::kind::PayloadKind>,
+        platform: Option<&str>,
+    ) -> DepositTool {
+        DepositTool {
+            name: name.into(),
+            version: version.into(),
+            platform: platform.map(str::to_string),
+            bytes: format!("{name}-{version}-bytes").into_bytes(),
+            source: None,
+            runner: None,
+            kind,
+        }
+    }
+
+    // rivet: verifies REQ-STORE-002
+    #[test]
+    fn two_versions_of_one_crate_are_a_layer_not_a_duplicate() {
+        // THE reported defect (varve#69), at the function that raised it.
+        // `deposit` keyed on (name, platform) and ignored version and kind, so
+        // serde 1.0.200 beside serde 1.0.210 was refused as "duplicate tool
+        // name 'serde'" — and varve could not express its own dependency graph
+        // (252 packages, 14 names at more than one version) as a layer.
+        use crate::kind::PayloadKind;
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        spec.tools = vec![
+            payload("serde", "1.0.200", Some(PayloadKind::Crate), None),
+            payload("serde", "1.0.210", Some(PayloadKind::Crate), None),
+        ];
+        let outcome = deposit(&spec, &sk, "k", &tmp.path().join("d")).unwrap();
+
+        // Both versions are in the SIGNED payload, each under its own digest.
+        let hex = outcome.digest.strip_prefix("sha256:").unwrap();
+        let payload_bytes = std::fs::read(tmp.path().join("d/blobs/sha256").join(hex)).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        let entries = json["manifests"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let versions: Vec<&str> = entries
+            .iter()
+            .map(|e| {
+                e["annotations"]["eu.pulseengine.tool.version"]
+                    .as_str()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(versions, vec!["1.0.200", "1.0.210"]);
+        assert_ne!(
+            entries[0]["digest"], entries[1]["digest"],
+            "two versions are two artifacts"
+        );
+    }
+
+    // rivet: verifies REQ-VSIX-001
+    #[test]
+    fn extensions_deposit_as_vsix_entries_at_several_versions() {
+        // Clause 1: the kind reaches the SIGNED payload as `vsix`, spelled that
+        // way — the annotation is what a consumer's `export-vsix` keys on, and
+        // it is inside the DSSE payload, so it cannot be corrected afterwards.
+        // Clause 4: an extension is not dispatched by name, so its identity is
+        // (name, version) and two versions of one extension is a layer, not a
+        // duplicate — the same rule REQ-STORE-002 established for crates,
+        // reached here through `is_dispatchable` rather than a second list.
+        use crate::kind::PayloadKind;
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        spec.tools = vec![
+            payload(
+                "rust-lang.rust-analyzer",
+                "0.3.2260",
+                Some(PayloadKind::Vsix),
+                None,
+            ),
+            payload(
+                "rust-lang.rust-analyzer",
+                "0.3.2300",
+                Some(PayloadKind::Vsix),
+                None,
+            ),
+            payload(
+                "vadimcn.vscode-lldb",
+                "1.11.4",
+                Some(PayloadKind::Vsix),
+                None,
+            ),
+        ];
+        let outcome = deposit(&spec, &sk, "k", &tmp.path().join("d")).unwrap();
+
+        let hex = outcome.digest.strip_prefix("sha256:").unwrap();
+        let payload_bytes = std::fs::read(tmp.path().join("d/blobs/sha256").join(hex)).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        let entries = json["manifests"].as_array().unwrap();
+        assert_eq!(entries.len(), 3, "all three extensions must be signed in");
+        for e in entries {
+            assert_eq!(
+                e["annotations"][crate::kind::ANN_KIND],
+                "vsix",
+                "every entry must carry the vsix kind in the SIGNED payload"
+            );
+        }
+        let ids: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e["annotations"]["eu.pulseengine.tool"].as_str().unwrap(),
+                    e["annotations"]["eu.pulseengine.tool.version"]
+                        .as_str()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("rust-lang.rust-analyzer", "0.3.2260"),
+                ("rust-lang.rust-analyzer", "0.3.2300"),
+                ("vadimcn.vscode-lldb", "1.11.4"),
+            ]
+        );
+        assert_ne!(
+            entries[0]["digest"], entries[1]["digest"],
+            "two versions of one extension are two artifacts"
+        );
+
+        // …and one version deposited twice is still a true duplicate.
+        let mut dup = spec;
+        dup.tools = vec![
+            payload("pub.ext", "1.0.0", Some(PayloadKind::Vsix), None),
+            payload("pub.ext", "1.0.0", Some(PayloadKind::Vsix), None),
+        ];
+        let err = deposit(&dup, &sk, "k", &tmp.path().join("e")).unwrap_err();
+        assert!(
+            matches!(&err, DepositError::DuplicatePayload { name, version, .. }
+                     if name == "pub.ext" && version == "1.0.0"),
+            "got: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-STORE-002
+    #[test]
+    fn a_tool_may_not_appear_twice_under_one_name_however_its_versions_differ() {
+        // Clause 1's other half, and the reason the rule is not simply
+        // "(name, version)": dispatch is BY NAME. `varve run synth` must have
+        // exactly one answer, so two versions of one TOOL in one layer is a
+        // real error — and the error must name both versions, or the depositor
+        // cannot tell which two entries collided.
+        use crate::kind::PayloadKind;
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        spec.tools = vec![
+            payload("synth", "0.45.0", Some(PayloadKind::Tool), None),
+            payload("synth", "0.46.0", None, None), // absent kind == tool
+        ];
+        let err = deposit(&spec, &sk, "k", &tmp.path().join("d")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(&err, DepositError::DuplicateTool { name, .. } if name == "synth"),
+            "got: {err}"
+        );
+        assert!(msg.contains("0.45.0") && msg.contains("0.46.0"), "{msg}");
+        // The identity includes the platform, so the verdict must name it —
+        // otherwise a depositor of a cross-platform layer is told two entries
+        // collide without being told on WHICH platform they do.
+        assert!(
+            msg.contains("any"),
+            "an unstamped entry is any-platform: {msg}"
+        );
+        let mut stamped = spec;
+        for tool in &mut stamped.tools {
+            tool.platform = Some("x86_64-unknown-linux-gnu".into());
+        }
+        let msg = deposit(&stamped, &sk, "k", &tmp.path().join("e"))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("x86_64-unknown-linux-gnu"), "{msg}");
+    }
+
+    // rivet: verifies REQ-STORE-002
+    #[test]
+    fn one_version_deposited_twice_is_still_refused_and_the_error_names_it() {
+        // Clause 3: relaxing the check must refuse only TRUE duplicates. Two
+        // entries with ONE identity are the same payload twice — only one set
+        // of bytes could land, so this stays an error, and the message carries
+        // the version the old one lacked.
+        use crate::kind::PayloadKind;
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        spec.tools = vec![
+            payload("serde", "1.0.200", Some(PayloadKind::Crate), None),
+            payload("serde", "1.0.200", Some(PayloadKind::Crate), None),
+        ];
+        let err = deposit(&spec, &sk, "k", &tmp.path().join("d")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(&err, DepositError::DuplicatePayload { name, version, .. }
+                if name == "serde" && version == "1.0.200"),
+            "got: {err}"
+        );
+        assert!(msg.contains("serde") && msg.contains("1.0.200"), "{msg}");
+    }
+
+    // rivet: verifies REQ-STORE-002
+    #[test]
+    fn platform_still_separates_identities_for_both_rules() {
+        // Clause 1 keeps `platform` in BOTH keys. The same tool for two
+        // platforms is the ordinary cross-platform layer (install filters to
+        // one), and the same crate for two platforms must likewise be allowed —
+        // dropping platform from the key would refuse layers that install fine.
+        use crate::kind::PayloadKind;
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        spec.tools = vec![
+            payload("synth", "0.45.0", None, Some("aarch64-apple-darwin")),
+            payload("synth", "0.45.0", None, Some("x86_64-unknown-linux-gnu")),
+            payload(
+                "serde",
+                "1.0.200",
+                Some(PayloadKind::Crate),
+                Some("aarch64-apple-darwin"),
+            ),
+            payload(
+                "serde",
+                "1.0.200",
+                Some(PayloadKind::Crate),
+                Some("x86_64-unknown-linux-gnu"),
+            ),
+        ];
+        deposit(&spec, &sk, "k", &tmp.path().join("d")).expect(
+            "distinct platforms, distinct
+             identities",
+        );
+    }
+
+    // rivet: verifies REQ-STORE-002
+    #[test]
+    fn the_signed_digest_does_not_depend_on_the_order_versions_are_listed_in() {
+        // The payload is sorted by the FULL identity now that one name can
+        // appear more than once. Sorting by (name, platform) alone left two
+        // versions of one name in spec order, so the same layer deposited from
+        // a reordered spec would have produced a DIFFERENT digest — and the
+        // digest is the identity a pin freezes against.
+        use crate::kind::PayloadKind;
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let a_first = vec![
+            payload("serde", "1.0.200", Some(PayloadKind::Crate), None),
+            payload("serde", "1.0.210", Some(PayloadKind::Crate), None),
+        ];
+        let b_first: Vec<DepositTool> = a_first.iter().rev().cloned().collect();
+        let mut s1 = spec();
+        s1.tools = a_first;
+        let mut s2 = spec();
+        s2.tools = b_first;
+        assert_eq!(
+            deposit(&s1, &sk, "k", &tmp.path().join("a"))
+                .unwrap()
+                .digest,
+            deposit(&s2, &sk, "k", &tmp.path().join("b"))
+                .unwrap()
+                .digest,
+        );
     }
 }

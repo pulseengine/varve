@@ -48,8 +48,104 @@ fn fixture(pin: Option<&str>, layers: &[(&str, LayerTools)]) -> Fixture {
 
 fn varve(fx: &Fixture) -> Command {
     let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fx.root).current_dir(&fx.project);
+    // A hermetic PATH. Without it these tests inherit the developer's, and
+    // REQ-SHADOW-001 correctly reported a real conflict — a `cargo install`ed
+    // `synth` in ~/.cargo/bin shadowing the fixture's pinned one — turning
+    // three unrelated tests red on one machine and green on another. That is
+    // the check doing its job; a suite whose result depends on what the person
+    // running it happens to have installed is the defect.
+    cmd.env("PATH", "/usr/bin:/bin");
     cmd
+}
+
+// rivet: verifies REQ-SHADOW-001
+#[test]
+fn verify_fails_when_path_runs_a_different_binary_than_the_pin() {
+    // The reported bug (varve#66), end to end. Every individual answer was
+    // correct and the composite was false: `which` printed the store path,
+    // `verify` called the layer perfect — it WAS perfect — and the shell ran
+    // something else. varve's headline claim in the README is `varve which
+    // synth  # which binary runs here`.
+    // A genuinely signed, installed layer — verify must have a trust root, and
+    // the point of this test is that a PERFECT layer still fails the check.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    let tool = parent.join("synth-bin");
+    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+    let spec = parent.join("spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0.0\"\npath = \"{}\"\n",
+            tool.display()
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "k", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    let elsewhere = fx.project.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let impostor = elsewhere.join("synth");
+    std::fs::write(&impostor, "#!/bin/sh\necho WRONG\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&impostor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let shadowed_path = format!("{}:/usr/bin:/bin", elsewhere.display());
+
+    // verify FAILS and says which binary actually wins, and how to fix it.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .env("PATH", &shadowed_path)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not what your PATH runs"))
+        .stderr(predicate::str::contains("varve shim install"));
+
+    // `which` keeps printing the dispatched path on STDOUT so scripts still
+    // work, and warns on STDERR.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .env("PATH", &shadowed_path)
+        .args(["which", "synth"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/bin/synth"))
+        .stderr(predicate::str::contains("on your PATH"));
+
+    // With nothing shadowing it, verify passes — the check must not fire on a
+    // machine that simply has not installed the shims yet.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .env("PATH", "/usr/bin:/bin")
+        .arg("verify")
+        .assert()
+        .success();
 }
 
 // rivet: verifies REQ-PIN-001
@@ -866,6 +962,178 @@ fn check_attestation_refuses_a_tampered_layer() {
         .failure();
 }
 
+// rivet: verifies REQ-ATTEST-002
+#[test]
+fn an_attestation_travels_through_deposit_archive_and_an_offline_install() {
+    // The carriage half, at the boundary a user actually touches. v0.22.0
+    // shipped BINDING and a review found REQ-ATTEST-001 marked verified with
+    // this half unimplemented: a statement that stays in the producer's CI is
+    // not evidence anyone has. Registries publish this material and mirrors
+    // drop it — bandersnatch and Verdaccio carry none, every BCR attestation
+    // URL points at github.com — so an air-gapped consumer receives the bytes
+    // and none of the accountability, with no error saying so.
+    //
+    // Three cores, sharing nothing but the pinned root: the producer's, the
+    // consumer's, and the disconnected site's on the far side of `archive`.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap().to_path_buf();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("attcarry-root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("attcarry-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    let tool = parent.join("attcarry-synth");
+    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+    let spec = parent.join("attcarry-spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0.0\"\npath = \"{}\"\n",
+            tool.display()
+        ),
+    )
+    .unwrap();
+
+    // 1. CI deposits the layer as an oci-layout.
+    let layout = parent.join("attcarry-layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "test-root", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    // 2. …installs it once to produce an SBOM transcribed from the signed
+    // manifest, and signs a statement binding that SBOM to the layer, ATTACHING
+    // both to the layout as referrer artifacts. This is the step that did not
+    // exist: without it the statement is written to a file and reaches nobody.
+    let producer_root = parent.join("producer-root");
+    let sbom = parent.join("layer.cdx.json");
+    let stmt = parent.join("sbom.statement.dsse");
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["sbom", "--out"])
+        .arg(&sbom)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args([
+            "sign-attestation",
+            "--kind",
+            "sbom",
+            "--producer",
+            "acme-ci",
+            "--file",
+        ])
+        .arg(&sbom)
+        .arg("--key")
+        .arg(&sk_path)
+        .args(["--key-id", "test-root", "--out"])
+        .arg(&stmt)
+        .arg("--attach-to")
+        .arg(&layout)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("attached to layout"));
+
+    // 3. A consumer installs from that layout into a core of its own: the
+    // evidence travels with the layer, and `verify` says what it is and that
+    // it still binds.
+    let consumer_root = parent.join("consumer-root");
+    varve(&fx)
+        .env("VARVE_ROOT", &consumer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("carried 1 attestation(s)"));
+    varve(&fx)
+        .env("VARVE_ROOT", &consumer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("carries 1 attestation(s)"))
+        .stdout(predicate::str::contains(
+            "sbom by acme-ci: binds to this layer",
+        ));
+
+    // 4. That consumer archives the layer for a disconnected site. The archive
+    // must re-emit the attestation as referrer entries — this is the mirror
+    // boundary, and dropping it here is exactly the bug.
+    let air_gapped = parent.join("attcarry-archive");
+    varve(&fx)
+        .env("VARVE_ROOT", &consumer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["archive", "2026.07.0"])
+        .arg(&air_gapped)
+        .assert()
+        .success();
+
+    // 5. The far side: a FRESH core, offline, nothing but the archive and the
+    // pinned root. The evidence is there and still binds.
+    let far_side = parent.join("far-side-root");
+    varve(&fx)
+        .env("VARVE_ROOT", &far_side)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&air_gapped)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("carried 1 attestation(s)"));
+    varve(&fx)
+        .env("VARVE_ROOT", &far_side)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "sbom by acme-ci: binds to this layer",
+        ));
+
+    // 6. Reporting, not refusal — deliberately. Corrupt the carried statement
+    // in the far-side core: `verify` must say the attestation no longer binds
+    // and still PASS the layer, whose own signature and digests are untouched.
+    // Failing here would make varve's verdict depend on a third party's
+    // release cadence, in the one tool whose purpose is frozen toolchains.
+    let store_dir = std::fs::read_dir(far_side.join("core"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("attestations");
+    for e in std::fs::read_dir(&store_dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.to_string_lossy().ends_with(".statement.json") {
+            std::fs::write(&p, b"{\"payload\":\"bm90LWEtc3RhdGVtZW50\"}").unwrap();
+        }
+    }
+    varve(&fx)
+        .env("VARVE_ROOT", &far_side)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("verified: signature OK"))
+        .stdout(predicate::str::contains("DOES NOT BIND"));
+}
+
 // rivet: verifies REQ-SBOM-001
 #[test]
 fn sbom_fails_closed_on_a_layer_it_cannot_verify() {
@@ -1151,6 +1419,130 @@ fn a_rolled_back_layer_is_refused_by_the_cli() {
         .stderr(predicate::str::contains("rollback").or(predicate::str::contains("high-water")));
 }
 
+/// Deposit one layer of a line under a caller-supplied key, so several layers
+/// share ONE trust root — `signed_layer_fixture` mints a fresh keypair per
+/// call, and anti-rollback is a property of a line, which needs two layers a
+/// single `verify` can check against a single root.
+fn deposit_under(
+    fx: &Fixture,
+    key: &std::path::Path,
+    layer: &str,
+    counter: u64,
+) -> std::path::PathBuf {
+    let dir = fx.project.parent().unwrap();
+    let tool = dir.join(format!("synth-{layer}"));
+    std::fs::write(&tool, format!("#!/bin/sh\necho {layer}\n")).unwrap();
+    let layout = dir.join(format!("layout-{layer}"));
+    varve(fx)
+        .args([
+            "deposit",
+            "--layer",
+            layer,
+            "--channel",
+            "qualified",
+            "--counter",
+            &counter.to_string(),
+            "--issued-at",
+            "2026-08-01T00:00:00Z",
+            "--key",
+        ])
+        .arg(key)
+        .arg("--out")
+        .arg(&layout)
+        .arg("--tool")
+        .arg(format!("synth@1.0.0={}", tool.display()))
+        .assert()
+        .success();
+    layout
+}
+
+// rivet: verifies REQ-ROLLBACK-001, REQ-VERIFY-001
+#[test]
+fn verify_refuses_a_pin_that_resolves_below_the_lines_high_water_mark() {
+    // varve#76. `verify` called itself "the install-time verdict, repeated
+    // offline" and was not: the install-time verdict includes anti-rollback
+    // and verify's did not. So a pin edited back to an already-installed
+    // OLDER layer verified clean, exit 0 — and the docs tell people to run
+    // `verify` in CI AS THE GATE, so the downgrade passed the gate. The layer
+    // is genuinely signed and its digests genuinely match; every individual
+    // answer was true and the composite was false.
+    let fx = fixture(None, &[]);
+    let dir = fx.project.parent().unwrap();
+    let key = dir.join("root.key");
+    let pubf = dir.join("root.pub");
+    varve(&fx)
+        .args(["keygen", "--out"])
+        .arg(&key)
+        .arg("--pub")
+        .arg(&pubf)
+        .assert()
+        .success();
+
+    let old = deposit_under(&fx, &key, "2026.08.0", 1);
+    let new = deposit_under(&fx, &key, "2026.08.5", 5);
+    let pin = |layer: &str| {
+        std::fs::write(
+            fx.project.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"{layer}\"\n"
+            ),
+        )
+        .unwrap()
+    };
+
+    // Install the old one, then the new one: the line's high-water mark rises
+    // to 5 while BOTH layers stay on disk, which is legitimate — a consumer
+    // may keep an older layer around.
+    pin("2026.08.0");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &pubf)
+        .args(["install", "--from"])
+        .arg(&old)
+        .assert()
+        .success();
+    pin("2026.08.5");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &pubf)
+        .args(["install", "--from"])
+        .arg(&new)
+        .assert()
+        .success();
+
+    // At the mark, verify passes — the check must not fire on a correct
+    // setup, or it becomes a check people switch off.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &pubf)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("verified"));
+
+    // Edit the pin back to the older, already-installed layer. Nothing about
+    // the layer is wrong; what is wrong is that the pin now DISPATCHES it.
+    pin("2026.08.0");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &pubf)
+        .arg("verify")
+        .assert()
+        .failure()
+        // Both counters, so the reader can see the gap and not just the
+        // verdict — and the layer it resolved to, so they know which pin.
+        .stderr(
+            predicate::str::contains("2026.08.0")
+                .and(predicate::str::contains("counter 1"))
+                .and(predicate::str::contains("high-water mark is 5")),
+        );
+
+    // …and `install` refuses the same downgrade, which is the verdict verify
+    // now repeats. The two commands must not disagree.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &pubf)
+        .args(["install", "--from"])
+        .arg(&old)
+        .assert()
+        .failure();
+}
+
 // rivet: verifies REQ-OFFLINE-001
 #[test]
 fn archive_then_offline_install_round_trips_with_verification_unchanged() {
@@ -1178,6 +1570,7 @@ fn archive_then_offline_install_round_trips_with_verification_unchanged() {
     // archive with the same trust root, then re-verify offline.
     let fresh_root = fx.project.parent().unwrap().join("fresh-root");
     let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fresh_root)
         .env("VARVE_TRUST_ROOT", &signed.trust_root)
         .current_dir(&fx.project)
@@ -1187,6 +1580,7 @@ fn archive_then_offline_install_round_trips_with_verification_unchanged() {
         .success()
         .stdout(predicate::str::contains("2026.07.0"));
     let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fresh_root)
         .env("VARVE_TRUST_ROOT", &signed.trust_root)
         .current_dir(&fx.project)
@@ -1467,6 +1861,409 @@ fn deposit_a_crate_kind_entry_and_export_a_cargo_registry() {
     assert!(
         idx.contains(r#""cksum":"#) && idx.contains(r#""vers":"0.1.0""#),
         "{idx}"
+    );
+}
+
+// rivet: verifies REQ-STORE-002
+#[test]
+fn a_layer_holding_two_versions_of_one_crate_deposits_installs_verifies_and_exports_both() {
+    // varve#69 end to end, at the boundary the user touches. `deposit` refused
+    // the layer outright ("duplicate tool name 'serde'"), so a real dependency
+    // graph — varve's own has 14 names at more than one version — could not be
+    // expressed at all. And had only the deposit check been relaxed, the two
+    // payloads would have landed on ONE path in the store: the wrong bytes
+    // under the right name, with `verify` failing on the other entry.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    // Two versions of ONE crate, plus a tool — the mixed layer, so the two
+    // identity rules are exercised side by side.
+    let old_bytes: &[u8] = b"serde-1.0.200-crate-tarball";
+    let new_bytes: &[u8] = b"serde-1.0.210-crate-tarball";
+    let old_path = parent.join("serde-1.0.200.crate");
+    let new_path = parent.join("serde-1.0.210.crate");
+    let tool_path = parent.join("synth-bin");
+    std::fs::write(&old_path, old_bytes).unwrap();
+    std::fs::write(&new_path, new_bytes).unwrap();
+    std::fs::write(&tool_path, b"#!/bin/sh\n").unwrap();
+
+    let spec = parent.join("spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"serde\"\nversion = \"1.0.200\"\nkind = \"crate\"\npath = \"{old}\"\n\n\
+             [[tool]]\nname = \"serde\"\nversion = \"1.0.210\"\nkind = \"crate\"\npath = \"{new}\"\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"0.45.0\"\npath = \"{tool}\"\n",
+            old = old_path.display(),
+            new = new_path.display(),
+            tool = tool_path.display(),
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    // The layer verifies as a whole: three payloads, each against its own
+    // signed digest.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+
+    // The exported registry OFFERS BOTH versions — a lockfile naming two
+    // majors needs both present to build offline.
+    let out = parent.join("cargo-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-cargo", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 verified crate"));
+    assert_eq!(
+        std::fs::read(out.join("registry/serde-1.0.200.crate")).unwrap(),
+        old_bytes
+    );
+    assert_eq!(
+        std::fs::read(out.join("registry/serde-1.0.210.crate")).unwrap(),
+        new_bytes,
+        "each version must export ITS OWN bytes"
+    );
+    let idx = std::fs::read_to_string(out.join("registry/index/se/rd/serde")).unwrap();
+    let versions: Vec<String> = idx
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).expect("Cargo-parseable index line");
+            v["vers"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(versions.len(), 2, "index: {idx}");
+    assert!(versions.contains(&"1.0.200".to_string()) && versions.contains(&"1.0.210".to_string()));
+
+    // The lockfile gate agrees with a lockfile that resolves both — before
+    // this, comparing every pinned entry against every locked package of the
+    // same name reported 1.0.200-vs-1.0.210 as drift.
+    let lock = fx.project.join("Cargo.lock");
+    std::fs::write(
+        &lock,
+        "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.200\"\n\n\
+         [[package]]\nname = \"serde\"\nversion = \"1.0.210\"\n",
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["verify", "--lockfile"])
+        .arg(&lock)
+        .assert()
+        .success();
+
+    // And the whole layer still crosses an air gap: archive it, install into a
+    // fresh core from that archive alone, and verify there.
+    let archive = parent.join("archive");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["archive", "2026.07.0"])
+        .arg(&archive)
+        .assert()
+        .success();
+    let far_side = parent.join("far-side");
+    varve(&fx)
+        .env("VARVE_ROOT", &far_side)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&archive)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_ROOT", &far_side)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+}
+
+// rivet: verifies REQ-STORE-002
+#[test]
+fn two_versions_of_one_tool_are_still_refused_and_the_error_names_both() {
+    // The other half of clause 1, at the boundary: dispatch is by name, so
+    // `varve run synth` must have exactly one answer. Relaxing the rule for
+    // everything would have made the shims ambiguous.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, _pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let bin = parent.join("synth-bin");
+    std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+    let spec = parent.join("spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"0.45.0\"\npath = \"{p}\"\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"0.46.0\"\npath = \"{p}\"\n",
+            p = bin.display(),
+        ),
+    )
+    .unwrap();
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "k", "--out"])
+        .arg(parent.join("layout"))
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("synth")
+                .and(predicate::str::contains("0.45.0"))
+                .and(predicate::str::contains("0.46.0")),
+        );
+}
+
+// rivet: verifies REQ-VSIX-001, REQ-STORE-002
+#[test]
+fn vsix_extensions_deposit_install_verify_and_export_for_code() {
+    // varve#68 end to end, at the boundary the user touches. Two extensions,
+    // one of them at TWO versions (REQ-STORE-002's identity rule, inherited
+    // rather than re-implemented), through deposit -> install -> verify ->
+    // export-vsix, and out the other side as files `code --install-extension`
+    // consumes directly.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    // Stand-in .vsix zips — varve never looks inside one; the bytes are
+    // anchored by the signed digest and the NAME comes from the manifest.
+    let payloads: [(&str, &str, &[u8]); 3] = [
+        ("rust-lang.rust-analyzer", "0.3.2260", b"ra-old-zip-bytes"),
+        ("rust-lang.rust-analyzer", "0.3.2300", b"ra-new-zip-bytes"),
+        ("vadimcn.vscode-lldb", "1.11.4", b"lldb-zip-bytes"),
+    ];
+    let mut spec_text =
+        String::from("layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n");
+    for (name, version, bytes) in payloads {
+        let path = parent.join(format!("{name}-{version}.vsix"));
+        std::fs::write(&path, bytes).unwrap();
+        spec_text.push_str(&format!(
+            "\n[[tool]]\nname = \"{name}\"\nversion = \"{version}\"\nkind = \"vsix\"\n\
+             path = \"{}\"\n",
+            path.display()
+        ));
+    }
+    let spec = parent.join("vsix-spec.toml");
+    std::fs::write(&spec, &spec_text).unwrap();
+
+    let layout = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    // Every entry verifies against its own signed digest — the digest check is
+    // kind-agnostic (DD-003), so a `vsix` needed nothing new here (clause 1).
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+
+    // Clause 2 + clause 4 IN THE STORE: three distinct files, each holding its
+    // own bytes, none of them executable.
+    let store = varve_core::Store::at(&fx.root);
+    let installed = store
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|l| l.layer.to_string() == "2026.07.0")
+        .expect("the layer is installed");
+    for (name, version, bytes) in payloads {
+        let path = installed.root.join("payloads").join(name).join(version);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "{name}@{version} must be stored under its own path with its own bytes"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o111,
+                0,
+                "clause 2: a .vsix is an archive, not a program — {name}@{version} \
+                 was laid down mode {mode:o}"
+            );
+        }
+        // …and it is NOT dispatchable: nothing landed in bin/ under its name.
+        assert!(
+            !installed.root.join("bin").join(name).exists(),
+            "an extension must never occupy a dispatch path"
+        );
+    }
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["which", "rust-lang.rust-analyzer"])
+        .assert()
+        .failure();
+
+    // Clause 3: export for `code`.
+    let out = parent.join("extensions");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-vsix", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("3 verified VS Code extension(s)")
+                .and(predicate::str::contains("code --install-extension")),
+        );
+
+    for (name, version, bytes) in payloads {
+        // The marketplace's own asset name: `code` dispatches on the .vsix
+        // suffix, and a human tells two versions apart by this name alone.
+        let file = out.join(format!("{name}-{version}.vsix"));
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            bytes,
+            "{} must hold ITS OWN verified bytes",
+            file.display()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o111,
+                0,
+                "clause 2 must survive the export too: {} is mode {mode:o}",
+                file.display()
+            );
+        }
+    }
+
+    // Clause 3's second half: the stamp, so `verify --export` catches drift.
+    let stamp: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join(".varve-export.json")).unwrap()).unwrap();
+    assert_eq!(stamp["kind"], "vsix");
+    assert_eq!(stamp["layer"], "2026.07.0");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["verify", "--export"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fresh"));
+
+    // And it goes STALE when the pin moves — the whole reason for the stamp.
+    std::fs::write(
+        out.join(".varve-export.json"),
+        r#"{"layer":"2026.06.0","manifest_digest":"sha256:0000","kind":"vsix"}"#,
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["verify", "--export"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("STALE"));
+}
+
+// rivet: verifies REQ-VSIX-001
+#[test]
+fn export_vsix_refuses_a_layer_with_no_extensions_rather_than_writing_an_empty_directory() {
+    // An export directory that exists and is empty is worse than an error: a
+    // consumer installs from it, gets nothing, and believes the pin carries no
+    // extensions. Every other adapter fails closed here; so does this one.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    let bin = parent.join("synth-bin");
+    std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+    let spec = parent.join("spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"0.45.0\"\npath = \"{}\"\n",
+            bin.display()
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    let out = parent.join("extensions");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-vsix", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("carries no `vsix` entries"));
+    assert!(
+        !out.join(".varve-export.json").exists(),
+        "a refused export must not be stamped as one"
     );
 }
 
@@ -2232,6 +3029,7 @@ fn two_realms_same_layer_name_zero_cross_talk() {
         // Install from each realm's archive; NO VARVE_TRUST_ROOT env — the
         // realm is authoritative and self-contained.
         let mut cmd = Command::cargo_bin("varve").unwrap();
+        cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
         cmd.env("VARVE_ROOT", &fx.root)
             .env_remove("VARVE_TRUST_ROOT")
             .current_dir(&proj)
@@ -2244,6 +3042,7 @@ fn two_realms_same_layer_name_zero_cross_talk() {
 
     // One shim serves both universes: per-invocation resolution.
     let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fx.root)
         .current_dir(parent.join("proj-pulseengine"))
         .args(["shim", "install"])
@@ -2269,6 +3068,7 @@ fn two_realms_same_layer_name_zero_cross_talk() {
     // Cross-acceptance impossible: acme's archive can NEVER install into the
     // pulseengine project (realm root refuses the signature).
     let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fx.root)
         .current_dir(parent.join("proj-pulseengine"))
         .args(["install", "--from"])
@@ -2458,4 +3258,297 @@ fn list_with_an_empty_core_succeeds_and_says_so() {
         .assert()
         .success()
         .stdout(predicate::str::contains("no layers"));
+}
+
+// ──────────────── REQ-INDEXAUTH-001 through the shipped binary ────────────
+//
+// These drive the real `varve` executable, and that is the point. The whole
+// requirement was implemented in varve-core, fully unit-tested, and reached
+// nobody: the CLI's only `InstallPolicy` hardcoded `index: None`, so every
+// clause was skipped at runtime while the suite stayed green. A test that
+// constructs an `InstallPolicy` itself cannot detect that the product never
+// constructs one — only a test that runs the binary can.
+
+/// A project pinning its own realm, plus a deposited layout of one layer.
+/// Returns (fixture, project dir, signing key, layout dir, payload digest).
+fn realm_project(
+    signed_index: bool,
+) -> (
+    Fixture,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    String,
+) {
+    let fx = fixture(None, &[]);
+    let dir = fx.project.clone();
+    let key = dir.join("root.key");
+    let pubf = dir.join("root.pub");
+    varve(&fx)
+        .args(["keygen", "--out"])
+        .arg(&key)
+        .arg("--pub")
+        .arg(&pubf)
+        .assert()
+        .success();
+    let root = std::fs::read_to_string(&pubf).unwrap().trim().to_string();
+
+    let tool = dir.join("acme-tool");
+    std::fs::write(&tool, b"#!/bin/sh\necho acme\n").unwrap();
+    let layout = dir.join("layout");
+    varve(&fx)
+        .args([
+            "deposit",
+            "--layer",
+            "2026.08.0",
+            "--channel",
+            "qualified",
+            "--counter",
+            "3",
+            "--issued-at",
+            "2026-08-01T00:00:00Z",
+            "--key",
+        ])
+        .arg(&key)
+        .arg("--out")
+        .arg(&layout)
+        .arg("--tool")
+        .arg(format!("acme-tool@1.0.0={}", tool.display()))
+        .assert()
+        .success();
+
+    std::fs::write(
+        dir.join("varve-realms.toml"),
+        format!(
+            "[realm.acme]\nregistry = \"oci://example.invalid/acme\"\n\
+             trust-root = \"{root}\"\nsigned-index = {signed_index}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\nlayer = \"2026.08.0\"\n",
+    )
+    .unwrap();
+
+    // The digest the deposited layer will install under — the entry in the
+    // layout index that is not the signature.
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(layout.join("index.json")).unwrap()).unwrap();
+    let payload_digest = index["manifests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e.get("artifactType").is_none())
+        .and_then(|e| e["digest"].as_str())
+        .expect("the layout names the layer manifest")
+        .to_string();
+
+    (fx, dir, key, layout, payload_digest)
+}
+
+// rivet: verifies REQ-INDEXAUTH-001
+#[test]
+fn the_binary_verifies_the_realms_index_and_reports_what_the_line_holds() {
+    // Clauses 1, 4 and 5 end to end through the executable. The realm declares
+    // `signed-index = true`; the source carries a signed index naming both the
+    // pinned layer and a NEWER one it does not serve. The install must succeed
+    // — the pin stays installable, which is the correction this release made —
+    // and must SAY what the realm asserts, so the consumer learns about the
+    // layer the source withheld instead of inferring it from silence.
+    let (fx, dir, key, layout, payload_digest) = realm_project(true);
+
+    let index_json = dir.join("index-2026.08.json");
+    std::fs::write(
+        &index_json,
+        format!(
+            r#"{{
+  "line": "2026.08",
+  "counter": 2,
+  "issued-at": "2026-08-19T00:00:00Z",
+  "layers": [
+    {{ "layer": "2026.08.0", "digest": "{payload_digest}", "channel": "qualified", "counter": 3 }},
+    {{ "layer": "2026.08.7", "digest": "sha256:notserved", "channel": "qualified", "counter": 9 }}
+  ]
+}}"#
+        ),
+    )
+    .unwrap();
+    let envelope = dir.join("index.dsse.json");
+    varve(&fx)
+        .args(["sign-index", "--file"])
+        .arg(&index_json)
+        .arg("--key")
+        .arg(&key)
+        .arg("--out")
+        .arg(&envelope)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("signed line-index #2"));
+    varve(&fx)
+        .args(["attach-index", "--layout"])
+        .arg(&layout)
+        .arg("--index")
+        .arg(&envelope)
+        .assert()
+        .success();
+
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "installed layer 2026.08.0 (counter 3)",
+        ))
+        // Clause 4: REPORTED, naming the realm, the line, and both counters.
+        .stdout(predicate::str::contains("realm 'acme'"))
+        .stdout(predicate::str::contains("line 2026.08"))
+        .stdout(predicate::str::contains("greatest counter 9"))
+        .stdout(predicate::str::contains("accepted counter 3"));
+
+    // …and the deliberately-pinned older layer really is installed and usable.
+    // An earlier draft of clause 4 raised the ENFORCEMENT mark to 9 here and
+    // this install failed with "rollback refused" — a frozen toolchain broken
+    // by somebody else publishing.
+    varve(&fx).arg("verify").assert().success();
+    varve(&fx)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2026.08.0"));
+}
+
+// rivet: verifies REQ-INDEXAUTH-001
+#[test]
+fn the_binary_refuses_a_declaring_realm_whose_index_is_absent() {
+    // Clause 5, the direction that makes the control a control. The realm says
+    // it publishes an index; the source carries none. If this passed, an
+    // attacker would disable the whole requirement by deleting one file — and
+    // it DID pass, silently, for as long as the CLI hardcoded `index: None`.
+    let (fx, _dir, _key, layout, _digest) = realm_project(true);
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("acme"))
+        .stderr(predicate::str::contains("will not fall back"));
+    // Nothing was laid down on the strength of an unauthenticated listing.
+    varve(&fx)
+        .arg("list")
+        .assert()
+        .stdout(predicate::str::contains("2026.08.0").not());
+}
+
+// rivet: verifies REQ-INDEXAUTH-001
+#[test]
+fn a_realm_that_never_promised_an_index_installs_exactly_as_before() {
+    // The other half of clause 5, and the reason the default is `false`:
+    // failing closed by default would break every realm in existence at once.
+    // The same layout, the same absent index, and no realm declaration.
+    let (fx, _dir, _key, layout, _digest) = realm_project(false);
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("installed layer 2026.08.0"))
+        .stdout(predicate::str::contains("signed index").not());
+    varve(&fx).arg("verify").assert().success();
+}
+
+// rivet: verifies REQ-OFFLINE-001
+#[test]
+fn archive_of_a_multi_platform_layer_says_what_it_carries_and_refuses_elsewhere() {
+    // varve#80, at the boundary an operator actually touches. A tool name
+    // repeats across triples while `install` lays down only the host's, so
+    // `archive` used to write ONE host binary under every platform's digest and
+    // exit 0 calling it the artifact of record. What matters here is that the
+    // command SAYS which platform it carried and how much it left behind — an
+    // operator carrying media to a mixed site must learn that before they
+    // travel — and that a consumer on another platform is told so plainly.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("mp-root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("mp-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    for (file, bytes) in [("kilnd-a", b"kilnd-for-a"), ("kilnd-b", b"kilnd-for-b")] {
+        std::fs::write(parent.join(file), bytes).unwrap();
+    }
+    let spec = parent.join("mp-spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"kilnd\"\nversion = \"1.0.0\"\n\
+             platform = \"platform-a\"\npath = \"{a}\"\n\n\
+             [[tool]]\nname = \"kilnd\"\nversion = \"1.0.0\"\n\
+             platform = \"platform-b\"\npath = \"{b}\"\n",
+            a = parent.join("kilnd-a").display(),
+            b = parent.join("kilnd-b").display(),
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("mp-layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "k", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .args(["--platform", "platform-a"])
+        .assert()
+        .success();
+
+    // The archive names the platform it carries AND the entries it omits.
+    let air_gapped = parent.join("mp-archive");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["archive", "2026.07.0"])
+        .arg(&air_gapped)
+        .args(["--platform", "platform-a"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("1 payload for platform-a")
+                .and(predicate::str::contains("1 entry omitted"))
+                .and(predicate::str::contains("platform-b (1)")),
+        );
+
+    // Every blob holds the bytes its digest names — CONTENT, not a count.
+    for e in std::fs::read_dir(air_gapped.join("blobs/sha256")).unwrap() {
+        let e = e.unwrap();
+        let name = e.file_name().to_string_lossy().to_string();
+        let bytes = std::fs::read(e.path()).unwrap();
+        assert_eq!(
+            varve_core::manifest_digest(&bytes),
+            format!("sha256:{name}"),
+            "blob {name} does not hold the bytes it is named for"
+        );
+    }
+
+    // And the platform-b consumer is told what this archive is, not accused of
+    // tampering — before varve#80 this was `does not match its signed digest`.
+    varve(&fx)
+        .env("VARVE_ROOT", parent.join("mp-far-root"))
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&air_gapped)
+        .args(["--platform", "platform-b"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("carries no payload for platform-b")
+                .and(predicate::str::contains("archived for platform-a")),
+        );
 }

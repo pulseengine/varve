@@ -167,6 +167,60 @@ pub(crate) mod fixtures {
         .into_bytes()
     }
 
+    /// Entries carrying a payload KIND and a version — the REQ-STORE-002
+    /// shape, in which one name may legitimately appear at several versions.
+    /// Each tuple is (name, version, kind, blob digest); an empty kind stamps
+    /// no kind annotation, which is how a pre-kind layer reads.
+    pub fn manifest_with_payloads(
+        layer: &str,
+        channel: &str,
+        counter: u64,
+        issued_at: &str,
+        payloads: &[(&str, &str, &str, &str)],
+    ) -> Vec<u8> {
+        let entries = payloads
+            .iter()
+            .map(|(name, version, kind, digest)| {
+                let kind_ann = if kind.is_empty() {
+                    String::new()
+                } else {
+                    format!(",\n        \"eu.pulseengine.varve.kind\": \"{kind}\"")
+                };
+                format!(
+                    r#"    {{
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "{digest}",
+      "size": 0,
+      "annotations": {{
+        "eu.pulseengine.tool": "{name}",
+        "eu.pulseengine.tool.version": "{version}"{kind_ann}
+      }}
+    }}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!(
+            r#"{{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "artifactType": "application/vnd.pulseengine.varve.layer.v1+json",
+  "annotations": {{
+    "eu.pulseengine.varve.layer": "{layer}",
+    "eu.pulseengine.varve.line": "{line}",
+    "eu.pulseengine.varve.channel": "{channel}",
+    "eu.pulseengine.varve.counter": "{counter}",
+    "org.opencontainers.image.created": "{issued_at}"
+  }},
+  "manifests": [
+{entries}
+  ]
+}}"#,
+            line = &layer[..layer.rfind('.').unwrap()],
+        )
+        .into_bytes()
+    }
+
     /// An acceptance-grade manifest whose entries reference tools by blob
     /// digest — the shape `install` consumes.
     pub fn manifest_with_tools(

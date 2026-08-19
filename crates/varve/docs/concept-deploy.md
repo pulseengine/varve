@@ -92,12 +92,21 @@ are trusted.
 
 ## What consumers need
 
-Two things, and only two:
+Two things go in the file:
 
 1. **The registry reference** — `oci://ghcr.io/your-org/layers`, which goes in the realm's `registry`.
 2. **The trust root** — the 64 hex characters `varve pubkey` prints, which goes in the realm's `trust-root`.
 
 Hand them a `varve-realms.toml` containing both. That file is the whole bootstrap: it names where bytes come from and which key makes them acceptable. Everything else — digests, counters, support windows — travels inside the signed manifest.
+
+And, **if your registry is private, a third thing that does not go in the file**: a credential. varve reads `$VARVE_REGISTRY_AUTH` as `username:password`, or falls back to Docker/podman config files; it never executes a `credsStore` helper, so cloud registries need the credential handed over directly:
+
+```sh
+export VARVE_REGISTRY_AUTH="$USER:$GHCR_TOKEN"
+export VARVE_REGISTRY_AUTH="AWS:$(aws ecr get-login-password --region eu-central-1)"
+```
+
+Without it a pull fails with *"offered no credential"*, naming `VARVE_REGISTRY_AUTH` — distinct from *"rejected it"*, which means the one you gave is wrong. Full precedence: `varve docs environment`. The credential is a *transport* secret: it decides whether the bytes arrive, never whether they are accepted.
 
 ## Bootstrapping trust the first time
 
@@ -105,4 +114,24 @@ A consumer has to obtain the realms file through a channel they already trust �
 
 ## Air-gapped delivery
 
-No registry is required. `varve archive <layer> <dir>` writes the same OCI layout, and `varve install --from <dir>` reads it. Carry the directory across on whatever media you use; verification is identical on both sides, because it depends on the signature and not on the transport.
+No registry is required. `varve archive <layer> <dir>` writes an OCI layout of the same shape `deposit` does — `oci-layout`, `index.json`, `blobs/sha256/<hex>`, the layer manifest tagged with `org.opencontainers.image.ref.name` — and `varve install --from <dir>` reads it. Carry the directory across on whatever media you use; verification is identical on both sides, because it depends on the signature and not on the transport.
+
+The **same three roles** travel: layer payload, DSSE signature envelope, and the baseline line-status. Until varve#77 the archive dropped that third one — three manifests in, two out — so an air-gapped consumer's `varve status` was permanently broken and a yank never arrived by the one transport that cannot fall back on a registry. Confirm it on a layer that carries one:
+
+```sh
+jq '[.manifests[].artifactType]' layout/index.json    # deposit side
+varve archive 2026.10.0 ./archived
+jq '[.manifests[].artifactType]' archived/index.json  # same three
+```
+
+Two ways an archive is legitimately *not* byte-identical to the deposit layout: attestations that entered at install time are re-emitted beside it as extra referrer entries, and the index is re-serialized. Both add evidence; neither changes the layer's identity, because the manifest digest is what the tag points at.
+
+`archive` carries the payloads THIS core holds, which for a multi-platform layer installed on one platform is that platform's. It says so:
+
+```
+9 payloads for aarch64-apple-darwin
+26 entries omitted — this core holds no payload for them: aarch64-unknown-linux-gnu (8), …
+this archive installs on aarch64-apple-darwin only; for another platform, install and archive the layer there.
+```
+
+A consumer on another platform is told plainly rather than shown a digest mismatch. If your air-gapped site is heterogeneous, archive once per platform from a machine of that platform — varve will not fetch other triples' bytes at archive time, because that would put a network operation inside the one command whose purpose is working without one (DD-022).

@@ -51,8 +51,11 @@ enum Cmd {
         #[arg(long, value_name = "TRIPLE")]
         platform: Option<String>,
     },
-    /// Re-verify the pinned layer against its retained signature and the
-    /// signed digests — the install-time verdict, repeated offline.
+    /// Re-check the pinned layer offline: retained signature, the signed
+    /// digest of every entry FOR THIS PLATFORM, each composed layer, the
+    /// line's anti-rollback mark, and PATH shadowing. Entries for other
+    /// platforms and files the manifest does not name are NOT checked — see
+    /// `varve docs verify`.
     Verify {
         /// Verify every installed layer instead of only the pinned one.
         #[arg(long)]
@@ -72,11 +75,21 @@ enum Cmd {
     },
     /// Extract the core: export an installed layer as a directory-shaped
     /// OCI image layout — the offline artifact of record.
+    ///
+    /// The archive carries ONE platform's payloads: it exports what this
+    /// machine installed, and `varve install` fetches only its own platform's
+    /// bytes. A mixed air-gapped site needs one archive per platform, each made
+    /// on (or installed for) that platform.
     Archive {
         /// Layer to export, e.g. `2026.07.0`.
         layer: String,
         /// Destination directory for the oci-layout.
         dest: PathBuf,
+        /// The platform this core was installed for (target triple) — the one
+        /// whose payloads the archive will carry. Defaults to this machine;
+        /// pass it when the core was laid down with `varve install --platform`.
+        #[arg(long, value_name = "TRIPLE")]
+        platform: Option<String>,
     },
     /// Dispatch a tool from the pinned layer, with the layer identity in the
     /// environment (VARVE_LAYER, VARVE_LAYER_MANIFEST_DIGEST) so provenance
@@ -196,6 +209,19 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
+    /// Lay the layer's verified `vsix` entries out as
+    /// `publisher.name-version.vsix` files, so `code --install-extension
+    /// <file>` installs an editor extension whose bytes varve signed rather
+    /// than whatever the marketplace serves today (REQ-VSIX-001).
+    ExportVsix {
+        /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
+        /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
+        #[arg(long)]
+        layer: Option<String>,
+        /// Output directory for the `.vsix` files.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
     /// Emit an SBOM for a verified layer, transcribed from its SIGNED manifest
     /// rather than scanned from disk — every component, version and hash is
     /// copied from what the trust root anchored (REQ-SBOM-001). Answers "which
@@ -245,6 +271,15 @@ enum Cmd {
         /// Where to write the signed statement.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
+        /// (CI) Also ATTACH the statement and the attestation bytes to a
+        /// deposit layout as referrer artifacts, so the evidence travels with
+        /// the layer through a registry push, an `archive`, and an offline
+        /// install (REQ-ATTEST-002). Without this the statement exists and
+        /// reaches nobody — the mirror-boundary gap where bandersnatch,
+        /// Verdaccio and every github.com-hosted BCR attestation drop the
+        /// evidence and no error says so.
+        #[arg(long = "attach-to", value_name = "DIR")]
+        attach_to: Option<PathBuf>,
     },
     /// Check that an attestation belongs to the pinned layer: verify the
     /// statement against the trust root, then re-hash the carried bytes and
@@ -271,6 +306,37 @@ enum Cmd {
         key_id: String,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
+    },
+    /// (CI) Validate and sign a line-index document — the realm's statement of
+    /// which layers a line contains (REQ-INDEXAUTH-001). Without one, the
+    /// listing a consumer resolves against is the registry's unauthenticated
+    /// `/tags/list`, and a host that HIDES a layer is undetectable: every
+    /// artifact it does serve still verifies.
+    SignIndex {
+        /// The index document JSON (line, counter, issued-at, layers[] of
+        /// layer/digest/channel/counter). See `varve docs sign-index`.
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// Signing key file: 128 hex characters — a 32-byte ed25519 seed
+        /// followed by its 32-byte public key. Mint one with `varve keygen`.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        #[arg(long, default_value = "varve-root-1")]
+        key_id: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// (CI) Attach a signed line-index envelope to a deposit layout, so an
+    /// offline consumer of a realm declaring `signed-index = true` can obtain
+    /// it (REQ-INDEXAUTH-001). On a registry the same envelope is pushed under
+    /// the `line-index-<line>` tag — see `varve docs attach-index`.
+    AttachIndex {
+        /// The oci-layout directory produced by `varve deposit`.
+        #[arg(long, value_name = "DIR")]
+        layout: PathBuf,
+        /// The signed line-index DSSE envelope (from `varve sign-index`).
+        #[arg(long, value_name = "ENVELOPE")]
+        index: PathBuf,
     },
     /// (CI) Attach a signed line-status envelope to a deposit layout as its
     /// baseline, so `varve status` works after an offline install and the
@@ -422,7 +488,11 @@ fn run() -> anyhow::Result<()> {
             export,
             lockfile,
         } => verify(&store, all, &export, lockfile.as_deref()),
-        Cmd::Archive { layer, dest } => archive(&store, &layer, &dest),
+        Cmd::Archive {
+            layer,
+            dest,
+            platform,
+        } => archive(&store, &layer, &dest, platform),
         Cmd::Run {
             varve,
             tool_and_args,
@@ -464,6 +534,7 @@ fn run() -> anyhow::Result<()> {
         Cmd::ExportBazelDistdir { layer, out } => {
             export_bazel_distdir(&store, layer.as_deref(), &out)
         }
+        Cmd::ExportVsix { layer, out } => export_vsix(&store, layer.as_deref(), &out),
         Cmd::Sbom { layer, format, out } => {
             sbom_cmd(&store, layer.as_deref(), &format, out.as_deref())
         }
@@ -484,6 +555,7 @@ fn run() -> anyhow::Result<()> {
             key,
             key_id,
             out,
+            attach_to,
         } => sign_attestation(
             &store,
             layer.as_deref(),
@@ -493,9 +565,17 @@ fn run() -> anyhow::Result<()> {
             &key,
             &key_id,
             &out,
+            attach_to.as_deref(),
         ),
         Cmd::CheckAttestation { statement, file } => check_attestation(&store, &statement, &file),
         Cmd::AttachStatus { layout, status } => attach_status(&layout, &status),
+        Cmd::SignIndex {
+            file,
+            key,
+            key_id,
+            out,
+        } => sign_index(&file, &key, &key_id, &out),
+        Cmd::AttachIndex { layout, index } => attach_index(&layout, &index),
         Cmd::Shim(ShimCmd::Install { extra_tools }) => shim_install(&store, &extra_tools),
         Cmd::Env { shell } => print_env(&store, &shell),
         Cmd::Completions { shell } => {
@@ -695,6 +775,51 @@ fn attach_status(layout: &std::path::Path, status: &std::path::Path) -> anyhow::
     println!(
         "attached baseline line-status #{counter} for line {line} to {}",
         layout.display()
+    );
+    Ok(())
+}
+
+fn attach_index(layout: &std::path::Path, index: &std::path::Path) -> anyhow::Result<()> {
+    let envelope = std::fs::read(index)
+        .with_context(|| format!("cannot read index envelope {}", index.display()))?;
+    let (line, counter) = varve_core::attach_index_envelope_to_layout(layout, &envelope)?;
+    println!(
+        "attached signed line-index #{counter} for line {line} to {}",
+        layout.display()
+    );
+    Ok(())
+}
+
+fn sign_index(
+    file: &std::path::Path,
+    key: &std::path::Path,
+    key_id: &str,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let bytes = std::fs::read(file)
+        .with_context(|| format!("cannot read index document {}", file.display()))?;
+    // Validate through the typed model before signing: an index is the
+    // document a consumer refuses installs on the strength of, so CI must not
+    // be able to sign a malformed one and discover it at the far end.
+    let doc: varve_core::LineIndex =
+        serde_json::from_slice(&bytes).context("index document does not match the schema")?;
+    // The line must be a real line, not merely a string that round-trips —
+    // an index for "twenty twenty six" verifies fine and matches nothing.
+    doc.line()?;
+    let hex_key = std::fs::read_to_string(key)
+        .with_context(|| format!("cannot read signing key {}", key.display()))?;
+    // Refuse a key that cannot produce verifiable signatures BEFORE signing,
+    // as every other producing path does (REQ-PRODUCER-001).
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
+    let envelope = doc.sign(&sk, key_id)?;
+    std::fs::write(out, envelope)
+        .with_context(|| format!("cannot write envelope {}", out.display()))?;
+    println!(
+        "signed line-index #{} for line {} ({} layer(s)) -> {}",
+        doc.counter,
+        doc.line,
+        doc.layers.len(),
+        out.display()
     );
     Ok(())
 }
@@ -1093,62 +1218,96 @@ fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
     Ok(())
 }
 
-/// Collect the verified `crate`-kind entries of an already-verified installed
-/// layer as CrateEntry values — the shared front-half of every Cargo-facing
-/// export. The layer was verified by `export_target`; each blob is still
-/// re-hashed against its signed digest before it can leave the store.
-fn collect_verified_crates(
+/// One payload lifted out of a verified layer, ready for an export adapter.
+struct VerifiedPayload {
+    name: String,
+    version: String,
+    /// The SIGNED digest, `sha256:<hex>`, re-checked against these bytes.
+    digest: String,
+    bytes: Vec<u8>,
+}
+
+/// Collect the entries of one KIND out of an already-verified installed layer.
+/// The shared front-half of every export adapter: the layer was verified by
+/// `export_target`, and each blob is still re-hashed against its signed digest
+/// before it can leave the store. Shared so the `crate` and `vsix` paths cannot
+/// drift apart on the part that matters — which bytes are allowed out.
+fn collect_verified_payloads(
     store: &Store,
     entry: &varve_core::store::InstalledLayer,
-) -> anyhow::Result<Vec<varve_core::crateexport::CrateEntry>> {
+    want: varve_core::PayloadKind,
+) -> anyhow::Result<Vec<VerifiedPayload>> {
     let payload = std::fs::read(entry.root.join("layer.json"))?;
     let manifest = varve_core::LayerManifest::parse(&payload)?;
+    let kind = want.as_str();
 
-    let mut crates = Vec::new();
+    let mut found = Vec::new();
     for e in &manifest.entries {
-        if e.kind().map_err(|err| anyhow::anyhow!(err.to_string()))?
-            != varve_core::PayloadKind::Crate
-        {
+        if e.kind().map_err(|err| anyhow::anyhow!(err.to_string()))? != want {
             continue;
         }
         let name = e
             .annotations
             .get("eu.pulseengine.tool")
-            .context("crate entry missing its name annotation")?;
+            .with_context(|| format!("{kind} entry missing its name annotation"))?;
         let version = e
             .annotations
             .get("eu.pulseengine.tool.version")
-            .context("crate entry missing its version annotation")?;
-        let cksum = e
-            .digest
-            .strip_prefix("sha256:")
-            .with_context(|| format!("crate '{name}' digest is not sha256:<hex>"))?
-            .to_string();
-        let bytes_path = store
-            .tool_path(entry, name)
-            .with_context(|| format!("crate '{name}' blob is not present in the store"))?;
+            .with_context(|| format!("{kind} entry missing its version annotation"))?;
+        // Locate by ENTRY, not by name: a layer may hold several versions of
+        // one payload, each under its own path, and `serde@1.0.200` must export
+        // its OWN bytes rather than whichever version landed last
+        // (REQ-STORE-002 clause 5).
+        let bytes_path = store.entry_path(entry, e).with_context(|| {
+            format!("{kind} '{name}' version {version} is not present in the store")
+        })?;
         let bytes = std::fs::read(&bytes_path)?;
         // Defense in depth: re-hash the on-disk bytes against the signed digest
         // ourselves, regardless of platform filtering, so what we export is the
         // exact bytes the trust root anchored.
         if varve_core::manifest_digest(&bytes) != e.digest {
             bail!(
-                "crate '{name}' on-disk bytes do not match the signed digest {}",
+                "{kind} '{name}' version {version} on-disk bytes do not match the signed \
+                 digest {}",
                 e.digest
             );
         }
-        crates.push(varve_core::crateexport::CrateEntry {
+        found.push(VerifiedPayload {
             name: name.clone(),
             version: version.clone(),
-            cksum,
+            digest: e.digest.clone(),
             bytes,
         });
     }
-    if crates.is_empty() {
+    if found.is_empty() {
         bail!(
-            "nothing exported — layer {} carries no `crate` entries",
+            "nothing exported — layer {} carries no `{kind}` entries",
             entry.layer
         );
+    }
+    Ok(found)
+}
+
+/// Collect the verified `crate`-kind entries of an already-verified installed
+/// layer as CrateEntry values — the shared front-half of every Cargo-facing
+/// export.
+fn collect_verified_crates(
+    store: &Store,
+    entry: &varve_core::store::InstalledLayer,
+) -> anyhow::Result<Vec<varve_core::crateexport::CrateEntry>> {
+    let mut crates = Vec::new();
+    for p in collect_verified_payloads(store, entry, varve_core::PayloadKind::Crate)? {
+        let cksum = p
+            .digest
+            .strip_prefix("sha256:")
+            .with_context(|| format!("crate '{}' digest is not sha256:<hex>", p.name))?
+            .to_string();
+        crates.push(varve_core::crateexport::CrateEntry {
+            name: p.name,
+            version: p.version,
+            cksum,
+            bytes: p.bytes,
+        });
     }
     Ok(crates)
 }
@@ -1228,6 +1387,7 @@ fn sign_attestation(
     key: &std::path::Path,
     key_id: &str,
     out: &std::path::Path,
+    attach_to: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let kind: varve_core::attest::AttestationKind = kind.parse()?;
     // Trust first, as everywhere: binding an attestation to a layer we cannot
@@ -1249,7 +1409,21 @@ fn sign_attestation(
     // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
     let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
     let envelope = varve_core::attest::sign(&st, &sk, key_id)?;
-    std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
+    std::fs::write(out, &envelope).with_context(|| format!("cannot write {}", out.display()))?;
+    // Carriage (REQ-ATTEST-002): both blobs go into the layout as referrer
+    // entries — the statement AND the attested bytes verbatim. Carrying only
+    // the statement would put a claim on the far side of the air gap with
+    // nothing to check it against.
+    if let Some(layout) = attach_to {
+        varve_core::attestcarry::attach(layout, envelope.as_bytes(), &bytes).with_context(
+            || {
+                format!(
+                    "cannot attach the attestation to layout {}",
+                    layout.display()
+                )
+            },
+        )?;
+    }
     println!(
         "signed a {kind} attestation statement by {producer} -> {out}\n\
          \u{20}\u{20}attestation digest : {adigest}\n\
@@ -1261,6 +1435,14 @@ fn sign_attestation(
         layer = entry.layer,
         ldigest = st.layer_manifest_digest,
     );
+    if let Some(layout) = attach_to {
+        println!(
+            "attached to layout {} as referrer artifacts — the statement AND the bytes, so it \
+             travels with the layer through a registry push, `varve archive`, and an offline \
+             install",
+            layout.display()
+        );
+    }
     Ok(())
 }
 
@@ -1396,6 +1578,42 @@ fn export_bazel_distdir(
         out.display()
     );
     write_export_stamp(out, &entry, "bazel-distdir")?;
+    Ok(())
+}
+
+/// `varve export-vsix --out D` (REQ-VSIX-001 clause 3): lay the layer's
+/// verified `.vsix` files out under names `code --install-extension` consumes
+/// directly, and stamp the directory so `varve verify --export D` catches the
+/// pin moving on without the export.
+fn export_vsix(store: &Store, layer: Option<&str>, out: &std::path::Path) -> anyhow::Result<()> {
+    let (store, entry) = export_target(store, layer)?;
+    // Absolute, because the whole point of the printed line is that it can be
+    // pasted into a different shell in a different directory.
+    let out = &absolute_export_dir(out)?;
+    let extensions: Vec<varve_core::VsixEntry> =
+        collect_verified_payloads(&store, &entry, varve_core::PayloadKind::Vsix)?
+            .into_iter()
+            .map(|p| varve_core::VsixEntry {
+                name: p.name,
+                version: p.version,
+                bytes: p.bytes,
+            })
+            .collect();
+    let n = varve_core::export_vsix(&extensions, out)?;
+    println!(
+        "exported {n} verified VS Code extension(s) to {} — install them with:",
+        out.display()
+    );
+    // Every file, named: an extension is installed one at a time, and the
+    // reader needs the exact argument, not a glob they have to expand.
+    for e in &extensions {
+        println!(
+            "  code --install-extension {}",
+            out.join(varve_core::vsixexport::vsix_file_name(&e.name, &e.version))
+                .display()
+        );
+    }
+    write_export_stamp(out, &entry, "vsix")?;
     Ok(())
 }
 
@@ -1581,7 +1799,13 @@ fn run_deposit(
     Ok(())
 }
 
-fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result<()> {
+fn archive(
+    store: &Store,
+    layer: &str,
+    dest: &std::path::Path,
+    platform: Option<String>,
+) -> anyhow::Result<()> {
+    let platform = platform.unwrap_or_else(varve_core::host_platform);
     // Use the PROJECT'S store. `archive` filtered the ambient top-level core,
     // so for a realm-pinned layer it reported "not installed" while `list`,
     // `verify`, `which`, `run` and `sbom` all resolved it — and its corrective
@@ -1607,13 +1831,39 @@ fn archive(store: &Store, layer: &str, dest: &std::path::Path) -> anyhow::Result
              not supported yet; clean up the core first"
         ),
     };
-    varve_core::export_archive(&store, &entry, dest)?;
+    let summary = varve_core::export_archive(&store, &entry, dest, &platform)?;
     println!(
         "archived layer {} {} as oci-layout at {}",
         entry.layer,
         entry.digest,
         dest.display()
     );
+    // What crossed, and what did not. An archive holds one platform's payloads
+    // because that is all this machine installed, and an operator carrying this
+    // media to a mixed site has to learn that BEFORE they travel, not from a
+    // failed install on the far side of the gap (varve#80).
+    println!(
+        "  {} payload{} for {}",
+        summary.archived,
+        if summary.archived == 1 { "" } else { "s" },
+        summary.platform
+    );
+    if !summary.omitted.is_empty() {
+        let total: usize = summary.omitted.values().sum();
+        let detail = summary
+            .omitted
+            .iter()
+            .map(|(p, n)| format!("{p} ({n})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "  {total} entr{} omitted — this core holds no payload for them: {detail}\n  \
+             this archive installs on {} only; for another platform, install and archive the \
+             layer there.",
+            if total == 1 { "y" } else { "ies" },
+            summary.platform
+        );
+    }
     Ok(())
 }
 
@@ -1749,7 +1999,10 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         } else {
             let path = std::path::Path::new(from);
             if path.join("oci-layout").is_file() {
-                Box::new(varve_core::OciLayoutSource::at(path))
+                // Tell the layout which platform we want, so a payload it does
+                // not carry is reported as the single-platform archive it is
+                // rather than as a bare missing digest (varve#80).
+                Box::new(varve_core::OciLayoutSource::at(path).for_platform(&platform))
             } else {
                 Box::new(varve_core::DirSource::at(path))
             }
@@ -1757,7 +2010,20 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
     let source = &*source;
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let now = today_rfc3339();
+    // The realm's line-index obligation (REQ-INDEXAUTH-001). The realm is
+    // where every other trust question is settled, so it is where this one is
+    // read: its name for the error, its trust root as the ONLY key an index
+    // may verify against, and its `signed-index` declaration deciding whether
+    // absence is fatal (clause 5). A realmless pin gets `None` — there is then
+    // no root that could have signed an index, so there is nothing to check
+    // and nothing that could be hidden from a check that cannot exist.
+    let index = ctx.realm.as_ref().map(|realm| varve_core::IndexPolicy {
+        realm: &realm.name,
+        root_public_key: &realm.trust_root,
+        required: realm.signed_index,
+    });
     let policy = varve_core::InstallPolicy {
+        index,
         now: &now,
         staleness_threshold_days: 90,
         platform: &platform,
@@ -1767,10 +2033,44 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         "installed layer {} (counter {}) {}",
         outcome.layer, outcome.counter, outcome.digest
     );
+    // Clause 4: REPORT what the realm asserts the line contains, beside what
+    // this install accepted. Reported and NOT enforced, deliberately — raising
+    // the anti-rollback mark to the newest counter that merely EXISTS would
+    // make a deliberately-pinned older layer uninstallable the moment the realm
+    // publishes a newer one, which breaks frozen toolchains to defend against
+    // an attack varve does not have (a consumer naming an exact layer cannot be
+    // tricked by a withheld newer one). What they CANNOT do is see it — so it
+    // is said out loud here.
+    if let Some(high_water) = outcome.index_high_water {
+        let realm = ctx.realm.as_ref().map(|r| r.name.as_str()).unwrap_or("-");
+        println!(
+            "  realm '{realm}' signed index for line {}: greatest counter {high_water}; this \
+             install accepted counter {} (reported, not enforced — your pin stays installable)",
+            pin.layer.line(),
+            outcome.counter
+        );
+    }
     if let Some(age) = outcome.staleness_days {
         eprintln!(
             "warning: layer {} was issued {age} days ago — check whether a newer deposit of \
              its line exists",
+            outcome.layer
+        );
+    }
+    // Carriage, reported at the moment the evidence crosses the boundary
+    // (REQ-ATTEST-002). `varve verify` is what says whether each still binds;
+    // this only says what travelled, so a consumer downstream of a mirror can
+    // see a drop instead of inferring it from silence.
+    if outcome.attestations_carried > 0 {
+        println!(
+            "  carried {} attestation(s) with the layer — `varve verify` reports what each \
+             claims and whether it still binds",
+            outcome.attestations_carried
+        );
+    }
+    if let Some(note) = &outcome.attestation_note {
+        eprintln!(
+            "warning: layer {} carried attestations that did not survive the trip: {note}",
             outcome.layer
         );
     }
@@ -1871,6 +2171,7 @@ fn verify(
             "layer {} {} verified: signature OK, {checked} tool(s) match their signed digests",
             layer.layer, layer.digest
         );
+        report_attestations(&ctx, &layer)?;
         // A composition is only as trustworthy as every layer in it. Verifying
         // the root alone left an UNSIGNED included layer dispatching while
         // verify reported OK (found by clean-room review) — the included
@@ -1884,7 +2185,135 @@ fn verify(
     if let Some(path) = lockfile {
         verify_lockfile(&ctx, path)?;
     }
+    // A verified layer that PATH does not actually reach is the gap between
+    // what is signed and what executes — the one varve exists to close. verify
+    // is where environment drift belongs (the precedent REQ-EXPORT-SYNC-001
+    // set for stale exports), so this fails rather than warns (varve#66).
+    verify_no_shadowing(&ctx, store)?;
+    // varve#76: verify claimed to be "the install-time verdict, repeated
+    // offline" and was not — the install-time verdict includes anti-rollback
+    // and verify's did not, so a pin downgraded to an already-installed older
+    // layer verified clean, exit 0. The docs tell people to run verify in CI
+    // AS THE GATE, so the downgrade passed the gate. Per-line offline
+    // anti-rollback is varve's most defensible property; the command a
+    // consumer runs to check it must check it.
+    verify_no_rollback(&ctx, store)?;
     Ok(())
+}
+
+/// Fail when the layer the PIN resolves to sits below its line's high-water
+/// mark (varve#76).
+///
+/// Scoped to the resolved layer deliberately. An older layer merely PRESENT in
+/// the store is not a danger — a consumer may keep one around — but the layer
+/// the pin dispatches being stale is precisely the attack anti-rollback
+/// exists to stop. Checking every installed layer would fail on legitimately
+/// retained ones, and a check that fires on correct setups is one people
+/// switch off (the REQ-SHADOW-001 lesson).
+fn verify_no_rollback(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
+    let resolved = varve_core::resolve(&ctx.pin, store)?;
+    let payload = std::fs::read(resolved.layer.root.join("layer.json"))?;
+    let manifest = varve_core::LayerManifest::parse(&payload)?;
+    let marks = varve_core::HighWaterMarks::load(store.root())?;
+    if let varve_core::RollbackVerdict::Rollback {
+        line,
+        presented,
+        high_water,
+    } = marks.check(&manifest)
+    {
+        bail!(
+            "the layer verifies, but the pin resolves to a STALE layer: {} presents counter \
+             {presented} while the {line} line's high-water mark is {high_water}. A \
+             validly-signed older layer is exactly what anti-rollback exists to refuse — \
+             `install` would have refused this. Move the pin forward, or if you are \
+             deliberately going back, see `varve docs recovery`.",
+            manifest.layer
+        );
+    }
+    Ok(())
+}
+
+/// Report the attestations a verified layer carries (REQ-ATTEST-002): what
+/// each claims, who produced it, and whether it STILL binds to this layer and
+/// these bytes under the trust root.
+///
+/// REPORTING, not refusal, and that is a decision rather than an omission. An
+/// attestation that no longer binds is evidence about the evidence — the
+/// consumer must see it — but a layer whose own signature and digests are good
+/// is still a good layer. Failing `verify` on a third party's stale audit would
+/// make varve's verdict depend on someone else's release cadence, in the one
+/// tool whose purpose is frozen toolchains.
+///
+/// Called only AFTER `verify_installed` has re-checked the retained envelope:
+/// the layer's name and digest are local labels until then, and joining an
+/// attestation onto unverified labels is the defect clean-room review already
+/// found in `check-attestation`.
+fn report_attestations(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> anyhow::Result<()> {
+    let root = ctx_root_bytes(ctx)?;
+    let reports = match varve_core::attestcarry::report_installed(
+        &layer.root,
+        &layer.layer.to_string(),
+        &layer.digest,
+        &root,
+    ) {
+        Ok(reports) => reports,
+        // A broken attestation store is surfaced, never fatal — same rule as
+        // the binding verdict itself.
+        Err(e) => {
+            eprintln!("note: attestations carried by layer {} : {e}", layer.layer);
+            return Ok(());
+        }
+    };
+    if reports.is_empty() {
+        return Ok(());
+    }
+    println!("  carries {} attestation(s):", reports.len());
+    for r in &reports {
+        if r.binds {
+            println!(
+                "    {kind} by {producer}: binds to this layer (varve vouches for the \
+                 association and the bytes' integrity — what {producer} CLAIMS is verified \
+                 with {producer}'s own key)",
+                kind = r.kind,
+                producer = r.producer,
+            );
+        } else {
+            println!(
+                "    {kind} by {producer}: DOES NOT BIND — {reason}",
+                kind = r.kind,
+                producer = r.producer,
+                reason = r.reason.as_deref().unwrap_or("unknown"),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Fail when PATH would run a different binary than the pin dispatches
+/// (REQ-SHADOW-001 clause 3).
+fn verify_no_shadowing(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
+    let resolved = varve_core::resolve(&ctx.pin, store)?;
+    let path_var = std::env::var_os("PATH");
+    // Our own binary: a shim is a symlink to VARVE, so reaching varve is the
+    // supported route, not a conflict.
+    let me = std::env::current_exe().ok();
+    let mut shadowed = Vec::new();
+    for (name, path) in &resolved.tools {
+        if let varve_core::shadow::Shadowing::Shadowed { found } =
+            varve_core::shadow::check(path_var.as_deref(), name, path, me.as_deref())
+        {
+            shadowed.push(varve_core::shadow::describe(name, path, &found));
+        }
+    }
+    if shadowed.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the layer verifies, but {} of its tool(s) are not what your PATH runs \
+         (REQ-SHADOW-001):\n\n{}",
+        shadowed.len(),
+        shadowed.join("\n\n")
+    );
 }
 
 /// Check a project's lockfile against the pinned layer's `crate` entries
@@ -2015,20 +2444,40 @@ fn verify_composition_inner(
             // No realm named: the including layer's own root applies.
             None => ctx_verifier(ctx)?,
         };
+        // How the root was chosen, in words a reader can act on. `<including
+        // layer's>` used to leak into BOTH messages verbatim — an unrendered
+        // template placeholder in the output of the command whose whole job is
+        // to be believed (varve#78).
+        let vouched_by = match &inc.realm {
+            Some(name) => format!("realm '{name}'"),
+            None => "this project's own trust root (the include names no realm)".to_string(),
+        };
         let checked =
             varve_core::verify_installed(store, &entry, &verifier, &varve_core::host_platform())
                 .with_context(|| {
-                    format!(
-                        "composed layer {} (from realm '{}') failed verification",
-                        entry.layer,
-                        inc.realm.as_deref().unwrap_or("<including layer's>")
-                    )
+                    let mut msg = format!(
+                        "composed layer {} failed verification against {vouched_by}",
+                        entry.layer
+                    );
+                    // The commonest cause is not tampering. An `[[include]]`
+                    // with no `realm` is checked against the PIN's root, so a
+                    // layer another realm signed — the entire point of
+                    // composition — is accused of a bad signature. Say so, or
+                    // the reader goes hunting for an attacker.
+                    if inc.realm.is_none() {
+                        msg.push_str(
+                            ". If the included layer comes from a DIFFERENT realm, this is the \
+                             expected result of an `[[include]]` with no `realm =` — its own \
+                             realm's root is the one that vouches for it. Add `realm` to the \
+                             include and re-deposit; the annotation is inside the signed payload, \
+                             so it cannot be added afterwards",
+                        );
+                    }
+                    msg
                 })?;
         println!(
-            "  composes {} {} — verified against realm '{}': {checked} tool(s) match",
-            entry.layer,
-            entry.digest,
-            inc.realm.as_deref().unwrap_or("<including layer's>")
+            "  composes {} {} — verified against {vouched_by}: {checked} tool(s) match",
+            entry.layer, entry.digest,
         );
         // Composition is a graph: verify what this layer composes too, on a
         // path that remembers where it has been.
@@ -2112,11 +2561,27 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
                 .join(", ")
         );
     };
+    // STDOUT is the dispatched path, unchanged, so scripts that capture it
+    // keep working (REQ-SHADOW-001 clause 2).
     println!("{}", path.display());
     println!(
         "layer {} ({}) {}",
         resolved.layer.layer, resolved.layer.channel, resolved.layer.digest
     );
+    // …but the answer to "which binary runs here" is false if PATH disagrees,
+    // and that is the README's own words for this command (varve#66).
+    let me = std::env::current_exe().ok();
+    if let varve_core::shadow::Shadowing::Shadowed { found } = varve_core::shadow::check(
+        std::env::var_os("PATH").as_deref(),
+        tool,
+        path,
+        me.as_deref(),
+    ) {
+        eprintln!(
+            "warning: {}",
+            varve_core::shadow::describe(tool, path, &found)
+        );
+    }
     Ok(())
 }
 
