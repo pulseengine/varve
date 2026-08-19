@@ -1799,6 +1799,113 @@ artifacts:
       priority: should
       category: non-functional
 
+  - id: REQ-CRATEIDX-001
+    type: requirement
+    title: An exported Cargo registry index describes the crates it contains
+    status: draft
+    release: v0.27.0
+    description: >
+      varve#73. `export-cargo` writes `"deps":[]` and `"features":{}` for every
+      crate while Cargo resolves the dependency graph FROM the index, so the
+      registry can only satisfy a crate that has neither. Measured against
+      varve's own 250-package lockfile, 226 of 250 crates declare a dependency
+      or a feature — the index line is factually wrong for 90% of the layer.
+      Three outcomes were observed, in increasing order of harm: a hard
+      resolution error (clap); a rustc error after Cargo resolved happily
+      (sha2); and a build that EXITS 0 with a crate silently compiled with no
+      features at all, not even `default` (aho-corasick). The third is why
+      "it fails" is the wrong description and why this is not merely a missing
+      feature: a failure announces itself and this does not.
+      Clauses:
+      (1) Each index entry shall carry the crate's real `deps` and `features`,
+      read from the `Cargo.toml` inside the `.crate` tarball varve signed —
+      the same tarball `export-crates-vendor` already opens.
+      (2) The transcription shall be faithful or refuse: a dependency or
+      feature varve cannot express shall be an error naming the crate, never a
+      silently dropped entry, because a dropped feature is the failure mode
+      that exits 0.
+      (3) The proof shall be a REAL offline build of a graph with transitive
+      dependencies, features and two versions of one name — not a
+      single-crate fixture. `cargo_offline` passes today precisely because its
+      fixture has none of those.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-CRATE-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-COMPOSEEXPORT-001
+    type: requirement
+    title: An export follows the composition, or says it did not
+    status: draft
+    release: v0.27.0
+    description: >
+      varve#79. `resolve()` unions composed TOOLS so `which` and `run` see
+      them, and `verify` checks each included layer against its own realm's
+      root — but every export adapter reads a single `layer.json`. An extender
+      composing pulseengine's layer runs `export-cargo` and gets only their own
+      crates, with no error; the build then fails with a missing-crate message
+      pointing nowhere near the cause.
+      This is the topology varve is FOR: bytecodealliance's layer,
+      pulseengine's composing it, a third party composing ours.
+      Clauses:
+      (1) An export shall include the payloads of every layer in the
+      composition, each still verified against ITS OWN realm's trust root.
+      (2) The collision rule is NOT the tool rule and shall be stated as such:
+      the same tool name in two layers is ambiguous and already refused; the
+      same crate name at DIFFERENT versions is legal and both shall export;
+      the same name AND version with DIFFERENT digests shall be an error naming
+      both realms, because two realms then disagree about what those bytes are.
+      (3) Where an export cannot follow the composition it shall SAY SO in its
+      output rather than produce a quietly incomplete directory.
+    tags: [distribution, core]
+    links:
+      - type: traces-to
+        target: REQ-COMPOSE-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-SDK-001
+    type: requirement
+    title: A tree-shaped payload can be distributed, and relocated as an export
+    status: draft
+    release: v0.27.0
+    description: >
+      varve#67. `sdk`, `wit` and `zephyr-module` parse and verify but nothing
+      consumes them, and the store cannot hold a tree at all: every payload is
+      written to a single file path. A Yocto SDK is thousands of files.
+      Yocto's installer also runs `relocate_sdk.py`, which byte-patches the
+      ELF interpreter and the loader's SYSDIRS in place, `sed -i`s every text
+      file, and re-points every symlink — so after installation the bytes no
+      longer hash to the signed digest.
+      Read from the script rather than assumed: the new interpreter path must
+      FIT the old one's field (`if len(new_dl_path) >= p_filesz: ERROR`), so
+      relocation can only ever move an SDK to a path no longer than the one it
+      was built with. varve's store path is ~90 characters before any content,
+      which means relocating INTO the store would frequently be impossible.
+      Clauses:
+      (1) The store shall hold a tree-shaped payload, addressed by
+      (name, version, platform) like any other held payload.
+      (2) The signed tree shall remain immutable and verifiable; varve shall
+      verify only what the producer signed, never what relocation produced.
+      (3) `varve export-sdk --out D` shall unpack and relocate into D and write
+      the `.varve-export.json` stamp, so `verify --export` catches drift.
+      Rejected: recording a post-relocation digest, which would put the
+      relocator inside the trust path.
+      (4) It shall refuse EARLY and by name when the destination path is too
+      long for the SDK's interpreter field, rather than after relocating
+      thousands of files.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-KIND-001
+    fields:
+      priority: should
+      category: functional
+
   - id: REQ-EXPORTDECL-001
     type: requirement
     title: A project declares its exports, and verify checks every one of them
