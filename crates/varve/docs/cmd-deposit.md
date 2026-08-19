@@ -20,3 +20,5 @@ varve deposit --spec deposit.toml --issued-at 2026-09-01T00:00:00Z --key root.ke
 The spec schema is in `varve docs config-reference`. Note `kind = "crate"` on a `[[tool]]` table is how a crate is deposited — there is no `[[crate]]`.
 
 deposit writes a LOCAL oci-layout directory and does not publish; see `varve docs deploy`.
+
+Deposit into a FRESH `--out` every time. Re-running deposit into a layout that already had a line-status, line-index or attestation attached succeeds — and silently drops every attached referrer, because deposit writes the whole `index.json`. The ordering of the producer pipeline is `varve docs ci`.

@@ -69,8 +69,15 @@ pub struct LineStatus {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LineStatusError {
-    #[error(transparent)]
-    Verify(#[from] VerifyError),
+    /// The DSSE envelope failed verification or was malformed. Carries the
+    /// verifier's reason verbatim — but under a line-status heading, because
+    /// the old `#[error(transparent)]` route surfaced these as "manifest
+    /// signature verification failed", sending the reader to the wrong
+    /// document entirely (varve#60).
+    #[error("line-status envelope rejected: {0}")]
+    Envelope(String),
+    #[error("cannot sign the line-status document: {0}")]
+    Sign(String),
     #[error("line-status payload is not valid: {0}")]
     Payload(String),
     #[error("line-status covers line {got} but line {expected} was requested")]
@@ -83,7 +90,30 @@ pub enum LineStatusError {
         presented: u64,
         cached: u64,
     },
-    #[error("io error at {path}: {source}")]
+    /// An advisory entry that can never fire (varve#61): `varve status`
+    /// matches `affected` ids and yank keys against installed layer ids
+    /// EXACTLY, so a typo'd id signs fine and then warns nobody. Refused on
+    /// the producing side, where the fix (re-sign) is still cheap.
+    #[error(
+        "{what} names layer '{id}', which is not a layer of line {line} ({reason}) — `varve \
+         status` matches layer ids exactly, so this entry would never fire for any installed \
+         layer; fix the id and re-sign the document"
+    )]
+    DeadReference {
+        what: String,
+        id: String,
+        line: String,
+        reason: String,
+    },
+    #[error(
+        "{layout} is not an OCI image layout (it has no index.json) — point --layout at the \
+         directory `varve deposit --out` produced"
+    )]
+    NotALayout { layout: String },
+    // The io source is NOT repeated in the message: anyhow's `{err:#}` chain
+    // already appends every source, and including it here printed the cause
+    // twice ("… No such file or directory: No such file or directory").
+    #[error("io error at {path}")]
     Io {
         path: String,
         #[source]
@@ -97,19 +127,74 @@ impl LineStatus {
         envelope: &[u8],
         root_public_key: &[u8],
     ) -> Result<Self, LineStatusError> {
-        let payload = dsse_verify_typed(envelope, LINE_STATUS_PAYLOAD_TYPE, root_public_key)?;
+        // Diagnose the not-an-envelope case BEFORE the verifier does: its
+        // wrapped parser error prints the cause twice and never names the
+        // commonest mistake — handing over the raw status JSON instead of the
+        // signed envelope (varve#60).
+        if let Ok(text) = std::str::from_utf8(envelope)
+            && wsc::dsse::DsseEnvelope::from_json(text).is_err()
+        {
+            return Err(not_an_envelope(text));
+        }
+        let payload = dsse_verify_typed(envelope, LINE_STATUS_PAYLOAD_TYPE, root_public_key)
+            .map_err(|VerifyError(msg)| {
+                // A wrong-realm signature is indistinguishable from tampering
+                // at this layer; say so, because "No valid signatures" alone
+                // sends the reader hunting for corruption.
+                let hint = if msg.contains("does not verify") {
+                    " (is the document signed by THIS realm's root? `varve pubkey <key>` \
+                     prints the public half a signature verifies against)"
+                } else {
+                    ""
+                };
+                LineStatusError::Envelope(format!("{msg}{hint}"))
+            })?;
         serde_json::from_slice(&payload).map_err(|e| LineStatusError::Payload(e.to_string()))
     }
 
     /// Sign a status document (the producing side — CI, next to deposit).
+    /// Refuses a document whose yank or `affected` entries could never fire
+    /// (varve#61) — a typo'd layer id is cheapest to fix before the signature
+    /// exists.
     pub fn sign(&self, secret_key: &[u8], key_id: &str) -> Result<String, LineStatusError> {
+        self.check_layer_refs()?;
         let payload = serde_json::to_vec_pretty(self).expect("status serializes");
-        Ok(dsse_sign_typed(
-            &payload,
-            LINE_STATUS_PAYLOAD_TYPE,
-            secret_key,
-            key_id,
-        )?)
+        dsse_sign_typed(&payload, LINE_STATUS_PAYLOAD_TYPE, secret_key, key_id)
+            .map_err(|VerifyError(msg)| LineStatusError::Sign(msg))
+    }
+
+    /// Every yank key and every known problem's `affected` id must be a layer
+    /// of THIS document's line (varve#61). `report_for` matches ids exactly,
+    /// and the cache is keyed per line, so an id outside the line — or one
+    /// that is not a layer id at all — is an advisory that signs fine and
+    /// then fires for nobody. Enforced wherever a producer commits the
+    /// document: `sign` and `attach_envelope_to_layout`.
+    pub fn check_layer_refs(&self) -> Result<(), LineStatusError> {
+        let line: Line = self.line.parse().map_err(|e| {
+            LineStatusError::Payload(format!("'{}' is not a YYYY.MM line: {e}", self.line))
+        })?;
+        let check = |what: String, id: &str| -> Result<(), LineStatusError> {
+            let dead = |reason: String| LineStatusError::DeadReference {
+                what: what.clone(),
+                id: id.to_string(),
+                line: self.line.clone(),
+                reason,
+            };
+            match id.parse::<LayerId>() {
+                Ok(layer) if layer.line() == &line => Ok(()),
+                Ok(layer) => Err(dead(format!("it belongs to line {}", layer.line()))),
+                Err(e) => Err(dead(e.to_string())),
+            }
+        };
+        for id in self.yanked.keys() {
+            check("the yank entry".to_string(), id)?;
+        }
+        for kp in &self.known_problems {
+            for id in &kp.affected {
+                check(format!("known problem '{}'", kp.id), id)?;
+            }
+        }
+        Ok(())
     }
 
     /// What this document says about one layer.
@@ -338,10 +423,17 @@ pub fn attach_envelope_to_layout(
     layout: &Path,
     envelope: &[u8],
 ) -> Result<(Line, u64), LineStatusError> {
+    // Refuse a directory that is not a layout BEFORE writing anything into
+    // it: the old path created blobs/ inside an arbitrary directory and then
+    // failed on the missing index.json with a bare io error (varve#60).
+    if !layout.join("index.json").is_file() {
+        return Err(LineStatusError::NotALayout {
+            layout: layout.display().to_string(),
+        });
+    }
     let text = std::str::from_utf8(envelope)
         .map_err(|e| LineStatusError::Payload(format!("envelope is not utf-8: {e}")))?;
-    let env = wsc::dsse::DsseEnvelope::from_json(text)
-        .map_err(|e| LineStatusError::Payload(format!("not a DSSE envelope: {e}")))?;
+    let env = wsc::dsse::DsseEnvelope::from_json(text).map_err(|_| not_an_envelope(text))?;
     let payload = env
         .payload_bytes()
         .map_err(|e| LineStatusError::Payload(format!("envelope payload: {e}")))?;
@@ -351,6 +443,10 @@ pub fn attach_envelope_to_layout(
         .line
         .parse()
         .map_err(|e| LineStatusError::Payload(format!("status line '{}': {e}", doc.line)))?;
+    // A yank or affected id outside the layout's line would attach fine and
+    // fire for nobody (varve#61) — this command knows the line, so it is the
+    // last producer-side place the typo is cheap to fix.
+    doc.check_layer_refs()?;
     // Monotonicity holds here too. `status --from-file` and `install` both
     // refuse a counter regression; attaching did not, so a re-run CI step could
     // silently downgrade a layout's baseline — shipping a pre-yank document
@@ -383,14 +479,33 @@ pub fn attach_envelope_to_layout(
     Ok((line, doc.counter))
 }
 
+/// The bytes are not a DSSE envelope — with the commonest cause named: the
+/// raw status document handed over where the SIGNED envelope belongs. The
+/// verifier's own wrapping ("not a DSSE envelope: Internal error: [Failed to
+/// parse DSSE envelope: …]") said the same thing twice and the fix zero
+/// times (varve#60).
+fn not_an_envelope(text: &str) -> LineStatusError {
+    if serde_json::from_str::<LineStatus>(text).is_ok() {
+        LineStatusError::Payload(
+            "this is the UNSIGNED status document, not a signed envelope — sign it first \
+             (`varve sign-status --file <doc> --key <key> --out <envelope>`) and pass the \
+             envelope"
+                .into(),
+        )
+    } else {
+        LineStatusError::Payload(
+            "not a DSSE envelope — expected the signed output of `varve sign-status`".into(),
+        )
+    }
+}
+
 /// Parse a status document out of an envelope WITHOUT verifying it. Used only
 /// to read back what a layout already carries, so a regression can be refused;
 /// the signature is checked wherever the document is actually trusted.
 fn parse_unverified(envelope: &[u8]) -> Result<LineStatus, LineStatusError> {
     let text = std::str::from_utf8(envelope)
         .map_err(|e| LineStatusError::Payload(format!("envelope is not utf-8: {e}")))?;
-    let env = wsc::dsse::DsseEnvelope::from_json(text)
-        .map_err(|e| LineStatusError::Payload(format!("not a DSSE envelope: {e}")))?;
+    let env = wsc::dsse::DsseEnvelope::from_json(text).map_err(|_| not_an_envelope(text))?;
     let payload = env
         .payload_bytes()
         .map_err(|e| LineStatusError::Payload(format!("envelope payload: {e}")))?;
@@ -610,6 +725,7 @@ mod tests {
                 source: None,
                 runner: None,
                 kind: None,
+                sdk_prefix: None,
             }],
         };
         let outcome = deposit(&spec, &sk, "k", &dest).unwrap();
@@ -727,8 +843,16 @@ mod tests {
         let (sk, pk) = generate_root_keypair();
         let tmp = tempfile::tempdir().unwrap();
         let requested: Line = "2026.07.0".parse::<LayerId>().unwrap().line().clone();
-        let mut doc = status(5);
-        doc.line = "2026.08".into(); // signed, but for the WRONG line
+        // A self-consistent document for the WRONG line — internally valid,
+        // validly signed, and still not the line this consumer asked about.
+        let doc = LineStatus {
+            line: "2026.08".into(),
+            counter: 5,
+            issued_at: "2026-08-07T00:00:00Z".into(),
+            support_until: None,
+            yanked: BTreeMap::new(),
+            known_problems: Vec::new(),
+        };
         let envelope = doc.sign(&sk, "k").unwrap();
         let source = MemorySource::new().with_line_status(envelope.as_bytes());
         let err = cache_baseline_from_source(
@@ -821,6 +945,7 @@ mod tests {
                     source: None,
                     runner: None,
                     kind: None,
+                    sdk_prefix: None,
                 }],
             },
             &sk,
@@ -870,6 +995,7 @@ mod tests {
                     source: None,
                     runner: None,
                     kind: None,
+                    sdk_prefix: None,
                 }],
             },
             &sk,
@@ -907,6 +1033,147 @@ mod tests {
         attach_envelope_to_layout(&dest, status(7).sign(&sk, "k").unwrap().as_bytes()).unwrap();
     }
 
+    // rivet: verifies REQ-PRODUCE-002
+    #[test]
+    fn an_advisory_that_could_never_fire_is_refused_at_sign_time() {
+        // varve#61: `report_for` matches ids EXACTLY and the cache is keyed
+        // per line, so a typo'd affected id — "2026.9.0" for "2026.09.0" —
+        // signed fine and the advisory then fired for nobody. The signature
+        // is the cheapest place to stop it.
+        let (sk, _pk) = generate_root_keypair();
+        let cases: &[(&str, &str)] = &[
+            ("2026.7.0", "not a valid YYYY.MM.P id"), // typo'd month width
+            ("2026.07", "missing its patch component"), // a line, not a layer
+            ("2026.08.0", "belongs to another line"), // wrong line entirely
+            ("2026.07.O", "letter O for zero"),
+        ];
+        for (bad, why) in cases {
+            let mut doc = status(1);
+            doc.known_problems[0].affected = vec![bad.to_string()];
+            let err = doc.sign(&sk, "k").unwrap_err();
+            assert!(
+                matches!(err, LineStatusError::DeadReference { .. }),
+                "{why}: affected id {bad:?} must be refused, got: {err}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains(bad) && msg.contains("2026.07") && msg.contains("re-sign"),
+                "the error must name the id, the line, and the fix: {msg}"
+            );
+        }
+        // A typo'd YANK key is the same dead advisory.
+        let mut doc = status(1);
+        doc.yanked = BTreeMap::from([("2026.8.0".to_string(), "CVE".to_string())]);
+        assert!(matches!(
+            doc.sign(&sk, "k").unwrap_err(),
+            LineStatusError::DeadReference { .. }
+        ));
+        // …and the untouched fixture still signs: the gate can pass, not
+        // merely fail.
+        status(1).sign(&sk, "k").unwrap();
+    }
+
+    // rivet: verifies REQ-PRODUCE-002
+    #[test]
+    fn attach_refuses_a_pre_signed_advisory_that_could_never_fire() {
+        // The envelope may come from an older varve whose sign-status did not
+        // validate — attach is the last producer-side gate before the layout
+        // ships. Built with the raw signer to bypass `sign`'s own check,
+        // exactly as an old binary would have.
+        use crate::deposit::{DepositSpec, DepositTool, deposit};
+        let (sk, _pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("layout");
+        deposit(
+            &DepositSpec {
+                includes: Vec::new(),
+                layer: "2026.07.0".parse().unwrap(),
+                channel: "qualified".into(),
+                counter: 1,
+                issued_at: "2026-08-07T00:00:00Z".into(),
+                tools: vec![DepositTool {
+                    name: "synth".into(),
+                    version: "1".into(),
+                    platform: None,
+                    bytes: b"t".to_vec(),
+                    source: None,
+                    runner: None,
+                    kind: None,
+                    sdk_prefix: None,
+                }],
+            },
+            &sk,
+            "k",
+            &dest,
+        )
+        .unwrap();
+        let mut doc = status(1);
+        doc.known_problems[0].affected = vec!["2026.7.0".to_string()];
+        let payload = serde_json::to_vec_pretty(&doc).unwrap();
+        let envelope = dsse_sign_typed(&payload, LINE_STATUS_PAYLOAD_TYPE, &sk, "k").unwrap();
+        let err = attach_envelope_to_layout(&dest, envelope.as_bytes()).unwrap_err();
+        assert!(
+            matches!(err, LineStatusError::DeadReference { .. }),
+            "got: {err}"
+        );
+        assert!(
+            read_any_from_layout(&dest).unwrap().is_none(),
+            "the dead advisory must not land in the layout"
+        );
+    }
+
+    // rivet: verifies REQ-PRODUCE-002
+    #[test]
+    fn attaching_to_a_directory_that_is_not_a_layout_is_refused_before_writing() {
+        // The old path created blobs/sha256/ inside the directory and then
+        // failed on index.json with "io error at …: No such file or directory
+        // (os error 2): No such file or directory (os error 2)" — the cause
+        // twice, the fix never (varve#60).
+        let (sk, _pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_layout = tmp.path().join("somedir");
+        std::fs::create_dir_all(&not_a_layout).unwrap();
+        let envelope = status(1).sign(&sk, "k").unwrap();
+        let err = attach_envelope_to_layout(&not_a_layout, envelope.as_bytes()).unwrap_err();
+        assert!(
+            matches!(err, LineStatusError::NotALayout { .. }),
+            "got: {err}"
+        );
+        assert!(
+            err.to_string().contains("varve deposit"),
+            "the error must carry its fix: {err}"
+        );
+        assert!(
+            !not_a_layout.join("blobs").exists(),
+            "nothing may be written into a directory that is not a layout"
+        );
+    }
+
+    // rivet: verifies REQ-PRODUCE-002
+    #[test]
+    fn the_unsigned_document_mistake_is_named_not_wrapped() {
+        // Handing the raw status JSON where the signed envelope belongs is
+        // the commonest producer mistake; the old error was a doubled parser
+        // wrap that never said "sign it" (varve#60).
+        let raw = serde_json::to_string_pretty(&status(1)).unwrap();
+        let err = not_an_envelope(&raw);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UNSIGNED") && msg.contains("varve sign-status"),
+            "raw document must be diagnosed with its fix: {msg}"
+        );
+        // Garbage is still garbage, said once, with the expected shape named.
+        let msg = not_an_envelope("garbage").to_string();
+        assert!(
+            msg.contains("not a DSSE envelope") && msg.contains("varve sign-status"),
+            "got: {msg}"
+        );
+        // And verify_and_parse routes through the same diagnosis.
+        let (_sk, pk) = generate_root_keypair();
+        let err = LineStatus::verify_and_parse(raw.as_bytes(), &pk).unwrap_err();
+        assert!(err.to_string().contains("UNSIGNED"), "got: {err}");
+    }
+
     // rivet: verifies REQ-STATUS-DIST-001
     #[test]
     fn a_deposit_layouts_baseline_is_readable_without_naming_the_line() {
@@ -931,6 +1198,7 @@ mod tests {
                 source: None,
                 runner: None,
                 kind: None,
+                sdk_prefix: None,
             }],
         };
         deposit(&spec, &sk, "k", &dest).unwrap();

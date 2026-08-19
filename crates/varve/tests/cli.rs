@@ -292,6 +292,38 @@ fn signed_layer_fixture(fx: &Fixture, layer: &str, counter: u64) -> SignedLayer 
     }
 }
 
+/// A REAL `.crate`-shaped gzip tar: `<name>-<version>/Cargo.toml` plus a source
+/// file, with `extra` appended to the manifest.
+///
+/// Every crate fixture here is one now. Opaque bytes used to be enough because
+/// `export-cargo` never opened the tarball — it wrote `"deps":[]` for every
+/// crate (varve#73), so a fixture that could not have deps was indistinguishable
+/// from one whose deps were dropped. The index is READ from these bytes now, so
+/// the fixture has to be able to tell the truth.
+fn dot_crate(name: &str, version: &str, extra_manifest: &str) -> Vec<u8> {
+    let manifest = format!(
+        "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2021\"\n{extra_manifest}"
+    );
+    let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::default(),
+    ));
+    for (path, body) in [
+        (format!("{name}-{version}/Cargo.toml"), manifest),
+        (
+            format!("{name}-{version}/src/lib.rs"),
+            "pub fn f() {}\n".to_string(),
+        ),
+    ] {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, &path, body.as_bytes()).unwrap();
+    }
+    b.into_inner().unwrap().finish().unwrap()
+}
+
 /// A manifest whose entries are tools, plus optional composed layers.
 fn manifest_with_includes(layer: &str, tools: &[&str], includes: &[&str]) -> String {
     let mut entries: Vec<String> = tools
@@ -1800,11 +1832,16 @@ fn deposit_a_crate_kind_entry_and_export_a_cargo_registry() {
     let trust_root = parent.join("root.pub");
     std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
 
-    // A stand-in .crate blob (export-cargo does not parse it; the offline
-    // build oracle covers real crates). Its sha256 is the cksum Cargo checks.
-    let crate_bytes = b"a-dot-crate-tarballs-bytes";
+    // A REAL `.crate` whose Cargo.toml declares a dependency and a feature:
+    // `export-cargo` reads both out of the tarball for the index entry
+    // (REQ-CRATEIDX-001), so a blob with nothing in it would not exercise it.
+    let crate_bytes = dot_crate(
+        "demo-crate",
+        "0.1.0",
+        "[dependencies]\ncfg-if = \"1\"\n\n[features]\ndefault = [\"std\"]\nstd = []\n",
+    );
     let crate_path = parent.join("demo-crate.crate");
-    std::fs::write(&crate_path, crate_bytes).unwrap();
+    std::fs::write(&crate_path, &crate_bytes).unwrap();
 
     // Deposit it as a `crate`-kind entry via a spec file (only the spec path
     // carries kind).
@@ -1858,8 +1895,17 @@ fn deposit_a_crate_kind_entry_and_export_a_cargo_registry() {
     let idx = std::fs::read_to_string(out.join("registry/index/de/mo/demo-crate")).unwrap();
     // A cksum is recorded (its correctness vs. real Cargo is proven by the
     // cargo_offline oracle); here we prove the CLI wiring end to end.
+    let line: serde_json::Value = serde_json::from_str(idx.trim()).expect("{idx}");
     assert!(
-        idx.contains(r#""cksum":"#) && idx.contains(r#""vers":"0.1.0""#),
+        line["cksum"].is_string() && line["vers"] == "0.1.0",
+        "{idx}"
+    );
+    // …and the wiring carries the DEPS and FEATURES out of the tarball, not a
+    // stub: the CLI is where varve#73 was observed.
+    assert_eq!(line["deps"][0]["name"], "cfg-if", "{idx}");
+    assert_eq!(
+        line["features"]["default"],
+        serde_json::json!(["std"]),
         "{idx}"
     );
 }
@@ -1883,13 +1929,13 @@ fn a_layer_holding_two_versions_of_one_crate_deposits_installs_verifies_and_expo
 
     // Two versions of ONE crate, plus a tool — the mixed layer, so the two
     // identity rules are exercised side by side.
-    let old_bytes: &[u8] = b"serde-1.0.200-crate-tarball";
-    let new_bytes: &[u8] = b"serde-1.0.210-crate-tarball";
+    let old_bytes = dot_crate("serde", "1.0.200", "");
+    let new_bytes = dot_crate("serde", "1.0.210", "[features]\nderive = []\n");
     let old_path = parent.join("serde-1.0.200.crate");
     let new_path = parent.join("serde-1.0.210.crate");
     let tool_path = parent.join("synth-bin");
-    std::fs::write(&old_path, old_bytes).unwrap();
-    std::fs::write(&new_path, new_bytes).unwrap();
+    std::fs::write(&old_path, &old_bytes).unwrap();
+    std::fs::write(&new_path, &new_bytes).unwrap();
     std::fs::write(&tool_path, b"#!/bin/sh\n").unwrap();
 
     let spec = parent.join("spec.toml");
@@ -2046,6 +2092,89 @@ fn two_versions_of_one_tool_are_still_refused_and_the_error_names_both() {
 }
 
 // rivet: verifies REQ-VSIX-001, REQ-STORE-002
+#[test]
+fn a_per_platform_payload_exports_the_hosts_bytes_not_another_platforms_digest() {
+    // Found by building the REAL pulseengine layer: spar ships one .vsix per
+    // platform, and a layer carrying them could be deposited and installed but
+    // NOT exported — `export-vsix` failed with "on-disk bytes do not match the
+    // signed digest".
+    //
+    // `install` platform-filters, laying down only the host's payload.
+    // `payloads_of_layer` did not filter at all, so it walked every platform's
+    // manifest entry, resolved each to the ONE on-disk file (the payload path
+    // is name/version and carries no platform), and compared the host's bytes
+    // against a foreign platform's signed digest. The mismatch was real; the
+    // conclusion drawn from it was wrong.
+    //
+    // This is latent for every per-platform non-tool payload, not just vsix —
+    // it stayed hidden because no layer had carried one until now.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("pp-root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("pp-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    let host = varve_core::host_platform();
+    let other = if host == "x86_64-unknown-linux-gnu" {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
+
+    // One extension, one version, DIFFERENT bytes per platform — so exporting
+    // the wrong platform's digest cannot accidentally agree.
+    let mut spec_text =
+        String::from("layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n");
+    for plat in [host.as_str(), other] {
+        let path = parent.join(format!("spar-aadl-{plat}.vsix"));
+        std::fs::write(&path, format!("vsix-bytes-for-{plat}")).unwrap();
+        spec_text.push_str(&format!(
+            "\n[[tool]]\nname = \"spar-aadl\"\nversion = \"0.36.0\"\nkind = \"vsix\"\n\
+             platform = \"{plat}\"\npath = \"{}\"\n",
+            path.display()
+        ));
+    }
+    let spec = parent.join("pp-spec.toml");
+    std::fs::write(&spec, &spec_text).unwrap();
+
+    let layout = parent.join("pp-layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-31T09:14:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "test-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    install_pinned(&fx, &trust_root, "2026.07.0", &layout);
+
+    let out = parent.join("pp-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-vsix", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    // Exactly one file — the host's — carrying the host's bytes.
+    let exported: Vec<_> = std::fs::read_dir(&out)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".vsix"))
+        .collect();
+    assert_eq!(exported.len(), 1, "one platform's vsix, got {exported:?}");
+    let body = std::fs::read_to_string(out.join(&exported[0])).unwrap();
+    assert_eq!(
+        body,
+        format!("vsix-bytes-for-{host}"),
+        "the exported bytes are not the host's"
+    );
+}
+
+// rivet: verifies REQ-VSIX-001
 #[test]
 fn vsix_extensions_deposit_install_verify_and_export_for_code() {
     // varve#68 end to end, at the boundary the user touches. Two extensions,
@@ -2267,16 +2396,27 @@ fn export_vsix_refuses_a_layer_with_no_extensions_rather_than_writing_an_empty_d
     );
 }
 
-// rivet: verifies REQ-PRODUCE-002
+// rivet: verifies REQ-PRODUCE-002, REQ-REPRO-001
 #[test]
-fn a_relative_out_still_yields_an_absolute_path_in_the_generated_config() {
-    // An independent review made absolute_export_dir return its argument
-    // verbatim and the whole suite stayed GREEN: every export test passes an
-    // ABSOLUTE --out, so the bug was unreachable from the suite that was cited
-    // as its evidence. The generated .cargo/config.toml is meant to be COPIED
-    // into a project and read from a different working directory, so a relative
-    // path there is a build that fails while varve printed instructions saying
-    // it would work. This test passes a RELATIVE --out, as a user does.
+fn a_relative_out_is_resolved_not_embedded_verbatim() {
+    // CORRECTED IN v0.27.0 (REQ-REPRO-001 clause 1). This test used to demand
+    // an ABSOLUTE path in the generated config. The bug it was written for was
+    // real — an independent review made absolute_export_dir return its argument
+    // verbatim and the whole suite stayed GREEN, because every other export
+    // test passes an absolute --out — but "absolute" was the wrong fix for it.
+    // An absolute path makes the export unreproducible (varve#72: the same
+    // layer exported twice differs) and breaks the moment the export is moved.
+    //
+    // Settled EMPIRICALLY against a real Cargo before changing anything (the
+    // `cargo_offline` oracle now pins it): Cargo resolves a relative
+    // `local-registry` against the directory that HOLDS `.cargo/`, never
+    // against the invoking cwd. So a bare subdirectory name is correct, stays
+    // correct when the export is copied, and is identical between two runs.
+    //
+    // What the original bug actually was — a relative --out embedded VERBATIM,
+    // and so resolved against whatever cwd the build later ran in — is still
+    // pinned here: the emitted string must not be the user's `./cargo-out`.
+    // This test passes a RELATIVE --out, as a user does.
     let fx = fixture(Some(PIN_JULY), &[]);
     let parent = fx.project.parent().unwrap();
     let (sk, pk) = varve_core::generate_root_keypair();
@@ -2285,7 +2425,7 @@ fn a_relative_out_still_yields_an_absolute_path_in_the_generated_config() {
     let trust_root = parent.join("root.pub");
     std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
 
-    let crate_bytes = b"fake-but-signed-crate-bytes".to_vec();
+    let crate_bytes = dot_crate("demo-crate", "0.1.0", "");
     let crate_path = parent.join("demo-crate-0.1.0.crate");
     std::fs::write(&crate_path, &crate_bytes).unwrap();
     let spec = parent.join("spec.toml");
@@ -2332,7 +2472,8 @@ fn a_relative_out_still_yields_an_absolute_path_in_the_generated_config() {
         .assert()
         .success();
 
-    let config = std::fs::read_to_string(workdir.join("cargo-out/.cargo/config.toml")).unwrap();
+    let out = workdir.join("cargo-out");
+    let config = std::fs::read_to_string(out.join(".cargo/config.toml")).unwrap();
     let registry_line = config
         .lines()
         .find(|l| l.contains("local-registry"))
@@ -2341,14 +2482,24 @@ fn a_relative_out_still_yields_an_absolute_path_in_the_generated_config() {
         .split('"')
         .nth(1)
         .unwrap_or_else(|| panic!("unquoted path: {registry_line}"));
+
+    // NOT the user's argument, verbatim or prefixed — that was the real bug.
     assert!(
-        std::path::Path::new(path).is_absolute(),
-        "a config meant to be copied into another directory must not carry a \
-         relative path: {registry_line}"
+        path != "./cargo-out" && !path.starts_with("./") && !path.contains("/./"),
+        "the user's --out must not be embedded verbatim: {registry_line}"
     );
+    // A bare relative subdirectory: nothing machine-specific, so two exports of
+    // one layer are byte-identical (REQ-REPRO-001 clause 1).
     assert!(
-        !path.starts_with("./") && !path.contains("/./"),
-        "the path must be resolved, not merely prefixed: {registry_line}"
+        !std::path::Path::new(path).is_absolute() && !path.contains('/'),
+        "the config must carry a bare relative subdirectory: {registry_line}"
+    );
+    // …and it must NAME something, resolved the way Cargo resolves it: against
+    // the directory holding `.cargo/`, which is the export root.
+    assert!(
+        out.join(path).join("index").is_dir(),
+        "the config names {path}, which must be the registry inside {}",
+        out.display()
     );
 }
 
@@ -3551,4 +3702,1659 @@ fn archive_of_a_multi_platform_layer_says_what_it_carries_and_refuses_elsewhere(
             predicate::str::contains("carries no payload for platform-b")
                 .and(predicate::str::contains("archived for platform-a")),
         );
+}
+
+/// Every file under `dir`, keyed by its path RELATIVE to `dir`. The comparison
+/// unit for REQ-REPRO-001 clause 3: two exports of one layer to two
+/// destinations must agree on this map exactly, including the export stamp.
+fn tree(dir: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.insert(
+                    p.strip_prefix(dir).unwrap().to_path_buf(),
+                    std::fs::read(&p).unwrap(),
+                );
+            }
+        }
+    }
+    out
+}
+
+// rivet: verifies REQ-REPRO-001
+#[test]
+fn every_export_adapter_is_byte_identical_between_two_runs() {
+    // Clause 3, made permanent. varve#72 was found by exporting one layer twice
+    // and diffing; the only difference was `.cargo/config.toml`, which embedded
+    // an ABSOLUTE path. A new adapter is exactly where a stray timestamp or an
+    // unordered map iteration will next appear, so every adapter is checked —
+    // not the one that happened to be broken.
+    //
+    // The destinations differ in NAME as well as location, so an adapter that
+    // leaked its `--out` anywhere into its output fails here.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    // One layer carrying every payload shape the adapters consume: a tool with
+    // source provenance (export-bazel), two crates at two versions of one name
+    // (export-cargo / -crates-vendor / -bazel-distdir), and two `.vsix`.
+    let host = varve_core::host_platform();
+    let tool_path = parent.join("rivet-bin");
+    std::fs::write(&tool_path, b"rivet-binary-bytes").unwrap();
+    let mut spec = format!(
+        r#"layer = "2026.07.0"
+channel = "qualified"
+counter = 1
+
+[[tool]]
+name = "rivet"
+version = "0.32.0"
+platform = "{host}"
+path = "{tool}"
+
+[tool.source]
+repo = "pulseengine/rivet"
+release = "v0.32.0"
+asset = "rivet-v0.32.0-{host}.tar.gz"
+sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+"#,
+        tool = tool_path.display()
+    );
+    for (name, version, extra) in [
+        ("serde", "1.0.200", ""),
+        ("serde", "1.0.210", "[features]\nderive = []\n"),
+        ("cfg-if", "1.0.0", "[dependencies]\nserde = \"1.0\"\n"),
+    ] {
+        let p = parent.join(format!("{name}-{version}.crate"));
+        std::fs::write(&p, dot_crate(name, version, extra)).unwrap();
+        spec.push_str(&format!(
+            "\n[[tool]]\nname = \"{name}\"\nversion = \"{version}\"\nkind = \"crate\"\npath = \"{}\"\n",
+            p.display()
+        ));
+    }
+    for (name, version) in [
+        ("rust-lang.rust-analyzer", "0.3.2260"),
+        ("vadimcn.vscode-lldb", "1.11.4"),
+    ] {
+        let p = parent.join(format!("{name}-{version}.vsix"));
+        std::fs::write(&p, format!("{name}-{version}-zip").as_bytes()).unwrap();
+        spec.push_str(&format!(
+            "\n[[tool]]\nname = \"{name}\"\nversion = \"{version}\"\nkind = \"vsix\"\npath = \"{}\"\n",
+            p.display()
+        ));
+    }
+    let spec_path = parent.join("repro-spec.toml");
+    std::fs::write(&spec_path, &spec).unwrap();
+    let layout = parent.join("repro-layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec_path)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    for adapter in [
+        "export-cargo",
+        "export-crates-vendor",
+        "export-bazel-distdir",
+        "export-vsix",
+        "export-bazel",
+    ] {
+        let first = parent.join(format!("{adapter}-alpha"));
+        let second = parent.join(format!("{adapter}-a-much-longer-beta-name"));
+        for out in [&first, &second] {
+            varve(&fx)
+                .env("VARVE_TRUST_ROOT", &trust_root)
+                .args([adapter, "--layer", "2026.07.0", "--out"])
+                .arg(out)
+                .assert()
+                .success();
+        }
+        let (a, b) = (tree(&first), tree(&second));
+        assert_eq!(
+            a.keys().collect::<Vec<_>>(),
+            b.keys().collect::<Vec<_>>(),
+            "{adapter} wrote a different set of files the second time"
+        );
+        for (path, bytes) in &a {
+            assert_eq!(
+                bytes,
+                &b[path],
+                "{adapter} is not reproducible: {} differs between two runs:\n--- first ---\n{}\n\
+                 --- second ---\n{}",
+                path.display(),
+                String::from_utf8_lossy(bytes),
+                String::from_utf8_lossy(&b[path]),
+            );
+        }
+        assert!(
+            !a.is_empty(),
+            "{adapter} wrote nothing — a vacuous comparison"
+        );
+    }
+}
+
+/// Move the pin to `layer` and install that layer from `archive`. `install`
+/// resolves the PIN, so a composition is installed one layer at a time — which
+/// is what an extender does when they adopt an upstream realm's layer and then
+/// pin their own on top.
+fn install_pinned(
+    fx: &Fixture,
+    trust_root: &std::path::Path,
+    layer: &str,
+    archive: &std::path::Path,
+) {
+    std::fs::write(
+        fx.project.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"{layer}\"\n"
+        ),
+    )
+    .unwrap();
+    varve(fx)
+        .env("VARVE_TRUST_ROOT", trust_root)
+        .args(["install", "--from"])
+        .arg(archive)
+        .assert()
+        .success();
+}
+
+/// A SIGNED layer holding `crate`-kind payloads, optionally composing other
+/// layers by digest. Returns (archive directory, this layer's manifest digest).
+///
+/// `includes` is a slice, not an `Option`: a layer composing TWO others is the
+/// shape that produces a diamond, and a helper that could only express one
+/// include is why no test covered the diamond at the CLI boundary.
+fn signed_crate_layer(
+    fx: &Fixture,
+    tag: &str,
+    layer: &str,
+    sk: &[u8],
+    crates: &[(&str, &str, Vec<u8>)],
+    includes: &[&str],
+) -> (std::path::PathBuf, String) {
+    let mut entries: Vec<String> = Vec::new();
+    let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
+    for (name, version, bytes) in crates {
+        let d = varve_core::manifest_digest(bytes);
+        entries.push(format!(
+            r#"{{"mediaType":"application/octet-stream","digest":"{d}","size":{size},"annotations":{{"eu.pulseengine.varve.kind":"crate","eu.pulseengine.tool":"{name}","eu.pulseengine.tool.version":"{version}"}}}}"#,
+            size = bytes.len()
+        ));
+        blobs.push((d, bytes.clone()));
+    }
+    for d in includes {
+        // `digest` or `digest@realm`. An include that names a realm is
+        // verified against THAT realm's root, not the includer's — the branch
+        // that made composition worth having, and which no test could reach
+        // while every fixture emitted realm-less includes.
+        let (digest, realm) = match d.split_once('@') {
+            Some((dg, r)) => (dg, Some(r)),
+            None => (*d, None),
+        };
+        let realm_ann = realm
+            .map(|r| format!(r#","eu.pulseengine.varve.include.realm":"{r}""#))
+            .unwrap_or_default();
+        entries.push(format!(
+            r#"{{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"{digest}","size":0,"annotations":{{"eu.pulseengine.varve.kind":"layer"{realm_ann}}}}}"#
+        ));
+    }
+    let line = &layer[..layer.rfind('.').unwrap()];
+    let payload = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{layer}","eu.pulseengine.varve.line":"{line}","eu.pulseengine.varve.channel":"qualified","eu.pulseengine.varve.counter":"1","org.opencontainers.image.created":"2026-07-31T09:14:00Z"}},"manifests":[{}]}}"#,
+        entries.join(",")
+    );
+    let digest = varve_core::manifest_digest(payload.as_bytes());
+    let envelope = varve_core::sign_layer_manifest(payload.as_bytes(), sk, "test-root").unwrap();
+    let archive = fx.project.parent().unwrap().join(format!("archive-{tag}"));
+    let refs: Vec<(&str, &[u8])> = blobs
+        .iter()
+        .map(|(d, b)| (d.as_str(), b.as_slice()))
+        .collect();
+    varve_core::DirSource::at(&archive)
+        .put(envelope.as_bytes(), &refs)
+        .unwrap();
+    (archive, digest)
+}
+
+// rivet: verifies REQ-COMPOSEEXPORT-001
+#[test]
+fn an_export_follows_the_composition() {
+    // varve#79, reproduced at the boundary the user touches. An upstream layer
+    // with a crate; a second layer `[[include]]`-ing it; before v0.27.0
+    // `export-cargo` showed only the second layer's crate, with NO error — and
+    // the build then failed with a missing-crate message pointing nowhere near
+    // the cause. This is the topology varve is FOR.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("compose-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    // Upstream: `cfg-if 1.0.0` and `serde 1.0.200`.
+    let (up_archive, up_digest) = signed_crate_layer(
+        &fx,
+        "compose-up",
+        "2026.08.0",
+        &sk,
+        &[
+            ("cfg-if", "1.0.0", dot_crate("cfg-if", "1.0.0", "")),
+            ("serde", "1.0.200", dot_crate("serde", "1.0.200", "")),
+        ],
+        &[],
+    );
+    // The pinned layer: its own crate, plus `serde` at a DIFFERENT version —
+    // legal, and both must export (clause 2).
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "compose-root",
+        "2026.07.0",
+        &sk,
+        &[
+            (
+                "rivet-core",
+                "0.32.0",
+                dot_crate("rivet-core", "0.32.0", ""),
+            ),
+            ("serde", "1.0.210", dot_crate("serde", "1.0.210", "")),
+        ],
+        &[&up_digest],
+    );
+    // `install` follows the pin, so the extender installs the upstream layer
+    // under its own pin and then moves the pin to their own — the sequence a
+    // consumer of two realms actually performs.
+    install_pinned(&fx, &trust_root, "2026.08.0", &up_archive);
+    install_pinned(&fx, &trust_root, "2026.07.0", &root_archive);
+
+    let out = parent.join("composed-cargo");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-cargo", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        // Clause 3: it SAYS it followed the composition, rather than producing
+        // a quietly incomplete directory.
+        .stdout(
+            predicate::str::contains("following the composition")
+                .and(predicate::str::contains("2026.08.0"))
+                .and(predicate::str::contains("4 verified crate")),
+        );
+
+    // Every crate of BOTH layers is present — including two versions of one
+    // name across the composition boundary.
+    for (name, version) in [
+        ("cfg-if", "1.0.0"),
+        ("serde", "1.0.200"),
+        ("serde", "1.0.210"),
+        ("rivet-core", "0.32.0"),
+    ] {
+        assert!(
+            out.join(format!("registry/{name}-{version}.crate"))
+                .is_file(),
+            "{name} {version} missing from the composed export"
+        );
+    }
+    let idx = std::fs::read_to_string(out.join("registry/se/rd/serde"))
+        .or_else(|_| std::fs::read_to_string(out.join("registry/index/se/rd/serde")))
+        .unwrap();
+    assert_eq!(
+        idx.lines().filter(|l| !l.trim().is_empty()).count(),
+        2,
+        "the index must offer BOTH versions of serde: {idx}"
+    );
+
+    // …and the vendored adapter follows it too — one adapter fixed is not the
+    // requirement.
+    let vendor_out = parent.join("composed-vendor");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-crates-vendor", "--out"])
+        .arg(&vendor_out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("4 verified crate"));
+    assert!(vendor_out.join("vendor/cfg-if-1.0.0/Cargo.toml").is_file());
+    assert!(
+        vendor_out
+            .join("vendor/rivet-core-0.32.0/Cargo.toml")
+            .is_file()
+    );
+}
+
+// rivet: verifies REQ-COMPOSEEXPORT-001
+#[test]
+fn an_export_verifies_a_composed_layer_against_its_own_realms_root() {
+    // Clause 1b, which was dead code under test. Every composition-export
+    // fixture emitted includes with NO `include.realm`, so `inc.realm` was
+    // `None` in all of them and the cross-realm branch never ran. A clean-room
+    // review confirmed it twice: swapping in the INCLUDER's verifier (trust
+    // widening across realms) and deleting the branch outright both left the
+    // whole suite green.
+    //
+    // Here the included layer is signed by a DIFFERENT key than the root
+    // layer. Verifying it against the includer's root cannot succeed, so a
+    // passing export is only possible if the realm's own root was used.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (up_sk, up_pk) = varve_core::generate_root_keypair();
+    let (root_sk, root_pk) = varve_core::generate_root_keypair();
+    assert_ne!(up_pk, root_pk, "the two realms must not share a root");
+
+    // `upstream` is a realm of its own, with its own trust root.
+    std::fs::write(
+        parent.join("varve-realms.toml"),
+        format!(
+            "[realm.upstream]\nregistry = \"oci://example.invalid/upstream\"\ntrust-root = \"{}\"\n",
+            hex::encode(&up_pk)
+        ),
+    )
+    .unwrap();
+
+    let (up_archive, up_digest) = signed_crate_layer(
+        &fx,
+        "xrealm-up",
+        "2026.08.0",
+        &up_sk,
+        &[("serde", "1.0.200", dot_crate("serde", "1.0.200", ""))],
+        &[],
+    );
+    // The include NAMES the realm, so the upstream root is the authority.
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "xrealm-root",
+        "2026.07.0",
+        &root_sk,
+        &[(
+            "rivet-core",
+            "0.32.0",
+            dot_crate("rivet-core", "0.32.0", ""),
+        )],
+        &[&format!("{up_digest}@upstream")],
+    );
+
+    let up_root = parent.join("xrealm-up.pub");
+    std::fs::write(&up_root, hex::encode(&up_pk)).unwrap();
+    let our_root = parent.join("xrealm-root.pub");
+    std::fs::write(&our_root, hex::encode(&root_pk)).unwrap();
+    install_pinned(&fx, &up_root, "2026.08.0", &up_archive);
+    install_pinned(&fx, &our_root, "2026.07.0", &root_archive);
+
+    let out = parent.join("xrealm-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &our_root)
+        .args(["export-cargo", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("following the composition"));
+    // The composed realm's crate is present, so its layer really was verified
+    // and followed rather than skipped.
+    assert!(
+        out.join("registry/serde-1.0.200.crate").is_file(),
+        "the upstream realm's crate is missing from the composed export"
+    );
+}
+
+// rivet: verifies REQ-COMPOSEEXPORT-001
+#[test]
+fn verify_lockfile_follows_the_composition_not_just_the_root() {
+    // REQ-COMPOSEEXPORT-001 clause 1's extension: a lockfile checked against
+    // only the ROOT layer silently asserts nothing about the crates the
+    // INCLUDED layers pin — varve#79 wearing a different hat.
+    //
+    // This clause shipped in v0.27.0 with no test naming it. A clean-room
+    // review replaced the composition walk with a root-only vec and the ENTIRE
+    // workspace suite stayed green; the stub was then swept into a commit by an
+    // unrelated `git add -A` and pushed, still green. A clause no test can
+    // distinguish from its own absence is indistinguishable from unimplemented.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("lockcompose-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    // The crate that will disagree lives ONLY in the included layer.
+    let (up_archive, up_digest) = signed_crate_layer(
+        &fx,
+        "lockcompose-up",
+        "2026.08.0",
+        &sk,
+        &[("serde", "1.0.200", dot_crate("serde", "1.0.200", ""))],
+        &[],
+    );
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "lockcompose-root",
+        "2026.07.0",
+        &sk,
+        &[(
+            "rivet-core",
+            "0.32.0",
+            dot_crate("rivet-core", "0.32.0", ""),
+        )],
+        &[&up_digest],
+    );
+    install_pinned(&fx, &trust_root, "2026.08.0", &up_archive);
+    install_pinned(&fx, &trust_root, "2026.07.0", &root_archive);
+
+    // The project resolves a DIFFERENT serde than the composed layer pins.
+    // Root-only checking cannot see this: the root layer has no serde at all.
+    let lock = fx.project.join("Cargo.lock");
+    std::fs::write(
+        &lock,
+        "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.99\"\nchecksum = \"aaaa\"\n",
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["verify", "--lockfile"])
+        .arg(&lock)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("1.0.200")
+                .and(predicate::str::contains("1.0.99"))
+                .and(predicate::str::contains("disagree")),
+        );
+
+    // …and agreement with the COMPOSED layer's crate passes.
+    std::fs::write(
+        &lock,
+        "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.200\"\n",
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["verify", "--lockfile"])
+        .arg(&lock)
+        .assert()
+        .success();
+}
+
+// rivet: verifies REQ-COMPOSE-001
+#[test]
+fn verify_walks_a_diamond_once_instead_of_calling_it_a_cycle() {
+    // A diamond — two layers sharing a base — is the most ordinary composition
+    // there is, and both `docs composition` and `docs layers` promise it is
+    // "walked once and is perfectly legal". `compose::walk` was fixed for this
+    // in v0.23.0; `verify_composition_inner` is an INDEPENDENT reimplementation
+    // in the CLI that kept the bug, so `varve verify` exited 1 on a store that
+    // `install`, `run`, `which` and every export handled correctly. Found by a
+    // persona audit driving the real binary — no unit test could see it,
+    // because the broken walker lives in the binary crate and the correct one
+    // in the library.
+    //
+    // Shape: root composes MID and BASE; MID also composes BASE.
+    //   root ─┬─> mid ──> base
+    //         └─────────> base
+    // BASE is reachable by two paths and is on NEITHER path twice.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("diamond-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    let (base_archive, base_digest) = signed_crate_layer(
+        &fx,
+        "diamond-base",
+        "2026.08.0",
+        &sk,
+        &[("cfg-if", "1.0.0", dot_crate("cfg-if", "1.0.0", ""))],
+        &[],
+    );
+    let (mid_archive, mid_digest) = signed_crate_layer(
+        &fx,
+        "diamond-mid",
+        "2026.08.1",
+        &sk,
+        &[("serde", "1.0.200", dot_crate("serde", "1.0.200", ""))],
+        &[&base_digest],
+    );
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "diamond-root",
+        "2026.07.0",
+        &sk,
+        &[(
+            "rivet-core",
+            "0.32.0",
+            dot_crate("rivet-core", "0.32.0", ""),
+        )],
+        &[&mid_digest, &base_digest],
+    );
+
+    // `install` follows the pin, so each layer is installed under its own pin
+    // before the pin moves to the root — the sequence a real consumer performs.
+    install_pinned(&fx, &trust_root, "2026.08.0", &base_archive);
+    install_pinned(&fx, &trust_root, "2026.08.1", &mid_archive);
+    install_pinned(&fx, &trust_root, "2026.07.0", &root_archive);
+
+    // The whole finding: this exited 1 with "composition cycle while verifying".
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("composes"));
+}
+
+// rivet: verifies REQ-COMPOSE-001
+#[test]
+fn verify_does_not_mistake_a_wide_composition_for_a_deep_one() {
+    // The second defect of the same wrong data structure, and the reason the
+    // fix is a path rather than a bigger set. `verify` guarded depth with
+    // `path.len() > MAX_DEPTH` on an insert-only set, so the counter measured
+    // every layer VISITED, not how deep the walk had gone. A root composing
+    // MAX_DEPTH+2 sibling layers is one level deep and was refused as "more
+    // than 8 layers deep".
+    //
+    // A cycle, by contrast, is deliberately NOT tested at this boundary: an
+    // include is content-addressed, so a layer including itself would need its
+    // own digest to depend on its own content, and a hand-edited layer.json is
+    // refused earlier by the tamper check ("the core entry was modified after
+    // install"). The cycle guard is retained as defence in depth against a
+    // future non-content-addressed include, not because a test can reach it.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("wide-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    let width = varve_core::compose::MAX_DEPTH + 2;
+    let mut archives = Vec::new();
+    let mut digests = Vec::new();
+    for i in 0..width {
+        let (archive, digest) = signed_crate_layer(
+            &fx,
+            &format!("wide-{i}"),
+            // Distinct layer ids so each installs under its own pin.
+            &format!("2026.08.{i}"),
+            &sk,
+            &[(
+                "cfg-if",
+                &format!("1.0.{i}"),
+                dot_crate("cfg-if", &format!("1.0.{i}"), ""),
+            )],
+            &[],
+        );
+        archives.push((format!("2026.08.{i}"), archive));
+        digests.push(digest);
+    }
+    let refs: Vec<&str> = digests.iter().map(|d| d.as_str()).collect();
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "wide-root",
+        "2026.07.0",
+        &sk,
+        &[(
+            "rivet-core",
+            "0.32.0",
+            dot_crate("rivet-core", "0.32.0", ""),
+        )],
+        &refs,
+    );
+
+    for (layer, archive) in &archives {
+        install_pinned(&fx, &trust_root, layer, archive);
+    }
+    install_pinned(&fx, &trust_root, "2026.07.0", &root_archive);
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+}
+
+// rivet: verifies REQ-COMPOSEEXPORT-001
+#[test]
+fn an_export_refuses_a_composed_layer_it_cannot_vouch_for() {
+    // Clause 1: each included layer is verified against ITS OWN realm's root,
+    // and an export is not a way around that. Trust must not widen because a
+    // layer was reached through an include rather than through the pin.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("badcompose-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    // An UNSIGNED upstream layer, laid straight into the store.
+    let store = varve_core::Store::at(&fx.root);
+    let up_manifest = manifest_with_includes("2026.08.0", &[], &[]);
+    let up_digest = store.lay_down(up_manifest.as_bytes(), &[]).unwrap();
+
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "badcompose-root",
+        "2026.07.0",
+        &sk,
+        &[(
+            "rivet-core",
+            "0.32.0",
+            dot_crate("rivet-core", "0.32.0", ""),
+        )],
+        &[&up_digest],
+    );
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&root_archive)
+        .assert()
+        .success();
+
+    let out = parent.join("badcompose-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-cargo", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("2026.08.0"));
+    assert!(
+        !out.join("registry").exists(),
+        "a refused export must not leave a directory that looks complete"
+    );
+}
+
+// rivet: verifies REQ-COMPOSEEXPORT-001
+#[test]
+fn an_export_refuses_two_layers_that_disagree_about_one_crate() {
+    // Clause 2's error case at the CLI. The same crate name at DIFFERENT
+    // versions is legal and both export (proven above); the same name AND
+    // version with DIFFERENT digests is two realms disagreeing about what those
+    // bytes are, and varve does not pick a winner.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("clash-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    let (up_archive, up_digest) = signed_crate_layer(
+        &fx,
+        "clash-up",
+        "2026.08.0",
+        &sk,
+        &[("cfg-if", "1.0.0", dot_crate("cfg-if", "1.0.0", ""))],
+        &[],
+    );
+    // Same name, same version, DIFFERENT bytes.
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "clash-root",
+        "2026.07.0",
+        &sk,
+        &[(
+            "cfg-if",
+            "1.0.0",
+            dot_crate("cfg-if", "1.0.0", "[features]\nstd = []\n"),
+        )],
+        &[&up_digest],
+    );
+    install_pinned(&fx, &trust_root, "2026.08.0", &up_archive);
+    install_pinned(&fx, &trust_root, "2026.07.0", &root_archive);
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-cargo", "--out"])
+        .arg(parent.join("clash-out"))
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("cfg-if")
+                .and(predicate::str::contains("1.0.0"))
+                .and(predicate::str::contains("DIFFERENT bytes")),
+        );
+}
+
+// rivet: verifies REQ-COMPOSEEXPORT-001
+#[test]
+fn an_export_that_cannot_follow_the_composition_says_so() {
+    // Clause 3. `install` refuses a composition whose include is missing, and
+    // `resolve` refuses to dispatch one — but an export named with `--layer`
+    // takes neither path, so a layer removed from the store AFTER install left
+    // the export adapters free to write a directory that is quietly missing an
+    // entire layer's crates. That is exactly varve#79's failure mode: no error,
+    // and a build that fails later pointing nowhere near the cause.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("gone-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    let (up_archive, up_digest) = signed_crate_layer(
+        &fx,
+        "gone-up",
+        "2026.08.0",
+        &sk,
+        &[("cfg-if", "1.0.0", dot_crate("cfg-if", "1.0.0", ""))],
+        &[],
+    );
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "gone-root",
+        "2026.07.0",
+        &sk,
+        &[(
+            "rivet-core",
+            "0.32.0",
+            dot_crate("rivet-core", "0.32.0", ""),
+        )],
+        &[&up_digest],
+    );
+    install_pinned(&fx, &trust_root, "2026.08.0", &up_archive);
+    install_pinned(&fx, &trust_root, "2026.07.0", &root_archive);
+
+    // The composed layer disappears from the core after installation.
+    let store = varve_core::Store::at(&fx.root);
+    let up = store
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|l| l.layer.to_string() == "2026.08.0")
+        .expect("the upstream layer is installed");
+    std::fs::remove_dir_all(&up.root).unwrap();
+
+    let out = parent.join("gone-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-cargo", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        // …naming what is missing and how to fix it, not exiting 0 with one
+        // layer's crates.
+        .stderr(
+            predicate::str::contains("not installed")
+                .and(predicate::str::contains("varve install"))
+                .and(predicate::str::contains("silently omit")),
+        );
+    assert!(
+        !out.join("registry").exists(),
+        "an export that could not follow the composition must not leave a registry"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// The library surface the SDK workstream left unwired: `export-sdk`, declared
+// exports, the shadowing declaration, and `varve env`. Every test below drives
+// the BINARY. A test that builds the policy itself cannot detect that the
+// product never builds one — which is exactly how REQ-INDEXAUTH-001 shipped a
+// `must` clause that no code path could reach.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The prefix an SDK must have been BUILT for so that `dest` fits inside its
+/// relocation budget.
+///
+/// Not a constant: relocation can only ever SHORTEN a path (the interpreter
+/// field is fixed-size), and a temporary directory is long. A hard-coded prefix
+/// would make these tests pass or fail on the length of `$TMPDIR`, which is the
+/// machine-dependent suite the hermetic PATH exists to prevent.
+fn built_prefix_for(dest: &std::path::Path) -> String {
+    let need = dest.to_str().expect("a utf-8 temp path").len();
+    let mut s = String::from("/opt/poky/4.0.15/sysroots/x86_64-pokysdk-linux");
+    while s.len() < need {
+        s.push('p');
+    }
+    s
+}
+
+/// A synthetic Yocto SDK as the gzip tar a producer signs: a NUL-padded binary
+/// field (the `relocate_sdk.py` half), a text `environment-setup-*` (the
+/// `sed -i` half), an absolute symlink, and a `bin/synth` that will shadow the
+/// pinned tool once the tree is on PATH.
+fn sdk_tarball(built: &str) -> Vec<u8> {
+    use std::io::Write;
+    // A NUL-padded path field, the way an ELF PT_INTERP segment holds one.
+    let field = |s: &str| {
+        let mut v = s.as_bytes().to_vec();
+        v.resize(s.len() + 8, 0);
+        v
+    };
+    let mut binary = b"\x7fELF".to_vec();
+    binary.extend_from_slice(&field(&format!(
+        "{built}/sysroots/x86_64/lib/ld-linux.so.2"
+    )));
+    binary.extend_from_slice(b"\0\0trailer\0");
+    // A REAL environment script: after relocation its PATH line points at the
+    // export, which is what makes `eval "$(varve env)"` testable end to end.
+    let env_setup = format!(
+        "export SDKTARGETSYSROOT=\"{built}/sysroots/cortexa53\"\n\
+         export PATH=\"{built}/bin:$PATH\"\n\
+         export CC=\"aarch64-poky-linux-gcc --sysroot={built}/sysroots/cortexa53\"\n"
+    );
+    let synth = "#!/bin/sh\necho SDK-SYNTH\n";
+
+    let mut tar_bytes = Vec::new();
+    {
+        let mut b = tar::Builder::new(&mut tar_bytes);
+        let mut dir = tar::Header::new_gnu();
+        dir.set_entry_type(tar::EntryType::Directory);
+        dir.set_size(0);
+        dir.set_mode(0o755);
+        b.append_data(&mut dir, "sysroots/", std::io::empty())
+            .unwrap();
+        for (path, mode, bytes) in [
+            (
+                "sysroots/x86_64/usr/bin/aarch64-poky-linux-gcc",
+                0o755u32,
+                binary.as_slice(),
+            ),
+            (
+                "environment-setup-cortexa53-poky-linux",
+                0o644,
+                env_setup.as_bytes(),
+            ),
+            ("bin/synth", 0o755, synth.as_bytes()),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(bytes.len() as u64);
+            h.set_mode(mode);
+            b.append_data(&mut h, path, bytes).unwrap();
+        }
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_size(0);
+        link.set_mode(0o777);
+        // `append_link`, not `set_link_name`: a real SDK's build prefix is
+        // routinely past the 100-byte header field, and tar's GNU LongLink
+        // record is how that is carried. A fixture that could only express a
+        // short target would test a case the requirement is not about.
+        b.append_link(
+            &mut link,
+            "bin/synth-latest",
+            std::path::Path::new(&format!("{built}/bin/synth")),
+        )
+        .unwrap();
+        b.finish().unwrap();
+    }
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(&tar_bytes).unwrap();
+    gz.finish().unwrap()
+}
+
+/// A signed root plus its key files, the two lines every one of these tests
+/// starts with.
+struct Root {
+    key: std::path::PathBuf,
+    trust_root: std::path::PathBuf,
+}
+
+fn root_at(parent: &std::path::Path) -> Root {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let key = parent.join("root.key");
+    std::fs::write(&key, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    Root { key, trust_root }
+}
+
+/// Deposit `spec_text` and install it — every test here needs a real, signed,
+/// installed layer, because `export_target` verifies before it exports.
+fn deposit_and_install(fx: &Fixture, root: &Root, spec_text: &str, tag: &str) {
+    let parent = fx.project.parent().unwrap();
+    let spec = parent.join(format!("{tag}-spec.toml"));
+    std::fs::write(&spec, spec_text).unwrap();
+    let layout = parent.join(format!("{tag}-layout"));
+    varve(fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&root.key)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+}
+
+// rivet: verifies REQ-SDK-001
+#[cfg(unix)]
+#[test]
+fn export_sdk_lays_a_relocated_tree_down_through_the_cli() {
+    // REQ-SDK-001 clause 3, at the boundary a user touches. The library could
+    // relocate a tree since v0.27.0 and NOTHING could ask it to: there was no
+    // subcommand, and no producer path for the signed prefix clause 4 requires.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+
+    let out = parent.join("poky");
+    std::fs::create_dir_all(&out).unwrap();
+    let dest = out.canonicalize().unwrap();
+    let built = built_prefix_for(&dest);
+    let archive = parent.join("poky-sdk.tar.gz");
+    let archive_bytes = sdk_tarball(&built);
+    std::fs::write(&archive, &archive_bytes).unwrap();
+
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"poky-cortexa53\"\nversion = \"4.0.15\"\nkind = \"sdk\"\n\
+             sdk-prefix = \"{built}\"\npath = \"{}\"\n",
+            archive.display()
+        ),
+        "sdk",
+    );
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-sdk", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("exported sdk poky-cortexa53@4.0.15")
+                .and(predicate::str::contains("field(s) patched in place")),
+        );
+
+    // The tree is HERE, relocated: no occurrence of the build prefix survives,
+    // and the destination is what the binaries now name.
+    let gcc = dest.join("sysroots/x86_64/usr/bin/aarch64-poky-linux-gcc");
+    let gcc_bytes = std::fs::read(&gcc).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&gcc_bytes).contains(&built),
+        "the interpreter field still names the build prefix"
+    );
+    assert!(String::from_utf8_lossy(&gcc_bytes).contains(dest.to_str().unwrap()));
+    assert_eq!(
+        gcc_bytes.len(),
+        archive_len_preserving_probe(&built),
+        "a binary field is patched IN PLACE — the file length must not move"
+    );
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&gcc).unwrap().permissions().mode() & 0o111,
+            0o111,
+            "a compiler must survive the export executable"
+        );
+    }
+    let env_script = std::fs::read_to_string(dest.join("environment-setup-cortexa53-poky-linux"))
+        .expect("the sourceable script is part of the tree");
+    assert!(env_script.contains(dest.to_str().unwrap()));
+    assert!(!env_script.contains(&built));
+    assert_eq!(
+        std::fs::read_link(dest.join("bin/synth-latest")).unwrap(),
+        dest.join("bin/synth"),
+        "an SDK-internal absolute symlink is re-pointed into the export"
+    );
+
+    // Clause 2: the store still holds EXACTLY the bytes the producer signed —
+    // nothing on the relocation path writes back into it — so `verify` (which
+    // re-hashes that one file) still passes.
+    let store = varve_core::Store::at(&fx.root);
+    let installed = store
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|l| l.layer.to_string() == "2026.07.0")
+        .unwrap();
+    let held = installed.root.join("payloads/poky-cortexa53/4.0.15");
+    assert_eq!(
+        std::fs::read(&held).unwrap(),
+        archive_bytes,
+        "the store must keep the signed archive, not the relocated tree"
+    );
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+
+    // The stamp says `sdk` EXACTLY — a declaration in varve.toml is compared
+    // against this string, and any other spelling reports the declared export
+    // as never produced.
+    let stamp: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dest.join(".varve-export.json")).unwrap()).unwrap();
+    assert_eq!(stamp["kind"], "sdk");
+    assert_eq!(stamp["layer"], "2026.07.0");
+}
+
+/// The synthetic binary's length, recomputed from the same rule the fixture
+/// builds it with — asserting a NUMBER here would be asserting the fixture.
+fn archive_len_preserving_probe(built: &str) -> usize {
+    // b"\x7fELF" + field(interp) + b"\0\0trailer\0"
+    4 + (format!("{built}/sysroots/x86_64/lib/ld-linux.so.2").len() + 8) + 10
+}
+
+/// The same fixture, plus ONE symlink that is absolute, sits under the build
+/// prefix, and climbs out of the export with `..`.
+fn sdk_tarball_with_escaping_link(built: &str) -> Vec<u8> {
+    use std::io::Write;
+    let inner = sdk_tarball(built);
+    let mut tar_bytes = Vec::new();
+    {
+        let mut b = tar::Builder::new(&mut tar_bytes);
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(inner.as_slice()));
+        for entry in ar.entries().unwrap() {
+            let entry = entry.unwrap();
+            let mut h = entry.header().clone();
+            let path = entry.path().unwrap().into_owned();
+            if let Some(link) = entry.link_name().unwrap() {
+                b.append_link(&mut h, &path, &link).unwrap();
+            } else {
+                let mut bytes = Vec::new();
+                {
+                    use std::io::Read;
+                    let mut e = entry;
+                    e.read_to_end(&mut bytes).unwrap();
+                }
+                h.set_size(bytes.len() as u64);
+                b.append_data(&mut h, &path, bytes.as_slice()).unwrap();
+            }
+        }
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_size(0);
+        link.set_mode(0o777);
+        b.append_link(
+            &mut link,
+            "bin/escape-abs-dotdot",
+            std::path::Path::new(&format!("{built}/../../../../../../../../tmp/varve-pwned")),
+        )
+        .unwrap();
+        b.finish().unwrap();
+    }
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(&tar_bytes).unwrap();
+    gz.finish().unwrap()
+}
+
+// rivet: verifies REQ-SDK-001
+#[test]
+fn export_sdk_refuses_an_absolute_symlink_that_climbs_out_of_the_export() {
+    // Clause 5 at the boundary that found it. A clean-room review reproduced
+    // this end to end through the RELEASE binary: a symlink that is absolute,
+    // starts with the SDK's own build prefix, and then climbs out with `..`
+    // was re-pointed into the export and reported as "1 symlink(s)
+    // re-pointed" — exit 0. The branch that re-points an SDK's internal
+    // absolute links stripped the prefix without walking the remainder, while
+    // the relative branch beside it had always walked its target.
+    //
+    // The library test for this lives in sdkexport.rs. It is repeated here
+    // because "the invariant was verified in the library while nothing could
+    // reach it" is a defect this very release shipped once already.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    // Long enough that the clause-4 fit check (destination must be no longer
+    // than the build prefix) passes and clause 5 is what actually decides.
+    let built = "/opt/poky/3.1/sysroots/x86_64-pokysdk-linux/usr/share/long-enough-prefix/padding";
+    let archive = parent.join("escaping-sdk.tar.gz");
+    std::fs::write(&archive, sdk_tarball_with_escaping_link(built)).unwrap();
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"poky\"\nversion = \"4.0\"\nkind = \"sdk\"\n\
+             sdk-prefix = \"{built}\"\npath = \"{}\"\n",
+            archive.display()
+        ),
+        "sdk",
+    );
+    let out = parent.join("escaping-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-sdk", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("escape-abs-dotdot"));
+    assert!(
+        !out.join(".varve-export.json").exists(),
+        "a refused export must not be stamped as one"
+    );
+}
+
+// rivet: verifies REQ-SDK-001
+#[test]
+fn export_sdk_refuses_a_destination_the_sdk_cannot_reach_before_writing_anything() {
+    // Clause 4 through the CLI: the refusal is EARLY (the archive is never
+    // even opened) and names the budget, because "it failed" after relocating
+    // thousands of files is not an answer anyone can act on.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let archive = parent.join("poky-sdk.tar.gz");
+    std::fs::write(&archive, sdk_tarball("/opt/tiny")).unwrap();
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"poky\"\nversion = \"4.0\"\nkind = \"sdk\"\n\
+             sdk-prefix = \"/opt/tiny\"\npath = \"{}\"\n",
+            archive.display()
+        ),
+        "sdk",
+    );
+    let out = parent.join("a-destination-far-longer-than-the-build-prefix");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-sdk", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("cannot relocate this sdk")
+                .and(predicate::str::contains("/opt/tiny"))
+                .and(predicate::str::contains("at most 9 characters")),
+        );
+    assert!(
+        !out.join(".varve-export.json").exists(),
+        "a refused export must not be stamped as one"
+    );
+    assert!(
+        !out.join("bin").exists(),
+        "the refusal must land before any byte of the tree"
+    );
+}
+
+// rivet: verifies REQ-SDK-001
+#[test]
+fn an_sdk_without_the_signed_prefix_cannot_be_deposited_at_all() {
+    // Clause 4's producing half. The budget is attributable or it is nothing:
+    // an sdk with no signed prefix would install, verify, and be impossible to
+    // export — discovered on the far side of an air gap, unfixable without a
+    // re-deposit, because the annotation lives inside the signature.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let archive = parent.join("poky-sdk.tar.gz");
+    std::fs::write(&archive, sdk_tarball("/opt/poky")).unwrap();
+    let spec = parent.join("no-prefix.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"poky\"\nversion = \"4.0\"\nkind = \"sdk\"\npath = \"{}\"\n",
+            archive.display()
+        ),
+    )
+    .unwrap();
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&root.key)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(parent.join("nope"))
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("declares no `sdk-prefix`")
+                .and(predicate::str::contains("export-sdk")),
+        );
+
+    // …and the same field on a payload nobody relocates is refused rather than
+    // signed, ignored, and believed.
+    let bin = parent.join("synth-bin");
+    std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+    let spec = parent.join("prefix-on-a-tool.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0\"\n\
+             sdk-prefix = \"/opt/poky\"\npath = \"{}\"\n",
+            bin.display()
+        ),
+    )
+    .unwrap();
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&root.key)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(parent.join("nope2"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("only a tree payload"));
+}
+
+/// A pin that declares exports, written into the project.
+fn write_pin(fx: &Fixture, exports: &str) {
+    std::fs::write(
+        fx.project.join("varve.toml"),
+        format!("{PIN_JULY}{exports}"),
+    )
+    .unwrap();
+}
+
+// rivet: verifies REQ-EXPORTDECL-001
+#[test]
+fn verify_checks_every_declared_export_without_being_told_to() {
+    // Clause 3, through the binary. The library could classify a declared
+    // export since v0.27.0 and `varve verify` never called it: the set of
+    // checked exports still lived in whichever `--export` flags someone
+    // remembered to type, which is the "only checks what it is told about"
+    // failure the requirement exists to close.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let vsix = parent.join("ext.vsix");
+    std::fs::write(&vsix, b"zip-bytes").unwrap();
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"rust-lang.rust-analyzer\"\nversion = \"0.3.2300\"\n\
+             kind = \"vsix\"\npath = \"{}\"\n",
+            vsix.display()
+        ),
+        "decl",
+    );
+
+    // TWO declarations, neither generated. Both must be reported: a loop that
+    // stops at the first fault checks one export and certifies the rest.
+    write_pin(
+        &fx,
+        "\n[[export]]\nkind = \"vsix\"\nout = \"extensions\"\n\
+         \n[[export]]\nkind = \"bazel-registry\"\nout = \"bazel/registries\"\n",
+    );
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("2 declared export(s)")
+                .and(predicate::str::contains("extensions"))
+                .and(predicate::str::contains("bazel/registries"))
+                .and(predicate::str::contains("MISSING"))
+                // The command that FIXES it, spelled the way it really is:
+                // `bazel-registry` is produced by `varve export-bazel`, so the
+                // obvious format!("export-{kind}") would print a command that
+                // does not exist in the one line whose job is to be run.
+                .and(predicate::str::contains("varve export-bazel --out"))
+                .and(predicate::str::contains("varve export-vsix --out")),
+        );
+
+    // Generate ONE of them: the other is still checked, so this is not a
+    // "declared exports exist" check that any single directory satisfies.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-vsix", "--out", "extensions"])
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("1 declared export(s)")
+                .and(predicate::str::contains("bazel/registries")),
+        );
+
+    // With only the generated one declared, verify passes — and SAYS it looked,
+    // because a silent pass is indistinguishable from a check that was skipped.
+    write_pin(&fx, "\n[[export]]\nkind = \"vsix\"\nout = \"extensions\"\n");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("declared export").and(predicate::str::contains("fresh")));
+
+    // The pin moves and the export does not.
+    let stamp = fx.project.join("extensions/.varve-export.json");
+    std::fs::write(
+        &stamp,
+        r#"{"layer":"2026.06.0","manifest_digest":"sha256:0000","kind":"vsix"}"#,
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("STALE"));
+
+    // A directory produced by a DIFFERENT adapter: freshness there says nothing
+    // about the declared export, which was never produced at all.
+    let current: serde_json::Value = {
+        varve(&fx)
+            .env("VARVE_TRUST_ROOT", &root.trust_root)
+            .args(["export-vsix", "--out", "extensions"])
+            .assert()
+            .success();
+        serde_json::from_slice(&std::fs::read(&stamp).unwrap()).unwrap()
+    };
+    std::fs::write(
+        &stamp,
+        serde_json::to_vec(&serde_json::json!({
+            "layer": current["layer"],
+            "manifest_digest": current["manifest_digest"],
+            "kind": "cargo",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("DECLARED as a vsix export but stamped cargo")
+                .and(predicate::str::contains("says nothing about it")),
+        );
+
+    // And a declared directory that is simply gone is a FAILURE, not a warning:
+    // "I forgot to generate it" and "it is stale" are the same severity to
+    // anyone relying on the export.
+    std::fs::remove_dir_all(fx.project.join("extensions")).unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("MISSING"));
+}
+
+// rivet: verifies REQ-EXPORTDECL-001, REQ-SHADOW-001
+#[cfg(unix)]
+#[test]
+fn a_declared_sdk_environment_is_not_reported_as_a_hijack_by_verify() {
+    // Clause 5 through the binary, in all three verdicts. Without the
+    // declaration consulted here, a legitimately sourced SDK makes `verify`
+    // cry wolf — and a check that fires on the setup the project deliberately
+    // configured is the one people switch off, which is worse than not
+    // checking at all.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+
+    let out = fx.project.join("toolchains/poky");
+    std::fs::create_dir_all(&out).unwrap();
+    let dest = out.canonicalize().unwrap();
+    let built = built_prefix_for(&dest);
+    let archive = parent.join("poky-sdk.tar.gz");
+    std::fs::write(&archive, sdk_tarball(&built)).unwrap();
+    let synth_bin = parent.join("synth-bin");
+    std::fs::write(&synth_bin, b"#!/bin/sh\necho PINNED\n").unwrap();
+
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0.0\"\npath = \"{}\"\n\n\
+             [[tool]]\nname = \"poky\"\nversion = \"4.0.15\"\nkind = \"sdk\"\n\
+             sdk-prefix = \"{built}\"\npath = \"{}\"\n",
+            synth_bin.display(),
+            archive.display()
+        ),
+        "shadow",
+    );
+
+    const DECL: &str = "\n[[export]]\nkind = \"sdk\"\nout = \"toolchains/poky\"\n\
+                        \n[export.env]\nscript = \"environment-setup-cortexa53-poky-linux\"\n";
+    write_pin(&fx, &format!("{DECL}path = \"before-shims\"\n"));
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-sdk", "--out", "toolchains/poky"])
+        .assert()
+        .success();
+
+    // The SDK's own `synth` is what PATH runs — exactly the condition
+    // REQ-SHADOW-001 detects, and exactly what `before-shims` declared.
+    let sdk_path = format!("{}:/usr/bin:/bin", dest.join("bin").display());
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .env("PATH", &sdk_path)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("before-shims").and(predicate::str::contains("not a hijack")),
+        );
+
+    // The SAME PATH under an `after-shims` declaration is a real fault: the
+    // project said varve's pinned tools win, and they do not.
+    write_pin(&fx, &format!("{DECL}path = \"after-shims\"\n"));
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .env("PATH", &sdk_path)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("varve.toml declares that export `after-shims`").and(
+                predicate::str::contains("environment-setup-cortexa53-poky-linux"),
+            ),
+        );
+
+    // …and a binary in no declared export at all is still the ordinary hijack,
+    // with the ordinary fix — the declaration must not blunt the check it
+    // exists to make usable.
+    write_pin(&fx, &format!("{DECL}path = \"before-shims\"\n"));
+    let elsewhere = parent.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let impostor = elsewhere.join("synth");
+    std::fs::write(&impostor, "#!/bin/sh\necho WRONG\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&impostor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .env("PATH", format!("{}:/usr/bin:/bin", elsewhere.display()))
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("not what your PATH runs")
+                .and(predicate::str::contains("varve shim install")),
+        );
+}
+
+// rivet: verifies REQ-EXPORTDECL-001
+#[cfg(unix)]
+#[test]
+fn env_enters_every_declared_environment_in_the_order_that_inverts_the_file() {
+    // Clause 4 through the binary. `env_lines` computed the inverted order in
+    // the library and `varve env` printed the shim fragment alone, so a project
+    // that declared its SDK still had to source it by hand — in whichever order
+    // it guessed.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    // Two sourced exports, one on each side of the shims, so the assertion is
+    // about ORDER and not merely about presence.
+    write_pin(
+        &fx,
+        "\n[[export]]\nkind = \"sdk\"\nout = \"sdk-after\"\n\
+         \n[export.env]\nscript = \"env-after.sh\"\npath = \"after-shims\"\n\
+         \n[[export]]\nkind = \"sdk\"\nout = \"sdk-before\"\n\
+         \n[export.env]\nscript = \"env-before.sh\"\npath = \"before-shims\"\n",
+    );
+    for (dir, marker) in [("sdk-after", "AFTER"), ("sdk-before", "BEFORE")] {
+        let d = fx.project.join(dir);
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        std::fs::write(
+            d.join(format!("env-{}.sh", marker.to_lowercase())),
+            format!("export PATH=\"{}/bin:$PATH\"\n", d.display()),
+        )
+        .unwrap();
+    }
+
+    let out = varve(&fx).arg("env").output().unwrap();
+    assert!(out.status.success());
+    let script = String::from_utf8(out.stdout).unwrap();
+    let at = |needle: &str| {
+        script
+            .find(needle)
+            .unwrap_or_else(|| panic!("`varve env` never mentions {needle}:\n{script}"))
+    };
+    let shims = fx.root.join("shims");
+    assert!(
+        at("env-after.sh") < at(shims.to_str().unwrap()),
+        "an `after-shims` export must be sourced FIRST, so the shims land ahead \
+         of it on PATH:\n{script}"
+    );
+    assert!(
+        at(shims.to_str().unwrap()) < at("env-before.sh"),
+        "a `before-shims` export must be sourced LAST, so its own bin wins:\n{script}"
+    );
+
+    // …and the emitted script actually produces that PATH when a shell runs it,
+    // which is the only claim that matters. Asserting the text alone would
+    // verify the formatter.
+    let probe = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("eval \"$VARVE_ENV\"; printf '%s' \"$PATH\"")
+        .env("VARVE_ENV", &script)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(&fx.project)
+        .output()
+        .unwrap();
+    let path = String::from_utf8_lossy(&probe.stdout);
+    let entries: Vec<&str> = path.split(':').collect();
+    let idx = |needle: &str| {
+        entries
+            .iter()
+            .position(|e| e.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} is not on the resulting PATH: {path}"))
+    };
+    assert!(
+        idx("sdk-before/bin") < idx("shims"),
+        "sourcing PREPENDS, so `before-shims` must end up ahead of the shims: {path}"
+    );
+    assert!(
+        idx("shims") < idx("sdk-after/bin"),
+        "…and `after-shims` behind them: {path}"
+    );
+
+    // fish cannot source a producer's POSIX-sh environment script, so it fails
+    // rather than handing back an environment missing what varve.toml declares.
+    varve(&fx)
+        .args(["env", "--shell", "fish"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("fish cannot source it"));
+
+    // A pin that EXISTS and does not parse is an error, not a fallback: half an
+    // environment, exit 0, is how a declared SDK goes missing without anyone
+    // noticing. (Outside a project there is no pin at all, and the shims stay
+    // the whole answer — `env_is_evaluable_and_idempotent` covers that.)
+    std::fs::write(fx.project.join("varve.toml"), "manifest-version = 1\n").unwrap();
+    varve(&fx)
+        .arg("env")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("varve.toml"));
+}
+
+// rivet: verifies REQ-PIN-001
+#[test]
+fn a_schema_mistake_in_the_pin_is_reported_once_not_twice() {
+    // varve#7 fixed this for the `Layer` variant and left its siblings alone:
+    // every variant that both interpolates `{source}` into its Display AND
+    // declares `#[source]` prints its cause twice, glued by a stray `: `. That
+    // is eleven lines of output for a one-line problem, on the errors a
+    // newcomer hits first — a missing field in varve.toml. Found by a persona
+    // audit, which ranked it the highest friction-removed-per-line-changed
+    // fix in the tool.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    std::fs::write(fx.project.join("varve.toml"), "[toolchain]\n").unwrap();
+    let out = varve(&fx).arg("which").arg("rivet").assert().failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert_eq!(
+        stderr.matches("missing field").count(),
+        1,
+        "the parse error is printed once, not once per formatter layer:\n{stderr}"
+    );
+    // …and no orphaned separator left behind by the removed interpolation.
+    assert!(
+        !stderr.contains("\n: "),
+        "stray `: ` gluing a doubled cause:\n{stderr}"
+    );
+}
+
+// rivet: verifies REQ-SDK-001
+#[test]
+fn export_sdk_refuses_a_hostile_archive_member_at_the_cli_boundary() {
+    // Clause 5 where it now actually runs. The tree's invariants were verified
+    // in the library while nothing could reach them; a signed blob is
+    // ATTRIBUTABLE, not benign, and this is the boundary a user types.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+
+    let mut tar_bytes = Vec::new();
+    {
+        let mut b = tar::Builder::new(&mut tar_bytes);
+        let mut h = tar::Header::new_gnu();
+        let payload = b"PWNED";
+        h.set_size(payload.len() as u64);
+        h.set_mode(0o644);
+        // Written into the header DIRECTLY: `set_path` refuses `..` itself, and
+        // an archive built by other software is under no obligation to have
+        // used it. The refusal has to be varve's.
+        {
+            let gnu = h.as_gnu_mut().unwrap();
+            let name = b"../../escaped";
+            gnu.name[..name.len()].copy_from_slice(name);
+        }
+        h.set_cksum();
+        b.append(&h, &payload[..]).unwrap();
+        b.finish().unwrap();
+    }
+    let archive = parent.join("hostile.tar");
+    std::fs::write(&archive, &tar_bytes).unwrap();
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"hostile\"\nversion = \"1.0\"\nkind = \"sdk\"\n\
+             sdk-prefix = \"/opt/poky-with-a-prefix-long-enough-for-any-temporary-directory-so-the-fit-check-is-not-what-refuses-this\"\n\
+             path = \"{}\"\n",
+            archive.display()
+        ),
+        "hostile",
+    );
+
+    let out = parent.join("hostile-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-sdk", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a usable path"));
+    assert!(
+        !parent.join("escaped").exists() && !out.join("escaped").exists(),
+        "a refused tree must leave nothing behind, inside the export or out of it"
+    );
 }

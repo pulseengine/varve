@@ -1,5 +1,120 @@
 # Changelog
 
+## v0.27.0 — 2026-08-19
+
+Distribution beyond binaries, and the system-level exercise that keeps it
+honest. **One behaviour change can turn a passing setup red — read it first.**
+
+### Breaking
+
+- **`varve env` now fails on a `varve.toml` it cannot parse**, instead of
+  printing the shim-only environment and exiting 0. Half an environment with a
+  success exit is how a declared SDK goes missing without anyone noticing. If
+  you have `eval "$(varve env)"` in a shell rc, a typo in a pin now hard-fails
+  that shell startup rather than silently dropping the toolchain. Outside a
+  project there is still no pin at all and the shims remain the whole answer.
+- **`sdk-prefix` is required on a `kind = "sdk"` payload.** An SDK's
+  interpreter path is patched in place into a fixed-size field, so varve has to
+  know the prefix it was built with before it can say whether a destination
+  fits at all.
+
+### Added — distributing more than binaries
+
+- **`kind = "sdk"` + `varve export-sdk`** — a signed SDK archive is held in the
+  store, unpacked and relocated on export, and the source bytes are never
+  written back to. The fit check happens BEFORE decompression, so an SDK that
+  cannot reach your destination is refused in milliseconds rather than after
+  thousands of files. (REQ-SDK-001)
+- **`[[export]]` declarations in `varve.toml`** — a project states which
+  adapters it exports and to where, and `varve verify` then checks every
+  declared export without being told to. Previously the set of checked exports
+  lived in a CI script, so an export nobody remembered to name went stale
+  silently. (REQ-EXPORTDECL-001)
+- **Exports follow the composition.** `export-cargo`, `export-crates-vendor`,
+  `export-bazel`, `export-bazel-distdir` and `verify --lockfile` now walk every
+  included layer instead of only the pinned one — and each included layer is
+  verified against **its own realm's** trust root. An export that cannot follow
+  the composition says so rather than quietly omitting those payloads.
+  (REQ-COMPOSEEXPORT-001, varve#79)
+
+### Fixed
+
+- **`export-cargo` could not build a real dependency graph.** Its index emitted
+  `"deps":[]` and `"features":{}` for every crate while Cargo resolves the graph
+  FROM the index, so the worst case was a build that exits 0 with crates
+  compiled featureless — not even `default`. Index entries now carry the real
+  deps and features read from each `.crate`. 228 of varve's own 250 index
+  entries declare a dependency or a feature; under the old code every one of
+  them declared neither. (REQ-CRATEIDX-001, varve#73)
+- **A committed export stopped resolving on another machine.** The registry and
+  vendor paths in the generated `.cargo/config.toml` were absolute, so an export
+  checked into a repository pointed at the exporting machine's filesystem. They
+  are relative now. (REQ-REPRO-001, varve#72)
+- **`varve verify` refused a diamond as a composition cycle.** Two layers
+  sharing a base is the most ordinary composition there is, and both
+  `docs composition` and `docs layers` promise it is "walked once and is
+  perfectly legal" — but verify guarded its walk with an insert-only set, so
+  the shared base was reported as a cycle and the gate CI runs went red on a
+  store `install`, `run`, `which` and every export handled correctly. The same
+  wrong structure also measured *layers visited* rather than *depth reached*,
+  so a root composing ten siblings was refused as "more than 8 layers deep".
+  Found by a ten-persona docs audit driving the real binary.
+- **An SDK symlink could escape the export.** A target that was absolute,
+  started with the SDK's own build prefix, and then climbed out with `..` was
+  re-pointed into place and counted as relocated, exit 0. varve does not write
+  through such a link, so the blast radius was bounded — but "a relocated SDK
+  is self-contained" was not true. Found by clean-room review.
+- **A per-platform payload could not be exported.** `install` lays down only
+  the host's payloads, but the export path walked EVERY platform's manifest
+  entry and resolved each to the one on-disk file — the payload path is
+  `payloads/<name>/<version>` and carries no platform — then compared the
+  host's bytes against a foreign platform's signed digest. It reported
+  tampering for a payload that had simply been built for another machine.
+  Latent for every per-platform non-tool payload; found by depositing spar's
+  per-platform `.vsix` set into the official layer.
+- **A cause printed twice.** Every error variant that interpolated its
+  `{source}` while also declaring `#[source]` printed the underlying error once
+  per formatter layer, glued by a stray `: `. varve#7 fixed this for one
+  variant in v0.25.0 and left eight siblings; a missing field in `varve.toml`
+  cost eleven lines of output and now costs six. These are the errors a
+  newcomer hits first.
+
+### Verification
+
+- **varve now builds varve from a varve layer, offline** — its own 250-package
+  `Cargo.lock` deposited as `crate` payloads, installed, verified, exported, and
+  built in an empty `CARGO_HOME`, through **both** Cargo adapters, each with a
+  negative control that must fail. The gate reproduced varve#73 on first
+  contact. (REQ-SYSTEST-001, varve#74)
+- **The OCI round trip runs against a real registry** — a sha256-pinned zot,
+  pushed with `oras` exactly as `varve docs deploy` documents, then installed
+  from `oci+http://` into a fresh core. (varve#62)
+- **Trusted publishing is mandatory** for `varve` and `varve-core` on crates.io.
+  There is no token path left.
+
+### Known limitations, stated rather than discovered
+
+- **`select` in an `[[export]]` declaration is parsed and validated but consumed
+  by nothing.** It restricts no payload today. The requirement clause stays
+  `approved` rather than `implemented` to say so.
+- **`varve sbom` is composition-blind** — it describes the pinned layer only,
+  while the export adapters now follow the whole composition. An SBOM for a
+  composed toolchain is therefore incomplete.
+- **`varve deposit` into an `--out` that already carries referrers destroys
+  them** — line-status, line-index and attestations — with exit 0 and a success
+  message identical to a clean run. Guarded by no code today (varve#82,
+  varve#85).
+- **The byte-identical export gate cannot catch a second-granularity
+  timestamp**: two exports in one test land in the same second, so a clock
+  injected into an adapter survives it. The gate is real but samples rather
+  than proves (varve#93).
+- **`verify --all` checks only the pinned realm's partition**, though its
+  `--help` says "every installed layer". A tampered layer in a second realm can
+  pass it (varve#84).
+- **`[tool.source].sha256` is signed but never verified**, and `export-bazel`
+  emits it as the checksum Bazel will enforce under a header saying the digests
+  were transcribed from the signed manifest (varve#89).
+
 ## v0.26.0 — 2026-08-19
 
 Trust hardening, a way to obtain varve at all, and payloads that scale.

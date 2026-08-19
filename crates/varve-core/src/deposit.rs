@@ -89,6 +89,15 @@ pub struct DepositTool {
     /// Payload kind (REQ-KIND-001). `None` or `Tool` deposits no kind
     /// annotation — pre-kind and tool layers keep byte-identical payloads.
     pub kind: Option<crate::kind::PayloadKind>,
+    /// The absolute path a tree-shaped payload was BUILT for, signed into the
+    /// manifest as `eu.pulseengine.varve.sdk.prefix` (REQ-SDK-001 clause 4).
+    ///
+    /// It is the relocation BUDGET, so it has to be attributable rather than
+    /// guessed: `export-sdk` refuses a destination longer than this, and a
+    /// consumer must not be able to talk varve into trying. Only a tree payload
+    /// has one — see `check_identities` for why depositing it on anything else
+    /// is refused rather than ignored.
+    pub sdk_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -174,6 +183,11 @@ pub struct SpecTool {
     /// wasm-component|vsix. Absent = tool.
     #[serde(default)]
     pub kind: Option<String>,
+    /// `sdk-prefix` — the absolute path this tree was built for (REQ-SDK-001
+    /// clause 4). Required to make an `sdk` exportable at all: without it there
+    /// is no relocation budget, so `varve export-sdk` has nothing to patch.
+    #[serde(rename = "sdk-prefix", default)]
+    pub sdk_prefix: Option<String>,
 }
 
 pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositError> {
@@ -224,6 +238,25 @@ pub enum DepositError {
         version: String,
         platform: String,
     },
+    #[error(
+        "payload '{name}' is kind {kind} and carries `sdk-prefix` — only a tree payload (sdk) is \
+         relocated, so the prefix would be signed into the manifest, ignored by every adapter, \
+         and believed. Drop it, or deposit this payload as kind = \"sdk\"."
+    )]
+    SdkPrefixOnNonTree { name: String, kind: String },
+    #[error(
+        "sdk '{name}' version {version} declares no `sdk-prefix` — the absolute path it was \
+         BUILT for. Without it `varve export-sdk` has no relocation budget and no path to \
+         patch, so the layer would install and verify and could never be exported. Add \
+         `sdk-prefix = \"/opt/poky/4.0\"` (the path the SDK was built for) to the [[tool]] table."
+    )]
+    SdkPrefixMissing { name: String, version: String },
+    #[error(
+        "sdk '{name}' declares sdk-prefix {prefix:?}, which is not absolute — the prefix is the \
+         path PATCHED INTO the SDK's binaries, and a relative one there would resolve against \
+         whatever directory a compiler happens to run in"
+    )]
+    SdkPrefixNotAbsolute { name: String, prefix: String },
     #[error(transparent)]
     Sign(#[from] VerifyError),
     #[error("io error at {path}: {source}")]
@@ -281,6 +314,42 @@ fn check_identities(tools: &[&DepositTool]) -> Result<(), DepositError> {
     Ok(())
 }
 
+/// The relocation budget must be present exactly where it can be acted on, and
+/// absent everywhere else (REQ-SDK-001 clause 4).
+///
+/// Both directions are refusals rather than warnings, at the PRODUCING end. An
+/// `sdk-prefix` on a payload nobody relocates is signed, ignored and believed;
+/// an `sdk` without one installs and verifies and can never be exported, which
+/// the consumer discovers on the far side of an air gap. Neither is repairable
+/// without re-depositing, because the annotation lives inside the signature.
+fn check_sdk_prefixes(tools: &[&DepositTool]) -> Result<(), DepositError> {
+    for tool in tools {
+        let is_tree = tool.kind == Some(crate::kind::PayloadKind::Sdk);
+        match (&tool.sdk_prefix, is_tree) {
+            (Some(_), false) => {
+                return Err(DepositError::SdkPrefixOnNonTree {
+                    name: tool.name.clone(),
+                    kind: tool.kind.unwrap_or_default().as_str().to_string(),
+                });
+            }
+            (None, true) => {
+                return Err(DepositError::SdkPrefixMissing {
+                    name: tool.name.clone(),
+                    version: tool.version.clone(),
+                });
+            }
+            (Some(prefix), true) if !prefix.starts_with('/') => {
+                return Err(DepositError::SdkPrefixNotAbsolute {
+                    name: tool.name.clone(),
+                    prefix: prefix.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Assemble, sign, and write a layer as an OCI image layout at `dest`.
 pub fn deposit(
     spec: &DepositSpec,
@@ -299,6 +368,7 @@ pub fn deposit(
         (&a.name, &a.version, &a.platform).cmp(&(&b.name, &b.version, &b.platform))
     });
     check_identities(&tools)?;
+    check_sdk_prefixes(&tools)?;
 
     // Assemble the payload deterministically: sorted tools, fixed key order
     // (serde_json sorts map keys), no timestamps beyond the caller-supplied
@@ -344,6 +414,16 @@ pub fn deposit(
                 && kind != crate::kind::PayloadKind::Tool
             {
                 annotations.insert(crate::kind::ANN_KIND.into(), kind.as_str().into());
+            }
+            // The relocation budget, inside the signature (REQ-SDK-001
+            // clause 4). `check_identities` has already refused it on a kind
+            // that is not a tree, so an entry carrying it is one `export-sdk`
+            // can act on.
+            if let Some(prefix) = &tool.sdk_prefix {
+                annotations.insert(
+                    crate::sdkexport::ANN_SDK_PREFIX.into(),
+                    prefix.clone().into(),
+                );
             }
             if let Some(runner) = &tool.runner {
                 annotations.insert(crate::bazel::ANN_RUNNER.into(), runner.tool.clone().into());
@@ -530,6 +610,7 @@ mod tests {
                     source: None,
                     runner: None,
                     kind: None,
+                    sdk_prefix: None,
                 },
                 DepositTool {
                     name: "rivet".into(),
@@ -539,6 +620,7 @@ mod tests {
                     source: None,
                     runner: None,
                     kind: None,
+                    sdk_prefix: None,
                 },
             ],
         }
@@ -665,6 +747,7 @@ mod tests {
             source: None,
             runner: None,
             kind,
+            sdk_prefix: None,
         }
     }
 

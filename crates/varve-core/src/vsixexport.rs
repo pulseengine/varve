@@ -60,7 +60,7 @@ pub fn vsix_file_name(name: &str, version: &str) -> String {
 /// Why an extension could not be exported.
 #[derive(Debug, thiserror::Error)]
 pub enum VsixExportError {
-    #[error("io error at {path}: {source}")]
+    #[error("io error at {path}")]
     Io {
         path: String,
         #[source]

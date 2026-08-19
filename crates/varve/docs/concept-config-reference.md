@@ -20,6 +20,48 @@ tools   = ["rivet", "synth"]  # optional; restrict to a subset of the layer
 
 `digest` makes resolution constant-time and byte-exact — prefer it. `tools` entries must be plain names: a path there would resolve outside the verified layer, so it is refused.
 
+### `[[export]]` — what this project materialises out of the layer
+
+The pin says which layer the project consumes; these say **how**. Declared means checked: `varve verify` looks at every one of them without being told (REQ-EXPORTDECL-001).
+
+```toml
+manifest-version = 1
+
+[toolchain]
+channel = "qualified"
+layer   = "2026.08.0"
+
+[[export]]
+kind = "crates-vendor"        # required; cargo | crates-vendor | bazel-registry |
+                              # bazel-distdir | vsix | sdk — spelled exactly as the
+                              # adapters stamp it in .varve-export.json
+out  = "third_party/rust"     # required; RELATIVE to the directory holding varve.toml
+
+[[export]]
+kind   = "vsix"
+out    = ".vscode/varve-extensions"
+select = ["rust-lang.rust-analyzer"]   # optional; a SUBSET of the layer, by payload name
+
+[[export]]
+kind = "sdk"
+out  = "toolchains/poky"
+
+[export.env]                  # only on a kind that is SOURCED (today: sdk)
+script = "environment-setup-cortexa53-poky-linux"   # relative to `out`
+path   = "before-shims"       # required with env; before-shims | after-shims
+```
+
+| rule | why |
+|---|---|
+| `out` is relative and may not climb out with `..` | the declaration is committed, so it must mean the same thing on every machine and cannot address anything outside the checkout |
+| two entries may not share one `out` | each adapter writes one stamp; the second would overwrite the first's, and `verify` would then check one export twice and the other never |
+| `[export.env]` only on a sourced kind | on one that is pointed at — a local registry, a distdir — the block would be accepted, ignored, and believed |
+| `path` is required, never defaulted | a default is a guess about PATH order made on the project's behalf; wrong in either direction is what the field exists to prevent (`varve docs env`) |
+
+`select` entries are payload names, not paths — a selection indexes the *verified* layer.
+
+**`select` does not shrink an export yet.** It parses and is validated, and no export adapter reads it: `varve export-vsix --out D` writes every extension in the layer whether or not the declaration names a subset, and `varve verify` reports that directory fresh. Declare it if you want the intent recorded; do not rely on it to keep a payload out. (`varve export-sdk --select <name>` is a *flag* on that one command and does work — it is what disambiguates a layer carrying several SDKs.)
+
 ## varve-realms.toml — the trust universe
 
 Alongside the pin, found by the same upward walk. Nearest wins; definitions are not merged.
@@ -53,6 +95,9 @@ path     = "./dist/rivet"      # relative to this file
 platform = "x86_64-unknown-linux-gnu"   # optional; absent = any platform
 kind     = "tool"              # tool | crate | wit | zephyr-module | sdk | wasm-component | vsix
                                # seven; `vsix` is a VS Code extension package (`varve docs payload-kinds`)
+# sdk-prefix = "/opt/poky/4.0.15"   # REQUIRED on kind = "sdk", refused on every other kind:
+                               # the absolute path the tree was BUILT for, which is the
+                               # relocation budget `varve export-sdk` patches against
 
 [tool.source]                  # optional upstream provenance
 repo    = "pulseengine/rivet"

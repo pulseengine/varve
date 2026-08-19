@@ -159,7 +159,7 @@ pub struct Store {
 /// to another layer" — the API cannot express fallback.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("io error at {path}: {source}")]
+    #[error("io error at {path}")]
     Io {
         path: String,
         #[source]
@@ -844,6 +844,71 @@ mod tests {
         assert_eq!(
             payload_rel_path(true, "synth", Some("0.45.0")).unwrap(),
             PathBuf::from("bin/synth")
+        );
+    }
+
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn a_tree_shaped_payload_is_held_by_name_and_version_like_any_other() {
+        // REQ-SDK-001 clause 1, and the correction the clause needed. A tree
+        // payload is held as the single archive its producer SIGNED — one blob,
+        // one digest, at `payloads/<name>/<version>` exactly like a `.crate` or
+        // a `.vsix`. It is not unpacked here, and that is the design rather than
+        // a shortfall:
+        //
+        //   * `verify` and `archive` re-hash ONE file at `entry_path` against
+        //     ONE signed digest, so an unpacked store entry would be neither
+        //     verifiable nor archivable — the opposite of clause 2;
+        //   * relocation can only ever SHORTEN a path, and the store path is
+        //     ~90 characters before any content, so an SDK could not be
+        //     relocated INTO the store even if it were unpacked there.
+        //
+        // The tree is materialised where it is used, by `sdkexport`.
+        let (_tmp, store) = store();
+        let manifest = fixtures::manifest("2026.08.0", "qualified");
+        let digest = store
+            .lay_down_payloads(
+                &manifest,
+                &[
+                    held("poky-cortexa53", "4.0.15", b"sdk-tarball-4.0.15"),
+                    held("poky-cortexa53", "5.0.2", b"sdk-tarball-5.0.2"),
+                    held("zephyr-hal", "3.6.0", b"zephyr-module-tarball"),
+                ],
+            )
+            .unwrap();
+        let layer = store.get(&digest).unwrap().unwrap();
+
+        // Two SDK versions coexist, neither overwriting the other — a project
+        // migrating between Yocto releases holds both.
+        for (version, want) in [
+            ("4.0.15", &b"sdk-tarball-4.0.15"[..]),
+            ("5.0.2", &b"sdk-tarball-5.0.2"[..]),
+        ] {
+            let path = store
+                .entry_path(&layer, &entry("poky-cortexa53", Some(version), Some("sdk")))
+                .expect("an sdk resolves from its manifest entry like any held payload");
+            assert_eq!(
+                path,
+                layer
+                    .root
+                    .join(format!("payloads/poky-cortexa53/{version}"))
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), want);
+        }
+        // An SDK is data handed to a compiler, never something varve dispatches.
+        assert!(!crate::kind::PayloadKind::Sdk.is_dispatchable());
+        assert_eq!(store.tool_path(&layer, "poky-cortexa53"), None);
+        assert!(!layer.root.join("bin/poky-cortexa53").exists());
+        // The other tree kinds are held the same way — nothing about `sdk` is
+        // special in the store, which is what "like any other held payload"
+        // means.
+        assert!(
+            store
+                .entry_path(
+                    &layer,
+                    &entry("zephyr-hal", Some("3.6.0"), Some("zephyr-module"))
+                )
+                .is_some()
         );
     }
 

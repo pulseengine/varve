@@ -43,7 +43,7 @@ pub const ANN_STATEMENT: &str = "eu.pulseengine.varve.attests";
 pub enum CarryError {
     #[error(transparent)]
     Attest(#[from] AttestError),
-    #[error("io error at {path}: {source}")]
+    #[error("io error at {path}")]
     Io {
         path: String,
         #[source]

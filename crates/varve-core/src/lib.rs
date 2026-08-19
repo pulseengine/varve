@@ -46,6 +46,7 @@ pub mod resolve;
 pub mod reverify;
 pub mod rollback;
 pub mod sbom;
+pub mod sdkexport;
 pub mod selfverify;
 pub mod shadow;
 pub mod source;
@@ -78,13 +79,20 @@ pub use linestatus::{
     read_from_layout as read_status_from_layout,
 };
 pub use manifest::{LayerManifest, ManifestError};
-pub use pin::{Channel, Pin, PinError};
+pub use pin::{
+    Channel, DeclaredExportStatus, ExportDecl, ExportEnv, ExportKind, Pin, PinError,
+    ShadowDeclaration, ShimOrder, check_declared_export, classify_shadowing, env_lines,
+};
 pub use platform::host_platform;
 pub use realm::{Realm, RealmError, resolve_realm};
 pub use registry::{RegistryRef, RegistrySource};
 pub use resolve::{ResolveError, Resolved, RunnerContract, resolve};
 pub use reverify::{ReverifyError, verify_installed};
 pub use rollback::{HighWaterMarks, RollbackError, RollbackVerdict, staleness_warning};
+pub use sdkexport::{
+    ANN_SDK_PREFIX, Member, MemberBody, Relocation, SdkExportError, SdkExportReport,
+    check_destination_fits, export_sdk, relocate_bytes,
+};
 pub use selfverify::{
     RELEASE_SUMS_PAYLOAD_TYPE, SelfVerifyError, sign_release_sums, verify_release_file,
 };

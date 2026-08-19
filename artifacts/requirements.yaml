@@ -1696,7 +1696,15 @@ artifacts:
   - id: REQ-SYSTEST-001
     type: requirement
     title: varve is exercised as a system, at real scale, not only as units
-    status: draft
+    # `implemented`, not `verified`, and not `draft` either. It sat at `draft`
+    # while VER-SYSTEST-001 read `verified` — an inconsistency a clean-room
+    # review caught, and at the time `verified` was the wrong half: clause 1's
+    # gate could not pass on the code it gates. That is now fixed and both
+    # adapters run green, so the requirement moves up. It stops short of
+    # `verified` because clause 2 is genuinely partial (the OCI round trip is a
+    # real gate; the Bazel --distdir transport is still uncovered — varve#27)
+    # and clause 4 is policy with no mechanical enforcement.
+    status: implemented
     release: v0.27.0
     description: >
       Every significant defect found in the week of 2026-08-13..19 came from
@@ -1750,7 +1758,7 @@ artifacts:
   - id: REQ-REPRO-001
     type: requirement
     title: What varve emits is a function of the layer, not of the machine or the clock
-    status: draft
+    status: implemented
     release: v0.27.0
     description: >
       varve's whole argument is that an artifact's identity is its bytes. That
@@ -1791,6 +1799,28 @@ artifacts:
       sentence is honest and shall stand until a reproducible-build pipeline
       makes it false — a claim of determinism is exactly the kind of thing an
       assessor checks and an attacker relies on nobody checking.
+      SETTLED 2026-08-19, empirically, against cargo 1.97.0, before any code
+      changed: Cargo resolves a relative `local-registry` (and a relative
+      `directory`) against the directory that HOLDS `.cargo/` — NOT against the
+      invoking cwd. With the config at `<root>/.cargo/config.toml` naming
+      `reg`, and the build run from `<root>/sub`, the registry at `<root>/reg`
+      resolves and builds; moving it to `<root>/sub/reg` (the cwd-relative
+      candidate) or to `<root>/.cargo/reg` (beside the config) fails with
+      "local registry path is not a directory: <root>/reg". Both negative
+      controls were run. Clause 1's first branch therefore applies and clause 2
+      does NOT: there is no machine-specific file left to separate out, because
+      varve emits the bare subdirectory constants `registry` and `vendor`.
+      CORRECTION TO REQ-PRODUCE-002's shipped evidence. Its test
+      `a_relative_out_still_yields_an_absolute_path_in_the_generated_config`
+      asserted the WRONG property. The defect that fix reacted to was real — a
+      relative `--out` embedded VERBATIM, and so resolved against whatever cwd
+      the build later ran in — but "absolute" was the wrong remedy: it made the
+      export unreproducible (varve#72) and broke the moment the export moved.
+      The test is renamed `a_relative_out_is_resolved_not_embedded_verbatim`
+      and now pins BOTH halves — the emitted string is not the user's argument,
+      and it names the registry where Cargo actually resolves it from. The
+      REQ-PRODUCE-002 clause text about absolute paths should be read through
+      this correction.
     tags: [core, supply-chain]
     links:
       - type: traces-to
@@ -1799,10 +1829,169 @@ artifacts:
       priority: should
       category: non-functional
 
+  - id: REQ-CRATEIDX-001
+    type: requirement
+    title: An exported Cargo registry index describes the crates it contains
+    status: implemented
+    release: v0.27.0
+    description: >
+      varve#73. `export-cargo` writes `"deps":[]` and `"features":{}` for every
+      crate while Cargo resolves the dependency graph FROM the index, so the
+      registry can only satisfy a crate that has neither. Measured against
+      varve's own 250-package lockfile, 228 of 250 crates declare a dependency
+      or a feature — the index line is factually wrong for 91% of the layer.
+      (226/90% appeared here and in the unit-test comment as an earlier
+      estimate; 228 is the count measured through the real export path, and
+      the two numbers disagreeing in one file was found by clean-room review.)
+      Three outcomes were observed, in increasing order of harm: a hard
+      resolution error (clap); a rustc error after Cargo resolved happily
+      (sha2); and a build that EXITS 0 with a crate silently compiled with no
+      features at all, not even `default` (aho-corasick). The third is why
+      "it fails" is the wrong description and why this is not merely a missing
+      feature: a failure announces itself and this does not.
+      Clauses:
+      (1) Each index entry shall carry the crate's real `deps` and `features`,
+      read from the `Cargo.toml` inside the `.crate` tarball varve signed —
+      the same tarball `export-crates-vendor` already opens.
+      (2) The transcription shall be faithful or refuse: a dependency or
+      feature varve cannot express shall be an error naming the crate, never a
+      silently dropped entry, because a dropped feature is the failure mode
+      that exits 0.
+      (3) The proof shall be a REAL offline build of a graph with transitive
+      dependencies, features and two versions of one name — not a
+      single-crate fixture. `cargo_offline` passes today precisely because its
+      fixture has none of those.
+      Measured again 2026-08-19 through the real export path: 228 of 250 index
+      entries for varve's own lockfile declare a dependency or a feature.
+      Clause 2 is implemented as a CLOSED allow-list of dependency keys, so a
+      construct varve has never seen is refused rather than ignored — an
+      ignored key is a changed meaning. All 250 of varve's own crates pass it.
+      The proof of clause 3 RUNS the consumer rather than building it: the
+      worst outcome of the stub compiled cleanly, and the mutation that drops
+      `default-features = false` is caught only by the program's behaviour
+      (17164 instead of 11564), never by the exit code.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-CRATE-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-COMPOSEEXPORT-001
+    type: requirement
+    title: An export follows the composition, or says it did not
+    status: implemented
+    release: v0.27.0
+    description: >
+      varve#79. `resolve()` unions composed TOOLS so `which` and `run` see
+      them, and `verify` checks each included layer against its own realm's
+      root — but every export adapter reads a single `layer.json`. An extender
+      composing pulseengine's layer runs `export-cargo` and gets only their own
+      crates, with no error; the build then fails with a missing-crate message
+      pointing nowhere near the cause.
+      This is the topology varve is FOR: bytecodealliance's layer,
+      pulseengine's composing it, a third party composing ours.
+      Clauses:
+      (1) An export shall include the payloads of every layer in the
+      composition, each still verified against ITS OWN realm's trust root.
+      (2) The collision rule is NOT the tool rule and shall be stated as such:
+      the same tool name in two layers is ambiguous and already refused; the
+      same crate name at DIFFERENT versions is legal and both shall export;
+      the same name AND version with DIFFERENT digests shall be an error naming
+      both realms, because two realms then disagree about what those bytes are.
+      (3) Where an export cannot follow the composition it shall SAY SO in its
+      output rather than produce a quietly incomplete directory.
+      Clause 1 extends to `verify --lockfile`, found blind in the same way
+      while implementing this: a lockfile checked against the root layer alone
+      silently asserts nothing about the crates the INCLUDED layers pin.
+      Clause 3 has a reachable failure path that `install` and `resolve` do not
+      cover — an export named with `--layer` takes neither of their guards, so
+      a composed layer removed from the store AFTER installation would have
+      produced a directory missing an entire layer's crates. That path is the
+      one the clause-3 test exercises; without it the "silently skip a missing
+      include" mutation SURVIVED.
+    tags: [distribution, core]
+    links:
+      - type: traces-to
+        target: REQ-COMPOSE-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-SDK-001
+    type: requirement
+    title: A tree-shaped payload can be distributed, and relocated as an export
+    status: verified
+    release: v0.27.0
+    description: >
+      varve#67. `sdk`, `wit` and `zephyr-module` parse and verify but nothing
+      consumes them, and the store cannot hold a tree at all: every payload is
+      written to a single file path. A Yocto SDK is thousands of files.
+      Yocto's installer also runs `relocate_sdk.py`, which byte-patches the
+      ELF interpreter and the loader's SYSDIRS in place, `sed -i`s every text
+      file, and re-points every symlink — so after installation the bytes no
+      longer hash to the signed digest.
+      Read from the script rather than assumed: the new interpreter path must
+      FIT the old one's field (`if len(new_dl_path) >= p_filesz: ERROR`), so
+      relocation can only ever move an SDK to a path no longer than the one it
+      was built with. varve's store path is ~90 characters before any content,
+      which means relocating INTO the store would frequently be impossible.
+      Clauses:
+      (1) The store shall hold a tree-shaped payload, addressed by
+      (name, version, platform) like any other held payload — as the single
+      archive its producer SIGNED, not unpacked. CORRECTED during
+      implementation; the original clause said the store "cannot hold a tree at
+      all" and implied unpacking one there. Unpacking in the store is not
+      merely unnecessary, it CONTRADICTS clause 2 and clause 4 of this same
+      requirement: `verify` and `archive` re-hash ONE file at
+      `Store::entry_path` against ONE signed digest, so an unpacked store entry
+      would be neither verifiable nor archivable; and relocation can only ever
+      shorten a path, while the store path is ~90 characters before any
+      content, so an SDK could not be relocated INTO the store even if it were
+      unpacked there. The premise was also already out of date: REQ-STORE-002
+      gave every non-dispatchable payload a `payloads/<name>/<version>` place,
+      so an `sdk` entry is held by (name, version, platform) today and two
+      Yocto releases coexist. The tree is materialised where it is USED — in
+      the export — which is what clause 3 asks for.
+      (2) The signed tree shall remain immutable and verifiable; varve shall
+      verify only what the producer signed, never what relocation produced.
+      Nothing on the relocation path writes back into the store.
+      (3) `varve export-sdk --out D` shall unpack and relocate into D and write
+      the `.varve-export.json` stamp, so `verify --export` catches drift.
+      Rejected: recording a post-relocation digest, which would put the
+      relocator inside the trust path.
+      Relocation covers both halves the Yocto installer performs: the
+      in-place, NUL-padded, length-preserving field patch of `relocate_sdk.py`
+      and the free-length text substitution of `toolchain-shar-relocate.sh`,
+      plus re-pointing the SDK's own absolute symlinks.
+      (4) It shall refuse EARLY and by name when the destination path is too
+      long for the SDK's interpreter field, rather than after relocating
+      thousands of files. The check is complete as a single comparison — every
+      patched field holds `<prefix><suffix>` and only the prefix changes — so
+      it runs before the archive is opened. The producer's build-time prefix is
+      carried in the SIGNED annotation `eu.pulseengine.varve.sdk.prefix`, so
+      the relocation budget is attributable rather than guessed.
+      (5) Laying a tree out shall hold the same invariants
+      `Store::lay_down_payloads` holds for a single payload, over the tree's
+      far larger attack surface: every component of every member validated,
+      all destinations resolved before any byte is written, colliding members
+      refused, and — the escape a per-component check cannot see — a symlink
+      that leaves the export, or a member written THROUGH one, refused as well.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-KIND-001
+      - type: traces-to
+        target: REQ-STORE-002
+    fields:
+      priority: should
+      category: functional
+
   - id: REQ-EXPORTDECL-001
     type: requirement
     title: A project declares its exports, and verify checks every one of them
-    status: draft
+    status: approved
     release: v0.27.0
     description: >
       `varve verify --export <DIR>` is repeatable and MANUAL, so
@@ -1822,16 +2011,35 @@ artifacts:
       able to select a SUBSET of the layer rather than all of it — a project
       exporting one extension or three crates into a dedicated area is the
       ordinary case, not a special one.
+      The adapter name shall be one this varve can actually produce, spelled
+      exactly as the adapters already stamp it in `.varve-export.json`, so a
+      declaration and the stamp it is checked against compare without a
+      translation table. The destination shall be RELATIVE to the directory
+      holding `varve.toml`, so a declaration checked into a repository means
+      the same thing on every machine and cannot address anything outside the
+      checkout. Two entries shall not share one destination: each adapter
+      writes one stamp, so the second would overwrite the first's and `verify`
+      would then check one export twice and the other never.
       (3) `varve verify` shall check every declared export WITHOUT being told
       to. Declared means checked. A declared directory that is absent shall
       fail, not warn: "I forgot to generate it" and "it is stale" are the same
       severity to anyone relying on the export, and distinguishing them mainly
-      helps the person who made the mistake.
+      helps the person who made the mistake. A directory whose stamp names a
+      DIFFERENT adapter shall fail too — freshness there says nothing, because
+      the declared export was never produced at all.
       (4) For a payload whose consumption requires entering an environment
       rather than pointing at a path — a Yocto SDK is sourced, setting CC,
       SYSROOT, CFLAGS and prepending its own bin to PATH — the entry shall
       record how the environment is entered, and `varve env` shall be able to
       emit that sourcing so one command sets up the whole environment.
+      Only an export that IS entered as an environment may carry that record.
+      On one that is pointed at — a local Cargo registry, a distdir — the block
+      would be accepted, ignored, and believed, which is the same failure shape
+      as an export nobody names.
+      The emitted order INVERTS the declared order, and must: sourcing a script
+      prepends its bin to PATH, so what is sourced last ends up first on PATH.
+      An environment declared to sit before the shims is therefore sourced
+      AFTER them.
       (5) The entry shall declare where such an environment sits RELATIVE TO
       varve's shims on PATH. An SDK environment script prepending its bin
       shadows the shims, which is exactly the condition REQ-SHADOW-001 detects:
@@ -1839,10 +2047,19 @@ artifacts:
       compiler silently winning over the pinned one — or fire spuriously on a
       legitimate setup. Both are damaging, and the spurious one is worse,
       because a check that cries wolf is a check people switch off.
+      The declaration shall be REQUIRED rather than defaulted — a default is a
+      guess about PATH order made on the project's behalf, and being wrong in
+      either direction is what this clause exists to prevent. It yields three
+      distinct verdicts, not two: a binary inside an export declared to sit
+      before the shims is EXPECTED; one inside an export declared to sit after
+      them CONTRADICTS the declaration and is a real fault with its own fix;
+      anything else is the ordinary hijack.
     tags: [distribution, ergonomics]
     links:
       - type: traces-to
         target: REQ-EXPORT-SYNC-001
+      - type: traces-to
+        target: REQ-SHADOW-001
     fields:
       priority: should
       category: functional

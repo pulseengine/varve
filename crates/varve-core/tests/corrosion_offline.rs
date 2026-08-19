@@ -7,6 +7,15 @@
 //! `cargo test` suite stays hermetic and offline. A dedicated CI job installs
 //! cmake and sets the env var. Verified locally 2026-08-12: Corrosion compiled
 //! the vendored `cdep` from `vendor/cdep-0.1.0/` offline and produced libapp.a.
+//!
+//! SCOPE (REQ-SYSTEST-001 clause 3) — the vendor tree here holds ONE crate
+//! with no dependencies and no features, so this test CANNOT exercise:
+//! dependency resolution across the vendor dir, feature resolution,
+//! multiple versions of one name, build scripts, or proc macros. It proves
+//! Corrosion consumes varve's vendor layout at all — nothing more. The
+//! realistic-scale evidence for the vendored adapter is the self-hosting
+//! gate (`tools/systest/selfhost.sh export-crates-vendor`), which vendors
+//! varve's own 250-package graph and builds the workspace offline from it.
 
 use std::path::Path;
 use std::process::Command;
@@ -43,6 +52,13 @@ fn corrosion_builds_a_varve_vendored_crate_offline() {
     let root = tmp.path();
     let cargo_home = root.join("cargo-home");
     std::fs::create_dir_all(&cargo_home).unwrap();
+    // The consumer's own directory IS the export root: `varve
+    // export-crates-vendor --out <project>` puts `vendor/` beside
+    // `.cargo/config.toml`, and the config names `vendor` RELATIVELY — Cargo
+    // resolves such a path against the directory holding `.cargo/`
+    // (REQ-REPRO-001 clause 1), which is where Corrosion's `cargo metadata`
+    // finds the config from too.
+    let consumer = root.join("consumer");
 
     // 1. A real producer crate -> a real .crate.
     let producer = root.join("cdep");
@@ -69,7 +85,10 @@ fn corrosion_builds_a_varve_vendored_crate_offline() {
     let cksum = hex::encode(Sha256::digest(&bytes));
 
     // 2. Vendor it with VARVE'S REAL export code.
-    let vendor = root.join("vendor");
+    // The vendored tree sits beside the consumer's `.cargo/`, because the
+    // generated config names it RELATIVELY — Cargo resolves such a path
+    // against the directory holding `.cargo/`, not the cwd (REQ-REPRO-001).
+    let vendor = consumer.join(varve_core::crateexport::VENDOR_SUBDIR);
     export_vendor_dir(
         &[CrateEntry {
             name: "cdep".into(),
@@ -83,7 +102,6 @@ fn corrosion_builds_a_varve_vendored_crate_offline() {
 
     // 3. A Rust staticlib consumer depending on the vendored crate, wired to
     //    varve's vendored source, with an offline-generated lockfile.
-    let consumer = root.join("consumer");
     write(
         &consumer.join("Cargo.toml"),
         "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"staticlib\"]\n\n[dependencies]\ncdep = \"0.1.0\"\n",
@@ -94,7 +112,7 @@ fn corrosion_builds_a_varve_vendored_crate_offline() {
     );
     write(
         &consumer.join(".cargo/config.toml"),
-        &vendored_config_toml(&vendor),
+        &vendored_config_toml(varve_core::crateexport::VENDOR_SUBDIR),
     );
     let lock = Command::new("cargo")
         .args(["generate-lockfile", "--offline"])
