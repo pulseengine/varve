@@ -31,9 +31,9 @@ pub enum ReverifyError {
     PayloadMismatch,
     #[error(transparent)]
     Manifest(#[from] ManifestError),
-    #[error("tool '{tool}' is missing from the installed layer")]
+    #[error("payload '{tool}' is missing from the installed layer")]
     MissingTool { tool: String },
-    #[error("tool '{tool}' does not match its signed digest {digest} — the binary was altered")]
+    #[error("payload '{tool}' does not match its signed digest {digest} — its bytes were altered")]
     ToolDigestMismatch { tool: String, digest: String },
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -43,6 +43,17 @@ pub enum ReverifyError {
         #[source]
         source: std::io::Error,
     },
+}
+
+/// How to name a payload in a verdict. A layer may hold several versions of one
+/// name, so the bare name no longer identifies WHICH payload failed — and a
+/// verification tool that cannot say which artifact is wrong has not reported
+/// the fault (REQ-STORE-002 clause 4).
+fn named(entry: &crate::manifest::ManifestEntry, name: &str) -> String {
+    match crate::store::entry_version(entry) {
+        Some(version) => format!("{name}@{version}"),
+        None => name.to_string(),
+    }
 }
 
 /// Re-verify one installed layer against the trust root. Returns the number
@@ -91,16 +102,26 @@ pub fn verify_installed(
         ) {
             continue;
         }
+        // A composed layer is a REFERENCE to another layer's manifest, not a
+        // blob laid down here; install skips it and so must re-verification.
+        if entry.kind() == Ok(crate::kind::PayloadKind::Layer) {
+            continue;
+        }
         let Some(tool) = entry.annotations.get("eu.pulseengine.tool") else {
             continue;
         };
-        let Some(path) = store.tool_path(layer, tool) else {
-            return Err(ReverifyError::MissingTool { tool: tool.clone() });
+        // Locate by ENTRY, not by name: several versions of one name coexist,
+        // and each must be checked against its own signed digest
+        // (REQ-STORE-002 clause 4).
+        let Some(path) = store.entry_path(layer, entry) else {
+            return Err(ReverifyError::MissingTool {
+                tool: named(entry, tool),
+            });
         };
         let bytes = std::fs::read(&path).map_err(|e| io(&path, e))?;
         if manifest_digest(&bytes) != entry.digest {
             return Err(ReverifyError::ToolDigestMismatch {
-                tool: tool.clone(),
+                tool: named(entry, tool),
                 digest: entry.digest.clone(),
             });
         }
@@ -195,6 +216,110 @@ mod tests {
         let checked =
             verify_installed(&ctx.store, &ctx.layer, &ctx.verifier, "test-platform").unwrap();
         assert_eq!(checked, 1);
+    }
+
+    /// A signed layer holding TWO versions of one crate, installed.
+    fn installed_two_versions() -> (Installed, Vec<u8>, Vec<u8>) {
+        use crate::manifest::fixtures::manifest_with_payloads;
+        let (sk, pk) = generate_root_keypair();
+        let a = b"serde-1.0.200-crate".to_vec();
+        let b = b"serde-1.0.210-crate".to_vec();
+        let (da, db) = (manifest_digest(&a), manifest_digest(&b));
+        let payload = manifest_with_payloads(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[
+                ("serde", "1.0.200", "crate", &da),
+                ("serde", "1.0.210", "crate", &db),
+            ],
+        );
+        let envelope = sign_layer_manifest(&payload, &sk, "varve-root-1").unwrap();
+        let source = MemorySource::new()
+            .with_manifest(envelope.as_bytes())
+            .with_blob(&da, &a)
+            .with_blob(&db, &b);
+        let pin = Pin::parse(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\n",
+            "varve.toml",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let store = Store::at(&root);
+        let mut marks = HighWaterMarks::load(&root).unwrap();
+        let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+        let policy = InstallPolicy {
+            index: None,
+            now: "2026-08-07T00:00:00Z",
+            staleness_threshold_days: 90,
+            platform: "test-platform",
+        };
+        let outcome = install(&pin, &source, &verifier, &store, &mut marks, &policy).unwrap();
+        let layer = store.get(&outcome.digest).unwrap().unwrap();
+        (
+            Installed {
+                _tmp: tmp,
+                store,
+                layer,
+                verifier,
+            },
+            a,
+            b,
+        )
+    }
+
+    // rivet: verifies REQ-STORE-002
+    #[test]
+    fn each_version_of_one_name_is_checked_against_its_own_signed_digest() {
+        // Clause 4, verification half. `verify_installed` looked payloads up by
+        // NAME, so with two versions present it would have hashed one file
+        // twice — passing the entry whose bytes happened to land and failing
+        // the other, with a verdict that named only "serde" and could not say
+        // which. Both are checked here, and tampering with EITHER is caught and
+        // named with its version.
+        let (ctx, a, b) = installed_two_versions();
+        assert_eq!(
+            verify_installed(&ctx.store, &ctx.layer, &ctx.verifier, "test-platform").unwrap(),
+            2,
+            "both versions must be checked, not one file twice"
+        );
+        // The bytes on disk really are each version's own.
+        assert_eq!(
+            std::fs::read(ctx.layer.root.join("payloads/serde/1.0.200")).unwrap(),
+            a
+        );
+        assert_eq!(
+            std::fs::read(ctx.layer.root.join("payloads/serde/1.0.210")).unwrap(),
+            b
+        );
+
+        for (version, path) in [
+            ("1.0.200", "payloads/serde/1.0.200"),
+            ("1.0.210", "payloads/serde/1.0.210"),
+        ] {
+            let (ctx, ..) = installed_two_versions();
+            std::fs::write(ctx.layer.root.join(path), b"EVIL").unwrap();
+            let err = verify_installed(&ctx.store, &ctx.layer, &ctx.verifier, "test-platform")
+                .unwrap_err();
+            assert!(
+                matches!(&err, ReverifyError::ToolDigestMismatch { tool, .. }
+                    if tool == &format!("serde@{version}")),
+                "tampering with {version} must be caught AND named: {err}"
+            );
+        }
+
+        // A payload that is simply gone is named with its version too — with
+        // two versions present, "serde is missing" would not say which.
+        let (ctx, ..) = installed_two_versions();
+        std::fs::remove_file(ctx.layer.root.join("payloads/serde/1.0.210")).unwrap();
+        let err =
+            verify_installed(&ctx.store, &ctx.layer, &ctx.verifier, "test-platform").unwrap_err();
+        assert!(
+            matches!(&err, ReverifyError::MissingTool { tool } if tool == "serde@1.0.210"),
+            "got: {err}"
+        );
     }
 
     // rivet: verifies REQ-VERIFY-001

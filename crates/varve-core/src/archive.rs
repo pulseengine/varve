@@ -42,6 +42,12 @@ pub enum ArchiveError {
          cannot serve as the artifact of record; reinstall from a signed source first"
     )]
     NoEnvelope { digest: String },
+    #[error(
+        "payload '{payload}' ({digest}) is named by the layer manifest but is not present in the \
+         installed layer — an archive missing a payload is not the artifact of record; reinstall \
+         the layer first"
+    )]
+    MissingPayload { payload: String, digest: String },
     #[error("layer.json in the core is not a valid manifest: {0}")]
     Manifest(#[from] crate::manifest::ManifestError),
     #[error(transparent)]
@@ -77,11 +83,30 @@ pub fn export(store: &Store, layer: &InstalledLayer, dest: &Path) -> Result<(), 
     let manifest = LayerManifest::parse(&payload)?;
     let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
     for entry in &manifest.entries {
-        if let Some(tool) = entry.annotations.get("eu.pulseengine.tool") {
-            let path = layer.root.join("bin").join(tool);
-            let bytes = std::fs::read(&path).map_err(|e| io(&path, e))?;
-            blobs.push((entry.digest.clone(), bytes));
+        // A composed layer is a reference to another layer's manifest, not a
+        // blob this layer holds.
+        if entry.kind() == Ok(crate::kind::PayloadKind::Layer) {
+            continue;
         }
+        let Some(name) = entry.annotations.get("eu.pulseengine.tool") else {
+            continue;
+        };
+        // By ENTRY, not by name: a layer may hold several versions of one name,
+        // and each must reach the archive under its own signed digest. Reading
+        // `bin/<name>` for both would have put ONE payload's bytes into the
+        // archive twice — a layer that cannot be archived whole cannot cross an
+        // air gap, which is the whole point (REQ-STORE-002 clause 4).
+        let path = store
+            .entry_path(layer, entry)
+            .ok_or_else(|| ArchiveError::MissingPayload {
+                payload: match crate::store::entry_version(entry) {
+                    Some(v) => format!("{name}@{v}"),
+                    None => name.clone(),
+                },
+                digest: entry.digest.clone(),
+            })?;
+        let bytes = std::fs::read(&path).map_err(|e| io(&path, e))?;
+        blobs.push((entry.digest.clone(), bytes));
     }
     // The attestations that travelled into this layer at install time must
     // travel back out (REQ-ATTEST-002) — otherwise the evidence reaches one
@@ -548,6 +573,95 @@ mod tests {
         assert!(reports[0].binds, "reason: {:?}", reports[0].reason);
         assert_eq!(reports[0].kind, "sbom");
         assert_eq!(reports[0].producer, "acme-ci");
+    }
+
+    // rivet: verifies REQ-STORE-002
+    #[test]
+    fn a_layer_holding_two_versions_of_one_name_crosses_an_air_gap_intact() {
+        // Clause 4. `export` read `bin/<tool>` for every entry, so with two
+        // versions of one name it would have read ONE file twice and written it
+        // under the OTHER version's digest — an archive that no longer matches
+        // its own signed manifest, discovered only on the far side of the air
+        // gap. A payload that cannot be archived cannot cross, which is the
+        // whole point of the artifact of record.
+        use crate::manifest::fixtures::manifest_with_payloads;
+        let (sk, pk) = generate_root_keypair();
+        let a = b"serde-1.0.200-crate".to_vec();
+        let b = b"serde-1.0.210-crate".to_vec();
+        let (da, db) = (manifest_digest(&a), manifest_digest(&b));
+        let payload = manifest_with_payloads(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[
+                ("serde", "1.0.200", "crate", &da),
+                ("serde", "1.0.210", "crate", &db),
+            ],
+        );
+        let envelope = sign_layer_manifest(&payload, &sk, "varve-root-1").unwrap();
+        let source = MemorySource::new()
+            .with_manifest(envelope.as_bytes())
+            .with_blob(&da, &a)
+            .with_blob(&db, &b);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let store = Store::at(&root);
+        let mut marks = HighWaterMarks::load(&root).unwrap();
+        let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &verifier,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .unwrap();
+        let layer = store.get(&outcome.digest).unwrap().unwrap();
+
+        let dest = tmp.path().join("archive");
+        export(&store, &layer, &dest).unwrap();
+        // Both blobs are in the archive, each holding ITS OWN bytes — content
+        // addressing makes this check exact: a blob written under the wrong
+        // digest is a blob whose name lies.
+        for (digest, expected) in [(&da, &a), (&db, &b)] {
+            let hex = digest.strip_prefix("sha256:").unwrap();
+            assert_eq!(
+                &std::fs::read(dest.join("blobs/sha256").join(hex)).unwrap(),
+                expected,
+                "blob {digest} must hold the bytes it is named for"
+            );
+        }
+
+        // Reinstall on a machine that shares nothing but the pinned root, and
+        // re-verify there: both versions, unaltered.
+        let fresh_root = tmp.path().join("fresh");
+        let fresh = Store::at(&fresh_root);
+        let mut fresh_marks = HighWaterMarks::load(&fresh_root).unwrap();
+        let outcome = install(
+            &pin("2026.07.0"),
+            &OciLayoutSource::at(&dest),
+            &verifier,
+            &fresh,
+            &mut fresh_marks,
+            &policy(),
+        )
+        .unwrap();
+        let entry = fresh.get(&outcome.digest).unwrap().unwrap();
+        assert_eq!(
+            crate::reverify::verify_installed(&fresh, &entry, &verifier, "test-platform").unwrap(),
+            2,
+            "both versions survive the round trip and re-verify"
+        );
+        assert_eq!(
+            std::fs::read(entry.root.join("payloads/serde/1.0.200")).unwrap(),
+            a
+        );
+        assert_eq!(
+            std::fs::read(entry.root.join("payloads/serde/1.0.210")).unwrap(),
+            b
+        );
     }
 
     // rivet: verifies REQ-VERIFY-001

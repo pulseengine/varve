@@ -1740,6 +1740,187 @@ fn deposit_a_crate_kind_entry_and_export_a_cargo_registry() {
     );
 }
 
+// rivet: verifies REQ-STORE-002
+#[test]
+fn a_layer_holding_two_versions_of_one_crate_deposits_installs_verifies_and_exports_both() {
+    // varve#69 end to end, at the boundary the user touches. `deposit` refused
+    // the layer outright ("duplicate tool name 'serde'"), so a real dependency
+    // graph — varve's own has 14 names at more than one version — could not be
+    // expressed at all. And had only the deposit check been relaxed, the two
+    // payloads would have landed on ONE path in the store: the wrong bytes
+    // under the right name, with `verify` failing on the other entry.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    // Two versions of ONE crate, plus a tool — the mixed layer, so the two
+    // identity rules are exercised side by side.
+    let old_bytes: &[u8] = b"serde-1.0.200-crate-tarball";
+    let new_bytes: &[u8] = b"serde-1.0.210-crate-tarball";
+    let old_path = parent.join("serde-1.0.200.crate");
+    let new_path = parent.join("serde-1.0.210.crate");
+    let tool_path = parent.join("synth-bin");
+    std::fs::write(&old_path, old_bytes).unwrap();
+    std::fs::write(&new_path, new_bytes).unwrap();
+    std::fs::write(&tool_path, b"#!/bin/sh\n").unwrap();
+
+    let spec = parent.join("spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"serde\"\nversion = \"1.0.200\"\nkind = \"crate\"\npath = \"{old}\"\n\n\
+             [[tool]]\nname = \"serde\"\nversion = \"1.0.210\"\nkind = \"crate\"\npath = \"{new}\"\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"0.45.0\"\npath = \"{tool}\"\n",
+            old = old_path.display(),
+            new = new_path.display(),
+            tool = tool_path.display(),
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    // The layer verifies as a whole: three payloads, each against its own
+    // signed digest.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+
+    // The exported registry OFFERS BOTH versions — a lockfile naming two
+    // majors needs both present to build offline.
+    let out = parent.join("cargo-out");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["export-cargo", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 verified crate"));
+    assert_eq!(
+        std::fs::read(out.join("registry/serde-1.0.200.crate")).unwrap(),
+        old_bytes
+    );
+    assert_eq!(
+        std::fs::read(out.join("registry/serde-1.0.210.crate")).unwrap(),
+        new_bytes,
+        "each version must export ITS OWN bytes"
+    );
+    let idx = std::fs::read_to_string(out.join("registry/index/se/rd/serde")).unwrap();
+    let versions: Vec<String> = idx
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).expect("Cargo-parseable index line");
+            v["vers"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(versions.len(), 2, "index: {idx}");
+    assert!(versions.contains(&"1.0.200".to_string()) && versions.contains(&"1.0.210".to_string()));
+
+    // The lockfile gate agrees with a lockfile that resolves both — before
+    // this, comparing every pinned entry against every locked package of the
+    // same name reported 1.0.200-vs-1.0.210 as drift.
+    let lock = fx.project.join("Cargo.lock");
+    std::fs::write(
+        &lock,
+        "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.200\"\n\n\
+         [[package]]\nname = \"serde\"\nversion = \"1.0.210\"\n",
+    )
+    .unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["verify", "--lockfile"])
+        .arg(&lock)
+        .assert()
+        .success();
+
+    // And the whole layer still crosses an air gap: archive it, install into a
+    // fresh core from that archive alone, and verify there.
+    let archive = parent.join("archive");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["archive", "2026.07.0"])
+        .arg(&archive)
+        .assert()
+        .success();
+    let far_side = parent.join("far-side");
+    varve(&fx)
+        .env("VARVE_ROOT", &far_side)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&archive)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_ROOT", &far_side)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+}
+
+// rivet: verifies REQ-STORE-002
+#[test]
+fn two_versions_of_one_tool_are_still_refused_and_the_error_names_both() {
+    // The other half of clause 1, at the boundary: dispatch is by name, so
+    // `varve run synth` must have exactly one answer. Relaxing the rule for
+    // everything would have made the shims ambiguous.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, _pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let bin = parent.join("synth-bin");
+    std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+    let spec = parent.join("spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"0.45.0\"\npath = \"{p}\"\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"0.46.0\"\npath = \"{p}\"\n",
+            p = bin.display(),
+        ),
+    )
+    .unwrap();
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "k", "--out"])
+        .arg(parent.join("layout"))
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("synth")
+                .and(predicate::str::contains("0.45.0"))
+                .and(predicate::str::contains("0.46.0")),
+        );
+}
+
 // rivet: verifies REQ-PRODUCE-002
 #[test]
 fn a_relative_out_still_yields_an_absolute_path_in_the_generated_config() {

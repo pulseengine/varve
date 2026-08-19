@@ -1135,16 +1135,21 @@ fn collect_verified_crates(
             .strip_prefix("sha256:")
             .with_context(|| format!("crate '{name}' digest is not sha256:<hex>"))?
             .to_string();
-        let bytes_path = store
-            .tool_path(entry, name)
-            .with_context(|| format!("crate '{name}' blob is not present in the store"))?;
+        // Locate by ENTRY, not by name: a layer may hold several versions of
+        // one crate, each under its own path, and `serde@1.0.200` must export
+        // its OWN bytes rather than whichever version landed last
+        // (REQ-STORE-002 clause 5).
+        let bytes_path = store.entry_path(entry, e).with_context(|| {
+            format!("crate '{name}' version {version} is not present in the store")
+        })?;
         let bytes = std::fs::read(&bytes_path)?;
         // Defense in depth: re-hash the on-disk bytes against the signed digest
         // ourselves, regardless of platform filtering, so what we export is the
         // exact bytes the trust root anchored.
         if varve_core::manifest_digest(&bytes) != e.digest {
             bail!(
-                "crate '{name}' on-disk bytes do not match the signed digest {}",
+                "crate '{name}' version {version} on-disk bytes do not match the signed \
+                 digest {}",
                 e.digest
             );
         }

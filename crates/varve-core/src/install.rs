@@ -207,7 +207,16 @@ pub fn install(
     // 5. Fetch blobs; each is accepted only if it matches its signed digest.
     // Platform filtering happens BEFORE any fetch: a foreign entry's blob
     // never even leaves the source (REQ-PLATFORM-001).
-    let mut tools: Vec<(String, Vec<u8>)> = Vec::new();
+    // Name, version and dispatchability travel with the bytes: a payload that
+    // is not dispatched by name is laid down under its version too, so two
+    // versions of one crate cannot overwrite each other (REQ-STORE-002).
+    struct Fetched {
+        name: String,
+        version: Option<String>,
+        dispatchable: bool,
+        bytes: Vec<u8>,
+    }
+    let mut tools: Vec<Fetched> = Vec::new();
     let mut matched = 0usize;
     for entry in &manifest.entries {
         if !crate::platform::entry_matches(
@@ -241,7 +250,12 @@ pub fn install(
                 digest: entry.digest.clone(),
             });
         }
-        tools.push((tool, blob));
+        tools.push(Fetched {
+            name: tool,
+            version: crate::store::entry_version(entry).map(str::to_string),
+            dispatchable: crate::store::entry_is_dispatchable(entry),
+            bytes: blob,
+        });
     }
 
     // A fully-stamped layer with nothing for this platform fails closed —
@@ -254,11 +268,16 @@ pub fn install(
     }
 
     // 6. Lay down.
-    let tool_refs: Vec<(&str, &[u8])> = tools
+    let payloads: Vec<crate::store::Payload<'_>> = tools
         .iter()
-        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .map(|t| crate::store::Payload {
+            name: t.name.as_str(),
+            version: t.version.as_deref(),
+            dispatchable: t.dispatchable,
+            bytes: t.bytes.as_slice(),
+        })
         .collect();
-    let stored_digest = store.lay_down(&bytes, &tool_refs)?;
+    let stored_digest = store.lay_down_payloads(&bytes, &payloads)?;
     debug_assert_eq!(stored_digest, digest);
 
     // Retain the signature envelope beside the payload, so `varve verify`
@@ -409,6 +428,100 @@ mod tests {
         let entry = store.get(&outcome.digest).unwrap().unwrap();
         assert!(store.tool_path(&entry, "synth").is_some());
         assert!(store.tool_path(&entry, "rivet").is_some());
+    }
+
+    // rivet: verifies REQ-STORE-002
+    #[test]
+    fn installing_two_versions_of_one_crate_lands_both_sets_of_bytes() {
+        // Clause 2 through the function that actually runs it. `install`
+        // collected (name, bytes) pairs and handed them to a store that wrote
+        // `bin/<name>`, so the second serde's bytes landed under the first's
+        // name: ONE file, the WRONG contents, and `verify` then failing on the
+        // other entry with nothing explaining why.
+        use crate::manifest::fixtures::manifest_with_payloads;
+        let (_tmp, store, mut marks) = setup();
+        let (a, b) = (
+            b"serde-1.0.200-crate".to_vec(),
+            b"serde-1.0.210-crate".to_vec(),
+        );
+        let (da, db) = (manifest_digest(&a), manifest_digest(&b));
+        let bytes = manifest_with_payloads(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[
+                ("serde", "1.0.200", "crate", &da),
+                ("serde", "1.0.210", "crate", &db),
+            ],
+        );
+        let source = memory_source(&bytes, &[(da, a.clone()), (db, b.clone())]);
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .expect("two versions of one crate is the ordinary shape of a dependency graph");
+
+        let entry = store.get(&outcome.digest).unwrap().unwrap();
+        assert_eq!(
+            std::fs::read(entry.root.join("payloads/serde/1.0.200")).unwrap(),
+            a
+        );
+        assert_eq!(
+            std::fs::read(entry.root.join("payloads/serde/1.0.210")).unwrap(),
+            b,
+            "the second version must not have overwritten the first"
+        );
+        // Nothing landed under the bare name, where one version would have won.
+        assert!(!entry.root.join("bin/serde").exists());
+    }
+
+    // rivet: verifies REQ-STORE-002
+    #[test]
+    fn a_signed_manifest_whose_entries_share_one_identity_is_refused_not_overwritten() {
+        // `deposit` refuses this, but deposit is not the only producer varve
+        // installs from: any realm root can sign a manifest, built by any
+        // software. If two entries ever reach one path, install must fail
+        // LOUDLY — writing one over the other would put the wrong bytes under
+        // the right name and make `verify` fail on the innocent entry.
+        use crate::manifest::fixtures::manifest_with_payloads;
+        let (_tmp, store, mut marks) = setup();
+        let (a, b) = (b"first-bytes".to_vec(), b"second-bytes".to_vec());
+        let (da, db) = (manifest_digest(&a), manifest_digest(&b));
+        let bytes = manifest_with_payloads(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[
+                ("serde", "1.0.200", "crate", &da),
+                ("serde", "1.0.200", "crate", &db),
+            ],
+        );
+        let source = memory_source(&bytes, &[(da, a), (db, b)]);
+        let err = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy(),
+        )
+        .expect_err("one identity, two payloads: the store must refuse");
+        assert!(
+            matches!(err, InstallError::Store(StoreError::Collision { .. })),
+            "got: {err}"
+        );
+        assert!(store.list().unwrap().is_empty(), "nothing may be laid down");
+        assert_eq!(
+            marks.mark(&"2026.07".parse().unwrap()),
+            None,
+            "a refused install must not burn the mark"
+        );
     }
 
     // rivet: verifies REQ-VERIFY-001

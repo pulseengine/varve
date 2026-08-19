@@ -2168,3 +2168,70 @@ artifacts:
     links:
       - type: verifies
         target: REQ-BOOTSTRAP-001
+
+  - id: VER-STORE-002
+    type: verification
+    title: A layer holds many payloads, including several versions of one name
+    status: verified
+    release: v0.26.0
+    tags: [core, distribution]
+    fields:
+      method: test
+      baseline: >
+        varve#69, raised from use: a layer could not hold two versions of one
+        crate. `deposit` dedupped on (name, platform), ignoring version and
+        kind, so varve could not express its OWN dependency graph as a layer —
+        252 packages in its Cargo.lock, 14 names at more than one version,
+        getrandom at three — and `export-cargo` could never satisfy a real
+        lockfile.
+        The second half was the dangerous one. `Store::lay_down` wrote every
+        payload to `bin/<name>`, so relaxing the deposit check ALONE would have
+        turned a clean error into a SILENT OVERWRITE: the wrong bytes under the
+        wrong name, and verification then failing on the OTHER entry with
+        nothing explaining why. Identity now follows dispatchability — `tool`
+        keeps `bin/<name>` and (name, platform) because it is dispatched by
+        name and must resolve uniquely; everything else lands at
+        `payloads/<name>/<version>` under (name, version, platform).
+        Proven end to end on the release binary rather than asserted: a layer
+        holding serde 1.0.200, serde 1.0.210 and a tool deposits, installs,
+        verifies, archives, re-installs into a fresh core offline, and exports
+        a Cargo registry whose index lists BOTH versions with cksums equal to
+        the sha256 of the tarballs actually on disk — each version exporting
+        its own bytes, not whichever landed last.
+        Two defects were found and fixed that the clauses did not name. A
+        signed manifest naming `../../evil` could previously escape the layer
+        via `bin.join(name)`; path components are now validated. And
+        `lockpin::disagreements` compared every pinned entry against every
+        locked package of the same NAME, so the moment a multi-version layer
+        existed `verify --lockfile` would have reported 1.0.200 vs 1.0.210 as
+        drift and gone red on every real lockfile — a false failure the fix
+        itself would have introduced.
+        Deliberate behaviour change, stated: crate/wit/sdk payloads no longer
+        appear in `bin/`, so `varve which <crate>` no longer resolves them.
+        They used to, accidentally; dispatching a `.crate` tarball was never
+        meaningful. Backward compatible for existing installs — `entry_path`
+        falls back to `bin/<name>`, unambiguous because the old check made a
+        second version impossible, and a pre-change core was reconstructed and
+        verified, exported and archived unchanged.
+        18 hand-applied mutations, all killed, including M1 (every payload back
+        to bin/<name> — the original bug) and M7 (held payloads keyed on
+        (name, platform) again — varve#69 restored). `cargo mutants` over the
+        CI-gated files changed: install.rs and reverify.rs, 28 mutants, 25
+        caught, 3 unviable, 0 missed; store.rs 0 missed.
+      evidence:
+        - run: cargo test -p varve-core two_versions_of_one_name_are_two_files_not_one_overwritten
+        - run: cargo test -p varve-core two_payloads_claiming_one_path_are_refused_before_anything_is_written
+        - run: cargo test -p varve-core a_name_or_version_that_escapes_the_layer_is_refused
+        - run: cargo test -p varve-core a_layer_installed_before_this_change_still_resolves_its_crate
+        - run: cargo test -p varve-core only_a_tool_is_dispatched_by_name
+        - run: cargo test -p varve-core two_versions_of_one_crate_are_a_layer_not_a_duplicate
+        - run: cargo test -p varve-core a_tool_may_not_appear_twice_for_one_platform
+        - run: cargo test -p varve-core the_signed_digest_does_not_depend_on_the_order_entries_appear_in
+        - run: cargo test -p varve-core each_version_of_one_name_is_hashed_against_its_own_signed_digest
+        - run: cargo test -p varve-core a_registry_exported_from_a_layer_offers_every_version_it_pins
+        - run: cargo test -p varve-core a_layer_pinning_two_versions_of_one_crate_agrees_with_a_lockfile_naming_both
+        - run: cargo test -p varve --test cli a_layer_holding_two_versions_of_one_crate_deposits_installs_verifies_and_exports_both
+        - run: cargo test -p varve --test cli two_versions_of_one_tool_are_still_refused_and_the_error_names_both
+    links:
+      - type: verifies
+        target: REQ-STORE-002

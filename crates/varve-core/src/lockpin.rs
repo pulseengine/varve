@@ -125,6 +125,17 @@ pub fn disagreements(
     for p in pinned {
         for l in locked.iter().filter(|l| l.name == p.name) {
             if l.version != p.version {
+                // A layer may pin SEVERAL versions of one crate (REQ-STORE-002):
+                // varve's own lockfile has 14 such names. The locked version
+                // agreeing with a DIFFERENT pinned entry of the same name is
+                // agreement, not drift — reporting it would make this gate go
+                // red on every real dependency graph.
+                if pinned
+                    .iter()
+                    .any(|q| q.name == l.name && q.version == l.version)
+                {
+                    continue;
+                }
                 out.push(Disagreement::Version {
                     name: p.name.clone(),
                     pinned: p.version.clone(),
@@ -240,6 +251,47 @@ version = "0.1.0"
         // The project uses something the layer does not pin: also not a
         // finding — the layer never claimed to cover every dependency.
         assert!(disagreements(&[], &locked).is_empty());
+    }
+
+    // rivet: verifies REQ-STORE-002, REQ-LOCKPIN-001
+    #[test]
+    fn a_layer_pinning_two_versions_of_one_crate_agrees_with_a_lockfile_holding_both() {
+        // REQ-STORE-002 lets a layer hold several versions of one name — the
+        // ordinary shape of a dependency graph, 14 such names in varve's own
+        // lockfile. This gate compared every pinned entry against every locked
+        // package OF THE SAME NAME, so the moment such a layer existed it
+        // reported 1.0.200-vs-1.0.210 as drift and went red on a lockfile it
+        // agrees with completely.
+        let lock = "version = 4\n\n\
+             [[package]]\nname = \"serde\"\nversion = \"1.0.200\"\nchecksum = \"aa\"\n\n\
+             [[package]]\nname = \"serde\"\nversion = \"1.0.210\"\nchecksum = \"bb\"\n";
+        let locked = parse_lockfile(lock, "Cargo.lock").unwrap();
+        let both = [
+            pinned("serde", "1.0.200", "aa"),
+            pinned("serde", "1.0.210", "bb"),
+        ];
+        assert!(
+            disagreements(&both, &locked).is_empty(),
+            "both versions are pinned AND locked — that is agreement: {:?}",
+            disagreements(&both, &locked)
+        );
+
+        // The gate still bites: a version the layer does not pin at all is
+        // still drift, and same-version-different-bytes is still caught.
+        let other = parse_lockfile(
+            "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.5\"\n",
+            "Cargo.lock",
+        )
+        .unwrap();
+        assert!(!disagreements(&both, &other).is_empty());
+        let wrong_bytes = [
+            pinned("serde", "1.0.200", "aa"),
+            pinned("serde", "1.0.210", "NOPE"),
+        ];
+        assert!(matches!(
+            disagreements(&wrong_bytes, &locked).as_slice(),
+            [Disagreement::Checksum { version, .. }] if version == "1.0.210"
+        ));
     }
 
     // rivet: verifies REQ-LOCKPIN-001

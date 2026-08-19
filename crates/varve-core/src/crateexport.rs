@@ -519,4 +519,82 @@ mod tests {
         let idx2 = std::fs::read_to_string(reg.join("index/de/mo/demo")).unwrap();
         assert_eq!(idx2.lines().count(), 1, "one line per (name, version)");
     }
+
+    // rivet: verifies REQ-STORE-002
+    #[test]
+    fn a_registry_exported_from_a_layer_offers_every_version_it_pins() {
+        // Clause 5. A lockfile that names two majors of one crate needs BOTH
+        // present to build offline — varve's own lockfile has 14 such names —
+        // so the exported registry must OFFER both, with an index entry per
+        // version carrying that version's own cksum. Checked by reading the
+        // index Cargo reads, not by counting what we handed in.
+        use sha2::{Digest, Sha256};
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = tmp.path().join("registry");
+        let bytes = |v: &str| format!("serde-{v}-crate-tarball").into_bytes();
+        let entry = |v: &str| CrateEntry {
+            name: "serde".into(),
+            version: v.into(),
+            cksum: hex::encode(Sha256::digest(bytes(v))),
+            bytes: bytes(v),
+        };
+        let crates = [entry("1.0.200"), entry("1.0.210")];
+        export_local_registry(&crates, &reg).unwrap();
+
+        // Both tarballs are on disk, each holding its OWN bytes.
+        for v in ["1.0.200", "1.0.210"] {
+            assert_eq!(
+                std::fs::read(reg.join(format!("serde-{v}.crate"))).unwrap(),
+                bytes(v),
+                "version {v} must export its own bytes"
+            );
+        }
+
+        // And the index — one JSON line per version, at Cargo's path, each
+        // with the cksum Cargo will check the corresponding tarball against.
+        let idx = std::fs::read_to_string(reg.join("index/se/rd/serde")).unwrap();
+        let lines: Vec<serde_json::Value> = idx
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("each index line is JSON Cargo can parse"))
+            .collect();
+        let mut offered: Vec<(String, String)> = lines
+            .iter()
+            .map(|l| {
+                (
+                    l["vers"].as_str().unwrap().to_string(),
+                    l["cksum"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        offered.sort();
+        assert_eq!(
+            offered,
+            vec![
+                (
+                    "1.0.200".to_string(),
+                    hex::encode(Sha256::digest(bytes("1.0.200")))
+                ),
+                (
+                    "1.0.210".to_string(),
+                    hex::encode(Sha256::digest(bytes("1.0.210")))
+                ),
+            ],
+            "the index must offer BOTH versions, each bound to its own bytes"
+        );
+        assert!(lines.iter().all(|l| l["name"] == "serde"));
+
+        // A distdir and a vendor tree hold both versions too — the same layer
+        // must be exportable to every adapter without one version vanishing.
+        let dd = tmp.path().join("distdir");
+        export_distdir(&crates, &dd).unwrap();
+        assert_eq!(
+            std::fs::read(dd.join("serde-1.0.200.crate")).unwrap(),
+            bytes("1.0.200")
+        );
+        assert_eq!(
+            std::fs::read(dd.join("serde-1.0.210.crate")).unwrap(),
+            bytes("1.0.210")
+        );
+    }
 }

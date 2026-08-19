@@ -49,6 +49,19 @@ pub enum PayloadKind {
 }
 
 impl PayloadKind {
+    /// Is a payload of this kind dispatched BY NAME (REQ-STORE-002 clause 1)?
+    ///
+    /// Only a `tool` is: `varve which`, `varve run` and the argv[0] shims all
+    /// resolve a bare name, so a name must resolve to exactly one binary and
+    /// the identity of a tool is (name, platform). Every other kind is held,
+    /// not dispatched — its identity is (name, version, platform), because
+    /// several versions of one crate is the ordinary shape of a dependency
+    /// graph. A `layer` is not laid down at all; it answers `false` because it
+    /// is certainly not dispatched by name.
+    pub fn is_dispatchable(self) -> bool {
+        matches!(self, PayloadKind::Tool)
+    }
+
     /// The canonical wire string, as written in the signed annotation.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -124,5 +137,29 @@ mod tests {
     #[test]
     fn the_default_kind_is_tool_for_back_compat() {
         assert_eq!(PayloadKind::default(), PayloadKind::Tool);
+    }
+
+    // rivet: verifies REQ-STORE-002
+    #[test]
+    fn only_a_tool_is_dispatched_by_name() {
+        // Clause 1: the identity rule follows dispatchability. A tool resolves
+        // by bare name through `varve run`/`which`/the shims, so one name must
+        // mean one binary. Nothing else is dispatched, so nothing else may be
+        // keyed by name alone — that is what let two versions of one crate
+        // overwrite each other.
+        assert!(PayloadKind::Tool.is_dispatchable());
+        for held in [
+            PayloadKind::Crate,
+            PayloadKind::Wit,
+            PayloadKind::ZephyrModule,
+            PayloadKind::Sdk,
+            PayloadKind::WasmComponent,
+            PayloadKind::Layer,
+        ] {
+            assert!(
+                !held.is_dispatchable(),
+                "{held} is not dispatched by name and must not be keyed by one"
+            );
+        }
     }
 }
