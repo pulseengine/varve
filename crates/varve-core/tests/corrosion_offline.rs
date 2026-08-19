@@ -7,6 +7,15 @@
 //! `cargo test` suite stays hermetic and offline. A dedicated CI job installs
 //! cmake and sets the env var. Verified locally 2026-08-12: Corrosion compiled
 //! the vendored `cdep` from `vendor/cdep-0.1.0/` offline and produced libapp.a.
+//!
+//! SCOPE (REQ-SYSTEST-001 clause 3) — the vendor tree here holds ONE crate
+//! with no dependencies and no features, so this test CANNOT exercise:
+//! dependency resolution across the vendor dir, feature resolution,
+//! multiple versions of one name, build scripts, or proc macros. It proves
+//! Corrosion consumes varve's vendor layout at all — nothing more. The
+//! realistic-scale evidence for the vendored adapter is the self-hosting
+//! gate (`tools/systest/selfhost.sh export-crates-vendor`), which vendors
+//! varve's own 250-package graph and builds the workspace offline from it.
 
 use std::path::Path;
 use std::process::Command;

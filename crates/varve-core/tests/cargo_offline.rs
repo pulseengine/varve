@@ -6,6 +6,17 @@
 //! consumer against the exported registry). It is the honest verification of
 //! the claim "builds offline through Cargo" — the unit tests cover the
 //! registry layout; this proves Cargo actually accepts it.
+//!
+//! SCOPE (REQ-SYSTEST-001 clause 3) — this fixture is ONE synthetic crate
+//! with no dependencies and no features, and therefore CANNOT exercise:
+//! dependency resolution (the index's `deps` array is never consulted),
+//! feature resolution (`features` never read — varve#73, `"features":{}`
+//! breaking every real consumer, was invisible here BY CONSTRUCTION),
+//! multiple versions of one name, build scripts, or proc macros. Do not
+//! cite these tests as evidence that a real dependency graph builds. That
+//! claim is carried by the self-hosting system gate — varve's own
+//! Cargo.lock (250 packages, 14 names at more than one version) through
+//! `tools/systest/selfhost.sh` in `.github/workflows/systest.yml`.
 
 use std::path::Path;
 use std::process::Command;

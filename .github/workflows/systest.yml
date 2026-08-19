@@ -1,0 +1,82 @@
+name: systest
+
+# REQ-SYSTEST-001 (varve#74): varve exercised as a SYSTEM, at real scale.
+#
+# Every significant defect of the 2026-08-13..19 week came from system use
+# and none from the unit or mutation gates — the fixtures were toys by
+# construction (one crate, no deps, no features; see the scope headers in
+# crates/varve-core/tests/cargo_offline.rs). These jobs run the substance:
+# varve's OWN Cargo.lock — 250 registry packages, 14 names at more than one
+# version — deposited as a signed layer, installed, verified, exported, and
+# built OFFLINE with an isolated empty CARGO_HOME (clause 1); and a REAL OCI
+# registry round trip through standard clients (clause 2, varve#62).
+#
+# Every job is bounded (timeout-minutes) — an unbounded apt-get once wedged a
+# required check for over an hour — and every action and downloaded tool is
+# pinned by SHA/sha256, never a mutable ref.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  selfhost-vendor:
+    name: self-host via export-crates-vendor (clause 1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: systest
+      - name: deposit Cargo.lock -> install -> verify -> export -> offline build
+        # The script ends with a NEGATIVE CONTROL: the same offline build
+        # without the export wiring must FAIL, or the CARGO_HOME isolation is
+        # leaking and the green above it is vacuous.
+        run: tools/systest/selfhost.sh export-crates-vendor "$RUNNER_TEMP/selfhost-vendor"
+
+  selfhost-cargo:
+    name: self-host via export-cargo (clause 1)
+    # SKIP-NEUTRAL GATE: export-cargo cannot yet resolve a real dependency
+    # graph — its local-registry index lines carry "deps":[],"features":{}
+    # (varve#73), so this job fails today at `failed to select a version for
+    # clap … does not have that feature`, exactly the defect the one-crate
+    # fixture could not see. A perpetually-red job is a dead signal, not a
+    # gate (cf. publish-crates.yml): set the repo variable
+    # VARVE_SYSTEST_EXPORT_CARGO=1 the moment the export-cargo fix lands,
+    # and from then on this job is the proof it stays fixed.
+    if: vars.VARVE_SYSTEST_EXPORT_CARGO == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: systest
+      - name: deposit Cargo.lock -> install -> verify -> export -> offline build
+        run: tools/systest/selfhost.sh export-cargo "$RUNNER_TEMP/selfhost-cargo"
+
+  oci-roundtrip:
+    name: OCI registry round trip (clause 2, varve#62)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: systest
+      - name: real registry, standard clients, then varve install + verify
+        # The script downloads sha256-pinned zot (the registry) and oras (the
+        # pushing client), pushes the deposited layout with the DOCUMENTED
+        # recipe (`varve docs deploy`), and installs + verifies from
+        # oci+http://127.0.0.1:15151 into a fresh core. Until this ran,
+        # "resolves in any OCI client" rested on an annotation being spelled
+        # right rather than on anything executed.
+        run: tools/systest/oci-roundtrip.sh "$RUNNER_TEMP/oci-roundtrip"
