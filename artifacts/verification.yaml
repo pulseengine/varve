@@ -2871,3 +2871,69 @@ artifacts:
     links:
       - type: verifies
         target: REQ-SYSTEST-001
+
+  - id: VER-SYSTEST-002
+    type: verification
+    title: The layer assembler is exercised end to end, without publishing
+    status: verified
+    release: v0.28.0
+    method: test
+    fields:
+      description: >
+        REQ-SYSTEST-002 clause by clause. The producer pipeline — the workflow
+        that assembles the official signed layer — previously had NO test and
+        was exercised only by dispatching it against the real GHCR registry.
+        That is where the 2026.08.3 deposit failed, on a bug a seventeen-check
+        CI gate including a twenty-nine-minute mutation run could not have
+        caught, because nothing in CI executed that workflow (varve#95).
+        .
+        Clause 1: the assembler was EXTRACTED from deposit-layer.yml's inline
+        run-block into tools/build-deposit-spec.sh, and the workflow now calls
+        it. This matters more than it looks: a gate that re-implements the
+        logic tests a COPY, which is the same lie as stubbing. The production
+        path and the tested path are now the same file.
+        .
+        Clause 2: the gate covers every shape that has broken or would be
+        dangerous — a repo appearing in BOTH lists (the bug that shipped), a
+        per-platform vsix set, a portable one, a binary rename, raw
+        per-platform binaries, a tool missing an asset for one platform, and
+        a repo requested at TWO versions, which must be refused because
+        otherwise one release's assets are checked against another release's
+        sums.
+        .
+        Clause 3: the spec is asserted to parse and to deposit; the run stops
+        before `oras push`, because publishing is not what needs testing.
+        .
+        Clause 4 is the reason this record exists. A pre-flight that stubs the
+        component under test is not coverage: the dry-run that preceded the
+        failed deposit stubbed `verify_release` and `asset_sha` — exactly the
+        function that broke — and reported success. Here the seam is the
+        external SERVICE (gh, cosign) and not the component: every line of the
+        assembler executes against a recorded asset inventory, hermetically,
+        with no network and no dependence on a release still existing.
+        .
+        The gate carries its own mutation: it deletes the idempotence guards
+        from a COPY of the assembler and requires red on the real
+        "already exists" message, refusing to run at all if the guards move or
+        are reworded. A gate nobody watches fail rots into a rubber stamp.
+        .
+        Declared scope, per REQ-SYSTEST-001 clause 3: the fixture asset BYTES
+        are stand-ins, so nothing here claims anything about the shipped
+        tools; and the cosign double checks bundle-to-blob binding, identity
+        regexp and issuer — the assembler's responsibilities — not sigstore
+        signatures, which would need the network the gate must not depend on.
+      steps:
+        # The gate itself, exactly as CI invokes it.
+        - run: bash tools/systest/deposit-layer.sh
+        # The assembler is a real file the workflow calls, not a copy.
+        - run: grep -q "tools/build-deposit-spec.sh" .github/workflows/deposit-layer.yml
+        - run: test -x tools/build-deposit-spec.sh
+        # The job is wired in.
+        - run: grep -q "deposit-layer.sh" .github/workflows/systest.yml
+        # The scripts parse (CI runs them verbatim).
+        - run: bash -n tools/build-deposit-spec.sh
+        - run: bash -n tools/systest/deposit-layer.sh
+        - run: python3 -m py_compile tools/systest/assert-deposit-spec.py
+    links:
+      - type: verifies
+        target: REQ-SYSTEST-002

@@ -3327,7 +3327,7 @@ artifacts:
   - id: REQ-SYSTEST-002
     type: requirement
     title: The producer pipeline is exercised, not only the consumer path
-    status: draft
+    status: verified
     release: v0.28.0
     description: >
       REQ-SYSTEST-001 gave the CONSUMER half a system gate: deposit, install,
