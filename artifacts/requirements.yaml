@@ -3222,13 +3222,24 @@ artifacts:
       failure mode the entire status mechanism exists to prevent, reachable by
       one wrong character. Clauses: (1) `sign-status` shall validate every
       `affected` entry as a well-formed layer identifier and refuse the document
-      otherwise. (2) Where the signer can see the line's layers (a layout or a
-      registry is reachable), it shall refuse an `affected` id that names no
-      known layer, naming the ids that do exist — the same shape as the
+      otherwise. (2) Where the signer is GIVEN a listing of the line's layers,
+      it shall refuse an `affected` id that names no known layer, naming the
+      ids that do exist — the same shape as the
       "it exposes:" list varve already prints for tools. (3) Where it cannot see
       them, it shall say which check it could NOT perform rather than implying a
       complete one. (4) `--force` shall allow signing an advisory for a layer not
       yet deposited, because pre-signing is legitimate; silence shall not.
+      (5) A listing shall be obtainable WITHOUT the network: the producer holds
+      their own layouts, and that is both the most trustworthy source available
+      and the only one that works for a realm publishing no index at all
+      (`signed-index` is false by default, so an index-only check would rarely
+      run — and opt-in safety is how this defect survived). (6) Checking a
+      signed advisory against a LIVE source shall be a separate, KEYLESS
+      command; a signing command shall not require the network. See DD-023:
+      validating against the registry would let a hiding registry block the
+      yank of the very layer it hides, on the same unauthenticated listing
+      REQ-INDEXAUTH-001 exists to distrust, and would put the root key and the
+      network in one command.
 
   - id: REQ-NOSILENT-001
     type: requirement
@@ -3357,3 +3368,70 @@ artifacts:
       reported success. (5) REQ-SYSTEST-001 clause 4 (no adapter without a system
       test) shall gain mechanical enforcement, or shall be restated honestly as
       review policy.
+
+  - id: DD-023
+    type: design-decision
+    title: A key-bearing command never needs the network; a network-bearing command never needs the key
+    status: accepted
+    release: v0.28.0
+    description: >
+      REQ-ADVISORY-002 clause 2 said an advisory's `affected` ids should be
+      checked for EXISTENCE "where the signer can see the line's layers (a
+      layout or a registry is reachable)". The registry half was left
+      unimplemented, and on examination it should stay that way.
+      .
+      Checking `affected` ids against the registry would import the exact
+      weakness REQ-INDEXAUTH-001 was written to remove. That requirement
+      exists because the listing of which layers a line has is the registry's
+      raw `/tags/list`, unauthenticated: "a compromised or merely stale index
+      host can HIDE a layer, and every artifact it does serve still verifies,
+      so nothing detects it." A `sign-status` that refuses an `affected` id
+      the registry does not list would therefore hand an adversary a
+      DENIAL-OF-YANK primitive — hide the layer, and the advisory about that
+      very layer cannot be signed. The attack is cheapest exactly when the
+      yank matters most.
+      .
+      It also contradicts the custody model. `docs root-ceremony` says to use
+      the root key as rarely as possible and ideally on an air-gapped host. A
+      signing command that requires the network cannot run where the key
+      ought to live, so the guidance and the tool would disagree and the
+      guidance would lose.
+      .
+      DECISION, two parts:
+      .
+      (1) SPLIT the concerns. `sign-status` stays offline: shape validation
+      always, existence against a listing it is GIVEN. A separate KEYLESS
+      command checks a signed advisory against a live source, and may use the
+      registry precisely BECAUSE it holds no key and its verdict is advisory
+      — a hiding registry makes that check fail loudly instead of silently
+      blocking a signature. The key-bearing command never needs the network;
+      the network-bearing command never needs the key.
+      .
+      (2) CLOSE THE REACH GAP LOCALLY. `signed-index = false` is the default,
+      so most realms publish no index and the existence check would rarely
+      have anything to check against — opt-in safety, which is how this
+      defect survived in the first place. The producer already HOLDS the
+      layers on disk; deriving the line's listing from their own layouts is
+      both the most trustworthy source available and the one that works for a
+      realm that never publishes an index at all.
+      .
+      Rejected alternative: `sign-status --against oci://…` behind a flag.
+      Convenient for a CI-only producer who already has registry credentials,
+      and wrong for both reasons above.
+    links:
+      - type: satisfies
+        target: REQ-ADVISORY-002
+    fields:
+      rationale: >
+        Validating an advisory against the registry would let a compromised or
+        stale registry BLOCK the signing of a yank by hiding the layer being
+        yanked — a denial-of-yank primitive, built on the same unauthenticated
+        `/tags/list` that REQ-INDEXAUTH-001 exists to distrust, and cheapest to
+        mount exactly when the yank matters most. It would also put the root key
+        and the network in one command, contradicting a custody model that says
+        to sign on an air-gapped host. Splitting them costs one extra command
+        and buys an offline signer plus a check that fails loudly instead of
+        silently. Deriving the listing from the producer's own layouts closes
+        the reach gap without either cost, and works for a realm that publishes
+        no index at all.
+    tags: [architecture, security]
