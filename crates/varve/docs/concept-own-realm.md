@@ -2,7 +2,7 @@
 
 An organisation with its own key, its own tools and its own layers — not a consumer of someone else's. End to end, in one transcript.
 
-**The order matters.** Steps 1–4 are the producer side and all happen before any consumer sees anything; the install in step 6 is the LAST thing, not the next thing after `deposit`. Skipping ahead to it is the mistake this topic used to teach: re-running `deposit` into a layout you have already attached to silently drops every attachment (`varve docs ci`), and a layer shipped with nothing attached can never deliver a yank.
+**The order matters.** Steps 1–4 are the producer side and all happen before any consumer sees anything; the install in step 6 is the LAST thing, not the next thing after `deposit`. Skipping ahead to it is the mistake this topic used to teach: re-running `deposit` into a layout you have already attached to would drop every attachment, which varve now refuses (`varve docs ci`), and a layer shipped with nothing attached can never deliver a yank.
 
 ## 1. Mint a key
 

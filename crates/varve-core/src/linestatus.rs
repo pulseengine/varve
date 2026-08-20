@@ -416,7 +416,28 @@ impl LineStatus {
         force: bool,
     ) -> Result<RefCheck, LineStatusError> {
         self.check_layer_refs()?;
+        // How many layer ids this document actually asserts anything about.
+        // A BASELINE status — no yanks, no known problems — refers to nothing,
+        // so there is nothing an existence check could have caught. Warning
+        // there is cry-wolf: it fires on the correct setup `docs own-realm`
+        // tells every new operator to perform, and REQ-SHADOW-001's own lesson
+        // is that a check which fires on correct setups is one people switch
+        // off. Found by clean-room review, which noted it also printed TWICE
+        // (sign-status and attach-status) on the documented happy path.
+        let referenced = self.yanked.len()
+            + self
+                .known_problems
+                .iter()
+                .map(|p| p.affected.len())
+                .sum::<usize>();
         let (source, layers) = match known {
+            KnownLayers::Unknown { .. } if referenced == 0 => {
+                return Ok(RefCheck {
+                    existence_checked: true,
+                    note: "this document names no layer — nothing to check against the line"
+                        .to_string(),
+                });
+            }
             KnownLayers::Unknown { why } => {
                 return Ok(RefCheck {
                     existence_checked: false,

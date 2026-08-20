@@ -48,12 +48,14 @@ your users run, so a layer that cannot install never leaves CI.
 ## Why the order is this way
 
 **deposit first, exactly once per directory.** `deposit` writes the whole
-layout, including `index.json`. Running it again into the same `--out`
-succeeds — and silently drops every referrer that was attached since: the
-baseline line-status, the line-index, attestations. The layer manifest digest
-is unchanged, so nothing looks wrong until a consumer's `varve status` comes
-up empty. Deposit into a fresh directory; treat the layout as append-only
-from then on.
+layout, including `index.json`, so running it again into the same `--out`
+would drop every referrer attached since: the baseline line-status, the
+line-index, attestations. Since v0.28.0 varve REFUSES that (exit 1), names
+what it found and the re-attach sequence, and leaves the layout
+byte-identical; `--force` overwrites deliberately. Before v0.28.0 it
+succeeded silently, the layer manifest digest was unchanged, and nothing
+looked wrong until a consumer's `varve status` came up empty. Deposit into a
+fresh directory anyway; treat the layout as append-only from then on.
 
 **sign before attach.** `attach-status` and `attach-index` take the signed
 DSSE envelope, not the raw JSON. Handing them the unsigned document is

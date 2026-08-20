@@ -26,14 +26,16 @@ on paper.
 
 ```sh
 varve keygen --out root.key --pub root.pub
-varve pubkey root.key            # re-derives the public half from the seed
+varve pubkey root.key            # refuses a key whose halves disagree
 ```
 
 `keygen` writes `root.key` mode 0600 and refuses to overwrite either file: it
 would rather fail than silently destroy a realm.
 
-`pubkey` is the ceremony's first check, not a convenience. It re-derives the
-public half from the seed and **refuses a key whose halves disagree**:
+`pubkey` is the ceremony's first check, not a convenience. It signs and
+verifies with the pair, then prints the public half the file CARRIES — it does
+not re-derive that half from the seed — and **refuses a key whose halves
+disagree**:
 
 ```
 error: root.key is not a consistent keypair: the public half it carries is not

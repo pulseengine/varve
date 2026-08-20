@@ -42,7 +42,10 @@ deposit spec (`varve docs config-reference`).
 ### What `export-bazel` actually vouches for
 
 The registries it writes carry the header *"digests transcribed from the signed
-layer manifest. Do not hand-edit."* Read that precisely. The `sha256` in each
+layer manifest. Do not hand-edit. The source-asset sha256 is transcribed from
+the deposit spec and is NOT verified by varve against the asset it names."*
+Read that precisely — and note the second sentence was added in v0.28.0,
+because the first on its own read as though varve had vouched for the value. The `sha256` in each
 platform entry is `[tool.source].sha256` from the deposit spec, copied verbatim
 into the signed payload at deposit time and copied out again here. **varve never
 verifies it against anything** — not at deposit, not at `varve verify`, not at

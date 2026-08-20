@@ -3202,14 +3202,13 @@ artifacts:
       touch shall be left byte-identical — a partial write is worse than both
       outcomes.
 
-  # Clause 2 is PARTIAL and this is why it stops at `implemented`. The
-  # signed-line-index path is done: where an index is in reach, an
-  # `affected` id naming no known layer is refused, listing the ids that
-  # do exist. The REGISTRY half is not — `sign-status` has no network
-  # concept, and wiring a fetch into a producer signing command is a
-  # design decision, not an omission to paper over. Clause 3 makes the
-  # gap visible at runtime rather than hiding it: where no listing was in
-  # reach the tool states which check it did NOT perform.
+  # Stops at `implemented` because of CLAUSE 6, not clause 2. An earlier note
+  # here said the gap was clause 2's "registry half" — that became false when
+  # DD-023 rewrote clause 2 to say "is GIVEN a listing" (no registry, on
+  # purpose) and `--layouts` implemented it. Clean-room review caught the
+  # comment still pointing at the wrong gap, two commits stale. The real gap:
+  # clause 6's separate KEYLESS command for checking a signed advisory against
+  # a live source does not exist yet.
   - id: REQ-ADVISORY-002
     type: requirement
     title: An advisory that can never fire is refused when it is signed
@@ -3312,6 +3311,12 @@ artifacts:
       repeat. (5) It shall not require network access: the store already holds
       the answer.
 
+  # `implemented`, not `verified`: its evidence is prose and the docs coverage
+  # gate, and it carries no test markers, so `rivet verify` refuses — correctly.
+  # Every clause looks discharged, but "looks discharged" is the judgement
+  # `verified` is supposed to encode mechanically, and here nothing mechanical
+  # can. Clean-room review flagged that this was the only held-back requirement
+  # on the branch with no reason recorded.
   - id: REQ-CUSTODY-001
     type: requirement
     title: An organisation can run its own realm as a real trust operation, not a demo

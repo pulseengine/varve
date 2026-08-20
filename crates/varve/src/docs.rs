@@ -897,7 +897,15 @@ mod tests {
                 "ci",
                 &[
                     "Never re-run `deposit`",
-                    "silently drops every referrer",
+                    // v0.28.0 changed the BEHAVIOUR this needle pinned:
+                    // re-depositing over referrers is now refused, not
+                    // silently destructive (REQ-NODESTROY-001). The boundary
+                    // still has to be stated — the topic must say what varve
+                    // does now, not what it used to do — so the needle tracks
+                    // the new truth rather than being deleted. A gate that
+                    // pins a sentence has to move when the sentence stops
+                    // being true, or it starts protecting a falsehood.
+                    "varve REFUSES that (exit 1)",
                     "must be INSTALLED",
                     "no trust root configured",
                     "/dev/stdin",
