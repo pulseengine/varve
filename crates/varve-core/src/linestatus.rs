@@ -209,6 +209,108 @@ pub fn known_layers_from_index(
     Ok(KnownLayers::from_index(&doc))
 }
 
+/// The line's layers as the PRODUCER can see them, from their own layouts —
+/// no network, and no published index required (REQ-ADVISORY-002 clause 5,
+/// DD-023).
+///
+/// `signed-index` is false by default, so an index-only existence check would
+/// rarely have anything to check against: opt-in safety, which is how a typo'd
+/// `affected` id came to sign cleanly and fire for nobody. The producer already
+/// HOLDS the layers on disk. That listing is more trustworthy than a registry's
+/// — a compromised registry can hide a layer and thereby block the yank of the
+/// very layer it hides (the reason DD-023 keeps the network out of the signing
+/// command) — and it works for a realm that never publishes an index at all.
+///
+/// Each path is either a layout directory or a directory OF layout
+/// directories, because a producer's output tree is usually the latter.
+pub fn known_layers_in_layout_dirs(dirs: &[std::path::PathBuf], line: &str) -> KnownLayers {
+    let mut layers: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    let visit = |dir: &Path, layers: &mut Vec<String>| {
+        // A real `varve deposit --out` writes an OCI layout: index.json plus
+        // blobs/sha256/. The bare `manifests/`+`blobs/` shape is the other
+        // source form varve accepts. Both are read, because a fixture that
+        // only spoke one of them is how this function first shipped passing a
+        // test against bytes the tool never produces.
+        let mut candidates: Vec<Vec<u8>> = Vec::new();
+        if let Ok(index) = std::fs::read(dir.join("index.json"))
+            && let Ok(idx) = serde_json::from_slice::<serde_json::Value>(&index)
+        {
+            for m in idx
+                .get("manifests")
+                .and_then(|m| m.as_array())
+                .into_iter()
+                .flatten()
+            {
+                if let Some(d) = m.get("digest").and_then(|d| d.as_str())
+                    && let Some((_, hex)) = d.split_once(':')
+                    && let Ok(b) = std::fs::read(dir.join("blobs").join("sha256").join(hex))
+                {
+                    candidates.push(b);
+                }
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(dir.join("manifests")) {
+            for e in entries.filter_map(|e| e.ok()) {
+                if let Ok(b) = std::fs::read(e.path()) {
+                    candidates.push(b);
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return false;
+        }
+        for bytes in candidates {
+            // A layout stores the SIGNED envelope; the layer id lives in its
+            // payload. Unverified is correct here: this is the producer's own
+            // output tree, and the id is being used to catch a typo, not to
+            // decide trust.
+            let payload = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|t| wsc::dsse::DsseEnvelope::from_json(t).ok())
+                .and_then(|env| env.payload_bytes().ok())
+                .unwrap_or_else(|| bytes.clone());
+            if let Ok(m) = crate::manifest::LayerManifest::parse(&payload) {
+                let id = m.layer.to_string();
+                if id.starts_with(&format!("{line}.")) && !layers.contains(&id) {
+                    layers.push(id);
+                }
+            }
+        }
+        true
+    };
+    for dir in dirs {
+        if visit(dir, &mut layers) {
+            scanned += 1;
+            continue;
+        }
+        // Not a layout itself — try its children.
+        if let Ok(children) = std::fs::read_dir(dir) {
+            for c in children.filter_map(|e| e.ok()) {
+                if c.path().is_dir() && visit(&c.path(), &mut layers) {
+                    scanned += 1;
+                }
+            }
+        }
+    }
+    if scanned == 0 {
+        return KnownLayers::unknown(format!(
+            "no oci-layout was found under {} — pass the directory `varve deposit --out` \
+             wrote, or one holding several of them",
+            dirs.iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    layers.sort();
+    KnownLayers::Known {
+        source: format!("{scanned} local layout(s) the producer holds"),
+        line: Some(line.to_string()),
+        layers,
+    }
+}
+
 /// What a deposit layout can tell a producer about the line's layers.
 ///
 /// A layout carries the realm's signed index only once `attach-index` has run,
@@ -1752,5 +1854,81 @@ mod tests {
             doc.sign_against(&listing(&["2026.07.0"]), false, &sk, "k")
                 .is_err()
         );
+    }
+
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn a_producer_can_list_their_own_line_without_a_network_or_an_index() {
+        // DD-023 clause 5. `signed-index` is false by default, so an
+        // index-only existence check would usually have nothing to check
+        // against — and opt-in safety is how a typo'd `affected` id came to
+        // sign cleanly and fire for nobody. The producer holds the layers.
+        let tmp = tempfile::tempdir().unwrap();
+        let (sk, _pk) = crate::generate_root_keypair();
+        // REAL layouts, written by `deposit` itself. The first version of this
+        // test built them with `DirSource::put`, which writes the bare
+        // manifests/+blobs/ SOURCE shape — not what `varve deposit --out`
+        // produces. It passed, and the CLI then found nothing at all. A
+        // fixture speaking a shape the tool never emits is the defect this
+        // release is named for, so this one uses the real writer.
+        for (id, counter, dir) in [
+            ("2026.08.0", 1u64, "out-a"),
+            ("2026.08.1", 2, "out-b"),
+            // A layer of a DIFFERENT line must not be counted as this line's.
+            ("2026.09.0", 1, "out-other"),
+        ] {
+            let spec = crate::deposit::DepositSpec {
+                layer: id.parse().unwrap(),
+                channel: "rolling".into(),
+                counter,
+                issued_at: "2026-08-07T00:00:00Z".into(),
+                tools: vec![crate::DepositTool {
+                    name: "t".into(),
+                    version: "1.0".into(),
+                    platform: None,
+                    bytes: b"x".to_vec(),
+                    source: None,
+                    runner: None,
+                    kind: None,
+                    sdk_prefix: None,
+                }],
+                includes: Vec::new(),
+            };
+            crate::deposit(&spec, &sk, "k", &tmp.path().join(dir)).unwrap();
+        }
+
+        // Pointed at the PARENT of several layouts, which is the usual shape.
+        let known = known_layers_in_layout_dirs(&[tmp.path().to_path_buf()], "2026.08");
+        match &known {
+            KnownLayers::Known { layers, line, .. } => {
+                assert_eq!(layers, &["2026.08.0", "2026.08.1"], "got {layers:?}");
+                assert_eq!(line.as_deref(), Some("2026.08"));
+            }
+            KnownLayers::Unknown { why } => panic!("expected a listing, got: {why}"),
+        }
+
+        // …and it actually catches the typo it exists for.
+        let mut doc = status(2);
+        doc.line = "2026.08".into();
+        doc.yanked = BTreeMap::from([(
+            "2026.08.10".to_string(),
+            "typo — never deposited".to_string(),
+        )]);
+        doc.known_problems.clear();
+        let err = doc
+            .check_layer_refs_against(&known, false)
+            .expect_err("a yank naming a layer this line does not have must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("2026.08.10") && msg.contains("2026.08.0"),
+            "the refusal must name the bad id AND the ids that exist: {msg}"
+        );
+
+        // A directory holding no layout says so rather than passing clean.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            known_layers_in_layout_dirs(&[empty.path().to_path_buf()], "2026.08"),
+            KnownLayers::Unknown { .. }
+        ));
     }
 }

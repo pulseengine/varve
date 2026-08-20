@@ -80,7 +80,8 @@ pub use linestatus::{
     attach_envelope_to_layout_checked as attach_status_envelope_to_layout_checked,
     attach_to_layout as attach_status_to_layout,
     cache_baseline_from_source as cache_baseline_line_status, known_layers_from_index,
-    known_layers_in_layout, read_any_from_layout as read_any_status_from_layout,
+    known_layers_in_layout, known_layers_in_layout_dirs,
+    read_any_from_layout as read_any_status_from_layout,
     read_from_layout as read_status_from_layout,
 };
 pub use manifest::{LayerManifest, ManifestError};

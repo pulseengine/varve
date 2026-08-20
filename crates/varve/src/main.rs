@@ -394,6 +394,12 @@ enum Cmd {
         /// (REQ-ADVISORY-002).
         #[arg(long, value_name = "ENVELOPE")]
         index: Option<PathBuf>,
+        /// Directories holding this line's oci-layouts (what `varve deposit
+        /// --out` wrote, or a directory of them). The producer's own layers
+        /// are the listing that needs no network and no published index —
+        /// `signed-index` is false by default (DD-023). Repeatable.
+        #[arg(long = "layouts", value_name = "DIR")]
+        layouts: Vec<PathBuf>,
         /// Sign an advisory naming a layer that is not deposited yet.
         #[arg(long)]
         force: bool,
@@ -675,8 +681,18 @@ fn run() -> anyhow::Result<Outcome> {
             out,
             json,
             index,
+            layouts,
             force,
-        } => sign_status(&file, &key, &key_id, &out, json, index.as_deref(), force),
+        } => sign_status(
+            &file,
+            &key,
+            &key_id,
+            &out,
+            json,
+            index.as_deref(),
+            &layouts,
+            force,
+        ),
         Cmd::Keygen { out, public } => keygen(&out, public.as_deref()),
         Cmd::Pubkey { key } => pubkey(&key),
         Cmd::SignAttestation {
@@ -1173,6 +1189,7 @@ fn sign_index(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sign_status(
     file: &std::path::Path,
     key: &std::path::Path,
@@ -1180,6 +1197,7 @@ fn sign_status(
     out: &std::path::Path,
     json: bool,
     index: Option<&std::path::Path>,
+    layouts: &[PathBuf],
     force: bool,
 ) -> anyhow::Result<()> {
     let bytes = std::fs::read(file)
@@ -1206,10 +1224,14 @@ fn sign_status(
                 .with_context(|| format!("cannot read line-index envelope {}", path.display()))?;
             varve_core::known_layers_from_index(&env, &sk[32..])?
         }
+        // The producer's own layouts: no network, no published index. This is
+        // the path that actually runs for most realms (DD-023 clause 5).
+        None if !layouts.is_empty() => varve_core::known_layers_in_layout_dirs(layouts, &doc.line),
         None => varve_core::KnownLayers::unknown(
-            "no line-index was supplied — pass `--index <envelope>` (the output of \
-             `varve sign-index`) to check the `affected` and yank ids against the layers \
-             this line actually has",
+            "no listing of this line was supplied — pass `--layouts <DIR>` (the directory \
+             `varve deposit --out` wrote, or one holding several) to check the `affected` \
+             and yank ids against the layers you actually deposited, or `--index \
+             <envelope>` if this realm publishes a signed line-index",
         ),
     };
     let (envelope, check) = doc.sign_against(&known, force, &sk, key_id)?;
