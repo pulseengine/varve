@@ -1,0 +1,85 @@
+# Recorded release inventory for the REQ-SYSTEST-002 producer gate.
+#
+# The shapes here are the ones the real pulseengine releases have — recorded,
+# not invented — so the layer-assembly path is driven by realistic metadata
+# without reaching GitHub. The gate must not depend on the network, nor on
+# somebody's release still existing at the version this file names.
+#
+# SCOPE (REQ-SYSTEST-001 clause 3 — a fixture states what it cannot prove):
+# the ASSET BYTES are small stand-ins, not the real binaries, so this fixture
+# proves nothing about what the shipped tools do. What it does exercise is
+# everything the assembler itself decides: which assets are selected for which
+# platform, that each is checksummed against its own release's VERIFIED sums,
+# that a repo named twice is downloaded once and a repo named at two versions
+# is refused, and that the resulting spec is one `varve deposit` accepts.
+#
+# Columns:  repo <TAB> version <TAB> asset <TAB> shape
+#   tar:<binary>:nested  a .tar.gz holding <repo>-<version>/bin/<binary>
+#   tar:<binary>:flat    a .tar.gz holding <binary> at the root
+#   tar:none             a .tar.gz holding no binary at all
+#   raw                  a bare downloadable file (sigil's wsc binaries)
+#   blob                 an opaque package file (a .vsix)
+#
+# `!sums-style` sets how a repo writes SHA256SUMS.txt. Both forms are real and
+# both must parse — hence the `[ /]` in the assembler's grep and the `s# \./# #`
+# before sha256sum -c.
+!sums-style	pulseengine/rivet	dotslash
+!sums-style	pulseengine/spar	bare
+!sums-style	pulseengine/loom	bare
+!sums-style	pulseengine/kiln	dotslash
+!sums-style	pulseengine/sigil	bare
+!sums-style	pulseengine/hollow	bare
+
+# rivet — appears in BOTH lists: a CLI and a VS Code extension from one
+# release. This is the pair that killed the 2026.08.3 deposit.
+pulseengine/rivet	v0.33.1	rivet-v0.33.1-aarch64-apple-darwin.tar.gz	tar:rivet:nested
+pulseengine/rivet	v0.33.1	rivet-v0.33.1-x86_64-apple-darwin.tar.gz	tar:rivet:nested
+pulseengine/rivet	v0.33.1	rivet-v0.33.1-aarch64-unknown-linux-gnu.tar.gz	tar:rivet:nested
+pulseengine/rivet	v0.33.1	rivet-v0.33.1-x86_64-unknown-linux-gnu.tar.gz	tar:rivet:nested
+pulseengine/rivet	v0.33.1	rivet-sdlc-0.33.1.vsix	blob
+
+# A SECOND rivet release, complete and downloadable. The version-skew scenario
+# must be refused by the assembler's guard and NOT by the fixture running out
+# of assets — a test that passes because the wrong thing was missing is not a
+# test of the guard.
+pulseengine/rivet	v0.33.0	rivet-v0.33.0-aarch64-apple-darwin.tar.gz	tar:rivet:nested
+pulseengine/rivet	v0.33.0	rivet-v0.33.0-x86_64-unknown-linux-gnu.tar.gz	tar:rivet:nested
+pulseengine/rivet	v0.33.0	rivet-sdlc-0.33.0.vsix	blob
+
+# spar — also in both lists, and its extension is PER PLATFORM: four packages,
+# each of which must land with its own varve `platform` so a consumer resolves
+# only their own.
+pulseengine/spar	v0.36.0	spar-v0.36.0-aarch64-apple-darwin.tar.gz	tar:spar:flat
+pulseengine/spar	v0.36.0	spar-v0.36.0-x86_64-apple-darwin.tar.gz	tar:spar:flat
+pulseengine/spar	v0.36.0	spar-v0.36.0-aarch64-unknown-linux-gnu.tar.gz	tar:spar:flat
+pulseengine/spar	v0.36.0	spar-v0.36.0-x86_64-unknown-linux-gnu.tar.gz	tar:spar:flat
+pulseengine/spar	v0.36.0	spar-aadl-darwin-arm64-0.36.0.vsix	blob
+pulseengine/spar	v0.36.0	spar-aadl-darwin-x64-0.36.0.vsix	blob
+pulseengine/spar	v0.36.0	spar-aadl-linux-arm64-0.36.0.vsix	blob
+pulseengine/spar	v0.36.0	spar-aadl-linux-x64-0.36.0.vsix	blob
+
+# loom — ships NO aarch64-apple-darwin tarball. That is a notice and an
+# omission from the layer, never a failed deposit.
+pulseengine/loom	v1.2.0	loom-v1.2.0-x86_64-apple-darwin.tar.gz	tar:loom:flat
+pulseengine/loom	v1.2.0	loom-v1.2.0-aarch64-unknown-linux-gnu.tar.gz	tar:loom:flat
+pulseengine/loom	v1.2.0	loom-v1.2.0-x86_64-unknown-linux-gnu.tar.gz	tar:loom:flat
+
+# kiln — the tool is `kiln`, the binary inside is `kilnd`. The `:binary`
+# field of a TARBALL_TOOLS entry is what makes that work.
+pulseengine/kiln	v0.4.4	kiln-v0.4.4-aarch64-apple-darwin.tar.gz	tar:kilnd:nested
+pulseengine/kiln	v0.4.4	kiln-v0.4.4-x86_64-apple-darwin.tar.gz	tar:kilnd:nested
+pulseengine/kiln	v0.4.4	kiln-v0.4.4-aarch64-unknown-linux-gnu.tar.gz	tar:kilnd:nested
+pulseengine/kiln	v0.4.4	kiln-v0.4.4-x86_64-unknown-linux-gnu.tar.gz	tar:kilnd:nested
+
+# sigil — raw per-platform binaries, named sigil's way rather than by triple.
+pulseengine/sigil	v0.10.0	wsc-macos-aarch64	raw
+pulseengine/sigil	v0.10.0	wsc-macos-x86_64	raw
+pulseengine/sigil	v0.10.0	wsc-linux-aarch64	raw
+pulseengine/sigil	v0.10.0	wsc-linux-x86_64	raw
+
+# hollow — a release whose tarballs carry no binary of the declared name, the
+# shape an upstream layout change produces. Used only by the negative case.
+pulseengine/hollow	v0.1.0	hollow-v0.1.0-aarch64-apple-darwin.tar.gz	tar:none
+pulseengine/hollow	v0.1.0	hollow-v0.1.0-x86_64-apple-darwin.tar.gz	tar:none
+pulseengine/hollow	v0.1.0	hollow-v0.1.0-aarch64-unknown-linux-gnu.tar.gz	tar:none
+pulseengine/hollow	v0.1.0	hollow-v0.1.0-x86_64-unknown-linux-gnu.tar.gz	tar:none
