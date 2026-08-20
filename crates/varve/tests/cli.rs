@@ -1811,11 +1811,14 @@ fn an_attached_baseline_makes_status_work_after_an_offline_install() {
         .stdout(predicate::str::contains("cached baseline line-status #1"));
 
     // `varve status` works OFFLINE with nothing but the install behind it.
+    // Exit 3, not 0: this fixture's baseline YANKS the pinned layer, and since
+    // v0.28.0 that is the exit code rather than a word on stdout
+    // (REQ-CIGATE-001 clause 1, BREAKING). The report is unchanged.
     varve(&fx)
         .env("VARVE_TRUST_ROOT", &trust_root)
         .arg("status")
         .assert()
-        .success()
+        .code(3)
         .stdout(
             predicate::str::contains("YANKED").and(predicate::str::contains("1 known problem")),
         );
@@ -2636,13 +2639,16 @@ fn status_reports_yank_and_known_problems_from_attached_evidence() {
         .assert()
         .success();
 
-    // status ingests the envelope, caches it, and reports for the pin.
+    // status ingests the envelope, caches it, and reports for the pin. Exit 3
+    // since v0.28.0 — the pinned layer is yanked, and the verdict IS the exit
+    // code (REQ-CIGATE-001 clause 1, BREAKING). The report is unchanged, so
+    // every assertion below it is the same as before.
     varve(&fx)
         .env("VARVE_TRUST_ROOT", &trust)
         .args(["status", "--from-file"])
         .arg(&env_path)
         .assert()
-        .success()
+        .code(3)
         .stdout(
             predicate::str::contains("YANKED")
                 .and(predicate::str::contains("CVE-2026-0001"))
@@ -2655,7 +2661,7 @@ fn status_reports_yank_and_known_problems_from_attached_evidence() {
         .env("VARVE_TRUST_ROOT", &trust)
         .arg("status")
         .assert()
-        .success()
+        .code(3)
         .stdout(predicate::str::contains("YANKED"));
 }
 
@@ -2688,18 +2694,23 @@ fn status_refuses_a_stale_document_and_keeps_the_newer_cache() {
     let older = parent.join("older.dsse.json");
     sign(2, &older);
 
+    // Code 3: the document ingests fine and the layer it describes is yanked —
+    // which is the ANSWER, not a failure (REQ-CIGATE-001).
     varve(&fx)
         .env("VARVE_TRUST_ROOT", &trust)
         .args(["status", "--from-file"])
         .arg(&newer)
         .assert()
-        .success();
+        .code(3);
+    // A stale document is a genuine refusal, and stays code 1 — the two must
+    // not collapse into one code, or a pipeline cannot tell "your toolchain is
+    // yanked" from "your evidence is bad".
     varve(&fx)
         .env("VARVE_TRUST_ROOT", &trust)
         .args(["status", "--from-file"])
         .arg(&older)
         .assert()
-        .failure()
+        .code(1)
         .stderr(predicate::str::contains("stale"));
 }
 
@@ -4116,15 +4127,62 @@ fn signed_crate_layer(
     crates: &[(&str, &str, Vec<u8>)],
     includes: &[&str],
 ) -> (std::path::PathBuf, String) {
+    let payloads: Vec<Payload> = crates
+        .iter()
+        .map(|(name, version, bytes)| Payload {
+            kind: "crate",
+            name,
+            version,
+            platform: None,
+            bytes: bytes.clone(),
+        })
+        .collect();
+    signed_payload_layer(fx, tag, layer, sk, &payloads, includes)
+}
+
+/// One entry for `signed_payload_layer`. A struct rather than a five-tuple
+/// because the two optional fields (kind, platform) are exactly the ones a
+/// positional tuple gets wrong.
+struct Payload<'a> {
+    /// The wire string written into the SIGNED kind annotation — a literal, so
+    /// a test can deposit a kind this varve does not know and assert what
+    /// happens, which `PayloadKind` would not let it express.
+    kind: &'a str,
+    name: &'a str,
+    version: &'a str,
+    /// `None` leaves the entry unstamped, which means any-platform.
+    platform: Option<&'a str>,
+    bytes: Vec<u8>,
+}
+
+/// A SIGNED layer holding payloads of ANY kind, optionally composing other
+/// layers by digest. The generalisation of `signed_crate_layer`, which is now a
+/// thin wrapper: REQ-INSPECT-001 is about the kinds that are NOT crates, and a
+/// fixture that can only express one kind cannot reach them.
+fn signed_payload_layer(
+    fx: &Fixture,
+    tag: &str,
+    layer: &str,
+    sk: &[u8],
+    payloads: &[Payload],
+    includes: &[&str],
+) -> (std::path::PathBuf, String) {
     let mut entries: Vec<String> = Vec::new();
     let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
-    for (name, version, bytes) in crates {
-        let d = varve_core::manifest_digest(bytes);
+    for p in payloads {
+        let d = varve_core::manifest_digest(&p.bytes);
+        let platform = p
+            .platform
+            .map(|t| format!(r#","eu.pulseengine.platform":"{t}""#))
+            .unwrap_or_default();
         entries.push(format!(
-            r#"{{"mediaType":"application/octet-stream","digest":"{d}","size":{size},"annotations":{{"eu.pulseengine.varve.kind":"crate","eu.pulseengine.tool":"{name}","eu.pulseengine.tool.version":"{version}"}}}}"#,
-            size = bytes.len()
+            r#"{{"mediaType":"application/octet-stream","digest":"{d}","size":{size},"annotations":{{"eu.pulseengine.varve.kind":"{kind}","eu.pulseengine.tool":"{name}","eu.pulseengine.tool.version":"{version}"{platform}}}}}"#,
+            size = p.bytes.len(),
+            kind = p.kind,
+            name = p.name,
+            version = p.version,
         ));
-        blobs.push((d, bytes.clone()));
+        blobs.push((d, p.bytes.clone()));
     }
     for d in includes {
         // `digest` or `digest@realm`. An include that names a realm is
@@ -5581,4 +5639,812 @@ fn export_sdk_refuses_a_hostile_archive_member_at_the_cli_boundary() {
         !parent.join("escaped").exists() && !out.join("escaped").exists(),
         "a refused tree must leave nothing behind, inside the export or out of it"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// REQ-CIGATE-001 — varve as something a pipeline can gate on.
+// REQ-INSPECT-001 — seeing what is in a layer.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A pinned, installed layer plus a signed line-status envelope that YANKS it.
+/// Reuses `signed_layer_fixture`'s shape but signs BOTH the layer and the
+/// status with one key, which is what makes `status` able to report at all.
+fn yanked_project(fx: &Fixture) -> (std::path::PathBuf, std::path::PathBuf) {
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("yank-root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust = parent.join("yank-root.pub");
+    std::fs::write(&trust, hex::encode(&pk)).unwrap();
+
+    let (archive, _) = signed_crate_layer(
+        fx,
+        "yanked",
+        "2026.07.0",
+        &sk,
+        &[("cfg-if", "1.0.0", dot_crate("cfg-if", "1.0.0", ""))],
+        &[],
+    );
+    install_pinned(fx, &trust, "2026.07.0", &archive);
+
+    let doc = parent.join("yank-status.json");
+    std::fs::write(&doc, status_doc_json("2026.07", 1)).unwrap();
+    let envelope = parent.join("yank-status.dsse.json");
+    varve(fx)
+        .args(["sign-status", "--file"])
+        .arg(&doc)
+        .args(["--key"])
+        .arg(&sk_path)
+        .args(["--out"])
+        .arg(&envelope)
+        .assert()
+        .success();
+    (trust, envelope)
+}
+
+// rivet: verifies REQ-CIGATE-001
+#[test]
+fn a_yanked_layer_fails_the_pipeline_instead_of_printing_and_succeeding() {
+    // BREAKING, and deliberately so: `varve status` used to print YANKED and
+    // exit 0, so the only way to gate a build on a yank was to grep stdout —
+    // which two personas of a ten-persona audit independently failed to do.
+    // The point of SIGNING a yank is to stop a build.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let (trust, envelope) = yanked_project(&fx);
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["status", "--from-file"])
+        .arg(&envelope)
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("YANKED").and(predicate::str::contains("CVE-2026-0001")));
+
+    // …and from the cache, on the second ask, with no envelope to ingest: a
+    // gate that only fires on the ingest run is not a gate.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .arg("status")
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("YANKED"));
+}
+
+// rivet: verifies REQ-CIGATE-001
+#[test]
+fn docs_grep_fails_on_no_match_so_it_can_gate() {
+    let fx = fixture(None, &[]);
+    varve(&fx)
+        .args(["docs", "--grep", "zzz-no-topic-says-this-zzz"])
+        .assert()
+        .code(4)
+        .stdout(predicate::str::contains("no topic matches"));
+    // …and still succeeds when there IS a match, or it gates on everything.
+    varve(&fx)
+        .args(["docs", "--grep", "trust root"])
+        .assert()
+        .success();
+}
+
+// rivet: verifies REQ-CIGATE-001
+#[test]
+fn docs_grep_finds_a_topic_by_its_title() {
+    // `--grep` searched BODIES only, so the one string a reader is most likely
+    // to type — the title they saw in `varve docs` — matched nothing.
+    //
+    // The needle is the FULL title, em dash and all. A first version of this
+    // test used "which binary runs here" and passed before a line of the fix
+    // was written: that substring appears verbatim in the BODY of
+    // getting-started, so the test never exercised title search at all. The
+    // exhaustive, drift-proof form of this check lives in `docs.rs`
+    // (`every_topic_title_is_greppable`); this one asserts it at the boundary.
+    let fx = fixture(None, &[]);
+    varve(&fx)
+        .args(["docs", "--grep", "which — which binary runs here"])
+        .assert()
+        .success()
+        // Attributed to the topic whose TITLE it is.
+        .stdout(predicate::str::contains("which:"));
+}
+
+// rivet: verifies REQ-CIGATE-001
+#[test]
+fn the_exit_code_contract_is_documented_and_greppable() {
+    // `varve docs --grep "exit code"` returned NOTHING across all fifty topics:
+    // a pipeline author had no contract to write against.
+    let fx = fixture(None, &[]);
+    varve(&fx)
+        .args(["docs", "--grep", "exit code"])
+        .assert()
+        .success();
+    varve(&fx)
+        .args(["docs", "exit-codes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("3"));
+}
+
+// rivet: verifies REQ-CIGATE-001
+#[test]
+fn every_documented_exit_code_is_produced_by_a_real_invocation() {
+    // Clause 3, and the part that makes it more than a table. The contract is
+    // READ OUT OF THE BINARY (`varve exit-codes --json`), and every code in it
+    // must then be produced by running varve for real. That is what "cannot
+    // drift from the binary" has to mean: rendering a table from a constant
+    // proves only that the table agrees with itself.
+    //
+    // Two ways this fails, both deliberate:
+    //   * a code is added to the contract with no scenario → the `other` arm
+    //     panics, so a documented code nothing produces cannot ship;
+    //   * a code's number changes on either side → the assert_eq fires.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let contract: serde_json::Value = serde_json::from_slice(
+        &varve(&fx)
+            .args(["exit-codes", "--json"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .expect("`varve exit-codes --json` emits JSON");
+    let codes = contract["codes"].as_array().expect("`codes` is an array");
+    assert!(
+        codes.len() >= 5,
+        "the contract must cover at least ok/error/usage/yanked/no-match"
+    );
+
+    // A separate project whose pinned layer is genuinely yanked by a signed,
+    // verified line-status document — the real path, not a stubbed one.
+    let yanked = fixture(Some(PIN_JULY), &[]);
+    let (trust, envelope) = yanked_project(&yanked);
+
+    fn code_of(cmd: &mut Command) -> i32 {
+        cmd.output()
+            .unwrap()
+            .status
+            .code()
+            .expect("varve must exit, not be signalled")
+    }
+
+    for entry in codes {
+        let documented = entry["code"].as_u64().unwrap();
+        let name = entry["name"].as_str().unwrap();
+        let observed = match name {
+            // A command that simply works.
+            "ok" => code_of(varve(&fx).args(["docs", "--list"])),
+            // varve fails closed: the pinned layer is not installed.
+            "error" => code_of(varve(&fx).args(["which", "synth"])),
+            // clap's own code, for a command line that is not one.
+            "usage" => code_of(varve(&fx).arg("--no-such-flag-exists")),
+            // The verdict this whole requirement exists for.
+            "yanked" => code_of(
+                varve(&yanked)
+                    .env("VARVE_TRUST_ROOT", &trust)
+                    .args(["status", "--from-file"])
+                    .arg(&envelope),
+            ),
+            // A search that ran and found nothing.
+            "no-match" => {
+                code_of(varve(&fx).args(["docs", "--grep", "zzz-no-topic-says-this-zzz"]))
+            }
+            other => panic!(
+                "exit code {documented} (`{other}`) is in the contract and NO scenario here \
+                 produces it. A documented code nothing exercises is exactly the drift this \
+                 test exists to stop: add a real invocation that returns it."
+            ),
+        };
+        assert_eq!(
+            observed as u64, documented,
+            "`{name}` is documented as exit code {documented}, but the binary returned {observed}"
+        );
+    }
+}
+
+// rivet: verifies REQ-CIGATE-001
+#[test]
+fn deposit_reports_the_layer_digest_as_json_instead_of_prose() {
+    // The motivating complaint, exactly: "a pipeline scrapes a layer digest out
+    // of a prose sentence". `manifest_digest` is what a pin records, what an
+    // `[[include]]` names and what an attestation binds to — and the only way
+    // to obtain it was to cut an English sentence apart on spaces.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let tool = parent.join("synth-bin");
+    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+    let spec = parent.join("json-spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 7\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0.0\"\npath = \"{}\"\n",
+            tool.display()
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("json-layout");
+    let out = varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&root.key)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&layout)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`deposit --json` emits ONE JSON document");
+    assert_eq!(v["command"], "deposit");
+    assert_eq!(v["layer"], "2026.07.0");
+    assert_eq!(v["channel"], "qualified");
+    assert_eq!(v["counter"], 7);
+    assert_eq!(v["entries"], 1);
+    let digest = v["manifest_digest"]
+        .as_str()
+        .expect("manifest_digest")
+        .to_string();
+    assert!(digest.starts_with("sha256:"), "{digest}");
+
+    // …and it is the REAL digest, not a plausible-looking string: the store
+    // keys the installed layer by it.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(digest));
+}
+
+// rivet: verifies REQ-CIGATE-001
+#[test]
+fn every_ci_marked_command_emits_json_a_pipeline_can_parse() {
+    // Clause 2 over the whole `(CI)` set, not one command of it. Each of these
+    // printed a prose sentence and nothing else; the shapes below are the
+    // compatibility promise, so they are asserted field by field rather than
+    // "it parsed". The companion check that the SET is complete — that no
+    // command tagged (CI) is missing `--json` — is `main.rs`'s
+    // `every_ci_marked_subcommand_offers_json`, which enumerates clap itself.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+
+    fn json_of(cmd: &mut Command) -> serde_json::Value {
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "command failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "--json must emit ONE JSON document on stdout, got {e}:\n{}",
+                String::from_utf8_lossy(&out.stdout)
+            )
+        })
+    }
+
+    // ── sign-status ────────────────────────────────────────────────────
+    let doc = parent.join("cij-status.json");
+    std::fs::write(&doc, status_doc_json("2026.07", 4)).unwrap();
+    let status_env = parent.join("cij-status.dsse.json");
+    let v = json_of(
+        varve(&fx)
+            .args(["sign-status", "--file"])
+            .arg(&doc)
+            .args(["--key"])
+            .arg(&root.key)
+            .args(["--out"])
+            .arg(&status_env)
+            .arg("--json"),
+    );
+    assert_eq!(v["command"], "sign-status");
+    assert_eq!(v["line"], "2026.07");
+    assert_eq!(v["counter"], 4);
+    assert_eq!(v["known_problems"], 1);
+
+    // ── sign-index ─────────────────────────────────────────────────────
+    let index_doc = parent.join("cij-index.json");
+    std::fs::write(
+        &index_doc,
+        r#"{"line":"2026.07","counter":2,"issued-at":"2026-08-07T00:00:00Z","layers":[]}"#,
+    )
+    .unwrap();
+    let index_env = parent.join("cij-index.dsse.json");
+    let v = json_of(
+        varve(&fx)
+            .args(["sign-index", "--file"])
+            .arg(&index_doc)
+            .args(["--key"])
+            .arg(&root.key)
+            .args(["--out"])
+            .arg(&index_env)
+            .arg("--json"),
+    );
+    assert_eq!(v["command"], "sign-index");
+    assert_eq!(v["line"], "2026.07");
+    assert_eq!(v["counter"], 2);
+    assert_eq!(v["layers"], 0);
+
+    // ── sign-sums ──────────────────────────────────────────────────────
+    let sums = parent.join("SHA256SUMS.txt");
+    std::fs::write(&sums, "aa  varve-x86_64-unknown-linux-gnu.tar.gz\n").unwrap();
+    let sums_env = parent.join("SHA256SUMS.txt.dsse.json");
+    let v = json_of(
+        varve(&fx)
+            .args(["sign-sums", "--sums"])
+            .arg(&sums)
+            .args(["--key"])
+            .arg(&root.key)
+            .args(["--out"])
+            .arg(&sums_env)
+            .arg("--json"),
+    );
+    assert_eq!(v["command"], "sign-sums");
+    assert!(v["sums_digest"].as_str().unwrap().starts_with("sha256:"));
+
+    // ── deposit (into a layout the attach-* commands then use) ──────────
+    let tool = parent.join("cij-tool");
+    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+    let spec = parent.join("cij-spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0.0\"\npath = \"{}\"\n",
+            tool.display()
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("cij-layout");
+    let deposited = json_of(
+        varve(&fx)
+            .args(["deposit", "--spec"])
+            .arg(&spec)
+            .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+            .arg(&root.key)
+            .args(["--key-id", "varve-root-1", "--out"])
+            .arg(&layout)
+            .arg("--json"),
+    );
+    assert_eq!(deposited["command"], "deposit");
+
+    // ── attach-status ──────────────────────────────────────────────────
+    let v = json_of(
+        varve(&fx)
+            .args(["attach-status", "--layout"])
+            .arg(&layout)
+            .args(["--status"])
+            .arg(&status_env)
+            .arg("--json"),
+    );
+    assert_eq!(v["command"], "attach-status");
+    assert_eq!(v["line"], "2026.07");
+    assert_eq!(v["counter"], 4);
+
+    // ── attach-index ───────────────────────────────────────────────────
+    let v = json_of(
+        varve(&fx)
+            .args(["attach-index", "--layout"])
+            .arg(&layout)
+            .args(["--index"])
+            .arg(&index_env)
+            .arg("--json"),
+    );
+    assert_eq!(v["command"], "attach-index");
+    assert_eq!(v["counter"], 2);
+
+    // ── sign-attestation (needs the layer INSTALLED, per `docs ci`) ─────
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+    let att = parent.join("cij-sbom.json");
+    std::fs::write(&att, r#"{"bomFormat":"CycloneDX"}"#).unwrap();
+    let att_env = parent.join("cij-sbom.dsse.json");
+    let v = json_of(
+        varve(&fx)
+            .env("VARVE_TRUST_ROOT", &root.trust_root)
+            .args(["sign-attestation", "--kind", "sbom", "--file"])
+            .arg(&att)
+            .args(["--producer", "varve", "--key"])
+            .arg(&root.key)
+            .args(["--out"])
+            .arg(&att_env)
+            .arg("--json"),
+    );
+    assert_eq!(v["command"], "sign-attestation");
+    assert_eq!(v["kind"], "sbom");
+    assert_eq!(v["producer"], "varve");
+    assert_eq!(v["layer"], "2026.07.0");
+    // The two commands agree on the layer's identity, which is the whole point
+    // of emitting it in a shape a pipeline can join on.
+    assert_eq!(v["layer_manifest_digest"], deposited["manifest_digest"]);
+    assert!(
+        v["attestation_digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert!(v["attached_to"].is_null(), "no --attach-to was passed");
+}
+
+// rivet: verifies REQ-CIGATE-001
+#[test]
+fn status_json_carries_the_verdict_that_the_exit_code_carries() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let (trust, envelope) = yanked_project(&fx);
+    let out = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["status", "--from-file"])
+        .arg(&envelope)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["command"], "status");
+    assert_eq!(v["layer"], "2026.07.0");
+    assert_eq!(v["yanked"], true);
+    assert_eq!(v["yanked_reason"], "CVE-2026-0001 in synth");
+    assert_eq!(v["known_problems"], 1);
+    // The document and the process must not be able to disagree.
+    assert_eq!(v["exit_code"], 3);
+}
+
+/// A two-layer composition holding one payload of every shape REQ-INSPECT-001
+/// cares about: a DISPATCHED tool, HELD payloads of two kinds, a payload
+/// stamped for ANOTHER platform (present in the signed manifest, absent from
+/// this store), and a second layer composed in. Returns the trust root.
+fn inspectable_composition(fx: &Fixture) -> std::path::PathBuf {
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust = parent.join("inspect-root.pub");
+    std::fs::write(&trust, hex::encode(&pk)).unwrap();
+
+    // Upstream: a crate and a WIT package — both HELD, neither dispatched.
+    let (up_archive, up_digest) = signed_payload_layer(
+        fx,
+        "inspect-up",
+        "2026.08.0",
+        &sk,
+        &[
+            Payload {
+                kind: "crate",
+                name: "cfg-if",
+                version: "1.0.0",
+                platform: None,
+                bytes: dot_crate("cfg-if", "1.0.0", ""),
+            },
+            Payload {
+                kind: "wit",
+                name: "wasi-interfaces",
+                version: "0.2.0",
+                platform: None,
+                bytes: b"package wasi:cli@0.2.0;\n".to_vec(),
+            },
+        ],
+        &[],
+    );
+
+    // The pinned layer: a dispatched tool, plus a `.vsix` built for a platform
+    // that is NOT this machine — so `install` will not lay it down and
+    // `inspect` must say so rather than pretend it is here or drop the row.
+    let elsewhere = if varve_core::host_platform().contains("aarch64") {
+        "x86_64-unknown-linux-gnu"
+    } else {
+        "aarch64-apple-darwin"
+    };
+    let (root_archive, _) = signed_payload_layer(
+        fx,
+        "inspect-root",
+        "2026.07.0",
+        &sk,
+        &[
+            Payload {
+                kind: "tool",
+                name: "synth",
+                version: "1.4.0",
+                platform: None,
+                bytes: b"#!/bin/sh\necho synth\n".to_vec(),
+            },
+            Payload {
+                kind: "vsix",
+                name: "pulseengine.wit-tools",
+                version: "0.9.1",
+                platform: Some(elsewhere),
+                bytes: b"PK\x03\x04not-for-this-machine".to_vec(),
+            },
+        ],
+        &[&up_digest],
+    );
+
+    // Installed one at a time, following the pin — the sequence an extender
+    // adopting an upstream realm's layer actually performs.
+    install_pinned(fx, &trust, "2026.08.0", &up_archive);
+    install_pinned(fx, &trust, "2026.07.0", &root_archive);
+    trust
+}
+
+// rivet: verifies REQ-INSPECT-001
+#[test]
+fn inspect_reports_name_version_kind_and_platform_for_every_payload() {
+    // Clauses 1 and 3. Before this, NOTHING reported a payload's name, version,
+    // kind or platform: `list` prints layer ids and `sbom` collapses every
+    // non-tool kind to a CycloneDX `library`. The build engineer in the audit
+    // chose an export adapter by running all four and reading which errored.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let trust = inspectable_composition(&fx);
+
+    let assert = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .arg("inspect")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    // Every payload, with all four facts clause 1 names.
+    for needle in [
+        "synth",
+        "1.4.0",
+        "tool", // dispatched
+        "cfg-if",
+        "1.0.0",
+        "crate", // held, from the composed layer
+        "wasi-interfaces",
+        "0.2.0",
+        "wit", // held — the kind `which` called absent
+        "pulseengine.wit-tools",
+        "0.9.1",
+        "vsix",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "`varve inspect` does not report `{needle}`:\n{stdout}"
+        );
+    }
+    // Clause 3: the distinction, in the words the requirement uses.
+    assert!(
+        stdout.contains("DISPATCHED") && stdout.contains("HELD"),
+        "inspect must distinguish dispatched payloads from held ones:\n{stdout}"
+    );
+    // The platform column is real, not decorative: an unstamped entry is
+    // any-platform and a stamped one says which.
+    assert!(stdout.contains("any"), "an unstamped entry is any-platform");
+    assert!(
+        stdout.contains("not laid down here"),
+        "a payload stamped for another platform is in the signed manifest and NOT in this \
+         store; saying nothing would be a quiet lie:\n{stdout}"
+    );
+}
+
+// rivet: verifies REQ-INSPECT-001
+#[test]
+fn inspect_json_is_the_shape_a_pipeline_was_promised() {
+    // Clauses 2 and 4. `sbom` is composition-blind and that is a known
+    // limitation — this must not repeat it, so the composed layer's payloads
+    // and the composition block are both asserted here.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let trust = inspectable_composition(&fx);
+
+    let out = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["inspect", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`inspect --json` emits ONE JSON document");
+
+    assert_eq!(v["command"], "inspect");
+    assert_eq!(v["layer"], "2026.07.0");
+    assert_eq!(v["channel"], "qualified");
+    assert!(
+        v["manifest_digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"),
+        "the pinned layer's manifest digest is what a pin and an [[include]] name"
+    );
+
+    // ── clause 4: the composition ──────────────────────────────────────
+    let comp = v["composition"].as_array().unwrap();
+    assert_eq!(comp.len(), 2, "both layers of the composition: {comp:#?}");
+    let root: Vec<&serde_json::Value> = comp.iter().filter(|c| c["root"] == true).collect();
+    assert_eq!(root.len(), 1, "exactly one layer is the pinned root");
+    assert_eq!(root[0]["layer"], "2026.07.0");
+    assert!(
+        comp.iter()
+            .any(|c| c["layer"] == "2026.08.0" && c["root"] == false),
+        "the COMPOSED layer must appear — its payloads are part of what the pin delivers, \
+         and `varve sbom` being blind to that is the limitation this must not repeat"
+    );
+
+    // ── clauses 1-3: the payloads ──────────────────────────────────────
+    let payloads = v["payloads"].as_array().unwrap();
+    assert_eq!(payloads.len(), 4, "{payloads:#?}");
+    let find = |name: &str| {
+        payloads
+            .iter()
+            .find(|p| p["name"] == name)
+            .unwrap_or_else(|| panic!("`{name}` missing from the report: {payloads:#?}"))
+    };
+
+    let synth = find("synth");
+    assert_eq!(synth["kind"], "tool");
+    assert_eq!(synth["version"], "1.4.0");
+    assert_eq!(synth["platform"], "any");
+    assert_eq!(synth["dispatch"], "dispatched");
+    assert_eq!(synth["present"], true);
+    assert_eq!(synth["layer"], "2026.07.0");
+
+    // The payload `varve which` used to call "not part of layer".
+    let wit = find("wasi-interfaces");
+    assert_eq!(wit["kind"], "wit");
+    assert_eq!(wit["version"], "0.2.0");
+    assert_eq!(wit["dispatch"], "held");
+    // …and it came from the COMPOSED layer, attributed to it.
+    assert_eq!(wit["layer"], "2026.08.0");
+
+    let crate_row = find("cfg-if");
+    assert_eq!(crate_row["kind"], "crate");
+    assert_eq!(crate_row["dispatch"], "held");
+    assert_eq!(crate_row["layer"], "2026.08.0");
+
+    // The other platform's entry: signed, reported, and honestly not here.
+    let vsix = find("pulseengine.wit-tools");
+    assert_eq!(vsix["kind"], "vsix");
+    assert_eq!(vsix["dispatch"], "held");
+    assert_eq!(vsix["present"], false);
+    assert_ne!(
+        vsix["platform"], "any",
+        "a stamped entry must report the triple it was built for"
+    );
+    assert_ne!(vsix["platform"], v["host_platform"]);
+
+    // Every payload carries its signed digest, which is what makes the report
+    // joinable against a manifest, an SBOM or an attestation.
+    for p in payloads {
+        assert!(
+            p["digest"].as_str().unwrap().starts_with("sha256:"),
+            "{p:#?}"
+        );
+        assert_eq!(p["known_kind"], true);
+    }
+
+    let summary = &v["summary"];
+    assert_eq!(summary["payloads"], 4);
+    assert_eq!(summary["dispatched"], 1);
+    assert_eq!(summary["held"], 3);
+    assert_eq!(summary["layers"], 2);
+}
+
+// rivet: verifies REQ-INSPECT-001
+#[test]
+fn which_names_a_held_payload_instead_of_claiming_the_layer_lacks_it() {
+    // Clause 3, at the surface that was FALSE: `varve which` on a held `wit`
+    // payload said "is not part of layer", and the layer holds it. A reader
+    // acting on that message re-deposits something that is already there.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let trust = inspectable_composition(&fx);
+
+    let assert = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["which", "wasi-interfaces"])
+        .assert()
+        // Still an error — it is not a dispatched tool, and `which` must not
+        // print a path for something varve will never exec.
+        .code(1);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        !stderr.contains("is not part of layer"),
+        "the refuted claim must not come back — the layer HOLDS it:\n{stderr}"
+    );
+    for needle in ["HELD", "wit", "0.2.0", "varve inspect"] {
+        assert!(
+            stderr.contains(needle),
+            "the message must say `{needle}`:\n{stderr}"
+        );
+    }
+
+    // A name that is genuinely absent still gets the generic refusal — the two
+    // answers must not collapse into one.
+    let assert = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["which", "no-such-thing"])
+        .assert()
+        .code(1);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("is not part of layer"), "{stderr}");
+    assert!(!stderr.contains("HELD"), "{stderr}");
+}
+
+// rivet: verifies REQ-INSPECT-001
+#[test]
+fn inspect_reports_a_payload_kind_this_varve_does_not_know() {
+    // A layer deposited by a NEWER varve installs and verifies normally: the
+    // signed-digest check is kind-independent by design (DD-003). So `inspect`
+    // meets kinds it cannot classify, and the choice is report-it-verbatim or
+    // lose it. `sbom` labels such an entry rather than dropping it; so does
+    // this — a command whose whole job is "what is in here" must not answer by
+    // omission.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust = parent.join("future-root.pub");
+    std::fs::write(&trust, hex::encode(&pk)).unwrap();
+    let (archive, _) = signed_payload_layer(
+        &fx,
+        "future",
+        "2026.07.0",
+        &sk,
+        &[Payload {
+            kind: "quantum-blob",
+            name: "spooky",
+            version: "2.0.0",
+            platform: None,
+            bytes: b"|0>+|1>".to_vec(),
+        }],
+        &[],
+    );
+    install_pinned(&fx, &trust, "2026.07.0", &archive);
+
+    let out = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["inspect", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "an unknown kind must not make `inspect` fail — the bytes still verify: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let p = &v["payloads"].as_array().unwrap()[0];
+    assert_eq!(p["name"], "spooky");
+    // Verbatim, as signed — not guessed into a kind this varve happens to know.
+    assert_eq!(p["kind"], "quantum-blob");
+    assert_eq!(p["known_kind"], false);
+    assert_eq!(
+        p["dispatch"], "unknown",
+        "whether an unknown kind dispatches is not knowable, and claiming `held` would be a \
+         guess dressed as a fact"
+    );
+}
+
+// rivet: verifies REQ-INSPECT-001
+#[test]
+fn inspect_refuses_a_layer_it_cannot_verify_rather_than_describing_it() {
+    // Clause 5 says no network; it does not say no trust. A contents report for
+    // a layer nobody vouched for is worse than none, because it looks
+    // authoritative — the same reasoning `sbom` fails closed on.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let trust = inspectable_composition(&fx);
+    let parent = fx.project.parent().unwrap();
+    let (_, wrong_pk) = varve_core::generate_root_keypair();
+    let wrong = parent.join("wrong-root.pub");
+    std::fs::write(&wrong, hex::encode(&wrong_pk)).unwrap();
+
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &wrong)
+        .arg("inspect")
+        .assert()
+        .code(1);
+
+    // …and it works with no source, no registry and nothing to fetch from:
+    // the fixture's realm names no registry and the archives it installed from
+    // are not consulted again. The answer comes out of the store (clause 5).
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["inspect", "--layer", "2026.08.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wasi-interfaces"));
 }
