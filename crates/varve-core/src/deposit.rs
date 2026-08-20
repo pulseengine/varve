@@ -125,6 +125,15 @@ pub struct ToolSource {
     pub sha256: String,
 }
 
+/// How a deposit treats a destination that is not empty (REQ-NODESTROY-001).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DepositOptions {
+    /// Overwrite a layout that already carries referrers, destroying them.
+    /// Deliberate and stated — the point of the guard is that the destructive
+    /// case must be ASKED for, not stumbled into.
+    pub force: bool,
+}
+
 /// A completed deposit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DepositOutcome {
@@ -194,6 +203,19 @@ pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositErr
     toml::from_str(toml_text).map_err(|e| DepositError::Spec(e.to_string()))
 }
 
+impl From<crate::archive::LayoutWriteError> for DepositError {
+    fn from(e: crate::archive::LayoutWriteError) -> Self {
+        match e {
+            crate::archive::LayoutWriteError::Io { path, source } => {
+                DepositError::Io { path, source }
+            }
+            crate::archive::LayoutWriteError::WouldDestroy(d) => {
+                DepositError::WouldDestroySignedWork(d)
+            }
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DepositError {
     #[error(
@@ -214,6 +236,12 @@ pub enum DepositError {
     BadIssuedAt { issued_at: String },
     #[error("deposit spec is not valid: {0}")]
     Spec(String),
+    /// REQ-NODESTROY-001. `deposit` writes the WHOLE layout, `index.json`
+    /// included, so a second deposit into a directory that has had evidence
+    /// attached dropped all of it and reported success. Documentation warned
+    /// about this in three topics and guarded nothing.
+    #[error(transparent)]
+    WouldDestroySignedWork(#[from] crate::referrers::WouldDestroy),
     #[error("deposit has no tools — an empty layer is not a toolchain")]
     NoTools,
     #[error(
@@ -350,13 +378,31 @@ fn check_sdk_prefixes(tools: &[&DepositTool]) -> Result<(), DepositError> {
     Ok(())
 }
 
-/// Assemble, sign, and write a layer as an OCI image layout at `dest`.
+/// Assemble, sign, and write a layer as an OCI image layout at `dest`,
+/// refusing a destination that already carries signed work (REQ-NODESTROY-001).
 pub fn deposit(
     spec: &DepositSpec,
     signing_key: &[u8],
     key_id: &str,
     dest: &Path,
 ) -> Result<DepositOutcome, DepositError> {
+    deposit_with_options(spec, signing_key, key_id, dest, &DepositOptions::default())
+}
+
+/// `deposit`, with the destructive case available to callers that ask for it.
+pub fn deposit_with_options(
+    spec: &DepositSpec,
+    signing_key: &[u8],
+    key_id: &str,
+    dest: &Path,
+    options: &DepositOptions,
+) -> Result<DepositOutcome, DepositError> {
+    // FIRST, before anything is validated or signed. `write_oci_layout` runs
+    // the same guard — it is the single writer, and clause 4 lives there — but
+    // asking here too means a deposit that would destroy signed work is
+    // refused before a key is even read, rather than after a signature exists
+    // for an artifact that will not be written (REQ-NODESTROY-001).
+    crate::referrers::guard(dest, options.force)?;
     if spec.tools.is_empty() {
         return Err(DepositError::NoTools);
     }
@@ -533,8 +579,9 @@ pub fn deposit(
         // single-platform claim — unlike an archive (varve#80).
         None,
         dest,
+        options.force,
     )
-    .map_err(|(path, source)| DepositError::Io { path, source })?;
+    .map_err(DepositError::from)?;
 
     Ok(DepositOutcome {
         digest: manifest_digest(&payload),
@@ -561,6 +608,79 @@ mod producer_tests {
                 "{bad} must be refused"
             );
         }
+    }
+
+    // rivet: verifies REQ-NODESTROY-001
+    #[test]
+    fn a_deposit_that_would_drop_a_referrer_is_refused_before_a_byte_is_written() {
+        use crate::verify::generate_root_keypair;
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("layout");
+        let spec = super::tests::spec();
+        deposit(&spec, &sk, "k", &dest).unwrap();
+        // Evidence attached after the deposit — the append-only half of the
+        // producer pipeline.
+        let status = crate::linestatus::LineStatus {
+            line: "2026.08".into(),
+            counter: 1,
+            issued_at: "2026-08-07T00:00:00Z".into(),
+            support_until: None,
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        };
+        crate::linestatus::attach_to_layout(
+            &dest,
+            &"2026.08".parse().unwrap(),
+            status.sign(&sk, "k").unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        let index_before = std::fs::read(dest.join("index.json")).unwrap();
+        let err = deposit(&spec, &sk, "k", &dest).expect_err("must refuse");
+        assert!(
+            matches!(&err, DepositError::WouldDestroySignedWork { .. }),
+            "got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("line-status") && msg.contains("2026.08"),
+            "{msg}"
+        );
+        assert!(msg.contains("varve attach-status"), "{msg}");
+        assert_eq!(
+            index_before,
+            std::fs::read(dest.join("index.json")).unwrap(),
+            "a refused deposit must not have touched the layout"
+        );
+
+        // …and --force is the deliberate way through, because sometimes the
+        // operator really does mean to start the directory over.
+        deposit_with_options(&spec, &sk, "k", &dest, &DepositOptions { force: true })
+            .expect("--force overrides the guard");
+        assert!(
+            crate::linestatus::read_any_from_layout(&dest)
+                .unwrap()
+                .is_none(),
+            "--force is destructive on purpose — the referrer is gone"
+        );
+    }
+
+    // rivet: verifies REQ-NODESTROY-001
+    #[test]
+    fn depositing_into_a_fresh_or_previously_clean_directory_still_works() {
+        // The guard must fire on ATTACHED work only. A guard that also refused
+        // a directory holding nothing but a previous clean deposit would break
+        // every idempotent CI re-run, and a guard that gets switched off
+        // protects nobody.
+        use crate::verify::generate_root_keypair;
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("layout");
+        let spec = super::tests::spec();
+        let first = deposit(&spec, &sk, "k", &dest).unwrap();
+        let second = deposit(&spec, &sk, "k", &dest).expect("a clean layout may be re-deposited");
+        assert_eq!(first.digest, second.digest);
     }
 
     // rivet: verifies REQ-PRODUCER-001
@@ -594,7 +714,7 @@ mod tests {
     use crate::store::Store;
     use crate::verify::{PinnedKeyVerifier, generate_root_keypair};
 
-    fn spec() -> DepositSpec {
+    pub(super) fn spec() -> DepositSpec {
         DepositSpec {
             includes: Vec::new(),
             layer: "2026.08.0".parse().unwrap(),

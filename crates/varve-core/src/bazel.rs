@@ -103,9 +103,20 @@ pub fn export(manifest: &LayerManifest) -> BazelExport {
         .into_iter()
         .map(|(tool, (repo, version, platforms))| {
             let json = serde_json::json!({
+                // The header states exactly what varve vouched for, and stops
+                // there. `sha256` below is the SOURCE-ASSET hash: recorded
+                // verbatim from the deposit spec into the signed payload, and
+                // never checked against the asset it names — varve never
+                // fetches that asset. A release engineer deposited all zeros
+                // and nothing objected anywhere in the chain. Being inside a
+                // signature makes a value ATTRIBUTABLE, not true, and a header
+                // that reads as though varve had verified it turns a
+                // transcription into a warrant.
                 "_generated_by": format!(
                     "varve export-bazel — layer {} (counter {}); digests transcribed from the \
-                     signed layer manifest. Do not hand-edit.",
+                     signed layer manifest. The source-asset sha256 is transcribed from the \
+                     deposit spec and is NOT verified by varve against the asset it names. \
+                     Do not hand-edit.",
                     manifest.layer, manifest.counter
                 ),
                 "tool_name": tool,
@@ -201,6 +212,17 @@ mod tests {
         // Provenance header names the layer and forbids hand-editing.
         let header = rivet["_generated_by"].as_str().unwrap();
         assert!(header.contains("2026.08.1") && header.contains("Do not hand-edit"));
+        // …and it must not overclaim. The `sha256` asserted above is the
+        // SOURCE-ASSET hash, transcribed from the deposit spec and never
+        // checked against the asset it names — varve never fetches it. This
+        // very fixture proves it: `aaaa…`/`bbbb…` are obviously not any real
+        // release's digest, and they travel through deposit, signature and
+        // export without a word. A header that reads as though varve had
+        // verified them turns a transcription into a warrant.
+        assert!(
+            header.contains("NOT verified by varve"),
+            "the header must not claim a check varve does not perform: {header}"
+        );
     }
 
     // rivet: verifies REQ-BAZEL-001
