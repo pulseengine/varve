@@ -3134,3 +3134,201 @@ artifacts:
     fields:
       priority: must
       category: functional
+
+  - id: REQ-VERIFYALL-001
+    type: requirement
+    title: The store-wide integrity check actually covers the store
+    status: draft
+    release: v0.28.0
+    description: >
+      `varve verify --all --help` says "Verify every installed layer instead of
+      only the pinned one". It walks only the PINNED project's realm partition.
+      A security auditor in the ten-persona audit planted a backdoored binary in
+      a second realm's installed layer, ran `verify --all`, got exit 0, and then
+      executed the backdoor (varve#84). `varve docs recovery` directs readers to
+      this command as THE store-wide integrity check, so the docs, the help text
+      and the operator's expectation agree with each other and only the code
+      dissents. Clauses: (1) `--all` shall walk EVERY realm partition in the
+      store, each layer against ITS OWN realm's trust root — the realm
+      separation is preserved in which key verifies what, not in what gets
+      looked at. (2) It shall report EVERY failing layer rather than stopping at
+      the first: it is fail-fast today, and in one observed run the only layer id
+      on screen belonged to a different, healthy layer. (3) Each failure shall
+      name the layer id AND its store path, because "which one" is the first
+      question an operator asks. (4) It shall print the scope it covered
+      (`checked N of N layers across M realms`), so a future scoping regression
+      is visible in the output rather than silent. (5) A layer whose realm is no
+      longer defined in varve-realms.toml shall be reported, not skipped — an
+      unverifiable layer in the store is exactly what this command is for.
+
+  - id: REQ-NODESTROY-001
+    type: requirement
+    title: A producer command does not destroy signed work while reporting success
+    status: draft
+    release: v0.28.0
+    description: >
+      `varve deposit --out DIR` into a directory that already carries referrers
+      — line-status, line-index, attestations — drops all of them, exits 0, and
+      prints a success message byte-identical to a clean run (varve#82,
+      varve#85). Three of ten personas hit this independently and the own-realm
+      operator hit it by accident. It is warned about in THREE separate docs
+      topics and guarded by ZERO code, which is documentation doing the tool's
+      safety job. For a realm declaring `signed-index = true` the blast radius is
+      total: every consumer install then fails closed. Clauses: (1) `deposit`
+      shall refuse to write into an `--out` that already carries referrers,
+      naming what it found. (2) `--force` shall override, because re-depositing
+      deliberately is a real workflow. (3) The refusal shall carry the re-attach
+      sequence (`sign-status`/`attach-status`, and `sign-index`/`attach-index`
+      where the realm declares one), so the operator recovers from the message
+      rather than from the docs. (4) The same guard shall apply to any other
+      command that writes a layout in place. (5) A layout the tool refuses to
+      touch shall be left byte-identical — a partial write is worse than both
+      outcomes.
+
+  - id: REQ-ADVISORY-002
+    type: requirement
+    title: An advisory that can never fire is refused when it is signed
+    status: draft
+    release: v0.28.0
+    description: >
+      A typo in an advisory's `affected` layer id signs cleanly and the advisory
+      then never fires for anyone (varve#61). The producer sees success; the
+      consumer sees nothing; the yank silently does not exist. This is the
+      failure mode the entire status mechanism exists to prevent, reachable by
+      one wrong character. Clauses: (1) `sign-status` shall validate every
+      `affected` entry as a well-formed layer identifier and refuse the document
+      otherwise. (2) Where the signer can see the line's layers (a layout or a
+      registry is reachable), it shall refuse an `affected` id that names no
+      known layer, naming the ids that do exist — the same shape as the
+      "it exposes:" list varve already prints for tools. (3) Where it cannot see
+      them, it shall say which check it could NOT perform rather than implying a
+      complete one. (4) `--force` shall allow signing an advisory for a layer not
+      yet deposited, because pre-signing is legitimate; silence shall not.
+
+  - id: REQ-NOSILENT-001
+    type: requirement
+    title: A command that cannot do what was asked says so
+    status: draft
+    release: v0.28.0
+    description: >
+      Three commands report success over a broken outcome (varve#88), and the
+      ten-persona audit found they caused as much downstream pain as any red
+      text. Clauses: (1) `varve archive` shall not silently omit the baseline
+      line-status: where the installing core cached none, it shall warn loudly,
+      or refuse without an explicit `--allow-no-status`. It is already verbose
+      about omitted PLATFORM payloads and silent about the advisory, which is the
+      inconsistency that hides it. An archive without a baseline hands every
+      air-gapped consumer a permanently broken `varve status`. (2)
+      `varve export-cargo` shall warn on every run where the index it can derive
+      is weaker than the crates deserve, naming `export-crates-vendor`, rather
+      than closing with an instruction to run the very `cargo build --offline`
+      that can exit 0 having compiled everything featureless. (3) `varve install`
+      of an incomplete composition shall not print "installed layer X" and THEN
+      error, leaving a layer in `varve list` that no other command will touch.
+      (4) The composition include check at install shall be TRANSITIVE, so
+      install and verify reach the same verdict — `docs verify` promises "the CI
+      gate and the install agree" and today install exits 0 on a graph verify
+      rejects at depth 2.
+
+  - id: REQ-CIGATE-001
+    type: requirement
+    title: varve is something a pipeline can gate on, not only something a human can read
+    status: draft
+    release: v0.28.0
+    description: >
+      `varve status` exits 0 while printing YANKED, so a pipeline must grep
+      stdout to fail on a yanked toolchain (varve#90). No `(CI)`-marked command
+      offers `--json`, so a pipeline scrapes a layer digest out of a prose
+      sentence. `varve docs --grep "exit code"` returns nothing across all fifty
+      topics. Two personas independently could not write the consumer-side gate
+      that three separate topics tell them to write. Clauses: (1) `varve status`
+      shall exit NON-ZERO when the resolved layer is yanked. This is a BREAKING
+      change to a documented-by-absence behaviour and shall be stated as one:
+      the point of signing a yank is to stop a build, and an exit 0 is precisely
+      the failure varve exists to prevent. (2) Every command marked (CI) shall
+      offer `--json` with a stable shape. (3) An exit-code contract shall exist
+      as a documented table, and shall be mechanically checked so it cannot
+      drift from the binary. (4) `docs ci` shall gain a consumer-gate section
+      showing `verify --export`, `verify --lockfile` and declared exports —
+      today it is producer-only while three topics ask for the consumer job.
+      (5) `varve docs --grep` shall search titles and summaries as well as
+      bodies, and shall exit non-zero on no match, so it too can gate.
+
+  - id: REQ-INSPECT-001
+    type: requirement
+    title: A consumer can see what is inside a layer
+    status: draft
+    release: v0.28.0
+    description: >
+      No command reports a layer's payload names, versions, kinds or platforms
+      (varve#92). `varve list` prints layer ids only; `varve sbom` collapses
+      every non-tool kind to CycloneDX `library`. In the audit the build
+      engineer chose an export adapter by running all four and reading which
+      errored; the newcomer learned the tool set by typo-ing a name into
+      `varve which` and reading the "it exposes:" list. Clauses: (1) A command
+      shall report, for the resolved or a named layer, each payload's name,
+      version, kind and platform. (2) It shall offer `--json` (see
+      REQ-CIGATE-001). (3) It shall distinguish DISPATCHED payloads from HELD
+      ones, because "not part of layer" is currently what a held `wit` payload
+      reports and that is false. (4) It shall report the composition — a
+      composed layer's payloads are part of what the pin delivers, and
+      `varve sbom` being composition-blind is a known limitation this should not
+      repeat. (5) It shall not require network access: the store already holds
+      the answer.
+
+  - id: REQ-CUSTODY-001
+    type: requirement
+    title: An organisation can run its own realm as a real trust operation, not a demo
+    status: draft
+    release: v0.28.0
+    description: >
+      The ten-persona audit found the producer story works — five personas stood
+      up a realm end to end from the docs alone, first try — and is incomplete in
+      ways that stop a serious adopter (varve#89). `docs signing-keys` says a
+      real root is "generated in a ceremony, not on a build machine" and stops
+      there. This requirement is the DOCS-and-procedure half; the key material
+      half stays REQ-CEREMONY-001 at v1.0.0. Clauses: (1) A `root-ceremony`
+      topic shall describe air-gapped generation, split custody, paper backup and
+      long-term storage, and shall state plainly what varve does NOT do —
+      there is no rotation and no revocation, and saying so is the honest form.
+      (2) It shall state whether HSM/PKCS#11/KMS is out of scope permanently or
+      merely absent, because an adopter needs to know which. (3) `docs own-realm`
+      shall continue past the operator's first consumer: `sign-status` +
+      `attach-status`, then `sign-index` + `attach-index` where the realm
+      declares one. Following it verbatim today ships a realm that verifies
+      perfectly and can NEVER deliver a yank. (4) It shall teach the correct
+      ORDERING — it currently teaches install-immediately-after-deposit, which is
+      what walks an operator into REQ-NOSILENT-001 clause 1. (5) README shall
+      state that running your own trust universe is possible at all: it contains
+      zero occurrences of `keygen` or `own-realm`, and addresses the reader only
+      as a PulseEngine consumer. (6) `[tool.source].sha256` is signed and NEVER
+      verified, while `export-bazel` emits it as the checksum Bazel will enforce
+      under a header saying digests were transcribed from the signed manifest.
+      That shall be stated in `config-reference` and `payload-kinds`, and the
+      export header shall stop implying varve vouched for it.
+
+  - id: REQ-SYSTEST-002
+    type: requirement
+    title: The producer pipeline is exercised, not only the consumer path
+    status: draft
+    release: v0.28.0
+    description: >
+      REQ-SYSTEST-001 gave the CONSUMER half a system gate: deposit, install,
+      verify, export, offline build, at real scale. The PRODUCER half — the
+      workflow that assembles the official layer — has none, and is exercised
+      only by dispatching it against the real registry. That is where the
+      2026.08.3 deposit failed, on a bug a seventeen-check CI gate including a
+      twenty-nine-minute mutation run could not have caught, because nothing in
+      CI executes that workflow (varve#95). Clauses: (1) The layer-assembly path
+      shall run in CI without publishing, driven by fixture or recorded release
+      metadata rather than live GitHub. (2) It shall cover the shapes that have
+      actually broken: one repo appearing in two lists, a per-platform payload, a
+      platform with no asset, and one repo requested at two different versions
+      (which must be refused, because otherwise one release's assets are checked
+      against another's sums). (3) It shall assert the generated spec parses and
+      deposits, and stop before the registry push. (4) A pre-flight that stubs
+      the component under test shall not count as coverage — the dry-run that
+      preceded the failed deposit stubbed exactly the function that broke, and
+      reported success. (5) REQ-SYSTEST-001 clause 4 (no adapter without a system
+      test) shall gain mechanical enforcement, or shall be restated honestly as
+      review policy.
