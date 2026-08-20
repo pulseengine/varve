@@ -97,13 +97,21 @@ impl CarriedWork {
     pub fn recovery(&self, dest: &str) -> String {
         let mut lines: Vec<String> = Vec::new();
         for _ in &self.line_status {
+            lines.push(
+                "  varve sign-status --file <status.json> --key <KEYFILE> --out <status.dsse>"
+                    .to_string(),
+            );
             lines.push(format!(
-                "  varve attach-status --layout {dest} --status <the signed line-status envelope>"
+                "  varve attach-status --layout {dest} --status <status.dsse>"
             ));
         }
         for _ in &self.line_index {
+            lines.push(
+                "  varve sign-index --file <index.json> --key <KEYFILE> --out <index.dsse>"
+                    .to_string(),
+            );
             lines.push(format!(
-                "  varve attach-index --layout {dest} --index <the signed line-index envelope>"
+                "  varve attach-index --layout {dest} --index <index.dsse>"
             ));
         }
         if self.attestations > 0 || self.attestation_blobs > 0 {
@@ -361,9 +369,15 @@ mod tests {
         // The recovery sequence covers exactly what was found, naming the
         // destination so it can be pasted.
         let recovery = work.recovery("/tmp/layout");
-        assert!(recovery.contains("varve attach-status --layout /tmp/layout"));
-        assert!(recovery.contains("varve attach-index --layout /tmp/layout"));
-        assert!(recovery.contains("--attach-to /tmp/layout"));
+        for expected in [
+            "varve sign-status --file",
+            "varve attach-status --layout /tmp/layout",
+            "varve sign-index --file",
+            "varve attach-index --layout /tmp/layout",
+            "--attach-to /tmp/layout",
+        ] {
+            assert!(recovery.contains(expected), "{recovery}");
+        }
     }
 
     // rivet: verifies REQ-NODESTROY-001
