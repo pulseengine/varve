@@ -3138,7 +3138,7 @@ artifacts:
   - id: REQ-VERIFYALL-001
     type: requirement
     title: The store-wide integrity check actually covers the store
-    status: draft
+    status: verified
     release: v0.28.0
     description: >
       `varve verify --all --help` says "Verify every installed layer instead of

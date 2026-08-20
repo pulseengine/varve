@@ -3119,6 +3119,230 @@ fn export_bazel_refuses_without_a_trust_root() {
         .stderr(predicate::str::contains("trust root"));
 }
 
+// rivet: verifies REQ-VERIFYALL-001
+#[cfg(unix)]
+#[test]
+fn verify_all_covers_every_realm_not_only_the_pinned_one() {
+    // varve#84, the auditor's scenario reproduced. `verify --all --help` says
+    // "Verify every installed layer instead of only the pinned one"; it walked
+    // only the PINNED project's realm partition. A security auditor planted a
+    // backdoored binary in a SECOND realm's installed layer, ran `verify
+    // --all`, got exit 0, and then executed the backdoor.
+    //
+    // `docs recovery` sends readers here as THE store-wide integrity check, so
+    // the docs, the help text and the operator all agree and only the code
+    // dissents. Realm separation is preserved in WHICH KEY verifies WHAT, not
+    // in what gets looked at.
+    let fx = fixture(None, &[]);
+    let parent = fx.project.parent().unwrap();
+
+    let mut realms_toml = String::new();
+    let mut archives = std::collections::BTreeMap::new();
+    for org in ["pulseengine", "acme"] {
+        let (sk, pk) = varve_core::generate_root_keypair();
+        let tool = format!("#!/bin/sh\necho universe={org}\n");
+        let digest = varve_core::manifest_digest(tool.as_bytes());
+        let host = varve_core::host_platform();
+        let payload = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"2026.08.0","eu.pulseengine.varve.line":"2026.08","eu.pulseengine.varve.channel":"rolling","eu.pulseengine.varve.counter":"5","org.opencontainers.image.created":"2026-08-07T00:00:00Z"}},"manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{digest}","size":0,"annotations":{{"eu.pulseengine.tool":"probe","eu.pulseengine.platform":"{host}"}}}}]}}"#
+        );
+        let envelope = varve_core::sign_layer_manifest(payload.as_bytes(), &sk, "k").unwrap();
+        let archive = parent.join(format!("va-archive-{org}"));
+        varve_core::DirSource::at(&archive)
+            .put(envelope.as_bytes(), &[(digest.as_str(), tool.as_bytes())])
+            .unwrap();
+        archives.insert(org.to_string(), archive);
+        realms_toml.push_str(&format!(
+            "[realm.{org}]\nregistry = \"oci://example.invalid/{org}\"\ntrust-root = \"{}\"\n\n",
+            hex::encode(&pk)
+        ));
+    }
+    std::fs::write(parent.join("varve-realms.toml"), realms_toml).unwrap();
+
+    for org in ["pulseengine", "acme"] {
+        let proj = parent.join(format!("va-proj-{org}"));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nrealm = \"{org}\"\nchannel = \"rolling\"\nlayer = \"2026.08.0\"\n"
+            ),
+        )
+        .unwrap();
+        let mut cmd = Command::cargo_bin("varve").unwrap();
+        cmd.env("PATH", "/usr/bin:/bin");
+        cmd.env("VARVE_ROOT", &fx.root)
+            .env_remove("VARVE_TRUST_ROOT")
+            .current_dir(&proj)
+            .args(["install", "--from"])
+            .arg(&archives[org])
+            .assert()
+            .success();
+    }
+
+    // Both realms clean: --all passes and SAYS what it covered, so a future
+    // scoping regression is visible in the output rather than silent.
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin");
+    cmd.env("VARVE_ROOT", &fx.root)
+        .env_remove("VARVE_TRUST_ROOT")
+        .current_dir(parent.join("va-proj-pulseengine"))
+        .args(["verify", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 of 2"));
+
+    // Now plant the backdoor in the realm the pin does NOT name.
+    let store = varve_core::Store::at(&fx.root);
+    let acme = varve_core::resolve_realm(&parent.join("va-proj-acme"), "acme").unwrap();
+    let acme_store = varve_core::Store::at(acme.effective_root(&fx.root));
+    let planted = acme_store
+        .list()
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("acme layer installed");
+    let probe = acme_store
+        .tool_path(&planted, "probe")
+        .expect("probe is dispatchable");
+    std::fs::write(&probe, b"#!/bin/sh\necho PWNED\n").unwrap();
+    let _ = store; // the top-level partition is empty here; both layers are realm-scoped
+
+    // The whole finding: this used to exit 0 while pinned to `pulseengine`.
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin");
+    cmd.env("VARVE_ROOT", &fx.root)
+        .env_remove("VARVE_TRUST_ROOT")
+        .current_dir(parent.join("va-proj-pulseengine"))
+        .args(["verify", "--all"])
+        .assert()
+        .failure()
+        // Names the layer AND where it lives — "which one" is the first
+        // question an operator asks.
+        .stderr(
+            predicate::str::contains("2026.08.0").and(predicate::str::contains(acme.fingerprint())),
+        );
+}
+
+// rivet: verifies REQ-VERIFYALL-001
+#[cfg(unix)]
+#[test]
+fn verify_all_reports_every_failure_and_refuses_to_skip_an_undefined_realm() {
+    // Clauses 2 and 5, which the headline test does not reach.
+    //
+    // Clause 2: it was FAIL-FAST. With two damaged layers an operator saw one,
+    // fixed it, re-ran, and met the next — and in one observed run the only
+    // layer id on screen belonged to a different, HEALTHY layer.
+    //
+    // Clause 5: a partition whose realm varve-realms.toml no longer defines
+    // cannot be checked by anything. Skipping it silently is the worst of the
+    // three options: an unverifiable layer sitting in the store is precisely
+    // what a store-wide check exists to surface.
+    let fx = fixture(None, &[]);
+    let parent = fx.project.parent().unwrap();
+
+    let mut realms_toml = String::new();
+    let mut archives = std::collections::BTreeMap::new();
+    for org in ["alpha", "beta"] {
+        let (sk, pk) = varve_core::generate_root_keypair();
+        let tool = format!("#!/bin/sh\necho {org}\n");
+        let digest = varve_core::manifest_digest(tool.as_bytes());
+        let host = varve_core::host_platform();
+        let payload = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"2026.08.0","eu.pulseengine.varve.line":"2026.08","eu.pulseengine.varve.channel":"rolling","eu.pulseengine.varve.counter":"5","org.opencontainers.image.created":"2026-08-07T00:00:00Z"}},"manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{digest}","size":0,"annotations":{{"eu.pulseengine.tool":"probe","eu.pulseengine.platform":"{host}"}}}}]}}"#
+        );
+        let envelope = varve_core::sign_layer_manifest(payload.as_bytes(), &sk, "k").unwrap();
+        let archive = parent.join(format!("ev-archive-{org}"));
+        varve_core::DirSource::at(&archive)
+            .put(envelope.as_bytes(), &[(digest.as_str(), tool.as_bytes())])
+            .unwrap();
+        archives.insert(org.to_string(), archive);
+        realms_toml.push_str(&format!(
+            "[realm.{org}]\nregistry = \"oci://example.invalid/{org}\"\ntrust-root = \"{}\"\n\n",
+            hex::encode(&pk)
+        ));
+    }
+    let realms_path = parent.join("varve-realms.toml");
+    std::fs::write(&realms_path, &realms_toml).unwrap();
+
+    for org in ["alpha", "beta"] {
+        let proj = parent.join(format!("ev-proj-{org}"));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nrealm = \"{org}\"\nchannel = \"rolling\"\nlayer = \"2026.08.0\"\n"
+            ),
+        )
+        .unwrap();
+        let mut cmd = Command::cargo_bin("varve").unwrap();
+        cmd.env("PATH", "/usr/bin:/bin");
+        cmd.env("VARVE_ROOT", &fx.root)
+            .env_remove("VARVE_TRUST_ROOT")
+            .current_dir(&proj)
+            .args(["install", "--from"])
+            .arg(&archives[org])
+            .assert()
+            .success();
+    }
+
+    // Clause 2: damage BOTH layers, and require BOTH to be named in one run.
+    for org in ["alpha", "beta"] {
+        let realm = varve_core::resolve_realm(&parent.join(format!("ev-proj-{org}")), org).unwrap();
+        let st = varve_core::Store::at(realm.effective_root(&fx.root));
+        let layer = st.list().unwrap().into_iter().next().unwrap();
+        let probe = st.tool_path(&layer, "probe").unwrap();
+        std::fs::write(&probe, format!("#!/bin/sh\necho tampered-{org}\n")).unwrap();
+    }
+    let alpha_fp = varve_core::resolve_realm(&parent.join("ev-proj-alpha"), "alpha")
+        .unwrap()
+        .fingerprint();
+    let beta_fp = varve_core::resolve_realm(&parent.join("ev-proj-beta"), "beta")
+        .unwrap()
+        .fingerprint();
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin");
+    let out = cmd
+        .env("VARVE_ROOT", &fx.root)
+        .env_remove("VARVE_TRUST_ROOT")
+        .current_dir(parent.join("ev-proj-alpha"))
+        .args(["verify", "--all"])
+        .assert()
+        .failure();
+    let err = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        err.contains(&alpha_fp) && err.contains(&beta_fp),
+        "both damaged layers must be named in ONE run, not one per re-run:\n{err}"
+    );
+    assert!(
+        err.contains("2 of 2"),
+        "the count must say how many failed of how many exist:\n{err}"
+    );
+
+    // Clause 5: drop `beta` from the realms file. Its partition is still on
+    // disk and nothing can vouch for it any more.
+    let alpha_only = realms_toml
+        .split("[realm.beta]")
+        .next()
+        .unwrap()
+        .to_string();
+    std::fs::write(&realms_path, alpha_only).unwrap();
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin");
+    let out = cmd
+        .env("VARVE_ROOT", &fx.root)
+        .env_remove("VARVE_TRUST_ROOT")
+        .current_dir(parent.join("ev-proj-alpha"))
+        .args(["verify", "--all"])
+        .assert()
+        .failure();
+    let err = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        err.contains(&beta_fp) && err.contains("does not define"),
+        "an undefined realm's partition must be REPORTED, not skipped:\n{err}"
+    );
+}
+
 // rivet: verifies REQ-REALM-001
 #[cfg(unix)]
 #[test]

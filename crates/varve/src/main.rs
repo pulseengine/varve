@@ -2647,11 +2647,16 @@ fn verify(
     let ctx = project_ctx(store)?;
     let verifier = ctx_verifier(&ctx)?;
     let store = &ctx.store;
-    let layers = if all {
-        store.list()?
-    } else {
-        vec![varve_core::resolve(&ctx.pin, store)?.layer]
-    };
+    if all {
+        // REQ-VERIFYALL-001: EVERY partition, each layer against ITS OWN
+        // realm's root. `--help` has always promised "every installed layer";
+        // this used to list only the pinned realm's partition, so a tampered
+        // layer in another realm passed with exit 0 (varve#84). The realm
+        // boundary is preserved in WHICH KEY verifies WHAT, not in what gets
+        // looked at.
+        return verify_every_partition(&ctx);
+    }
+    let layers = vec![varve_core::resolve(&ctx.pin, store)?.layer];
     if layers.is_empty() {
         bail!("nothing to verify — no layers installed");
     }
@@ -2694,6 +2699,106 @@ fn verify(
     // anti-rollback is varve's most defensible property; the command a
     // consumer runs to check it must check it.
     verify_no_rollback(&ctx, store)?;
+    Ok(())
+}
+
+/// `varve verify --all` (REQ-VERIFYALL-001): walk EVERY partition in the store.
+///
+/// Three properties this must have, each of which the old version lacked:
+///   * every realm partition is walked, not only the pinned project's;
+///   * each layer is checked against the root of the realm that OWNS its
+///     partition — using the pinned project's root for another realm's layer
+///     would be trust widening, the precise thing realms exist to prevent;
+///   * every failure is reported, with layer id AND path, and the scope
+///     actually covered is printed. It was fail-fast and in one observed run
+///     the only layer id on screen belonged to a different, healthy layer.
+fn verify_every_partition(ctx: &ProjectCtx) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    // fingerprint -> (realm name, verifier). A partition whose realm is not
+    // defined here cannot be checked, and is REPORTED rather than skipped: an
+    // unverifiable layer sitting in the store is what this command is for.
+    let mut by_fp: std::collections::BTreeMap<String, (String, varve_core::PinnedKeyVerifier)> =
+        std::collections::BTreeMap::new();
+    for name in varve_core::realm::realm_names(&cwd).unwrap_or_default() {
+        if let Ok(realm) = varve_core::resolve_realm(&cwd, &name)
+            && let Ok(v) = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
+        {
+            by_fp.insert(realm.fingerprint(), (name, v));
+        }
+    }
+
+    // The pin's own root, for the top-level (non-realm) partition.
+    let own = ctx_verifier(ctx)?;
+    let host = varve_core::host_platform();
+    let mut failures: Vec<String> = Vec::new();
+    let mut checked_layers = 0usize;
+    let mut total_layers = 0usize;
+    let mut partitions_seen = 0usize;
+
+    for (fp, part) in ctx.store.partitions() {
+        let layers = part.list().unwrap_or_default();
+        if layers.is_empty() {
+            continue;
+        }
+        partitions_seen += 1;
+        // Whose root speaks for this partition?
+        let chosen = match &fp {
+            Some(fp) => by_fp.get(fp).map(|(n, v)| (n.clone(), v)),
+            // The top-level core is not realm-scoped: the pin's own root.
+            None => Some(("(no realm)".to_string(), &own)),
+        };
+        for layer in layers {
+            total_layers += 1;
+            let Some((realm_name, verifier)) = &chosen else {
+                failures.push(format!(
+                    "layer {} ({}) sits in realm partition {} which varve-realms.toml does not \
+                     define — nothing here can vouch for it. Add that realm, or remove the \
+                     partition; an unverifiable layer in the store is exactly what `--all` is \
+                     for.\n    at {}",
+                    layer.layer,
+                    layer.digest,
+                    fp.clone().unwrap_or_default(),
+                    layer.root.display()
+                ));
+                continue;
+            };
+            match varve_core::verify_installed(&part, &layer, *verifier, &host) {
+                Ok(n) => {
+                    checked_layers += 1;
+                    println!(
+                        "layer {} {} [realm {realm_name}] verified: signature OK, {n} tool(s) \
+                         match their signed digests",
+                        layer.layer, layer.digest
+                    );
+                }
+                Err(e) => failures.push(format!(
+                    "layer {} ({}) in realm {realm_name} FAILED: {e}\n    at {}",
+                    layer.layer,
+                    layer.digest,
+                    layer.root.display()
+                )),
+            }
+        }
+    }
+
+    if total_layers == 0 {
+        bail!("nothing to verify — no layers installed");
+    }
+    // The scope, always — so a future regression that narrows what `--all`
+    // covers shows up in the output instead of passing quietly.
+    println!(
+        "checked {checked_layers} of {total_layers} layer(s) across {partitions_seen} partition(s)"
+    );
+    if !failures.is_empty() {
+        for f in &failures {
+            eprintln!("  {f}");
+        }
+        bail!(
+            "{} of {} installed layer(s) did not verify — see `varve docs recovery`",
+            failures.len(),
+            total_layers
+        );
+    }
     Ok(())
 }
 
