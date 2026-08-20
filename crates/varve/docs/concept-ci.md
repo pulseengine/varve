@@ -117,3 +117,71 @@ signing step's file descriptor.
 | `attach-index` | yes | no | no | no |
 | `sign-attestation --attach-to` | yes | **yes** | **yes** | yes |
 | `sign-sums` | no | no | no | yes |
+
+## The consumer gate
+
+Everything above is the PRODUCER half — you have a key and you publish a
+layer. The other half is the job every project that *consumes* a layer
+should run, and until v0.28.0 this chapter did not show it while three
+other topics told you to write it (`docs verify`: "run it in CI";
+`verify --export --help`: "run it in CI").
+
+```sh
+varve install                       # resolves the pin, fails closed
+varve verify --all                  # every layer in the store, every realm
+varve verify --lockfile Cargo.lock  # the lockfile agrees with the layer
+varve status                        # exits 3 if the pinned layer is YANKED
+```
+
+Four commands, four different questions:
+
+- **`install`** — do the bytes match what the realm signed, and is the pin
+  not a downgrade? Anti-rollback is enforced here.
+- **`verify --all`** — is *anything* in this store unverifiable? Scoped to
+  the pinned realm before v0.28.0, which meant a tampered layer in another
+  realm passed (varve#84). It now walks every partition and prints
+  `checked N of M layer(s) across P partition(s)` so you can see the scope
+  it covered.
+- **`verify --lockfile`** — do the versions your project resolved agree,
+  package by package, with the crates the layer pins? varve cannot
+  intercept a build, so provenance for compiled-in dependencies is by
+  asserted agreement, not by dispatch. This is that assertion.
+- **`status`** — has the realm since said something about this layer?
+  `install` and `verify` are offline and cannot know.
+
+### Declared exports need no flag
+
+If your `varve.toml` declares `[[export]]` entries, plain `varve verify`
+already checks every one of them for drift against the current pin — you
+do not have to name them, and a directory nobody remembered to name is
+exactly how an export goes stale.
+
+```toml
+manifest-version = 1
+
+[toolchain]
+realm   = "pulseengine"
+channel = "rolling"
+layer   = "2026.08.3"
+
+[[export]]
+kind = "crates-vendor"
+out  = "third_party/vendor"
+```
+
+`varve verify --export <DIR>` remains for a directory that is not
+declared yet.
+
+### Gate on the exit code, not on the text
+
+```sh
+varve status || case $? in
+  3) echo "::error::pinned layer is YANKED"; exit 1 ;;
+  *) echo "::error::varve status failed"; exit 1 ;;
+esac
+```
+
+`varve exit-codes` prints the contract, and `varve exit-codes --json`
+gives it to a script. Every `(CI)` command takes `--json`, so nothing
+here needs you to parse prose — before v0.28.0 a pipeline had to scrape
+the layer digest out of an English sentence.

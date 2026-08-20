@@ -3181,7 +3181,7 @@ artifacts:
   - id: REQ-NODESTROY-001
     type: requirement
     title: A producer command does not destroy signed work while reporting success
-    status: draft
+    status: verified
     release: v0.28.0
     description: >
       `varve deposit --out DIR` into a directory that already carries referrers
@@ -3202,10 +3202,18 @@ artifacts:
       touch shall be left byte-identical — a partial write is worse than both
       outcomes.
 
+  # Clause 2 is PARTIAL and this is why it stops at `implemented`. The
+  # signed-line-index path is done: where an index is in reach, an
+  # `affected` id naming no known layer is refused, listing the ids that
+  # do exist. The REGISTRY half is not — `sign-status` has no network
+  # concept, and wiring a fetch into a producer signing command is a
+  # design decision, not an omission to paper over. Clause 3 makes the
+  # gap visible at runtime rather than hiding it: where no listing was in
+  # reach the tool states which check it did NOT perform.
   - id: REQ-ADVISORY-002
     type: requirement
     title: An advisory that can never fire is refused when it is signed
-    status: draft
+    status: implemented
     release: v0.28.0
     description: >
       A typo in an advisory's `affected` layer id signs cleanly and the advisory
@@ -3250,7 +3258,7 @@ artifacts:
   - id: REQ-CIGATE-001
     type: requirement
     title: varve is something a pipeline can gate on, not only something a human can read
-    status: draft
+    status: verified
     release: v0.28.0
     description: >
       `varve status` exits 0 while printing YANKED, so a pipeline must grep
@@ -3274,7 +3282,7 @@ artifacts:
   - id: REQ-INSPECT-001
     type: requirement
     title: A consumer can see what is inside a layer
-    status: draft
+    status: verified
     release: v0.28.0
     description: >
       No command reports a layer's payload names, versions, kinds or platforms
@@ -3296,7 +3304,7 @@ artifacts:
   - id: REQ-CUSTODY-001
     type: requirement
     title: An organisation can run its own realm as a real trust operation, not a demo
-    status: draft
+    status: implemented
     release: v0.28.0
     description: >
       The ten-persona audit found the producer story works — five personas stood
