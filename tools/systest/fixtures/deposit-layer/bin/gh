@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# A fixture-backed `gh` for the REQ-SYSTEST-002 producer gate. Only
+# `gh release download` exists, because that is all the assembler calls.
+#
+# This replaces the SERVICE (GitHub), not the component under test: every line
+# of tools/build-deposit-spec.sh runs for real against it. The one behaviour it
+# must reproduce exactly is the one that broke production — real `gh release
+# download` REFUSES to overwrite an existing file and exits non-zero, which
+# under `set -e` ended the 2026.08.3 deposit. A double that quietly overwrote
+# would make the double-verify regression invisible, which is the whole reason
+# the previous dry-run harness proved nothing.
+#
+# Environment:
+#   VARVE_FIXTURE_RELEASES  root of the materialised release tree
+#   VARVE_FIXTURE_GH_LOG    append one line per invocation (call accounting)
+
+set -uo pipefail
+
+: "${VARVE_FIXTURE_RELEASES:?fake gh: VARVE_FIXTURE_RELEASES is not set — the real gh must never be reached from this gate}"
+printf 'gh %s\n' "$*" >> "${VARVE_FIXTURE_GH_LOG:-/dev/null}"
+
+if [ "${1:-}" != "release" ] || [ "${2:-}" != "download" ]; then
+  echo "fake gh: only 'release download' is modelled; got: $*" >&2
+  exit 64
+fi
+version="${3:?fake gh: no release tag}"
+shift 3
+
+# Newline-delimited rather than an array: bash 3.2 (what macOS ships) treats
+# an empty array under `set -u` as an unbound variable, and this gate has to be
+# runnable on the machine of whoever is about to dispatch the real workflow.
+repo=""
+dest="."
+patterns=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)          repo="$2"; shift 2 ;;
+    -p|--pattern)    patterns="${patterns}$2
+"; shift 2 ;;
+    -D|--dir)        dest="$2"; shift 2 ;;
+    --clobber|--skip-existing) shift ;;
+    *) echo "fake gh: unmodelled flag '$1'" >&2; exit 64 ;;
+  esac
+done
+[ -n "$repo" ] || { echo "fake gh: --repo is required" >&2; exit 64; }
+[ -n "$patterns" ] || { echo "fake gh: -p is required" >&2; exit 64; }
+
+src="$VARVE_FIXTURE_RELEASES/$repo/$version"
+if [ ! -d "$src" ]; then
+  echo "release not found: $repo@$version" >&2
+  exit 1
+fi
+
+mkdir -p "$dest"
+matched=0
+while IFS= read -r pat; do
+  [ -n "$pat" ] || continue
+  for f in "$src"/$pat; do
+    [ -f "$f" ] || continue
+    base="${f##*/}"
+    if [ -e "$dest/$base" ]; then
+      # gh's real wording, so a failing gate reads like the failing run did.
+      echo "$dest/$base already exists (use \`--clobber\` to overwrite file or \`--skip-existing\` to skip file)" >&2
+      exit 1
+    fi
+    cp "$f" "$dest/$base"
+    matched=$((matched + 1))
+  done
+done <<PATTERNS
+$patterns
+PATTERNS
+if [ "$matched" -eq 0 ]; then
+  echo "no assets match the file pattern" >&2
+  exit 1
+fi
