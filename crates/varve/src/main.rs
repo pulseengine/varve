@@ -117,6 +117,11 @@ enum Cmd {
         /// pass it when the core was laid down with `varve install --platform`.
         #[arg(long, value_name = "TRIPLE")]
         platform: Option<String>,
+        /// Overwrite a destination that already carries referrers, destroying
+        /// them (REQ-NODESTROY-001). Without this, archiving over a layout
+        /// that holds a line-status or attestations is REFUSED.
+        #[arg(long)]
+        force: bool,
     },
     /// Dispatch a tool from the pinned layer, with the layer identity in the
     /// environment (VARVE_LAYER, VARVE_LAYER_MANIFEST_DIGEST) so provenance
@@ -190,6 +195,12 @@ enum Cmd {
         /// sentence (REQ-CIGATE-001).
         #[arg(long)]
         json: bool,
+        /// Overwrite an `--out` that already carries referrers, destroying
+        /// them. Without this, depositing into a used layout is REFUSED
+        /// (REQ-NODESTROY-001) — it used to drop the line-status, line-index
+        /// and attestations and report success.
+        #[arg(long)]
+        force: bool,
     },
     /// Compile a Bazel checksum registry (rules_wasm_component schema) from
     /// a verified installed layer — every hash Bazel enforces becomes a
@@ -377,6 +388,15 @@ enum Cmd {
         /// Machine-readable result on stdout (REQ-CIGATE-001).
         #[arg(long)]
         json: bool,
+        /// The realm's signed line-index envelope (from `varve sign-index`).
+        /// Without it the `affected` and yank ids can only be checked for
+        /// SHAPE, and sign-status says which check it did not perform
+        /// (REQ-ADVISORY-002).
+        #[arg(long, value_name = "ENVELOPE")]
+        index: Option<PathBuf>,
+        /// Sign an advisory naming a layer that is not deposited yet.
+        #[arg(long)]
+        force: bool,
     },
     /// (CI) Validate and sign a line-index document — the realm's statement of
     /// which layers a line contains (REQ-INDEXAUTH-001). Without one, the
@@ -428,6 +448,11 @@ enum Cmd {
         /// Machine-readable result on stdout (REQ-CIGATE-001).
         #[arg(long)]
         json: bool,
+        /// Attach an advisory naming a layer this line does not (yet) have.
+        /// Without this the attach is REFUSED, because an advisory whose
+        /// `affected` id names nothing can never fire (REQ-ADVISORY-002).
+        #[arg(long)]
+        force: bool,
     },
     /// Shims on PATH: thin dispatchers that resolve the pin from the
     /// invocation's working directory and exec — switching projects is cd.
@@ -586,7 +611,8 @@ fn run() -> anyhow::Result<Outcome> {
             layer,
             dest,
             platform,
-        } => archive(&store, &layer, &dest, platform),
+            force,
+        } => archive(&store, &layer, &dest, platform, force),
         Cmd::Run {
             varve,
             tool_and_args,
@@ -610,6 +636,7 @@ fn run() -> anyhow::Result<Outcome> {
             out,
             tools,
             json,
+            force,
         } => deposit_cmd(
             spec.as_deref(),
             layer.as_deref(),
@@ -621,6 +648,7 @@ fn run() -> anyhow::Result<Outcome> {
             &out,
             &tools,
             json,
+            force,
         ),
         Cmd::ExportBazel { layer, out } => export_bazel(&store, layer.as_deref(), &out),
         Cmd::ExportCargo { layer, out } => export_cargo(&store, layer.as_deref(), &out),
@@ -646,7 +674,9 @@ fn run() -> anyhow::Result<Outcome> {
             key_id,
             out,
             json,
-        } => sign_status(&file, &key, &key_id, &out, json),
+            index,
+            force,
+        } => sign_status(&file, &key, &key_id, &out, json, index.as_deref(), force),
         Cmd::Keygen { out, public } => keygen(&out, public.as_deref()),
         Cmd::Pubkey { key } => pubkey(&key),
         Cmd::SignAttestation {
@@ -676,7 +706,8 @@ fn run() -> anyhow::Result<Outcome> {
             layout,
             status,
             json,
-        } => attach_status(&layout, &status, json),
+            force,
+        } => attach_status(&layout, &status, json, force),
         Cmd::SignIndex {
             file,
             key,
@@ -1042,21 +1073,31 @@ fn attach_status(
     layout: &std::path::Path,
     status: &std::path::Path,
     json: bool,
+    force: bool,
 ) -> anyhow::Result<()> {
     let envelope = std::fs::read(status)
         .with_context(|| format!("cannot read status envelope {}", status.display()))?;
-    let (line, counter) = varve_core::attach_status_envelope_to_layout(layout, &envelope)?;
+    // REQ-ADVISORY-002: where the layout carries a line-index, the `affected`
+    // ids are checked against the layers the line actually has. `check.note`
+    // says which check ran — and, when no listing was in reach, which one did
+    // NOT. Printing it is clause 3: a partial check must not read as a
+    // complete one.
+    let (line, counter, check) =
+        varve_core::attach_status_envelope_to_layout_checked(layout, &envelope, force)?;
     report(
         json,
         &format!(
-            "attached baseline line-status #{counter} for line {line} to {}",
-            layout.display()
+            "attached baseline line-status #{counter} for line {line} to {}\n  {}",
+            layout.display(),
+            check.note
         ),
         serde_json::json!({
             "command": "attach-status",
             "line": line.to_string(),
             "counter": counter,
             "layout": layout.display().to_string(),
+            "existence_checked": check.existence_checked,
+            "note": check.note,
         }),
     );
     Ok(())
@@ -1138,6 +1179,8 @@ fn sign_status(
     key_id: &str,
     out: &std::path::Path,
     json: bool,
+    index: Option<&std::path::Path>,
+    force: bool,
 ) -> anyhow::Result<()> {
     let bytes = std::fs::read(file)
         .with_context(|| format!("cannot read status document {}", file.display()))?;
@@ -1151,16 +1194,35 @@ fn sign_status(
     // varve used to accept 64 bytes of entropy here and emit a signed layer no
     // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
     let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
-    let envelope = doc.sign(&sk, key_id)?;
+    // REQ-ADVISORY-002: a typo in an `affected` layer id used to sign cleanly,
+    // and the advisory then never fired for anyone — producer sees success,
+    // consumer sees nothing, the yank silently does not exist. Shape is always
+    // checked. EXISTENCE is checked only where a listing of the line is in
+    // reach, and where it is not, `check.note` says so rather than letting a
+    // partial check read as a complete one.
+    let known = match index {
+        Some(path) => {
+            let env = std::fs::read(path)
+                .with_context(|| format!("cannot read line-index envelope {}", path.display()))?;
+            varve_core::known_layers_from_index(&env, &sk[32..])?
+        }
+        None => varve_core::KnownLayers::unknown(
+            "no line-index was supplied — pass `--index <envelope>` (the output of \
+             `varve sign-index`) to check the `affected` and yank ids against the layers \
+             this line actually has",
+        ),
+    };
+    let (envelope, check) = doc.sign_against(&known, force, &sk, key_id)?;
     std::fs::write(out, envelope)
         .with_context(|| format!("cannot write envelope {}", out.display()))?;
     report(
         json,
         &format!(
-            "signed line-status #{} for line {} -> {}",
+            "signed line-status #{} for line {} -> {}\n  {}",
             doc.counter,
             doc.line,
-            out.display()
+            out.display(),
+            check.note
         ),
         serde_json::json!({
             "command": "sign-status",
@@ -1168,6 +1230,8 @@ fn sign_status(
             "counter": doc.counter,
             "yanked": doc.yanked.keys().collect::<Vec<_>>(),
             "known_problems": doc.known_problems.len(),
+            "existence_checked": check.existence_checked,
+            "note": check.note,
             "key_id": key_id,
             "out": out.display().to_string(),
         }),
@@ -2431,6 +2495,7 @@ fn deposit_cmd(
     out: &std::path::Path,
     tools: &[String],
     json: bool,
+    force: bool,
 ) -> anyhow::Result<()> {
     if let Some(spec_path) = spec {
         let text = std::fs::read_to_string(spec_path)
@@ -2479,6 +2544,7 @@ fn deposit_cmd(
             deposit_tools,
             includes,
             json,
+            force,
         );
     }
     let (layer, channel, counter) = (
@@ -2525,6 +2591,7 @@ fn deposit_cmd(
         // individual flags deliberately do not grow a way to say it.
         Vec::new(),
         json,
+        force,
     )
 }
 
@@ -2540,6 +2607,7 @@ fn run_deposit(
     deposit_tools: Vec<varve_core::DepositTool>,
     includes: Vec<varve_core::deposit::DepositInclude>,
     json: bool,
+    force: bool,
 ) -> anyhow::Result<()> {
     // `deposit` writes an oci-layout DIRECTORY. A registry-shaped --out used to
     // report success while creating a local directory literally named
@@ -2571,7 +2639,17 @@ fn run_deposit(
     let includes = spec.includes.len();
     let channel = spec.channel.clone();
     let issued_at = spec.issued_at.clone();
-    let outcome = varve_core::deposit(&spec, &sk, key_id, out)?;
+    // REQ-NODESTROY-001: refuses by default when `out` already carries
+    // referrers. `--force` is the deliberate override, and the refusal names
+    // it — so the flag has to exist, or the message is telling the operator to
+    // run something clap will reject.
+    let outcome = varve_core::deposit_with_options(
+        &spec,
+        &sk,
+        key_id,
+        out,
+        &varve_core::DepositOptions { force },
+    )?;
     report(
         json,
         &format!(
@@ -2606,6 +2684,7 @@ fn archive(
     layer: &str,
     dest: &std::path::Path,
     platform: Option<String>,
+    force: bool,
 ) -> anyhow::Result<()> {
     let platform = platform.unwrap_or_else(varve_core::host_platform);
     // Use the PROJECT'S store. `archive` filtered the ambient top-level core,
@@ -2633,7 +2712,13 @@ fn archive(
              not supported yet; clean up the core first"
         ),
     };
-    let summary = varve_core::export_archive(&store, &entry, dest, &platform)?;
+    let summary = varve_core::export_archive_with_options(
+        &store,
+        &entry,
+        dest,
+        &platform,
+        &varve_core::ArchiveOptions { force },
+    )?;
     println!(
         "archived layer {} {} as oci-layout at {}",
         entry.layer,
