@@ -118,6 +118,27 @@ The rolling channel is provisional and makes no qualification promise — see
 not available. New to varve? `varve docs getting-started` is the five-minute
 transcript; `varve docs config-reference` is every file you will hand-write.
 
+## Or run your own realm
+
+varve is not only a way to consume PulseEngine's toolchain. A **realm** is a
+trust universe identified by a root public key, and you can stand up your own —
+your key, your tools, your layers, verified against *your* root and nobody
+else's. Nothing about varve's verification path is PulseEngine-specific.
+
+```sh
+varve keygen --out acme.key --pub acme.pub   # the public half IS your trust root
+varve deposit --spec deposit.toml --issued-at 2026-09-01T00:00:00Z \
+              --key acme.key --out ./layout  # (CI) assemble and sign a layer
+```
+
+Hand consumers a `varve-realms.toml` naming your registry and that root, and
+their `varve install` verifies against it offline. `varve docs own-realm` is the
+whole path, key to consumer, in one transcript; `varve docs root-ceremony` is
+how to generate and hold the key, including what varve does **not** do (no
+rotation, no revocation); `varve docs ci` is the producer pipeline in order.
+A realm is a boundary, not a hierarchy — nothing your root signs is acceptable
+in another realm, which is what makes composing an upstream realm safe.
+
 ## The problem
 
 Three consumers, two toolchains, one afternoon:
