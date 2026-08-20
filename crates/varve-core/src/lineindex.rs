@@ -393,7 +393,7 @@ pub fn read_from_layout(layout: &Path, line: &str) -> Result<Option<Vec<u8>>, In
 /// back a document this machine already accepted (the cache) or is about to
 /// publish (attach); every place the document is TRUSTED goes through
 /// `verify_and_parse`.
-fn parse_unverified(envelope: &[u8]) -> Result<LineIndex, IndexError> {
+pub(crate) fn parse_unverified(envelope: &[u8]) -> Result<LineIndex, IndexError> {
     let text = std::str::from_utf8(envelope)
         .map_err(|e| IndexError::Payload(format!("envelope is not utf-8: {e}")))?;
     let env = wsc::dsse::DsseEnvelope::from_json(text)
@@ -828,6 +828,7 @@ mod tests {
             // A test fixture layout, not a real archive: no platform stamp.
             None,
             &dest,
+            false,
         )
         .unwrap();
         (tmp, dest)
