@@ -1693,6 +1693,13 @@ artifacts:
       priority: must
       category: functional
 
+  # Stays `implemented`. Clause 1 is genuinely green (both Cargo adapters
+  # self-host in CI with negative controls red), but clause 2 is partial —
+  # the Bazel --distdir transport has no gate (varve#27) — and clause 4 is
+  # policy with no mechanical enforcement, which REQ-SYSTEST-002 addresses
+  # for the producer pipeline. Its evidence is shell-based, so it carries no
+  # cargo-test markers and `rivet verify` would refuse anyway; that refusal
+  # is correct rather than an obstacle to work around.
   - id: REQ-SYSTEST-001
     type: requirement
     title: varve is exercised as a system, at real scale, not only as units
@@ -1755,6 +1762,11 @@ artifacts:
       priority: must
       category: process
 
+  # Stays `implemented`, not `verified`: clause 3's gate cannot catch a
+  # second-granularity timestamp (two exports in one test land in the same
+  # second), so a clock injected into an adapter survives it — varve#93. The
+  # clauses that ARE discharged are discharged; the gate samples rather than
+  # proves, and saying so is the honest form.
   - id: REQ-REPRO-001
     type: requirement
     title: What varve emits is a function of the layer, not of the machine or the clock
@@ -1832,7 +1844,7 @@ artifacts:
   - id: REQ-CRATEIDX-001
     type: requirement
     title: An exported Cargo registry index describes the crates it contains
-    status: implemented
+    status: verified
     release: v0.27.0
     description: >
       varve#73. `export-cargo` writes `"deps":[]` and `"features":{}` for every
@@ -1881,7 +1893,7 @@ artifacts:
   - id: REQ-COMPOSEEXPORT-001
     type: requirement
     title: An export follows the composition, or says it did not
-    status: implemented
+    status: verified
     release: v0.27.0
     description: >
       varve#79. `resolve()` unions composed TOOLS so `which` and `run` see
@@ -1988,6 +2000,11 @@ artifacts:
       priority: should
       category: functional
 
+  # Stays `approved` deliberately. Clause 2's `select` is parsed and
+  # validated and consumed by NOTHING: `varve export-vsix --out D` writes
+  # every extension whether or not the declaration names a subset. Clean-room
+  # review confirmed it is the only unreachable clause. Advancing this would
+  # claim a capability the code does not have.
   - id: REQ-EXPORTDECL-001
     type: requirement
     title: A project declares its exports, and verify checks every one of them
