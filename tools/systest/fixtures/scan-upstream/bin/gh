@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# A fixture-backed `gh` for the REQ-ROLLING-001 scanner gate.
+#
+# It replaces the SERVICE (GitHub's release API and attestation store), not the
+# component under test: every line of tools/scan-upstream.sh and
+# tools/upstream-mechanism.sh runs for real against it. Only the three
+# subcommands the scanner actually calls are modelled, and an unmodelled call
+# is an error rather than a shrug — a double that silently succeeded on
+# something the scanner never meant to do would hide the mistake.
+#
+# Environment:
+#   VARVE_FIXTURE_RELEASES  root of the materialised release tree
+#   VARVE_FIXTURE_GH_LOG    append one line per invocation (call accounting —
+#                           this is how the dry-run assertion proves no PR was
+#                           opened rather than assuming it)
+
+set -uo pipefail
+
+: "${VARVE_FIXTURE_RELEASES:?fake gh: VARVE_FIXTURE_RELEASES is not set — the real gh must never be reached from this gate}"
+printf 'gh %s\n' "$*" >> "${VARVE_FIXTURE_GH_LOG:-/dev/null}"
+
+case "${1:-}" in
+
+  # gh api /repos/OWNER/NAME/releases?per_page=100
+  api)
+    path="${2:-}"
+    case "$path" in
+      /repos/*/releases*) ;;
+      *) echo "fake gh: only the releases endpoint is modelled; got: $path" >&2; exit 64 ;;
+    esac
+    rest="${path#/repos/}"
+    repo="${rest%%/releases*}"
+    file="$VARVE_FIXTURE_RELEASES/$repo/releases.json"
+    if [ ! -f "$file" ]; then
+      echo '{"message":"Not Found","status":"404"}' >&2
+      exit 1
+    fi
+    cat "$file"
+    ;;
+
+  # gh release download TAG --repo OWNER/NAME -p PATTERN -D DIR
+  release)
+    [ "${2:-}" = download ] || { echo "fake gh: only 'release download' is modelled" >&2; exit 64; }
+    version="${3:?fake gh: no release tag}"
+    shift 3
+    repo=""; dest="."; patterns=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --repo)       repo="$2"; shift 2 ;;
+        -p|--pattern) patterns="${patterns}$2
+"; shift 2 ;;
+        -D|--dir)     dest="$2"; shift 2 ;;
+        *) echo "fake gh: unmodelled flag '$1'" >&2; exit 64 ;;
+      esac
+    done
+    src="$VARVE_FIXTURE_RELEASES/$repo/$version"
+    [ -d "$src" ] || { echo "release not found: $repo@$version" >&2; exit 1; }
+    mkdir -p "$dest"
+    matched=0
+    while IFS= read -r pat; do
+      [ -n "$pat" ] || continue
+      for f in "$src"/$pat; do
+        [ -f "$f" ] || continue
+        # Real `gh release download` refuses to overwrite. The scanner works in
+        # a fresh directory per probe, so reproducing that refusal here is what
+        # would catch it ever reusing one.
+        [ -e "$dest/${f##*/}" ] && { echo "$dest/${f##*/} already exists" >&2; exit 1; }
+        cp "$f" "$dest/${f##*/}"
+        matched=$((matched + 1))
+      done
+    done <<PATTERNS
+$patterns
+PATTERNS
+    [ "$matched" -gt 0 ] || { echo "no assets match the file pattern" >&2; exit 1; }
+    ;;
+
+  # gh attestation verify FILE --repo OWNER/NAME   (and its --help probe)
+  attestation)
+    [ "${2:-}" = verify ] || { echo "fake gh: only 'attestation verify' is modelled" >&2; exit 64; }
+    case "${3:-}" in --help) exit 0 ;; esac
+    file="${3:?fake gh: no artifact}"
+    shift 3
+    repo=""
+    while [ $# -gt 0 ]; do
+      case "$1" in --repo) repo="$2"; shift 2 ;; *) shift ;; esac
+    done
+    # A release carries provenance when the fixture says so, per artifact —
+    # which is the shape of the real thing: provenance attests an ARTIFACT, not
+    # a release.
+    src="$VARVE_FIXTURE_RELEASES/$repo"
+    if [ ! -f "$src/.provenance" ]; then
+      echo "no attestations found for $file" >&2
+      exit 1
+    fi
+    grep -qxF "${file##*/}" "$src/.provenance" || {
+      echo "no attestation matches $file" >&2; exit 1; }
+    echo "Verification succeeded! (fixture, repo=$repo)"
+    ;;
+
+  *)
+    echo "fake gh: unmodelled subcommand '${1:-}'" >&2
+    exit 64 ;;
+esac

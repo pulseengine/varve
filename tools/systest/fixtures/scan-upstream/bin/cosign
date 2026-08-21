@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# A fixture-backed `cosign` for the REQ-ROLLING-001 scanner gate.
+#
+# Only `verify-blob` exists, because that is all the mechanism table calls. The
+# behaviour that must be real is the one clause 5 rests on: a release that
+# SHIPS a bundle is not thereby verified. The fixture bundle records the digest
+# it covers and the identity it was issued to, and this double checks both —
+# so a release whose sums were tampered with, or whose bundle came from another
+# repo, is REJECTED here exactly as the real verifier would reject it.
+#
+# Environment:
+#   VARVE_FIXTURE_COSIGN_LOG  append one line per invocation
+
+set -uo pipefail
+printf 'cosign %s\n' "$*" >> "${VARVE_FIXTURE_COSIGN_LOG:-/dev/null}"
+
+[ "${1:-}" = verify-blob ] || { echo "fake cosign: only verify-blob is modelled" >&2; exit 64; }
+shift
+
+bundle=""; identity=""; issuer=""; blob=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bundle)                      bundle="$2"; shift 2 ;;
+    --certificate-identity-regexp) identity="$2"; shift 2 ;;
+    --certificate-oidc-issuer)     issuer="$2"; shift 2 ;;
+    -*) echo "fake cosign: unmodelled flag '$1'" >&2; exit 64 ;;
+    *)  blob="$1"; shift ;;
+  esac
+done
+[ -n "$bundle" ] && [ -n "$identity" ] && [ -n "$issuer" ] && [ -n "$blob" ] \
+  || { echo "fake cosign: missing arguments" >&2; exit 64; }
+[ -f "$bundle" ] || { echo "no bundle: $bundle" >&2; exit 1; }
+[ -f "$blob" ]   || { echo "no blob: $blob" >&2; exit 1; }
+
+sha_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+want_sha="$(sed -n 's/^sha256=//p' "$bundle" | head -1)"
+got_sha="$(sha_of "$blob")"
+if [ "$want_sha" != "$got_sha" ]; then
+  echo "Error: bundle does not cover this blob (bundle $want_sha, blob $got_sha)" >&2
+  exit 1
+fi
+
+signer="$(sed -n 's/^identity=//p' "$bundle" | head -1)"
+case "$signer" in
+  "$identity"*) ;;
+  *) echo "Error: none of the signatures were verified: certificate identity '$signer' does not match '$identity'" >&2; exit 1 ;;
+esac
+
+want_issuer="$(sed -n 's/^issuer=//p' "$bundle" | head -1)"
+[ "$want_issuer" = "$issuer" ] || { echo "Error: issuer mismatch" >&2; exit 1; }
+
+echo "Verified OK"
