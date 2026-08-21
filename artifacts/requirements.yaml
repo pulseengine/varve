@@ -3647,3 +3647,81 @@ artifacts:
         step that remains is the one that carries meaning.
       tags: [architecture, security, process]
 
+  - id: DD-025
+    type: design-decision
+    title: A realm is an identity, not a secret — adopt keyless signing
+    status: proposed
+    release: v0.30.0
+    description: >
+      DIRECTION, decided by the maintainer 2026-08-21; the design is NOT
+      finished and the open questions below are real. Recorded now because it
+      changes what a realm IS, and because the alternative was about to be
+      built.
+      .
+      Today a realm is a long-lived ed25519 secret whose public half consumers
+      pin. `docs threat-model` and `docs root-ceremony` both state the
+      consequences as permanent limits: no rotation, no revocation, no expiry,
+      no transparency log. A leaked root stays valid until every consumer
+      hand-edits their own varve-realms.toml. That is not a gap in the
+      implementation — it is what a pinned raw public key means.
+      .
+      Keyless removes the ASSET rather than mitigating the risk. Signing
+      happens in CI against an OIDC workflow identity through Fulcio, recorded
+      in Rekor; there is no long-lived secret to generate, split, paper-back,
+      store, rotate or lose. The maintainer's stated reason is the right one:
+      unease with holding this class of secret at all.
+      .
+      What made this credible rather than aspirational is that sigil's `wsc`
+      — which varve already depends on — has the pieces. Verified by reading
+      wsc 0.10.0: `signature/keyless/` carries Fulcio, Rekor, OIDC, cert
+      pinning and Merkle proofs; `airgapped/` does OFFLINE verification of
+      keyless signatures against a provisioned Trust Bundle, with a real
+      `tuf.rs` (471 lines, no stubs) for updating it. So the air-gap story
+      survives, which was the objection that nearly killed this.
+      .
+      Two findings that decide feasibility. `airgapped::verify_signature`
+      takes a 32-BYTE HASH, not a WASM module — a layer manifest digest is
+      exactly that, so offline verification is already general enough.
+      Signing is not: `sign_module` is WASM-shaped, so wsc needs a
+      sign-an-arbitrary-digest entry point. That is a small addition to
+      sigil, not a new subsystem.
+      .
+      The bundle verifier handles expiry with a grace period AND an explicit
+      unreliable-time-source fallback for devices with no clock — the exact
+      case varve's air-gapped consumer is. Fulcio's short cert lifetime does
+      not rot old layers: the Rekor entry is the durable evidence that the
+      signature existed while the cert was valid.
+      .
+      OPEN, and to be settled by a spike before any requirement is written:
+      (1) how a Trust Bundle is provisioned to a consumer, and whether that
+      is meaningfully easier than pinning a 64-hex root — a consumer still
+      pins ONE thing either way, and if bundle distribution is harder we have
+      moved the problem rather than solved it. (2) Whether Rekor inclusion
+      proofs genuinely verify offline from the cached proof, or need a
+      lookup. (3) What a realm's IDENTITY becomes in varve-realms.toml, and
+      how a consumer expresses "only accept layers signed by this workflow in
+      this repository". (4) Whether both mechanisms must coexist — a realm
+      that cannot reach Fulcio at signing time still needs to publish. (5)
+      Rekor makes every signature a public record; that is a benefit for an
+      open toolchain and a disclosure for a private one, and a realm may need
+      to choose.
+      .
+      NOT decided: whether the existing ed25519 path is removed. It probably
+      is not — an org signing offline, or one unwilling to publish to a
+      transparency log, still needs it.
+    links:
+      - type: satisfies
+        target: REQ-CEREMONY-001
+    fields:
+      rationale: >
+        A long-lived signing secret is a liability that only grows: varve
+        cannot rotate it, cannot revoke it, and it must survive a decade of
+        custody while every use is a chance to leak it. Keyless deletes the
+        asset instead of guarding it, and sigil already ships the offline
+        verification that would otherwise make this incompatible with varve's
+        air-gap requirement. The hardware alternative was investigated and
+        rejected on evidence: the available token is a YubiKey NEO (firmware
+        3.0.0) whose PIV and OpenPGP applets cap at RSA 2048 and cannot sign
+        ed25519 at all.
+      tags: [architecture, security]
+
