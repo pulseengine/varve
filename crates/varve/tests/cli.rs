@@ -4397,6 +4397,147 @@ fn an_export_verifies_a_composed_layer_against_its_own_realms_root() {
     );
 }
 
+// rivet: verifies REQ-NOSILENT-001
+#[test]
+fn archive_says_out_loud_that_it_carries_no_baseline_advisory() {
+    // varve#88 clause 1. `archive` was verbose about omitted PLATFORM payloads
+    // and SILENT about a missing baseline line-status — the inconsistency that
+    // hid it. The result is an air-gap artifact whose `varve status` is
+    // permanently broken for every consumer of it, and no yank can ever reach
+    // them.
+    //
+    // It warns rather than refusing, deliberately: `archive` is most often run
+    // by the CONSUMER exporting their own core, who cannot retroactively add a
+    // baseline the producer never published. Refusing was the first cut and it
+    // broke four legitimate flows.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("nb-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    let (archive_src, _) = signed_crate_layer(
+        &fx,
+        "nobaseline",
+        "2026.07.0",
+        &sk,
+        &[("cfg-if", "1.0.0", dot_crate("cfg-if", "1.0.0", ""))],
+        &[],
+    );
+    install_pinned(&fx, &trust_root, "2026.07.0", &archive_src);
+
+    let dest = parent.join("nb-archive");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["archive", "2026.07.0"])
+        .arg(&dest)
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("no baseline line-status")
+                .and(predicate::str::contains("varve status")),
+        );
+
+    // …and --allow-no-status silences it, for an archive not meant to receive
+    // advisories. Silence must be something you ASK for.
+    let dest2 = parent.join("nb-archive-2");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["archive", "2026.07.0"])
+        .arg(&dest2)
+        .arg("--allow-no-status")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("no baseline line-status").not());
+}
+
+// rivet: verifies REQ-NOSILENT-001
+#[test]
+fn install_checks_the_whole_composition_and_says_so_before_claiming_success() {
+    // varve#88 clauses 3 and 4, which are one defect seen from two sides.
+    //
+    // Clause 4: the include check at install was DIRECT-ONLY. A chain
+    // root -> mid -> leaf with `leaf` missing passed, because root's own
+    // includes (just `mid`) were all present. `verify` walks the whole graph
+    // and rejects it at depth 2 — so install and verify disagreed, while
+    // `docs verify` promises "the CI gate and the install agree".
+    //
+    // Clause 3: the success line printed BEFORE the check ran, so even when
+    // the check did fire the operator saw "installed layer X" and then an
+    // error, leaving a layer in `varve list` that no other command would
+    // touch.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let trust_root = parent.join("chain-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+
+    let (leaf_archive, leaf_digest) = signed_crate_layer(
+        &fx,
+        "chain-leaf",
+        "2026.08.0",
+        &sk,
+        &[("cfg-if", "1.0.0", dot_crate("cfg-if", "1.0.0", ""))],
+        &[],
+    );
+    let (mid_archive, mid_digest) = signed_crate_layer(
+        &fx,
+        "chain-mid",
+        "2026.08.1",
+        &sk,
+        &[("serde", "1.0.200", dot_crate("serde", "1.0.200", ""))],
+        &[&leaf_digest],
+    );
+    let (root_archive, _) = signed_crate_layer(
+        &fx,
+        "chain-root",
+        "2026.07.0",
+        &sk,
+        &[(
+            "rivet-core",
+            "0.32.0",
+            dot_crate("rivet-core", "0.32.0", ""),
+        )],
+        &[&mid_digest],
+    );
+    install_pinned(&fx, &trust_root, "2026.08.0", &leaf_archive);
+    install_pinned(&fx, &trust_root, "2026.08.1", &mid_archive);
+
+    // Remove the LEAF, leaving mid installed. root's direct includes are still
+    // satisfied; the graph is not.
+    let store = varve_core::Store::at(&fx.root);
+    let leaf = store
+        .find_anywhere(&leaf_digest)
+        .unwrap()
+        .map(|(_, e)| e)
+        .expect("leaf was installed");
+    std::fs::remove_dir_all(&leaf.root).unwrap();
+
+    // `install_pinned` left the pin at the mid layer; point it at the root.
+    std::fs::write(
+        fx.project.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\n",
+    )
+    .unwrap();
+    let out = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&root_archive)
+        .assert()
+        .failure();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    // Clause 4: the missing layer is two hops away and must still be named.
+    assert!(
+        stderr.contains("2026.08.0") || stderr.contains(&leaf_digest),
+        "the transitively-missing layer must be named:\nstdout={stdout}\nstderr={stderr}"
+    );
+    // Clause 3: it must NOT have claimed success first.
+    assert!(
+        !stdout.contains("installed layer"),
+        "install must refuse BEFORE claiming success, not after:\nstdout={stdout}"
+    );
+}
+
 // rivet: verifies REQ-COMPOSEEXPORT-001
 #[test]
 fn verify_lockfile_follows_the_composition_not_just_the_root() {

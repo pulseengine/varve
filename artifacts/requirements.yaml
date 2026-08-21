@@ -3243,7 +3243,7 @@ artifacts:
   - id: REQ-NOSILENT-001
     type: requirement
     title: A command that cannot do what was asked says so
-    status: draft
+    status: verified
     release: v0.28.0
     description: >
       Three commands report success over a broken outcome (varve#88), and the

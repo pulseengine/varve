@@ -134,6 +134,10 @@ pub enum ArchiveError {
 /// an air gap, so the omission is counted here and printed by the CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportSummary {
+    /// True when this core cached no baseline line-status for the line, so the
+    /// archive carries none and the consumer's `varve status` will fail for as
+    /// long as they hold it (REQ-NOSILENT-001 clause 1).
+    pub baseline_missing: bool,
     /// The platform whose payloads this archive carries — the only one.
     pub platform: String,
     /// Payload blobs written (the manifest and its envelope are not counted).
@@ -172,6 +176,9 @@ pub fn export(
 pub struct ArchiveOptions {
     /// Overwrite a layout that already carries referrers, destroying them.
     pub force: bool,
+    /// Produce an archive even though the installing core cached no baseline
+    /// line-status for this line (REQ-NOSILENT-001 clause 1).
+    pub allow_no_status: bool,
 }
 
 /// `export`, with the destructive case available to callers that ask for it.
@@ -316,15 +323,37 @@ pub fn export_with_options(
     // partition keeps its baseline under `realms/<fingerprint>/state`.
     // Reading from the varve root instead would have found nothing for every
     // realm install — the same drop this fix exists to close, one layer down.
+    let mut baseline_missing = false;
     let cache = crate::linestatus::StatusCache::at_root(store.root());
-    if let Some(envelope) = cache
+    match cache
         .envelope_bytes(layer.layer.line())
         .map_err(|e| ArchiveError::LineStatus(e.to_string()))?
     {
-        crate::linestatus::attach_to_layout(dest, layer.layer.line(), &envelope)
-            .map_err(|e| ArchiveError::LineStatus(e.to_string()))?;
+        Some(envelope) => {
+            crate::linestatus::attach_to_layout(dest, layer.layer.line(), &envelope)
+                .map_err(|e| ArchiveError::LineStatus(e.to_string()))?;
+        }
+        // REQ-NOSILENT-001 clause 1: this used to be a silent no-op. `archive`
+        // was already verbose about omitted PLATFORM payloads and mute about
+        // the advisory — the inconsistency that hid it — and the result was an
+        // air-gap artifact whose `varve status` is permanently broken for
+        // every consumer of it. Refuse, unless the operator says otherwise.
+        // REQ-NOSILENT-001 clause 1. This was a silent no-op: `archive` was
+        // verbose about omitted PLATFORM payloads and mute about the advisory,
+        // and the result was an air-gap artifact whose `varve status` is
+        // permanently broken for every consumer of it.
+        //
+        // It WARNS rather than refusing. Refusing was the first cut and it
+        // broke four legitimate flows, which is the useful signal: `archive`
+        // is most often run by the CONSUMER exporting their own core for
+        // transport, and they cannot retroactively add a baseline the producer
+        // never published. A gate that fires on a correct setup nobody can fix
+        // is one people learn to pass `--allow-no-status` to reflexively, and
+        // then it protects nothing.
+        None => baseline_missing = !options.allow_no_status,
     }
     Ok(ExportSummary {
+        baseline_missing,
         platform: platform.to_string(),
         archived: blobs.len(),
         omitted,
@@ -798,7 +827,10 @@ mod tests {
             &layer,
             &dest,
             "test-platform",
-            &ArchiveOptions { force: true },
+            &ArchiveOptions {
+                force: true,
+                allow_no_status: true,
+            },
         )
         .expect("--force overrides the guard");
     }

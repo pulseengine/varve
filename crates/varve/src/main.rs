@@ -122,6 +122,11 @@ enum Cmd {
         /// that holds a line-status or attestations is REFUSED.
         #[arg(long)]
         force: bool,
+        /// Archive even though this core cached no baseline line-status — the
+        /// consumer's `varve status` will then fail for as long as they hold
+        /// the archive, and a yank can never reach them (REQ-NOSILENT-001).
+        #[arg(long)]
+        allow_no_status: bool,
     },
     /// Dispatch a tool from the pinned layer, with the layer identity in the
     /// environment (VARVE_LAYER, VARVE_LAYER_MANIFEST_DIGEST) so provenance
@@ -618,7 +623,8 @@ fn run() -> anyhow::Result<Outcome> {
             dest,
             platform,
             force,
-        } => archive(&store, &layer, &dest, platform, force),
+            allow_no_status,
+        } => archive(&store, &layer, &dest, platform, force, allow_no_status),
         Cmd::Run {
             varve,
             tool_and_args,
@@ -2318,6 +2324,19 @@ fn export_cargo(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
         varve_core::crateexport::REGISTRY_SUBDIR,
         out.display(),
     );
+    // REQ-NOSILENT-001 clause 2. Until v0.27.0 the index carried "deps":[] and
+    // "features":{} for every crate, and the worst observed outcome was a
+    // build that exits 0 having compiled everything featureless — not a
+    // failure anyone would notice. That is fixed, but the index is only ever
+    // as good as what each `.crate` declares, and a registry index cannot
+    // express everything a vendor directory can. Say which one is stronger,
+    // on every run, rather than closing with an instruction to run the very
+    // build that can succeed while being wrong.
+    println!(
+        "  the index is derived from each .crate's own Cargo.toml. If a build resolves \
+         differently than you expect, `varve export-crates-vendor` sidesteps index \
+         resolution entirely by vendoring the sources — it is the stronger of the two."
+    );
     write_export_stamp(out, &target.entry, "cargo")?;
     Ok(())
 }
@@ -2707,6 +2726,7 @@ fn archive(
     dest: &std::path::Path,
     platform: Option<String>,
     force: bool,
+    allow_no_status: bool,
 ) -> anyhow::Result<()> {
     let platform = platform.unwrap_or_else(varve_core::host_platform);
     // Use the PROJECT'S store. `archive` filtered the ambient top-level core,
@@ -2739,7 +2759,10 @@ fn archive(
         &entry,
         dest,
         &platform,
-        &varve_core::ArchiveOptions { force },
+        &varve_core::ArchiveOptions {
+            force,
+            allow_no_status,
+        },
     )?;
     println!(
         "archived layer {} {} as oci-layout at {}",
@@ -2771,6 +2794,20 @@ fn archive(
              layer there.",
             if total == 1 { "y" } else { "ies" },
             summary.platform
+        );
+    }
+    // REQ-NOSILENT-001 clause 1: loud, on stderr, and it names the consequence
+    // rather than the condition. `archive` was already verbose about omitted
+    // PLATFORM payloads and silent about this — the inconsistency that hid it.
+    if summary.baseline_missing {
+        eprintln!(
+            "warning: this core cached no baseline line-status for line {}, so the archive \
+             carries none. Every consumer of it gets a permanently failing `varve status` and \
+             no yank can ever reach them — and an air-gapped consumer cannot ask a registry \
+             instead. Install from a source that carries the baseline (a registry, or a layout \
+             with one attached) and archive again. Pass --allow-no-status to silence this if \
+             you are shipping an archive that is not meant to receive advisories.",
+            entry.layer.line()
         );
     }
     Ok(())
@@ -2943,10 +2980,6 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         platform: &platform,
     };
     let outcome = varve_core::install(pin, source, &verifier, store, &mut marks, &policy)?;
-    println!(
-        "installed layer {} (counter {}) {}",
-        outcome.layer, outcome.counter, outcome.digest
-    );
     // Clause 4: REPORT what the realm asserts the line contains, beside what
     // this install accepted. Reported and NOT enforced, deliberately — raising
     // the anti-rollback mark to the newest counter that merely EXISTS would
@@ -2989,35 +3022,59 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         );
     }
 
-    // A composed layer is only usable once what it composes is installed too.
-    // install exited 0 on a composition `verify` rejects, so `run` then
-    // executed a tool from an unverified included layer — and the error the
-    // user eventually hit named `varve install`, which cannot take a layer or a
-    // digest, so following it was a no-op loop.
-    if let Some(entry) = ctx.store.get(&outcome.digest)?
-        && let Ok(bytes) = std::fs::read(entry.root.join("layer.json"))
-        && let Ok(view) = varve_core::compose::view(&bytes)
-        && !view.includes.is_empty()
-    {
-        let missing: Vec<String> = view
-            .includes
-            .iter()
-            .filter(|inc| {
-                ctx.store
-                    .find_anywhere(&inc.digest)
-                    .ok()
-                    .flatten()
-                    .is_none()
-            })
-            .map(|inc| {
-                let name = inc.layer.clone().unwrap_or_else(|| inc.digest.clone());
-                match &inc.realm {
-                    Some(r) => format!("{name} (realm '{r}')"),
-                    None => name,
+    // A composed layer is only usable once EVERYTHING it composes is installed
+    // — transitively (REQ-NOSILENT-001 clause 4). install exited 0 on a
+    // composition `verify` rejects, so `run` then executed a tool from an
+    // unverified included layer, and the error the user eventually hit named
+    // `varve install`, which cannot take a layer or a digest, so following it
+    // was a no-op loop.
+    //
+    // The check used to look only at the root's OWN includes, so a chain
+    // root -> mid -> leaf with `leaf` missing passed: root's direct includes
+    // were all present. `verify` walks the whole graph and rejects it at depth
+    // 2, while `docs verify` promises "the CI gate and the install agree".
+    // They now reach the same verdict.
+    let mut composed_count = 0usize;
+    if let Some(entry) = ctx.store.get(&outcome.digest)? {
+        let mut missing: Vec<String> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut queue: Vec<varve_core::store::InstalledLayer> = vec![entry];
+        let mut depth = 0usize;
+        while let Some(current) = queue.pop() {
+            depth += 1;
+            if depth > varve_core::compose::MAX_DEPTH * 4 {
+                break;
+            }
+            let Ok(bytes) = std::fs::read(current.root.join("layer.json")) else {
+                continue;
+            };
+            let Ok(view) = varve_core::compose::view(&bytes) else {
+                continue;
+            };
+            for inc in &view.includes {
+                if !seen.insert(inc.digest.clone()) {
+                    continue;
                 }
-            })
-            .collect();
+                composed_count += 1;
+                match ctx.store.find_anywhere(&inc.digest)? {
+                    Some((_, found)) => queue.push(found),
+                    None => {
+                        // Name the realm too: "install it" is not actionable
+                        // without knowing WHOSE layer it is, and a consumer
+                        // composing two realms cannot tell them apart by id.
+                        let name = inc.layer.clone().unwrap_or_else(|| inc.digest.clone());
+                        missing.push(match &inc.realm {
+                            Some(r) => format!("{name} (realm '{r}')"),
+                            None => name,
+                        });
+                    }
+                }
+            }
+        }
         if !missing.is_empty() {
+            // Clause 3: REFUSE BEFORE claiming success. This used to print
+            // "installed layer X" and THEN error, leaving a layer in
+            // `varve list` that no other command would touch.
             bail!(
                 "layer {} composes {} layer(s) that are not installed: {}.\n\
                  Install each first — a composed layer names what it needs by digest, \
@@ -3025,16 +3082,23 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
                  pointing --from at the other source is not enough: give the included \
                  layer its own pin (a directory whose varve.toml names that realm, \
                  channel and layer), run `varve install` there, then re-run this one. \
-                 Both land in the same store. See `varve docs composition`.",
+                 Both land in the same store. The list above is TRANSITIVE — a layer \
+                 named here may be one this layer composes only indirectly. \
+                 See `varve docs composition`.",
                 outcome.layer,
                 missing.len(),
                 missing.join(", ")
             );
         }
+    }
+    println!(
+        "installed layer {} (counter {}) {}",
+        outcome.layer, outcome.counter, outcome.digest
+    );
+    if composed_count > 0 {
         println!(
-            "  composes {} installed layer(s) — `varve verify` checks each against its own \
-             realm's trust root",
-            view.includes.len()
+            "  composes {composed_count} installed layer(s), transitively — `varve verify` \
+             checks each against its own realm's trust root"
         );
     }
 
