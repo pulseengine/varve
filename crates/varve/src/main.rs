@@ -165,6 +165,21 @@ enum Cmd {
         /// The signing key file.
         key: PathBuf,
     },
+    /// (CI) Translate a realm's `layer.toml` into the environment the layer
+    /// assembler reads (REQ-LAYERREPO-001). This is what lets a realm's
+    /// contents live in the realm's OWN repository — bumping a tool becomes a
+    /// one-line reviewed diff there, not a commit to the tool that signs it.
+    ///
+    /// Prints `KEY=value` lines for `$GITHUB_ENV`. It reads no network, writes
+    /// no files, and touches no key.
+    LayerSpec {
+        /// The realm's layer manifest.
+        #[arg(long, value_name = "FILE", default_value = "layer.toml")]
+        manifest: PathBuf,
+        /// Machine-readable output (see `varve docs layer-spec`).
+        #[arg(long)]
+        json: bool,
+    },
     /// (CI) Assemble and SIGN a layer — the only way a layer comes into being.
     /// Writes an OCI image layout directory, the same shape `archive` produces.
     /// It does NOT publish: varve runs no server and pushes nothing, by design
@@ -706,6 +721,7 @@ fn run() -> anyhow::Result<Outcome> {
         ),
         Cmd::Keygen { out, public } => keygen(&out, public.as_deref()),
         Cmd::Pubkey { key } => pubkey(&key),
+        Cmd::LayerSpec { manifest, json } => layer_spec(&manifest, json),
         Cmd::SignAttestation {
             layer,
             kind,
@@ -2169,6 +2185,49 @@ fn pubkey(key: &std::path::Path) -> anyhow::Result<()> {
     let public = varve_core::keys::public_from_secret(&text, &key.display().to_string())?;
     // Bare on stdout, so it composes: trust-root = "$(varve pubkey root.key)"
     println!("{public}");
+    Ok(())
+}
+
+/// `layer.toml` → the assembler's environment (REQ-LAYERREPO-001).
+///
+/// Nothing here is trusted work: the output is consumed by the assembler, which
+/// verifies every byte it downloads regardless of what named it. What this must
+/// not do is translate a manifest INEXACTLY — a dropped tool or a truncated
+/// version produces a layer that signs and verifies while carrying the wrong
+/// contents, so `layerspec` refuses rather than approximates.
+fn layer_spec(manifest: &std::path::Path, json: bool) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(manifest).with_context(|| {
+        format!(
+            "cannot read layer manifest {}. This is the realm's own \
+             `layer.toml` — see `varve docs layer-repo`.",
+            manifest.display()
+        )
+    })?;
+    let parsed = varve_core::layerspec::parse_layer_manifest(&text)
+        .with_context(|| format!("in {}", manifest.display()))?;
+    let env = varve_core::layerspec::assembler_env(&parsed)
+        .with_context(|| format!("in {}", manifest.display()))?;
+    if json {
+        // The same values, as an object. `layer-spec` is tagged (CI), and a
+        // pipeline must never have to scrape prose to drive one
+        // (REQ-CIGATE-001 clause 2) — even when the prose is already
+        // KEY=value, since that shape exists for `$GITHUB_ENV`, not for
+        // programs.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "tarball_tools": env.layer_tools,
+                "wsc_version": env.wsc_version,
+                "vsix_packages": env.vsix_packages,
+                "realm": env.realm,
+                "channel": env.channel,
+                "registry": env.registry,
+                "varve_version": env.varve_version,
+            }))?
+        );
+    } else {
+        print!("{}", env.render());
+    }
     Ok(())
 }
 

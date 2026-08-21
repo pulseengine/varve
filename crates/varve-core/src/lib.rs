@@ -35,6 +35,7 @@ pub mod install;
 pub mod keys;
 pub mod kind;
 pub mod layer;
+pub mod layerspec;
 pub mod lineindex;
 pub mod linestatus;
 pub mod lockpin;

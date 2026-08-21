@@ -3493,8 +3493,8 @@ artifacts:
   - id: REQ-LAYERREPO-001
     type: requirement
     title: A realm's layers are assembled outside varve, in that realm's own repository
-    status: draft
-    release: v0.29.0
+    status: approved
+    release: v0.30.0
     description: >
       `deposit-layer.yml` lives inside varve and hard-codes one realm's tool
       list, so bumping a tool version is a commit to the tool that installs
@@ -3520,6 +3520,60 @@ artifacts:
       roots' secrets in one repo's settings, and unpicking that later means
       rotating keys varve cannot rotate. (5) varve's own repository shall stop
       carrying any realm's signing secret once the migration completes.
+      .
+      Moved v0.29.0 -> v0.30.0 deliberately. The ADAPTER this depends on
+      shipped in v0.29.0 and is verified separately (REQ-LAYERADAPT-001), but
+      clauses 4 and 5 are not code: clause 4 requires `pulseengine-layers` to
+      publish a real layer, which needs `VARVE_ROLLING_KEY` provisioned in
+      that repository by its custodian, and clause 5 requires removing the
+      secret from varve only AFTER that publish succeeds. Neither can be
+      discharged by the party writing the code, and marking this verified on
+      the strength of the adapter alone would claim a migration that has not
+      happened. The layers repository's deposit workflow therefore still
+      refuses to run rather than pretending, and the ordering is deliberate:
+      varve keeps the secret until the new repository has proven it can
+      publish without it.
+
+  - id: REQ-LAYERADAPT-001
+    type: requirement
+    title: A realm's manifest is translated into assembler inputs by varve, exactly or not at all
+    status: verified
+    release: v0.29.0
+    description: >
+      REQ-LAYERREPO-001 moves a realm's tool list into that realm's own
+      repository. Something must then translate that manifest into the inputs
+      the assembler reads, and the translation is where a whole class of
+      silent corruption lives: the assembler takes space-separated entries of
+      colon-separated fields, an encoding that cannot represent a value
+      containing a space or a colon and whose shell will not complain. A
+      mangled list does not fail — it deposits, signs and verifies, carrying
+      the wrong bytes under a good signature. That is the defect class this
+      project keeps finding (REQ-NOSILENT-001, REQ-ADVISORY-002): a check that
+      cannot see the thing it checks is worse than no check, because it is
+      believed.
+      .
+      Clauses: (1) The adapter shall live in varve, beside the assembler it
+      feeds, and not in each realm's repository — the assembler is
+      system-tested here (REQ-SYSTEST-002) and a per-realm copy inherits none
+      of that testing (REQ-LAYERREPO-001 clause 2). (2) Any value that the
+      assembler's encoding cannot carry intact shall be REFUSED, naming the
+      offending field and value; approximating it is forbidden. (3) An
+      unrecognised key in the manifest shall be refused rather than ignored,
+      because an ignored `verison =` leaves the real version stale and ships
+      the wrong release. (4) A declaration the assembler cannot express shall
+      be refused rather than dropped: a second `raw-per-platform` tool (the
+      assembler holds exactly one, as WSC_VERSION), an extension under a
+      foreign owner (the assembler resolves `pulseengine/<name>` itself, so
+      dropping the owner fetches a different repository's release of the same
+      name), an unknown layout, a duplicate name, or a manifest with no
+      payloads at all. (5) The output shall be `KEY=value` lines appended to
+      the environment directly, never a shell fragment to be evaluated, so no
+      value in a manifest can execute. (6) The adapter shall reach no network,
+      write no file and read no key: it is a translation, and the step after
+      it is what verifies and signs. (7) Translating the manifest
+      `pulseengine-layers` actually carries shall reproduce the tool list the
+      pre-migration workflow carried by hand, so the migration is provably a
+      move rather than a change.
 
   - id: REQ-REALM2-001
     type: requirement
