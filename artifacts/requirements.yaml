@@ -3534,11 +3534,27 @@ artifacts:
       shall compose across both realms and resolve tools from each, verified
       each against ITS OWN realm's root. (3) The system gate shall exercise
       that composition, not a fixture of it. (4) varve#91 shall be settled by
-      the attempt: a tool-name collision between two real realms currently has
-      NO escape — the error's own suggested fix ("restrict the pin's `tools`")
-      does not work, and the other ("remove the duplicate") is unavailable to
-      a consumer composing a realm they do not control. Two realms shipping
-      `wasm-tools` is not hypothetical. (5) `docs composition` shall document
+      the attempt. Two realms shipping `wasm-tools` is not hypothetical — it
+      is the ORDINARY case the moment a fork exists alongside its upstream,
+      which is exactly the topology this release builds. The error's own
+      suggested fix, "restrict the pin's `tools`", is not merely unimplemented
+      but STRUCTURALLY INCAPABLE: `tools` filters by NAME, and the collision is
+      two layers exposing the SAME name, so no value of it has ever been able
+      to disambiguate. The other suggestion, "remove the duplicate from one
+      layer", is unavailable to a consumer composing a realm they do not
+      control. (4a) `tools` shall accept an optional REALM QUALIFIER —
+      `tools = ["bytecodealliance/wasm-tools", "rivet"]` — so the filter can
+      express the choice its own error message tells people to make; a bare
+      name shall keep working where nothing collides. (4b) The unselected
+      layer shall stay installed and verified, and remain addressable
+      qualified (`varve run bytecodealliance/wasm-tools`), because "compare
+      our fork against upstream" is a real workflow and losing the other
+      binary entirely is a worse answer than refusing. (4c) Exactly ONE shim
+      per name shall remain, so what a bare name dispatches is decided by the
+      pin and never by install order. (4d) The refusal, where the pin has not
+      chosen, shall name both providers WITH their realms and show the
+      qualified form — the current message names the layers and then gives
+      advice that cannot work. (5) `docs composition` shall document
       the real two-realm setup (varve#57) with commands verified against the
       real binary, replacing the fixture-shaped example.
 
