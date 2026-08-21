@@ -27,7 +27,7 @@ manifest-version = 1
 realm   = "pulseengine"
 channel = "rolling"             # what the pulseengine realm actually publishes today
 layer   = "2026.08.2"
-tools   = ["rivet", "synth"]    # optional; a subset, plain names only
+tools   = ["rivet", "synth"]    # optional; a subset, plain or realm-qualified
 ```
 
 Copy this one as-is; it is installable. Two ways an earlier version of this

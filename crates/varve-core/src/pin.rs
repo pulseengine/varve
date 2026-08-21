@@ -205,6 +205,61 @@ impl ExportDecl {
     }
 }
 
+/// One entry of a pin's `tools` list (REQ-REALM2-001 clause 4a).
+///
+/// A bare name — `"rivet"` — means "whichever layer of this composition
+/// provides it", and stays exactly what it always was where nothing collides.
+/// A REALM-QUALIFIED name — `"bytecodealliance/wasm-tools"` — names the realm
+/// that must provide it, which is the only thing that can settle a collision
+/// between two realms shipping one name. Filtering by name never could: the
+/// collision IS one name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSelector {
+    /// The realm the pin chose, or `None` for a bare name.
+    pub realm: Option<String>,
+    /// The dispatchable name, always bare.
+    pub name: String,
+}
+
+impl ToolSelector {
+    /// Parse one `tools` entry. `None` where the string is neither a plain
+    /// name nor `realm/name` — a path, an empty half, or a deeper path.
+    ///
+    /// The check is deliberately whole-string rather than "does it contain a
+    /// slash": `/usr/bin/id` and `../x` must stay refused, because a tool name
+    /// indexes the verified layer's `bin/` and `Path::join` with an absolute
+    /// path REPLACES the base.
+    pub fn parse(entry: &str) -> Option<Self> {
+        let plain = |s: &str| {
+            !s.is_empty()
+                && s != "."
+                && s != ".."
+                && !s.contains('/')
+                && !s.contains('\\')
+                && !s.contains('\0')
+        };
+        match entry.split_once('/') {
+            Some((realm, name)) => (plain(realm) && plain(name)).then(|| ToolSelector {
+                realm: Some(realm.to_string()),
+                name: name.to_string(),
+            }),
+            None => plain(entry).then(|| ToolSelector {
+                realm: None,
+                name: entry.to_string(),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for ToolSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.realm {
+            Some(realm) => write!(f, "{realm}/{}", self.name),
+            None => f.write_str(&self.name),
+        }
+    }
+}
+
 /// A parsed, validated pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pin {
@@ -217,9 +272,9 @@ pub struct Pin {
     /// a name resolving to a different digest is a hard failure (DD-005's
     /// lever available at the pin level).
     pub digest: Option<String>,
-    /// Optional restriction to a subset of the layer's tools. `None` means
-    /// every tool in the layer.
-    pub tools: Option<Vec<String>>,
+    /// Optional restriction to a subset of the layer's tools, each optionally
+    /// realm-qualified. `None` means every tool in the composition.
+    pub tools: Option<Vec<ToolSelector>>,
     /// The exports this project declares (REQ-EXPORTDECL-001). Declared means
     /// checked: `verify` looks at every one of these without being told.
     pub exports: Vec<ExportDecl>,
@@ -256,9 +311,10 @@ pub enum PinError {
     )]
     MalformedDigest { path: String, found: String },
     #[error(
-        "{path}: tool name {name:?} is not a plain name — a tool is looked up INSIDE \
-         the pinned layer, so a path would resolve outside it. Name the tool only, \
-         e.g. tools = [\"rivet\"]."
+        "{path}: tools entry {name:?} is neither a tool name nor a realm-qualified one — \
+         a tool is looked up INSIDE the verified composition, so a path would resolve \
+         outside it. Write either tools = [\"rivet\"] or, where two realms ship one name, \
+         tools = [\"bytecodealliance/wasm-tools\"]."
     )]
     ToolNameIsAPath { path: String, name: String },
     #[error("{path}: tools list is present but empty — omit it to select every tool in the layer")]
@@ -419,38 +475,39 @@ impl Pin {
                 });
             }
         }
-        if let Some(tools) = &raw.toolchain.tools {
-            if tools.is_empty() {
-                return Err(PinError::EmptyTools {
-                    path: origin.to_string(),
-                });
-            }
-            // A tool name indexes the verified layer's `bin/`. `Path::join`
-            // with an absolute path REPLACES the base, and `..` walks out of
-            // it, so anything but a plain name would escape the layer — the
-            // opposite of "a pin resolves exactly or the command fails".
-            for name in tools {
-                let plain = !name.is_empty()
-                    && name != "."
-                    && name != ".."
-                    && !name.contains('/')
-                    && !name.contains('\\')
-                    && !name.contains('\0');
-                if !plain {
-                    return Err(PinError::ToolNameIsAPath {
+        let tools = match &raw.toolchain.tools {
+            None => None,
+            Some(entries) => {
+                if entries.is_empty() {
+                    return Err(PinError::EmptyTools {
                         path: origin.to_string(),
-                        name: name.clone(),
                     });
                 }
+                // A tool name indexes the verified layer's `bin/`. `Path::join`
+                // with an absolute path REPLACES the base, and `..` walks out
+                // of it, so anything but a plain name (or one realm qualifier
+                // ahead of a plain name) would escape the layer — the opposite
+                // of "a pin resolves exactly or the command fails".
+                let mut selectors = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let Some(selector) = ToolSelector::parse(entry) else {
+                        return Err(PinError::ToolNameIsAPath {
+                            path: origin.to_string(),
+                            name: entry.clone(),
+                        });
+                    };
+                    selectors.push(selector);
+                }
+                Some(selectors)
             }
-        }
+        };
         let exports = parse_exports(&raw.exports, origin)?;
         Ok(Pin {
             realm: raw.toolchain.realm,
             channel: raw.toolchain.channel,
             layer,
             digest: raw.toolchain.digest,
-            tools: raw.toolchain.tools,
+            tools,
             exports,
         })
     }
@@ -781,9 +838,21 @@ tools   = ["rivet", "synth"]
             pin.digest.as_deref(),
             Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+        // The compatibility surface: a bare `tools` list still parses to bare
+        // selectors, realm `None`, in the order written.
         assert_eq!(
-            pin.tools.as_deref(),
-            Some(&["rivet".to_string(), "synth".to_string()][..])
+            pin.tools
+                .as_deref()
+                .map(|t| t.iter().map(ToolSelector::to_string).collect::<Vec<_>>()),
+            Some(vec!["rivet".to_string(), "synth".to_string()])
+        );
+        assert!(
+            pin.tools
+                .as_deref()
+                .unwrap()
+                .iter()
+                .all(|t| t.realm.is_none()),
+            "a bare name carries no realm choice"
         );
     }
 
@@ -885,14 +954,25 @@ tools   = ["rivet", "synth"]
         // with an absolute path REPLACES the base, so an unchecked name would
         // resolve outside the layer entirely — exactly the "never falls back
         // to binaries on PATH" guarantee the docs make. Fail closed here.
+        //
+        // One `/` is now a REALM QUALIFIER (REQ-REALM2-001 clause 4a), so the
+        // list below is what remains path-shaped: an absolute path, a deeper
+        // path, a half that is empty or relative, a Windows path.
         for hostile in [
             "/usr/bin/id",
             "../../usr/bin/id",
-            "sub/dir",
+            "sub/dir/deeper",
+            "/rivet",
+            "acme/",
+            "../rivet",
+            "./rivet",
+            "acme/..",
+            "../acme/rivet",
             "..",
             ".",
             "",
             "C:\\Windows\\system32\\cmd.exe",
+            "acme\\rivet",
         ] {
             let content = format!(
                 "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\ntools = [\"{}\"]\n",
@@ -900,12 +980,53 @@ tools   = ["rivet", "synth"]
             );
             assert!(
                 Pin::parse(&content, "varve.toml").is_err(),
-                "tool name {hostile:?} must be refused — it escapes the layer"
+                "tools entry {hostile:?} must be refused — it escapes the layer"
             );
         }
         // Ordinary names still parse.
         let ok = "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\ntools = [\"rivet\", \"synth-c\", \"cargo_x\"]\n";
         assert!(Pin::parse(ok, "varve.toml").is_ok());
+    }
+
+    // rivet: verifies REQ-REALM2-001
+    #[test]
+    fn tools_accepts_a_realm_qualifier_beside_a_bare_name() {
+        // Clause 4a, at the schema. The pin is a COMPATIBILITY SURFACE: the
+        // qualified and bare forms must coexist in one list, because a realm
+        // collision is about one name and the rest of the list is unaffected.
+        let pin = Pin::parse(
+            "manifest-version = 1\n[toolchain]\nrealm = \"pulseengine\"\nchannel = \"qualified\"\n\
+             layer = \"2026.09.0\"\ntools = [\"bytecodealliance/wasm-tools\", \"rivet\"]\n",
+            "varve.toml",
+        )
+        .unwrap();
+        let tools = pin.tools.unwrap();
+        assert_eq!(tools[0].realm.as_deref(), Some("bytecodealliance"));
+        assert_eq!(tools[0].name, "wasm-tools");
+        assert_eq!(tools[0].to_string(), "bytecodealliance/wasm-tools");
+        assert_eq!(tools[1].realm, None);
+        assert_eq!(tools[1].name, "rivet");
+    }
+
+    // rivet: verifies REQ-REALM2-001
+    #[test]
+    fn the_refusal_for_a_path_shows_both_forms_that_are_accepted() {
+        // The old message said "Name the tool only" — which, from v0.29.0, is
+        // no longer the whole truth, and a reader hitting a collision would be
+        // sent back to the form that cannot express their fix.
+        let err = Pin::parse(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\n\
+             tools = [\"/usr/bin/id\"]\n",
+            "varve.toml",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, PinError::ToolNameIsAPath { .. }), "{msg}");
+        assert!(
+            msg.contains("tools = [\"rivet\"]")
+                && msg.contains("tools = [\"bytecodealliance/wasm-tools\"]"),
+            "both accepted forms must be shown: {msg}"
+        );
     }
 
     // rivet: verifies REQ-PIN-001

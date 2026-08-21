@@ -16,6 +16,16 @@
 //! is bounded, and a tool exposed by two layers is an ERROR naming both — varve
 //! does not pick a winner, for the same reason a pin that does not resolve
 //! uniquely is an error and not a fallback.
+//!
+//! What v0.29.0 adds (REQ-REALM2-001 clause 4) is the way THROUGH that refusal.
+//! Two realms shipping one name stopped being hypothetical the moment a fork
+//! existed beside its upstream — which is the whole reason the fork exists,
+//! upstream not attesting every tool. The escape is a realm QUALIFIER in the
+//! pin, decided here and nowhere else: `select_tools` is the single place that
+//! says what a bare name dispatches to, it consults only the pin's choice, and
+//! it never consults install order. Realm PRECEDENCE was considered and
+//! rejected for exactly that reason — it would let adding a tool to a
+//! high-priority realm silently change which binary a build runs.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,9 +56,17 @@ pub fn view(bytes: &[u8]) -> Result<LayerView, ComposeError> {
         let ann = &e["annotations"];
         let digest = e["digest"].as_str().unwrap_or_default().to_string();
         match ann[crate::kind::ANN_KIND].as_str() {
+            // An EMPTY realm annotation is read as absent, not as a realm
+            // named "". Absent means "the including layer's realm", and a
+            // producer that writes the key with no value plainly means the
+            // same thing — reading it literally would leave the included
+            // layer with no realm and so no qualified form for its tools.
             Some("layer") => v.includes.push(Include {
                 digest,
-                realm: ann[ANN_INCLUDE_REALM].as_str().map(|s| s.to_string()),
+                realm: ann[ANN_INCLUDE_REALM]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
                 layer: ann[ANN_INCLUDE_LAYER].as_str().map(|s| s.to_string()),
             }),
             // Absent kind = tool (back-compat, as everywhere else).
@@ -101,15 +119,40 @@ pub enum ComposeError {
     TooDeep,
     #[error("layer manifest could not be read for composition: {0}")]
     Unreadable(String),
+    /// A name two layers of one composition both provide, which the pin has
+    /// not chosen between (REQ-REALM2-001 clause 4d).
+    ///
+    /// The old message named two layer DIGESTS and then said "Restrict the
+    /// pin's `tools`" — advice structurally incapable of working, because
+    /// `tools` filtered by NAME and the collision is one name. It must instead
+    /// name both providers WITH their realms and show the qualified form to
+    /// copy, which is a fix the reader can actually apply.
     #[error(
-        "tool '{tool}' is exposed by more than one layer in this composition \
-         ({first} and {second}) — refusing to choose. Restrict the pin's `tools`, \
-         or remove the duplicate from one layer."
+        "tool '{tool}' is provided by more than one layer of this composition — {first} \
+         and {second} — and the pin has not chosen between them. varve does not pick a \
+         winner: what a bare name runs is decided by the pin, never by install order. \
+         {fix}"
     )]
     AmbiguousTool {
         tool: String,
         first: String,
         second: String,
+        fix: String,
+    },
+    /// The pin qualified a name with a realm that provides no such tool.
+    /// Failing closed matters here: silently falling back to the other realm
+    /// would run bytes the pin explicitly did not choose.
+    #[error(
+        "this project's pin selects '{selector}', but no layer of this composition from \
+         realm '{realm}' provides '{tool}' — it is provided by: {providers}. Fix the \
+         qualifier in varve.toml; varve will not substitute another realm's binary for \
+         the one the pin named."
+    )]
+    RealmProvidesNoSuchTool {
+        selector: String,
+        realm: String,
+        tool: String,
+        providers: String,
     },
     /// Boxed: six strings inline would make every `ComposeError` — and so
     /// every `ResolveError` — large enough to move on the happy path.
@@ -213,34 +256,60 @@ pub fn includes(v: &LayerView) -> Vec<Include> {
     v.includes.clone()
 }
 
-/// Walk a composition graph breadth-first from a root manifest, refusing cycles
-/// and excessive depth. `fetch` supplies a manifest for a digest, or `None` if
-/// that layer is not installed — a missing layer is the caller's error to
-/// report (with its corrective `varve install`), not this walker's to invent.
+/// One layer of a walked composition, with the realm whose root vouches for it.
 ///
-/// Returns the visit order, root first, so callers can union tools predictably.
+/// The realm is carried through the walk rather than looked up afterwards
+/// because it is a property of the EDGE — an `[[include]]` names the realm that
+/// verifies the layer it points at — and because a refusal that cannot name the
+/// realms is the refusal clause 4d exists to replace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Walked {
+    pub digest: String,
+    /// The realm naming this layer's trust root. Empty where the composition
+    /// names none (a pin with no `realm`), in which case there is no qualified
+    /// form for its tools and the refusal must say so.
+    pub realm: String,
+    pub view: LayerView,
+}
+
+/// Walk a composition graph from a root manifest, refusing cycles and excessive
+/// depth. `fetch` supplies a manifest for a digest, or `None` if that layer is
+/// not installed — a missing layer is the caller's error to report (with its
+/// corrective `varve install`), not this walker's to invent.
+///
+/// `root_realm` labels the root; each include labels its child, inheriting the
+/// including layer's realm where it names none (the annotation's documented
+/// meaning).
+///
+/// Returns the visit order, root first, so callers can select tools predictably.
 pub fn walk<F>(
     root_digest: &str,
+    root_realm: &str,
     root: &LayerView,
     mut fetch: F,
-) -> Result<Vec<(String, LayerView)>, ComposeError>
+) -> Result<Vec<Walked>, ComposeError>
 where
     F: FnMut(&str) -> Option<LayerView>,
 {
-    let mut out = vec![(root_digest.to_string(), root.clone())];
+    let mut out = vec![Walked {
+        digest: root_digest.to_string(),
+        realm: root_realm.to_string(),
+        view: root.clone(),
+    }];
     let mut emitted: BTreeSet<String> = BTreeSet::new();
     emitted.insert(root_digest.to_string());
-    // (digest, view, ancestors-on-this-path). A CYCLE is a digest reappearing
-    // on its OWN path — not merely one seen before. An earlier version used a
-    // global `seen`, which reported a DIAMOND (two layers sharing a base) as a
-    // cycle, with a message falsely claiming the layer included itself. A
-    // shared base is the most ordinary composition there is.
-    let mut stack: Vec<(String, LayerView, BTreeSet<String>)> = vec![(
+    // (digest, realm, view, ancestors-on-this-path). A CYCLE is a digest
+    // reappearing on its OWN path — not merely one seen before. An earlier
+    // version used a global `seen`, which reported a DIAMOND (two layers
+    // sharing a base) as a cycle, with a message falsely claiming the layer
+    // included itself. A shared base is the most ordinary composition there is.
+    let mut stack: Vec<(String, String, LayerView, BTreeSet<String>)> = vec![(
         root_digest.to_string(),
+        root_realm.to_string(),
         root.clone(),
         BTreeSet::from([root_digest.to_string()]),
     )];
-    while let Some((from, view, path)) = stack.pop() {
+    while let Some((from, realm, view, path)) = stack.pop() {
         if path.len() > MAX_DEPTH {
             return Err(ComposeError::TooDeep);
         }
@@ -255,39 +324,150 @@ where
                 // Not installed. The caller names it and how to fix it.
                 continue;
             };
+            let child_realm = inc.realm.clone().unwrap_or_else(|| realm.clone());
             // A layer reachable by two paths is walked once, not refused.
             if emitted.insert(inc.digest.clone()) {
-                out.push((inc.digest.clone(), child.clone()));
+                out.push(Walked {
+                    digest: inc.digest.clone(),
+                    realm: child_realm.clone(),
+                    view: child.clone(),
+                });
             }
             let mut child_path = path.clone();
             child_path.insert(inc.digest.clone());
-            stack.push((inc.digest.clone(), child, child_path));
+            stack.push((inc.digest.clone(), child_realm, child, child_path));
         }
     }
     Ok(out)
 }
 
-/// Union the tool names a composition exposes, refusing any name that appears
-/// in more than one layer. Returns tool → the digest of the layer providing it.
-pub fn union_tools(
-    layers: &[(String, LayerView)],
-) -> Result<BTreeMap<String, String>, ComposeError> {
-    let mut owner: BTreeMap<String, String> = BTreeMap::new();
-    for (digest, v) in layers {
-        for tool in &v.tools {
-            if let Some(first) = owner.get(tool)
-                && first != digest
-            {
-                return Err(ComposeError::AmbiguousTool {
-                    tool: tool.clone(),
-                    first: first.clone(),
-                    second: digest.clone(),
-                });
-            }
-            owner.insert(tool.clone(), digest.clone());
+/// One layer's claim to a dispatchable name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolProvider {
+    pub tool: String,
+    /// The realm whose root vouches for the providing layer. Empty where the
+    /// composition names none.
+    pub realm: String,
+    /// The providing layer's identity, for messages a human reads.
+    pub layer: String,
+    /// The providing layer's manifest digest — the store key.
+    pub digest: String,
+}
+
+impl ToolProvider {
+    /// How a pin names this provider: `realm/tool`. `None` where the layer
+    /// belongs to no named realm — there is then no qualified form, and a
+    /// refusal must say that rather than print one that cannot work.
+    pub fn qualified(&self) -> Option<String> {
+        (!self.realm.is_empty()).then(|| format!("{}/{}", self.realm, self.tool))
+    }
+
+    /// How this provider is named in an error: realm first, since the realms
+    /// are what a reader must tell apart.
+    fn describe(&self) -> String {
+        if self.realm.is_empty() {
+            format!("layer {} (no realm named)", self.layer)
+        } else {
+            format!("realm '{}' layer {}", self.realm, self.layer)
         }
     }
-    Ok(owner)
+}
+
+/// Decide, for every dispatchable name a composition exposes, the ONE provider
+/// a bare name resolves to (REQ-REALM2-001 clauses 4c and 4d).
+///
+/// `chosen` is the pin's realm-qualified selection, tool name → realm. A name
+/// with a single provider needs no entry and is unaffected — every pin written
+/// before this existed keeps resolving byte for byte. A name with several
+/// providers resolves only where the pin chose, and the choice is the pin's
+/// alone: nothing here reads install order, partition order or a precedence
+/// list, because any of those would let adding a tool to one realm silently
+/// change which binary a build runs.
+///
+/// Providers are given root-layer-first; that order decides only which one an
+/// error names first, never which one wins.
+pub fn select_tools(
+    providers: &[ToolProvider],
+    chosen: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, ToolProvider>, ComposeError> {
+    let mut by_name: BTreeMap<&str, Vec<&ToolProvider>> = BTreeMap::new();
+    for p in providers {
+        let slot = by_name.entry(p.tool.as_str()).or_default();
+        // One layer offering a name twice (manifest and `bin/` both say so) is
+        // one provider, not a collision with itself.
+        if !slot.iter().any(|q| q.digest == p.digest) {
+            slot.push(p);
+        }
+    }
+    let mut out = BTreeMap::new();
+    for (tool, offers) in by_name {
+        let picked: Vec<&ToolProvider> = match chosen.get(tool) {
+            Some(realm) => offers
+                .iter()
+                .copied()
+                .filter(|p| &p.realm == realm)
+                .collect(),
+            None => offers.clone(),
+        };
+        match picked.as_slice() {
+            [only] => {
+                out.insert(tool.to_string(), (*only).clone());
+            }
+            [] => {
+                // The pin qualified with a realm that provides nothing here.
+                let realm = chosen.get(tool).cloned().unwrap_or_default();
+                return Err(ComposeError::RealmProvidesNoSuchTool {
+                    selector: format!("{realm}/{tool}"),
+                    realm,
+                    tool: tool.to_string(),
+                    providers: offers
+                        .iter()
+                        .map(|p| p.describe())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                });
+            }
+            [first, second, ..] => {
+                return Err(ComposeError::AmbiguousTool {
+                    tool: tool.to_string(),
+                    first: first.describe(),
+                    second: second.describe(),
+                    fix: fix_for(tool, first, second, chosen.contains_key(tool)),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The corrective half of clause 4d: a line the reader can paste, or a plain
+/// statement of why no such line exists for this pair.
+fn fix_for(
+    tool: &str,
+    first: &ToolProvider,
+    second: &ToolProvider,
+    already_qualified: bool,
+) -> String {
+    match (first.qualified(), second.qualified()) {
+        (Some(a), Some(b)) if first.realm != second.realm => format!(
+            "Choose one in varve.toml: tools = [\"{a}\"] — or tools = [\"{b}\"]. The layer you \
+             do not choose stays installed and verified, and `varve run {a}` / `varve run {b}` \
+             still reach either one."
+        ),
+        // Two layers of ONE realm, or a layer with no realm at all: a realm
+        // qualifier cannot separate these, and saying so is the honest answer.
+        _ if already_qualified || first.realm == second.realm => format!(
+            "Both are in realm '{}', so a realm qualifier cannot separate them — one of those \
+             two layers must stop exposing '{tool}', or pin the layer that provides the one \
+             you want directly.",
+            first.realm
+        ),
+        _ => format!(
+            "One of these layers belongs to no named realm, so there is no qualified form for \
+             it: define its realm in varve-realms.toml and name it in the pin's `realm`, then \
+             choose with tools = [\"<realm>/{tool}\"]."
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +501,29 @@ mod tests {
         view(json.as_bytes()).unwrap()
     }
 
+    /// Every provider a walk exposes, in walk order — the shape `resolve`
+    /// hands `select_tools`, built here from views so the compose tests reason
+    /// about the same data the binary does.
+    fn providers(walked: &[Walked]) -> Vec<ToolProvider> {
+        walked
+            .iter()
+            .flat_map(|w| {
+                w.view.tools.iter().map(|t| ToolProvider {
+                    tool: t.clone(),
+                    realm: w.realm.clone(),
+                    layer: "2026.08.0".into(),
+                    digest: w.digest.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// `select_tools` with nothing chosen — the pre-v0.29.0 behaviour, and
+    /// still what an unrestricted pin gets.
+    fn unchosen(walked: &[Walked]) -> Result<BTreeMap<String, ToolProvider>, ComposeError> {
+        select_tools(&providers(walked), &BTreeMap::new())
+    }
+
     // rivet: verifies REQ-COMPOSE-001
     #[test]
     fn a_composition_exposes_both_layers_tools() {
@@ -335,18 +538,22 @@ mod tests {
         assert_eq!(inc[0].digest, "sha256:up");
         assert_eq!(inc[0].realm.as_deref(), Some("bytecodealliance"));
 
-        let layers = walk("sha256:root", &root, |d| {
+        let layers = walk("sha256:root", "pulseengine", &root, |d| {
             (d == "sha256:up").then(|| upstream.clone())
         })
         .unwrap();
         assert_eq!(layers.len(), 2, "root plus the included layer");
-        let tools = union_tools(&layers).unwrap();
+        // The include's realm labels the layer it points at; the root keeps
+        // the pin's own.
+        assert_eq!(layers[0].realm, "pulseengine");
+        assert_eq!(layers[1].realm, "bytecodealliance");
+        let tools = unchosen(&layers).unwrap();
         // The producing half is now answerable alongside the checking half.
         for t in ["rivet", "meld", "wasm-tools", "cargo-component"] {
             assert!(tools.contains_key(t), "{t} missing from the composition");
         }
-        assert_eq!(tools["wasm-tools"], "sha256:up");
-        assert_eq!(tools["rivet"], "sha256:root");
+        assert_eq!(tools["wasm-tools"].digest, "sha256:up");
+        assert_eq!(tools["rivet"].digest, "sha256:root");
     }
 
     // rivet: verifies REQ-COMPOSE-001
@@ -359,14 +566,176 @@ mod tests {
             &["wasm-tools"],
             &[("sha256:up", "bytecodealliance")],
         );
-        let layers = walk("sha256:root", &root, |d| {
+        let layers = walk("sha256:root", "pulseengine", &root, |d| {
             (d == "sha256:up").then(|| upstream.clone())
         })
         .unwrap();
-        match union_tools(&layers) {
+        match unchosen(&layers) {
             Err(ComposeError::AmbiguousTool { tool, .. }) => assert_eq!(tool, "wasm-tools"),
             other => panic!("expected AmbiguousTool, got {other:?}"),
         }
+    }
+
+    // rivet: verifies REQ-REALM2-001
+    #[test]
+    fn a_realm_qualifier_settles_a_collision_the_tools_filter_never_could() {
+        // Clause 4a. `tools = ["rivet", "synth"]` filters by NAME, and the
+        // collision is two layers exposing the SAME name — so no value of the
+        // old filter could ever disambiguate. A realm can.
+        let upstream = manifest("2026.08.0", &["wasm-tools"], &[]);
+        let root = manifest(
+            "2026.09.0",
+            &["wasm-tools", "rivet"],
+            &[("sha256:up", "bytecodealliance")],
+        );
+        let layers = walk("sha256:root", "pulseengine", &root, |d| {
+            (d == "sha256:up").then(|| upstream.clone())
+        })
+        .unwrap();
+        let all = providers(&layers);
+
+        for (realm, digest) in [
+            ("bytecodealliance", "sha256:up"),
+            ("pulseengine", "sha256:root"),
+        ] {
+            let chosen = BTreeMap::from([("wasm-tools".to_string(), realm.to_string())]);
+            let picked = select_tools(&all, &chosen).unwrap();
+            assert_eq!(
+                picked["wasm-tools"].digest, digest,
+                "the pin chose realm '{realm}'"
+            );
+            assert_eq!(picked["wasm-tools"].realm, realm);
+            // A bare name where nothing collides is untouched by any of this.
+            assert_eq!(picked["rivet"].digest, "sha256:root");
+        }
+    }
+
+    // rivet: verifies REQ-REALM2-001
+    #[test]
+    fn a_qualifier_naming_a_realm_that_provides_nothing_is_refused_not_ignored() {
+        // Failing closed is the whole point: quietly falling back to the other
+        // realm would run bytes the pin explicitly did not choose, which is the
+        // silent substitution the qualifier exists to prevent.
+        let upstream = manifest("2026.08.0", &["wasm-tools"], &[]);
+        let root = manifest(
+            "2026.09.0",
+            &["wasm-tools"],
+            &[("sha256:up", "bytecodealliance")],
+        );
+        let layers = walk("sha256:root", "pulseengine", &root, |d| {
+            (d == "sha256:up").then(|| upstream.clone())
+        })
+        .unwrap();
+        let chosen = BTreeMap::from([("wasm-tools".to_string(), "acme".to_string())]);
+        let err = select_tools(&providers(&layers), &chosen).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, ComposeError::RealmProvidesNoSuchTool { .. }),
+            "{msg}"
+        );
+        assert!(msg.contains("acme/wasm-tools"), "{msg}");
+        // …and it names who DOES provide it, or the reader cannot fix the typo.
+        assert!(
+            msg.contains("pulseengine") && msg.contains("bytecodealliance"),
+            "{msg}"
+        );
+    }
+
+    // rivet: verifies REQ-REALM2-001
+    #[test]
+    fn the_refusal_names_both_realms_and_shows_a_qualified_form_that_works() {
+        // Clause 4d. The message it replaces named two layer DIGESTS and then
+        // advised "Restrict the pin's `tools`" — a fix that cannot work, and a
+        // persona who tried it twice reported it doing nothing.
+        let upstream = manifest("2026.08.0", &["wasm-tools"], &[]);
+        let root = manifest(
+            "2026.09.0",
+            &["wasm-tools"],
+            &[("sha256:up", "bytecodealliance")],
+        );
+        let layers = walk("sha256:root", "pulseengine", &root, |d| {
+            (d == "sha256:up").then(|| upstream.clone())
+        })
+        .unwrap();
+        let msg = unchosen(&layers).unwrap_err().to_string();
+        assert!(
+            msg.contains("realm 'pulseengine'") && msg.contains("realm 'bytecodealliance'"),
+            "both providers must be named WITH their realms: {msg}"
+        );
+        assert!(
+            msg.contains("tools = [\"pulseengine/wasm-tools\"]")
+                && msg.contains("tools = [\"bytecodealliance/wasm-tools\"]"),
+            "both qualified forms must be there to copy: {msg}"
+        );
+        assert!(
+            !msg.contains("Restrict the pin's `tools`"),
+            "the advice that cannot work must be gone: {msg}"
+        );
+    }
+
+    // rivet: verifies REQ-REALM2-001
+    #[test]
+    fn two_layers_of_one_realm_are_told_a_qualifier_cannot_help_them() {
+        // The honest edge of clause 4d. A realm qualifier separates realms; it
+        // cannot separate two layers inside one. Printing a form that would not
+        // work is exactly the failure this requirement exists to end, so the
+        // refusal says so instead.
+        let base = manifest("2026.08.0", &["wasm-tools"], &[]);
+        let root = manifest("2026.09.0", &["wasm-tools"], &[("sha256:base", "")]);
+        let layers = walk("sha256:root", "pulseengine", &root, |d| {
+            (d == "sha256:base").then(|| base.clone())
+        })
+        .unwrap();
+        let msg = unchosen(&layers).unwrap_err().to_string();
+        assert!(
+            msg.contains("a realm qualifier cannot separate them"),
+            "an unusable qualified form must not be offered: {msg}"
+        );
+    }
+
+    // rivet: verifies REQ-REALM2-001
+    #[test]
+    fn one_layer_declaring_a_name_twice_is_not_a_collision_with_itself() {
+        // `resolve` offers a name from the signed manifest AND from `bin/`, so
+        // the ordinary layer produces two offers for one tool. Treating that as
+        // ambiguity would refuse every single-realm pin varve has ever had.
+        let twice = vec![
+            ToolProvider {
+                tool: "rivet".into(),
+                realm: "pulseengine".into(),
+                layer: "2026.09.0".into(),
+                digest: "sha256:root".into(),
+            },
+            ToolProvider {
+                tool: "rivet".into(),
+                realm: "pulseengine".into(),
+                layer: "2026.09.0".into(),
+                digest: "sha256:root".into(),
+            },
+        ];
+        let picked = select_tools(&twice, &BTreeMap::new()).unwrap();
+        assert_eq!(picked["rivet"].digest, "sha256:root");
+    }
+
+    // rivet: verifies REQ-REALM2-001
+    #[test]
+    fn an_include_inherits_the_including_realm_where_it_names_none() {
+        // The annotation's documented meaning ("absent means the including
+        // layer's own realm"), which is also what keeps every single-realm
+        // composition addressable: without inheritance the included layer would
+        // have no qualified form at all.
+        let base = manifest("2026.08.0", &["base"], &[]);
+        let root = manifest("2026.09.0", &["rivet"], &[("sha256:base", "")]);
+        let layers = walk("sha256:root", "pulseengine", &root, |d| {
+            (d == "sha256:base").then(|| base.clone())
+        })
+        .unwrap();
+        assert_eq!(layers[1].realm, "pulseengine");
+        let picked = unchosen(&layers).unwrap();
+        assert_eq!(
+            picked["base"].qualified().as_deref(),
+            Some("pulseengine/base")
+        );
     }
 
     // rivet: verifies REQ-COMPOSE-001
@@ -381,12 +750,69 @@ mod tests {
         let chain: Vec<LayerView> = (0..=MAX_DEPTH + 2)
             .map(|i| manifest("2026.08.0", &["t"], &[(&format!("sha256:{}", i + 1), "r")]))
             .collect();
-        let err = walk("sha256:0", &chain[0], |d| {
+        let err = walk("sha256:0", "r", &chain[0], |d: &str| {
             let n: usize = d.trim_start_matches("sha256:").parse().ok()?;
             chain.get(n).cloned().or_else(|| Some(leaf.clone()))
         })
         .unwrap_err();
         assert!(matches!(err, ComposeError::TooDeep), "got {err:?}");
+    }
+
+    // rivet: verifies REQ-COMPOSE-001
+    #[test]
+    fn a_chain_exactly_at_the_bound_is_walked_not_refused() {
+        // The other side of the same `>`. `MAX_DEPTH` is documented as how deep
+        // a composition MAY go, so a graph exactly that deep is legal — an
+        // off-by-one here would refuse the deepest permitted composition while
+        // the message said graphs of this depth are a mistake.
+        let chain: Vec<LayerView> = (0..MAX_DEPTH)
+            .map(|i| {
+                let tool = format!("t{i}");
+                if i + 1 == MAX_DEPTH {
+                    manifest("2026.08.0", &[&tool], &[])
+                } else {
+                    manifest(
+                        "2026.08.0",
+                        &[&tool],
+                        &[(&format!("sha256:{}", i + 1), "r")],
+                    )
+                }
+            })
+            .collect();
+        let walked = walk("sha256:0", "r", &chain[0], |d: &str| {
+            let n: usize = d.trim_start_matches("sha256:").parse().ok()?;
+            chain.get(n).cloned()
+        })
+        .expect("a chain exactly MAX_DEPTH long is within the bound");
+        assert_eq!(walked.len(), MAX_DEPTH);
+    }
+
+    // rivet: verifies REQ-REALM2-001
+    #[test]
+    fn a_collision_involving_a_layer_with_no_realm_says_there_is_no_qualified_form() {
+        // A pin that names no realm gives its own layer no realm name, so
+        // there IS no `realm/tool` for it. Printing one anyway would be the
+        // same failure clause 4d exists to end — advice that cannot work — so
+        // the refusal points at the thing that WOULD make a qualifier possible.
+        let upstream = manifest("2026.08.0", &["wasm-tools"], &[]);
+        let root = manifest(
+            "2026.09.0",
+            &["wasm-tools"],
+            &[("sha256:up", "bytecodealliance")],
+        );
+        let layers = walk("sha256:root", "", &root, |d| {
+            (d == "sha256:up").then(|| upstream.clone())
+        })
+        .unwrap();
+        let msg = unchosen(&layers).unwrap_err().to_string();
+        assert!(
+            msg.contains("belongs to no named realm") && msg.contains("varve-realms.toml"),
+            "the refusal must name the fix that exists, not a qualified form that does not: {msg}"
+        );
+        assert!(
+            !msg.contains("Both are in realm"),
+            "these two are NOT in one realm; one has none: {msg}"
+        );
     }
 
     // rivet: verifies REQ-COMPOSE-001
@@ -400,7 +826,7 @@ mod tests {
         let b = manifest("2026.08.0", &["b"], &[("sha256:d", "r")]);
         let c = manifest("2026.08.0", &["c"], &[("sha256:d", "r")]);
         let a = manifest("2026.08.0", &["a"], &[("sha256:b", "r"), ("sha256:c", "r")]);
-        let walked = walk("sha256:a", &a, |q| match q {
+        let walked = walk("sha256:a", "r", &a, |q| match q {
             "sha256:b" => Some(b.clone()),
             "sha256:c" => Some(c.clone()),
             "sha256:d" => Some(d.clone()),
@@ -409,8 +835,8 @@ mod tests {
         .unwrap();
         assert_eq!(walked.len(), 4, "A, B, C and D each once: {walked:?}");
         // …and the shared base's tool resolves exactly once, not ambiguously.
-        let tools = union_tools(&walked).unwrap();
-        assert_eq!(tools["base"], "sha256:d");
+        let tools = unchosen(&walked).unwrap();
+        assert_eq!(tools["base"].digest, "sha256:d");
     }
 
     // rivet: verifies REQ-COMPOSE-001
@@ -420,7 +846,7 @@ mod tests {
         let a = manifest("2026.08.0", &["x"], &[("sha256:b", "r")]);
         let b = manifest("2026.08.0", &["y"], &[("sha256:a", "r")]);
         let (ac, bc) = (a.clone(), b.clone());
-        let err = walk("sha256:a", &a, move |d| match d {
+        let err = walk("sha256:a", "r", &a, move |d| match d {
             "sha256:b" => Some(bc.clone()),
             "sha256:a" => Some(ac.clone()),
             _ => None,
@@ -435,7 +861,7 @@ mod tests {
         // walk() does not invent a fetch. A missing layer is the caller's
         // error to report, with its corrective `varve install`.
         let root = manifest("2026.08.0", &["rivet"], &[("sha256:missing", "other")]);
-        let layers = walk("sha256:root", &root, |_| None).unwrap();
+        let layers = walk("sha256:root", "r", &root, |_| None).unwrap();
         assert_eq!(layers.len(), 1, "only the root resolved");
         assert_eq!(
             includes(&root).len(),
@@ -523,8 +949,8 @@ mod tests {
         // behave exactly as before.
         let plain = manifest("2026.08.0", &["rivet", "meld"], &[]);
         assert!(includes(&plain).is_empty());
-        let layers = walk("sha256:root", &plain, |_| None).unwrap();
+        let layers = walk("sha256:root", "r", &plain, |_| None).unwrap();
         assert_eq!(layers.len(), 1);
-        assert_eq!(union_tools(&layers).unwrap().len(), 2);
+        assert_eq!(unchosen(&layers).unwrap().len(), 2);
     }
 }

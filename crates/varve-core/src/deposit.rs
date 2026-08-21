@@ -123,6 +123,20 @@ pub struct ToolSource {
     /// sha256 of that asset (the bytes Bazel will hash), bare hex or
     /// sha256:-prefixed.
     pub sha256: String,
+    /// WHICH mechanism vouched for these bytes (REQ-INGEST-001 clause 2).
+    /// `None` on a spec written before the requirement; a layer deposited that
+    /// way reads as `unrecorded`, never as verified.
+    #[serde(default)]
+    pub proof: Option<crate::ingest::IngestProof>,
+    /// The identity that vouched — the cosign certificate identity, or the
+    /// attestation's `buildSignerURI`.
+    #[serde(rename = "proof-signer", default)]
+    pub proof_signer: Option<String>,
+    /// What that mechanism ASSERTED, in one line. For `unverified` this is the
+    /// operator's recorded reason, and it is mandatory: see
+    /// `DepositError::UnverifiedWithoutReason`.
+    #[serde(rename = "proof-asserts", default)]
+    pub proof_asserts: Option<String>,
 }
 
 /// How a deposit treats a destination that is not empty (REQ-NODESTROY-001).
@@ -285,6 +299,37 @@ pub enum DepositError {
          whatever directory a compiler happens to run in"
     )]
     SdkPrefixNotAbsolute { name: String, prefix: String },
+    #[error(
+        "payload '{name}' from {repo} declares proof = \"unverified\" and records no reason — \
+         \"we could not verify this\" must never be the silent path. Nothing vouched for these \
+         bytes, so the only thing that can travel with them is WHY you shipped them anyway: set \
+         `proof-asserts` on [tool.source] to the operator's justification, which is signed into \
+         the layer where `varve inspect` and every consumer will see it."
+    )]
+    UnverifiedWithoutReason { name: String, repo: String },
+    #[error(
+        "payload '{name}' from {repo} declares proof = \"unverified\" and also names \
+         proof-signer {signer:?} — nothing vouched for these bytes, so naming an identity that \
+         did would be signed, attributable and false. Drop the signer, or declare the mechanism \
+         that actually established it."
+    )]
+    UnverifiedNamesASigner {
+        name: String,
+        repo: String,
+        signer: String,
+    },
+    #[error(
+        "payload '{name}' from {repo} carries ingestion-proof detail ({detail}) but declares no \
+         `proof` mechanism — the detail would be signed into the layer with nothing saying HOW \
+         it was established, which makes it attributable and believed rather than checkable. \
+         Declare `proof = \"cosign-sums\" | \"build-provenance\" | \"unverified\"`, or drop the \
+         detail."
+    )]
+    ProofDetailWithoutMechanism {
+        name: String,
+        repo: String,
+        detail: &'static str,
+    },
     #[error(transparent)]
     Sign(#[from] VerifyError),
     #[error("io error at {path}: {source}")]
@@ -378,6 +423,69 @@ fn check_sdk_prefixes(tools: &[&DepositTool]) -> Result<(), DepositError> {
     Ok(())
 }
 
+/// The ingestion proof must be sayable, or not said at all (REQ-INGEST-001
+/// clause 3), checked at the PRODUCING end for the same reason
+/// `check_sdk_prefixes` is: everything below is immutable the moment it is
+/// signed.
+///
+/// This function does NOT require a proof to be present. A crate ingested from
+/// crates.io and a layer deposited before this requirement both legitimately
+/// carry none, and they read as `unrecorded` rather than as verified. What it
+/// refuses are the three shapes that would be signed and BELIEVED:
+///
+/// * `unverified` with no recorded reason — the silent path the requirement
+///   exists to close;
+/// * `unverified` naming a signer — an identity credited with vouching for
+///   bytes nothing vouched for;
+/// * proof detail with no mechanism — a claim with no account of how it was
+///   established.
+///
+/// Refusing a MISSING proof is the assembler's job, not this one's: only the
+/// assembler knows it went looking for a mechanism and found none.
+fn check_ingest_proofs(tools: &[&DepositTool]) -> Result<(), DepositError> {
+    for tool in tools {
+        let Some(source) = &tool.source else { continue };
+        match source.proof {
+            Some(crate::ingest::IngestProof::Unverified) => {
+                if source
+                    .proof_asserts
+                    .as_ref()
+                    .is_none_or(|r| r.trim().is_empty())
+                {
+                    return Err(DepositError::UnverifiedWithoutReason {
+                        name: tool.name.clone(),
+                        repo: source.repo.clone(),
+                    });
+                }
+                if let Some(signer) = &source.proof_signer {
+                    return Err(DepositError::UnverifiedNamesASigner {
+                        name: tool.name.clone(),
+                        repo: source.repo.clone(),
+                        signer: signer.clone(),
+                    });
+                }
+            }
+            Some(_) => {}
+            None => {
+                let detail = match (&source.proof_signer, &source.proof_asserts) {
+                    (Some(_), Some(_)) => Some("proof-signer and proof-asserts"),
+                    (Some(_), None) => Some("proof-signer"),
+                    (None, Some(_)) => Some("proof-asserts"),
+                    (None, None) => None,
+                };
+                if let Some(detail) = detail {
+                    return Err(DepositError::ProofDetailWithoutMechanism {
+                        name: tool.name.clone(),
+                        repo: source.repo.clone(),
+                        detail,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Assemble, sign, and write a layer as an OCI image layout at `dest`,
 /// refusing a destination that already carries signed work (REQ-NODESTROY-001).
 pub fn deposit(
@@ -415,6 +523,7 @@ pub fn deposit_with_options(
     });
     check_identities(&tools)?;
     check_sdk_prefixes(&tools)?;
+    check_ingest_proofs(&tools)?;
 
     // Assemble the payload deterministically: sorted tools, fixed key order
     // (serde_json sorts map keys), no timestamps beyond the caller-supplied
@@ -452,6 +561,33 @@ pub fn deposit_with_options(
                     crate::bazel::ANN_SRC_SHA256.into(),
                     source.sha256.clone().into(),
                 );
+                // WHICH mechanism vouched for these bytes, and what it
+                // asserted (REQ-INGEST-001 clause 2) — inside the signed
+                // payload, so a consumer can tell a cosign-signed tool from an
+                // attested one without leaving the layer.
+                //
+                // Stamped only when the spec declares it. An absent annotation
+                // is the pre-requirement layer and reads as `unrecorded`;
+                // synthesising a default here would silently upgrade every
+                // payload deposited by an older spec to a claim nobody made,
+                // and would change the signed bytes of layers that carry no
+                // proof at all (the crate deposits, whose ingestion is
+                // crates.io and not a release page).
+                if let Some(proof) = source.proof {
+                    annotations.insert(crate::ingest::ANN_PROOF.into(), proof.as_str().into());
+                }
+                if let Some(signer) = &source.proof_signer {
+                    annotations.insert(
+                        crate::ingest::ANN_PROOF_SIGNER.into(),
+                        signer.clone().into(),
+                    );
+                }
+                if let Some(asserts) = &source.proof_asserts {
+                    annotations.insert(
+                        crate::ingest::ANN_PROOF_ASSERTS.into(),
+                        asserts.clone().into(),
+                    );
+                }
             }
             // Stamp the payload kind only when it is non-default: a `tool`
             // (or unspecified) entry carries no kind annotation, so pre-kind
@@ -849,6 +985,205 @@ mod tests {
         assert!(
             matches!(&err, DepositError::DuplicateTool { name, .. } if name == "synth"),
             "got: {err}"
+        );
+    }
+
+    /// A tool whose bytes arrived through a NAMED ingestion mechanism
+    /// (REQ-INGEST-001).
+    fn ingested(name: &str, repo: &str, proof: crate::ingest::IngestProof) -> DepositTool {
+        let mut tool = payload(name, "1.0.0", None, Some("x86_64-unknown-linux-gnu"));
+        tool.source = Some(ToolSource {
+            repo: repo.into(),
+            release: "v1.0.0".into(),
+            asset: format!("{name}-v1.0.0-x86_64-unknown-linux-gnu.tar.gz"),
+            sha256: "a".repeat(64),
+            proof: Some(proof),
+            proof_signer: match proof {
+                crate::ingest::IngestProof::Unverified => None,
+                _ => Some(format!(
+                    "https://github.com/{repo}/.github/workflows/release.yml@refs/tags/v1.0.0"
+                )),
+            },
+            proof_asserts: Some(match proof {
+                crate::ingest::IngestProof::CosignSums => {
+                    "SHA256SUMS.txt signed for this repo".to_string()
+                }
+                crate::ingest::IngestProof::BuildProvenance => {
+                    "built from source commit deadbeef".to_string()
+                }
+                crate::ingest::IngestProof::Unverified => {
+                    "NOTHING — operator opt-in: needed for the 2026.09 bring-up".to_string()
+                }
+            }),
+        });
+        tool
+    }
+
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_mechanism_that_vouched_for_each_payload_is_inside_the_signed_layer() {
+        // Clause 2. A consumer must be able to tell a cosign-signed tool from
+        // an attested one WITHOUT leaving the layer, so the mechanism and what
+        // it asserted are annotations on the payload entry — inside the DSSE
+        // payload, uncorrectable after signing, exactly like the kind and the
+        // source digests beside them.
+        use crate::ingest::{ANN_PROOF, ANN_PROOF_ASSERTS, ANN_PROOF_SIGNER, IngestProof};
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        spec.tools = vec![
+            ingested("rivet", "pulseengine/rivet", IngestProof::CosignSums),
+            ingested(
+                "wasm-tools",
+                "bytecodealliance/wasm-tools",
+                IngestProof::BuildProvenance,
+            ),
+            ingested(
+                "wit-bindgen",
+                "bytecodealliance/wit-bindgen",
+                IngestProof::Unverified,
+            ),
+        ];
+        let outcome = deposit(&spec, &sk, "k", &tmp.path().join("d")).unwrap();
+        let hex = outcome.digest.strip_prefix("sha256:").unwrap();
+        let bytes = std::fs::read(tmp.path().join("d/blobs/sha256").join(hex)).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = json["manifests"].as_array().unwrap();
+        let by_name = |n: &str| {
+            entries
+                .iter()
+                .find(|e| e["annotations"]["eu.pulseengine.tool"] == n)
+                .unwrap_or_else(|| panic!("{n} is not in the payload"))
+                .clone()
+        };
+
+        let rivet = by_name("rivet");
+        assert_eq!(rivet["annotations"][ANN_PROOF], "cosign-sums");
+        assert_eq!(
+            rivet["annotations"][ANN_PROOF_SIGNER],
+            "https://github.com/pulseengine/rivet/.github/workflows/release.yml@refs/tags/v1.0.0"
+        );
+
+        let wasm_tools = by_name("wasm-tools");
+        assert_eq!(
+            wasm_tools["annotations"][ANN_PROOF], "build-provenance",
+            "an attested tool must not read as a cosign-signed one"
+        );
+        assert_eq!(
+            wasm_tools["annotations"][ANN_PROOF_ASSERTS],
+            "built from source commit deadbeef"
+        );
+
+        let wit_bindgen = by_name("wit-bindgen");
+        assert_eq!(wit_bindgen["annotations"][ANN_PROOF], "unverified");
+        assert!(
+            wit_bindgen["annotations"][ANN_PROOF_SIGNER].is_null(),
+            "nothing vouched for it, so no signer may be named"
+        );
+        assert!(
+            wit_bindgen["annotations"][ANN_PROOF_ASSERTS]
+                .as_str()
+                .unwrap()
+                .contains("2026.09 bring-up"),
+            "the recorded opt-in reason travels with the payload"
+        );
+    }
+
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_unproven_payload_may_not_be_signed_in_silently() {
+        // Clause 3, at the signing end. `unverified` is a real, sayable state —
+        // but only WITH the recorded reason. A bare `proof = "unverified"` and
+        // no `proof-asserts` is the silent path the requirement forbids, and it
+        // is refused before a key is read rather than published and believed.
+        use crate::ingest::IngestProof;
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        let mut tool = ingested(
+            "wit-bindgen",
+            "bytecodealliance/wit-bindgen",
+            IngestProof::Unverified,
+        );
+        tool.source.as_mut().unwrap().proof_asserts = None;
+        spec.tools = vec![tool];
+        let err = deposit(&spec, &sk, "k", &tmp.path().join("d")).unwrap_err();
+        assert!(
+            matches!(&err, DepositError::UnverifiedWithoutReason { name, .. } if name == "wit-bindgen"),
+            "got: {err}"
+        );
+
+        // …and a signer named for a mechanism that vouched for nothing is a
+        // claim of provenance where there is none.
+        let mut spec = super::tests::spec();
+        let mut tool = ingested(
+            "wit-bindgen",
+            "bytecodealliance/wit-bindgen",
+            IngestProof::Unverified,
+        );
+        tool.source.as_mut().unwrap().proof_signer = Some("https://github.com/someone/".into());
+        spec.tools = vec![tool];
+        let err = deposit(&spec, &sk, "k", &tmp.path().join("e")).unwrap_err();
+        assert!(
+            matches!(&err, DepositError::UnverifiedNamesASigner { name, .. } if name == "wit-bindgen"),
+            "got: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn proof_detail_without_a_mechanism_is_refused_rather_than_signed() {
+        // The other direction: `proof-signer` / `proof-asserts` with no
+        // `proof` would land a signer and a claim in the signed payload with
+        // nothing saying HOW it was established — attributable, believed, and
+        // meaningless. Same shape of refusal as an sdk-prefix on a non-tree.
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        let mut tool = ingested(
+            "wasm-tools",
+            "bytecodealliance/wasm-tools",
+            crate::ingest::IngestProof::BuildProvenance,
+        );
+        tool.source.as_mut().unwrap().proof = None;
+        spec.tools = vec![tool];
+        let err = deposit(&spec, &sk, "k", &tmp.path().join("d")).unwrap_err();
+        assert!(
+            matches!(&err, DepositError::ProofDetailWithoutMechanism { name, .. } if name == "wasm-tools"),
+            "got: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_layer_deposited_before_this_requirement_reads_as_unrecorded_not_as_verified() {
+        // The compatibility promise. Every layer already published carries no
+        // proof annotation, and the absent case must NOT read as "verified" —
+        // that would silently upgrade every pre-REQ-INGEST-001 payload to a
+        // claim nobody made. Absent is its own state: `unrecorded`.
+        use crate::ingest::IngestProof;
+        use crate::manifest::ManifestEntry;
+        let entry = ManifestEntry {
+            digest: "sha256:abc".into(),
+            annotations: Default::default(),
+        };
+        assert_eq!(entry.ingest_proof(), Ok(None));
+        assert_eq!(IngestProof::label(None), "unrecorded");
+
+        let mut entry = entry;
+        entry
+            .annotations
+            .insert(crate::ingest::ANN_PROOF.into(), "build-provenance".into());
+        assert_eq!(entry.ingest_proof(), Ok(Some(IngestProof::BuildProvenance)));
+        // An unknown mechanism is reported verbatim, never guessed into a
+        // known one — a newer varve may mint mechanisms this build has not
+        // heard of, and quietly reading one as `cosign-sums` would be a lie.
+        entry
+            .annotations
+            .insert(crate::ingest::ANN_PROOF.into(), "notary-v2".into());
+        assert_eq!(
+            entry.ingest_proof(),
+            Err(crate::ingest::UnknownProof("notary-v2".into()))
         );
     }
 

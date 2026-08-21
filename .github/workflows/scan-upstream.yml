@@ -1,0 +1,254 @@
+name: Scan upstream
+
+# REQ-ROLLING-001: keep the rolling channel rolling, without automating the
+# signature.
+#
+# The measurement that produced this. Days after layer 2026.08.3 was published,
+# rivet had moved v0.33.1 -> v0.34.0, spar v0.36.0 -> v0.40.0 (four minors),
+# synth v0.55.0 -> v0.58.0, witness v0.39.0 -> v0.43.0, ordeal v0.18.0 ->
+# v0.19.0. A consumer pinned to `rolling` was not getting a rolling toolchain;
+# they were getting whatever was current the last time a human remembered.
+#
+# The decision that shapes this file (DD-024). The obvious automation — scan,
+# assemble, sign, publish, on a timer — is the wrong one here. In varve,
+# `channel = "rolling"` is NOT a trust boundary: a rolling layer is signed by
+# the SAME realm root as a qualified one, and the REALM is the boundary. An
+# automated publisher therefore means the realm root signing unattended, dozens
+# of times a week, while `varve docs root-ceremony` says to use that key as
+# rarely as possible, air-gapped, under a two-person rule, with every use
+# recorded. varve has no revocation and no rotation: a layer published in error
+# cannot be withdrawn.
+#
+# So this workflow automates the TOIL and leaves the JUDGEMENT:
+#
+#   scan     notice what moved, and check who vouches for each new artifact
+#   gate     run the real assembly gate against the PROPOSED pins
+#   propose  open one pull request carrying the version diff — and stop
+#   deposit-on-merge   a human merge, and only that, dispatches the signed deposit
+#
+# Cadence: daily, not hourly. Measured over the 30 days to 2026-08-21, the nine
+# repos this layer carries published 56 non-draft releases on 15 distinct days —
+# half the days had nothing at all, and the busy days came in bursts of seven to
+# nine. Hourly would scan 24x per day to find the same answer, and on a burst
+# day would rewrite the same proposal up to nine times, each rewrite
+# invalidating the assembly gate that had just run on it. Daily bounds staleness
+# below 24 hours (against the days-to-weeks a manual cut produced), costs nine
+# release listings and nine small signature checks, and yields at most one
+# proposal a day — a rate at which a human review is a review and not a rubber
+# stamp. `workflow_dispatch` covers the case where waiting for tomorrow is too
+# slow.
+
+on:
+  schedule:
+    # 06:17 UTC. Off the hour deliberately: on-the-hour crons queue behind the
+    # global stampede and can be delayed by tens of minutes.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Open/update the proposal PR (off = dry run, print only)"
+        type: boolean
+        default: false
+  pull_request:
+    # The scanner's own gate. It cannot live in systest.yml (that file belongs
+    # to REQ-SYSTEST-001/002), so it runs here, on changes to the scanner.
+    paths:
+      - tools/scan-upstream.sh
+      - tools/upstream-mechanism.sh
+      - tools/next-layer-id.sh
+      - tools/systest/scan-upstream.sh
+      - .github/workflows/scan-upstream.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/deposit-layer.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  # One scan at a time: two concurrent runs would force-push the same proposal
+  # branch past each other.
+  group: scan-upstream-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  self-test:
+    name: the scanner's own system gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: scan against a recorded release inventory
+        # Fixture-backed `gh` and `cosign`, no network: the cases that decide
+        # whether a proposal is right (a repo in both env lists, a blocked
+        # upstream, a pin ahead of upstream, nothing moved) and a negative
+        # control that must go red.
+        run: tools/systest/scan-upstream.sh "$RUNNER_TEMP/scan-upstream-systest"
+
+  scan:
+    name: what moved upstream
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      moved: ${{ steps.scan.outputs.moved }}
+      status: ${{ steps.scan.outputs.status }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: scan
+        id: scan
+        # Read-only against the GitHub API: it lists releases, and downloads
+        # only the small signature material it verifies. `github.token` is used
+        # for the rate limit, not for any write.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/scan-upstream.sh scan --out "$RUNNER_TEMP/scan"
+      - name: keep the proposal for the later jobs
+        if: steps.scan.outputs.moved == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upstream-proposal
+          # Only the proposal, not the downloaded probe material.
+          path: |
+            ${{ runner.temp }}/scan/status
+            ${{ runner.temp }}/scan/resolved.tsv
+            ${{ runner.temp }}/scan/deposit-layer.yml.proposed
+            ${{ runner.temp }}/scan/pins.diff
+            ${{ runner.temp }}/scan/pr-body.md
+            ${{ runner.temp }}/scan/pr-title.txt
+          retention-days: 14
+
+  gate:
+    name: is the proposal assemblable
+    needs: scan
+    if: needs.scan.outputs.moved == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: systest
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-proposal
+          path: proposal
+      - name: run the assembly gate against the PROPOSED pins
+        # Clause 2. A pull request opened by GITHUB_TOKEN does not trigger
+        # `pull_request` workflows, so systest.yml's deposit-layer job would NOT
+        # run on the proposal — the gate has to run here, before anyone is asked
+        # to look at it, or "known-assemblable" would be a claim rather than a
+        # result. The proposed env block is put in place first so section 5 of
+        # that gate (the live-pin consistency check, which is what catches a
+        # repo bumped in one list and not the other) sees the pins under review.
+        run: |
+          set -euo pipefail
+          cp proposal/deposit-layer.yml.proposed .github/workflows/deposit-layer.yml
+          git --no-pager diff --stat .github/workflows/deposit-layer.yml
+          tools/systest/deposit-layer.sh "$RUNNER_TEMP/deposit-layer"
+
+  propose:
+    name: open the pull request
+    needs: [scan, gate]
+    if: always() && needs.scan.outputs.moved == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # A proposal PR whose checks should run needs a token that is not
+          # GITHUB_TOKEN; provision VARVE_SCAN_PR_TOKEN to get that, or accept
+          # that the gate above is the proposal's evidence.
+          token: ${{ secrets.VARVE_SCAN_PR_TOKEN || github.token }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: upstream-proposal
+          path: ${{ runner.temp }}/scan
+      - name: open or update the standing proposal
+        env:
+          GH_TOKEN: ${{ secrets.VARVE_SCAN_PR_TOKEN || github.token }}
+          # Dry run unless this is the scheduled scan or somebody asked for it
+          # explicitly. The script defaults to dry run on its own; this makes
+          # the workflow say so too, so neither layer alone can open a PR by
+          # omission.
+          VARVE_SCAN_APPLY: ${{ (github.event_name == 'schedule' || inputs.apply) && '1' || '0' }}
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: |
+          set -euo pipefail
+          case "$GATE_RESULT" in
+            success) GATE=pass ;;
+            *)       GATE=fail ;;
+          esac
+          tools/scan-upstream.sh propose \
+            --out "$RUNNER_TEMP/scan" \
+            --gate "$GATE" \
+            --gate-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  deposit-on-merge:
+    name: a merge dispatches the signed deposit
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+      - name: did the pins actually change
+        id: pins
+        # Clause 3, and the guard that keeps it honest: a push that only edits
+        # a comment in deposit-layer.yml must not sign anything. The comparison
+        # is on the NORMALISED pin set, not on the file.
+        run: |
+          set -euo pipefail
+          tools/scan-upstream.sh pins > "$RUNNER_TEMP/pins.new"
+          git show "HEAD^:.github/workflows/deposit-layer.yml" > "$RUNNER_TEMP/old-workflow.yml" 2>/dev/null || : > "$RUNNER_TEMP/old-workflow.yml"
+          if [ -s "$RUNNER_TEMP/old-workflow.yml" ]; then
+            tools/scan-upstream.sh pins --workflow "$RUNNER_TEMP/old-workflow.yml" > "$RUNNER_TEMP/pins.old"
+          else
+            : > "$RUNNER_TEMP/pins.old"
+          fi
+          if diff -u "$RUNNER_TEMP/pins.old" "$RUNNER_TEMP/pins.new"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "the pin set is unchanged — nothing to deposit"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: dispatch the deposit
+        if: steps.pins.outputs.changed == 'true'
+        # This is the ONLY automated path to a signature, and the thing that
+        # triggers it is a person merging. The layer id and counter are read out
+        # of the published registry rather than typed or guessed; if that read
+        # fails, or the computed tag already exists, the helper refuses and this
+        # step goes red instead of dispatching a deposit that could collide with
+        # a published layer that cannot be withdrawn.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          IFS=$'\t' read -r LAYER COUNTER < <(tools/next-layer-id.sh)
+          echo "dispatching deposit-layer.yml for layer $LAYER (counter $COUNTER)"
+          gh workflow run deposit-layer.yml \
+            --ref "$GITHUB_REF_NAME" \
+            -f layer="$LAYER" \
+            -f counter="$COUNTER"
+          {
+            echo "### Deposit dispatched"
+            echo
+            echo "- layer: \`$LAYER\`"
+            echo "- counter: \`$COUNTER\`"
+            echo
+            echo "Pins that changed in this merge:"
+            echo '```diff'
+            diff -u "$RUNNER_TEMP/pins.old" "$RUNNER_TEMP/pins.new" | tail -n +3 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
