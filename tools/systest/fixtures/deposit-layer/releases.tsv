@@ -39,6 +39,7 @@
 !sums-style	pulseengine/kiln	dotslash
 !sums-style	pulseengine/sigil	bare
 !sums-style	pulseengine/hollow	bare
+!sums-style	pulseengine/wasm-tools	bare
 
 # rivet — appears in BOTH lists: a CLI and a VS Code extension from one
 # release. This is the pair that killed the 2026.08.3 deposit.
@@ -128,6 +129,23 @@ bytecodealliance/wasm-tools	v1.257.1	wasm-tools-1.257.1-x86_64-linux.tar.gz	tar:
 # must not confuse the selection.
 bytecodealliance/wasm-tools	v1.257.1	wasm-tools-1.257.1-riscv64-linux.tar.gz	tar:wasm-tools:upstream
 bytecodealliance/wasm-tools	v1.257.1	wasm-tools-1.257.1-x86_64-windows.zip	blob
+
+# pulseengine/wasm-tools — THE FORK, and the reason REQ-REALM2-001 exists.
+#
+# SCOPE: this fork is not published today; the row records the SHAPE such a
+# release has, not a measurement of one. What it is here to exercise is not
+# hypothetical — a fork exists precisely where upstream does not attest every
+# tool, so two realms shipping a tool called `wasm-tools` is the ORDINARY case
+# the moment one is cut. It is released through this org's own signed pipeline,
+# so it publishes a cosign-signed SHA256SUMS.txt (the default `!proof`) while
+# its upstream publishes build provenance and no sums — the two realms differ
+# in the mechanism that vouches for them as well as in the key that signs them.
+# Its asset naming is this org's (by Rust target triple), which is itself the
+# point: the same tool NAME arrives through two entirely different shapes.
+pulseengine/wasm-tools	v1.257.1-pulseengine.1	wasm-tools-v1.257.1-pulseengine.1-aarch64-apple-darwin.tar.gz	tar:wasm-tools:nested
+pulseengine/wasm-tools	v1.257.1-pulseengine.1	wasm-tools-v1.257.1-pulseengine.1-x86_64-apple-darwin.tar.gz	tar:wasm-tools:nested
+pulseengine/wasm-tools	v1.257.1-pulseengine.1	wasm-tools-v1.257.1-pulseengine.1-aarch64-unknown-linux-gnu.tar.gz	tar:wasm-tools:nested
+pulseengine/wasm-tools	v1.257.1-pulseengine.1	wasm-tools-v1.257.1-pulseengine.1-x86_64-unknown-linux-gnu.tar.gz	tar:wasm-tools:nested
 
 # wit-bindgen — NEITHER. The refusal case, and the one whose answer is a fork.
 !proof	bytecodealliance/wit-bindgen	none

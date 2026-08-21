@@ -51,162 +51,10 @@ echo "== deposit-layer systest: workdir $WORK"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-sha256_of() { # file -> bare hex
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
-  else shasum -a 256 "$1" | awk '{print $1}'; fi
-}
-
-# ── materialise the recorded release inventory ───────────────────────────────
-# Small stand-in bytes, real asset NAMES, real SHA256SUMS shapes, real cosign
-# bundle bindings. Nothing here touches the network, and nothing here depends
-# on somebody's release still existing at the version the fixture names.
-write_sums() { # release-dir repo version sums-style
-  local dir="$1" repo="$2" version="$3" style="$4" f base sums
-  sums="$dir/SHA256SUMS.txt"
-  : > "$sums"
-  for f in "$dir"/*; do
-    [ -f "$f" ] || continue
-    base="${f##*/}"
-    case "$base" in SHA256SUMS.txt|SHA256SUMS.txt.cosign.bundle) continue ;; esac
-    if [ "$style" = "dotslash" ]; then
-      printf '%s  ./%s\n' "$(sha256_of "$f")" "$base" >> "$sums"
-    else
-      printf '%s  %s\n' "$(sha256_of "$f")" "$base" >> "$sums"
-    fi
-  done
-  # What a real sigstore bundle binds together: the signer identity, the
-  # issuer, and the digest of the blob it covers.
-  cat > "$dir/SHA256SUMS.txt.cosign.bundle" <<BUNDLE
-repo=$repo
-identity=https://github.com/$repo/.github/workflows/release.yml@refs/tags/$version
-issuer=https://token.actions.githubusercontent.com
-sha256=$(sha256_of "$sums")
-BUNDLE
-}
-
-# A GitHub build attestation over a whole release (REQ-INGEST-001), written
-# NEXT TO the release directory rather than inside it: it is not a release
-# asset, and a `-p '*'` download must not pick it up.
-#
-# The shape is the one `gh attestation verify --format json` printed for
-# bytecodealliance/wasm-tools v1.257.1 on 2026-08-21, reduced to the fields the
-# assembler reads. The in-toto subject list carries EVERY asset in the release
-# — which is what makes an attestation a replacement for the sums file and not
-# merely an addition to it.
-write_attestation() { # release-dir repo version
-  local dir="$1" repo="$2" version="$3"
-  python3 - "$dir" "$repo" "$version" <<'PY'
-import hashlib, json, os, pathlib, sys
-
-d, repo, version = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
-# A stand-in commit that is stable per release, so the assertion recorded in
-# the layer is reproducible across runs (the payload digest depends on it).
-commit = hashlib.sha256(f"{repo}@{version}".encode()).hexdigest()[:40]
-signer = f"https://github.com/{repo}/.github/workflows/publish.yml@refs/heads/main"
-subjects = [
-    {"name": f.name, "digest": {"sha256": hashlib.sha256(f.read_bytes()).hexdigest()}}
-    for f in sorted(d.iterdir()) if f.is_file()
-]
-doc = [{"verificationResult": {
-    "signature": {"certificate": {
-        "subjectAlternativeName": signer,
-        "issuer": "https://token.actions.githubusercontent.com",
-        "buildSignerURI": signer,
-        "sourceRepositoryURI": f"https://github.com/{repo}",
-        "sourceRepositoryDigest": commit,
-        "sourceRepositoryRef": "refs/heads/main",
-        "runnerEnvironment": "github-hosted",
-    }},
-    "statement": {
-        "_type": "https://in-toto.io/Statement/v1",
-        "predicateType": "https://slsa.dev/provenance/v1",
-        "subject": subjects,
-    },
-}}]
-(d.parent / f"{version}.attestation.json").write_text(json.dumps(doc, indent=1))
-PY
-}
-
-materialise_releases() {
-  local root="$WORK/releases"
-  local repo version asset shape dir body binname layout stagedir
-  local owner name ver style
-  rm -rf "$root" "$WORK/.tarstage"
-  while IFS="$TAB" read -r repo version asset shape; do
-    case "$repo" in ''|'#'*) continue ;; esac
-    if [ "$repo" = '!sums-style' ]; then
-      mkdir -p "$root/$version"
-      printf '%s\n' "$asset" > "$root/$version.sums-style"
-      continue
-    fi
-    # Which ingestion proof this repo publishes: sums | provenance | none.
-    if [ "$repo" = '!proof' ]; then
-      mkdir -p "$root/$version"
-      printf '%s\n' "$asset" > "$root/$version.proof"
-      continue
-    fi
-    dir="$root/$repo/$version"
-    mkdir -p "$dir"
-    # Distinct bytes per asset: two payloads that hashed alike would let a
-    # per-platform mix-up pass unnoticed.
-    body="varve systest fixture payload
-repo=$repo release=$version asset=$asset
-"
-    case "$shape" in
-      raw|blob)
-        printf '%s' "$body" > "$dir/$asset"
-        ;;
-      tar:*)
-        binname="$(printf '%s' "$shape" | cut -d: -f2)"
-        layout="$(printf '%s' "$shape" | cut -d: -f3)"
-        stagedir="$WORK/.tarstage/$repo/$version/${asset%.tar.gz}"
-        rm -rf "$stagedir"; mkdir -p "$stagedir"
-        if [ "$binname" = "none" ]; then
-          # An upstream layout change: an archive with no binary of the
-          # declared name anywhere in it.
-          printf 'this release ships documentation and nothing executable\n' > "$stagedir/README.md"
-        elif [ "$layout" = "nested" ]; then
-          mkdir -p "$stagedir/${repo##*/}-$version/bin"
-          printf '%s' "$body" > "$stagedir/${repo##*/}-$version/bin/$binname"
-          chmod +x "$stagedir/${repo##*/}-$version/bin/$binname"
-        elif [ "$layout" = "upstream" ]; then
-          # bytecodealliance's shape: one top directory named for the asset,
-          # binary at its root beside the licences.
-          mkdir -p "$stagedir/${asset%.tar.gz}"
-          printf '%s' "$body" > "$stagedir/${asset%.tar.gz}/$binname"
-          chmod +x "$stagedir/${asset%.tar.gz}/$binname"
-          printf 'Apache-2.0 WITH LLVM-exception\n' > "$stagedir/${asset%.tar.gz}/LICENSE-APACHE"
-        else
-          printf '%s' "$body" > "$stagedir/$binname"
-          chmod +x "$stagedir/$binname"
-        fi
-        tar czf "$dir/$asset" -C "$stagedir" .
-        ;;
-      *) fail "fixture: unknown shape '$shape' for $repo $version $asset" ;;
-    esac
-  done < "$FIXTURES/releases.tsv"
-
-  local proof
-  for owner in "$root"/*; do
-    [ -d "$owner" ] || continue
-    for name in "$owner"/*; do
-      [ -d "$name" ] || continue
-      style="$(cat "$name.sums-style" 2>/dev/null || echo bare)"
-      proof="$(cat "$name.proof" 2>/dev/null || echo sums)"
-      for ver in "$name"/*; do
-        [ -d "$ver" ] || continue
-        case "$proof" in
-          sums)       write_sums "$ver" "${owner##*/}/${name##*/}" "${ver##*/}" "$style" ;;
-          provenance) write_attestation "$ver" "${owner##*/}/${name##*/}" "${ver##*/}" ;;
-          none)       : ;;  # tarballs and nothing else — the refusal case
-          *) fail "fixture: unknown !proof '$proof' for ${name##*/}" ;;
-        esac
-      done
-    done
-  done
-}
-
-materialise_releases
+# The recorded release inventory lives in lib.sh: REQ-REALM2-001's two-realm
+# gate materialises the SAME rows, and a copy here would be a second thing to
+# keep in step with the fixture data.
+systest_materialise_releases "$FIXTURES/releases.tsv" "$WORK/releases" "$WORK/.tarstage"
 export VARVE_FIXTURE_RELEASES="$WORK/releases"
 echo "   materialised $(find "$WORK/releases" -type f | wc -l | tr -d ' ') fixture files across \
 $(find "$WORK/releases" -mindepth 3 -maxdepth 3 -type d | wc -l | tr -d ' ') releases"
@@ -480,6 +328,17 @@ TARBALL_TOOLS="hollow:v0.1.0"
 expect_refusal tarball-without-binary \
   "contains no 'hollow' binary" \
   "a release tarball carrying no binary of the declared name"
+
+# A tarball tool whose asset template matches NOTHING on any platform. Per
+# platform this is a notice (loom, above); everywhere is a layer silently
+# missing a tool it claims to carry — the vsix loop has always refused the same
+# shape, and the tarball loop did not until REQ-REALM2-001's two-realm gate
+# lost a tool to a mistyped %V and went green with four notices.
+reset_layer_env
+TARBALL_TOOLS="rivet:v0.33.1:rivet:rivet-%V-%T.tar.gzz"
+expect_refusal tarball-template-drift \
+  "matched no asset for any platform" \
+  "a tarball tool whose asset naming changed upstream on every platform"
 
 # cosign rejecting the sums must stop the deposit.
 reset_layer_env

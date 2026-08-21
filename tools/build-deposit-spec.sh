@@ -55,6 +55,10 @@
 #   WSC_VERSION    sigil release carrying the raw per-platform wsc binaries
 #   VSIX_PACKAGES  "repo:version:extension:asset-template ..."  (%V bare version,
 #                  %P VS Code platform tag; no %P = one portable package)
+#   COMPOSES       optional "<manifest-digest>[@realm[@layer-id]] ..." — layers
+#                  this one composes (REQ-COMPOSE-001). The realm is the one
+#                  whose trust root verifies the INCLUDED layer, which is how a
+#                  PulseEngine layer composes a bytecodealliance one.
 #   PLATFORMS      optional override of the target triples to include
 #   UNVERIFIED_INGEST  one "owner/repo=reason" opt-in PER LINE, for releases
 #                  that offer neither mechanism. The reason is MANDATORY and is
@@ -81,8 +85,15 @@ WORK="${1:?usage: build-deposit-spec.sh <workdir>}"
 : "${LAYER:?LAYER must be set (layer identifier, e.g. 2026.08.4)}"
 : "${COUNTER:?COUNTER must be set (monotonic per-line release counter)}"
 : "${TARBALL_TOOLS:?TARBALL_TOOLS must be set}"
-: "${WSC_VERSION:?WSC_VERSION must be set}"
-: "${VSIX_PACKAGES:?VSIX_PACKAGES must be set}"
+# Set-but-EMPTY is a legal answer for these two, and it is the answer a second
+# realm gives (REQ-REALM2-001 clause 1). `wsc` comes from pulseengine/sigil and
+# the extensions from pulseengine repos; a bytecodealliance layer carries
+# neither, and until this distinction existed the assembler could only build a
+# PulseEngine-shaped layer — which made "a second realm is constructible" a
+# claim nothing could execute. Still REQUIRED to be set, so forgetting one in a
+# workflow is caught exactly as before.
+: "${WSC_VERSION?WSC_VERSION must be set (empty = this layer carries no wsc)}"
+: "${VSIX_PACKAGES?VSIX_PACKAGES must be set (empty = this layer carries no extensions)}"
 
 PLATFORMS="${PLATFORMS:-aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu}"
 
@@ -369,6 +380,7 @@ ENTRYEOF
   bare="${version#v}"
   template="${f_template:-$tool-$version-%T.tar.gz}"
   verify_release "$repo" "$version"
+  staged=0
   for platform in $PLATFORMS; do
     asset="${template//%V/$bare}"
     asset="${asset//%T/$platform}"
@@ -390,10 +402,25 @@ ENTRYEOF
     fi
     cp "$bin" "tools/$binname-$platform"
     add_tool "$binname" "$bare" "$platform" "tools/$binname-$platform" "$repo" "$version" "$asset" "$sha"
+    staged=$((staged+1))
   done
+  # A tool that matched NOTHING on any platform is an asset-template that no
+  # longer describes the release — the same failure the vsix loop below has
+  # always refused, and for the same reason. Per-platform absence is a notice
+  # (loom ships no aarch64-apple-darwin, deliberately); absence EVERYWHERE is a
+  # layer silently missing a tool it claims to carry. Found by REQ-REALM2-001's
+  # two-realm gate, where a mistyped %V template omitted a tool from the layer
+  # and the run went green with four notices.
+  if [ "$staged" -eq 0 ]; then
+    echo "::error::$tool matched no asset for any platform (template $template) — the release's \
+asset naming has changed, or the entry is wrong; refusing to ship a layer without it"
+    exit 1
+  fi
 done
 
-# wsc: raw per-platform binaries with sigil's naming.
+# wsc: raw per-platform binaries with sigil's naming. Skipped entirely for a
+# layer that declares no wsc — see the note on WSC_VERSION above.
+if [ -n "$WSC_VERSION" ]; then
 verify_release pulseengine/sigil "$WSC_VERSION"
 BARE_WSC="${WSC_VERSION#v}"
 for platform in $PLATFORMS; do
@@ -412,6 +439,7 @@ for platform in $PLATFORMS; do
   cp "downloads/sigil/$wsc_asset" "tools/wsc-$platform"
   add_tool wsc "$BARE_WSC" "$platform" "tools/wsc-$platform" pulseengine/sigil "$WSC_VERSION" "$wsc_asset" "$sha"
 done
+fi
 
 # VS Code extensions (REQ-VSIX-001). A vsix is HELD, not dispatched, so the
 # entry carries no binary and `varve export-vsix` is what materialises it for
@@ -485,6 +513,34 @@ for entry in $VSIX_PACKAGES; do
     # claims to carry.
     [ "$found" -gt 0 ] || { echo "::error::$extname matched no vsix asset for any platform (template $template)"; exit 1; }
   fi
+done
+
+# Layers this one COMPOSES (REQ-COMPOSE-001, REQ-REALM2-001 clause 2). An
+# include is named by the digest of the included layer's SIGNED MANIFEST, plus
+# the realm whose trust root verifies it — a different realm from this layer's
+# is the whole point. Without this the assembler could produce every layer
+# EXCEPT a composing one, so the topology this project exists for could only be
+# hand-authored, and "composition is exercised by the system gate" would mean
+# "exercised against a hand-written spec".
+#
+#   COMPOSES="<manifest-digest>[@realm[@layer-id]] ..."
+#
+# `@` rather than `:`, because a digest is `sha256:<hex>` and already has one.
+for entry in ${COMPOSES:-}; do
+  inc_digest="${entry%%@*}"; inc_rest="${entry#*@}"
+  inc_realm=""; inc_layer=""
+  if [ "$inc_rest" != "$entry" ]; then
+    inc_realm="${inc_rest%%@*}"
+    [ "${inc_rest#*@}" != "$inc_rest" ] && inc_layer="${inc_rest#*@}"
+  fi
+  case "$inc_digest" in
+    sha256:*) ;;
+    *) echo "::error::COMPOSES entry '$entry' does not name a sha256 manifest digest"; exit 1 ;;
+  esac
+  printf '\n[[include]]\ndigest = "%s"\n' "$inc_digest" >> "$SPEC"
+  [ -n "$inc_realm" ] && printf 'realm = "%s"\n' "$inc_realm" >> "$SPEC"
+  [ -n "$inc_layer" ] && printf 'layer = "%s"\n' "$inc_layer" >> "$SPEC"
+  echo "── composes $inc_digest${inc_realm:+ from realm '$inc_realm'}"
 done
 
 echo "── deposit spec: $SPEC"

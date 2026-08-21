@@ -20,8 +20,14 @@ use crate::store::{InstalledLayer, Store, StoreError};
 pub struct Resolved {
     pub layer: InstalledLayer,
     /// The tools this pin exposes (the pin's `tools` subset, or every tool in
-    /// the layer), each with its resolved binary path.
+    /// the layer), each with its resolved binary path. Exactly one entry per
+    /// NAME — that is what keeps one shim per name (REQ-REALM2-001 clause 4c).
     pub tools: Vec<(String, PathBuf)>,
+    /// Every provider of every exposed name, including the ones a bare name
+    /// does NOT dispatch to (REQ-REALM2-001 clause 4b). Addressable as
+    /// `realm/tool`, so "compare our fork against upstream" keeps working
+    /// instead of the unselected binary disappearing.
+    pub qualified: Vec<(crate::compose::ToolProvider, PathBuf)>,
     /// Runner contracts (REQ-RUNNER-001): tool → (runner tool, prefix args,
     /// optional per-user-arg flag), from the signed manifest annotations.
     pub runners: std::collections::BTreeMap<String, RunnerContract>,
@@ -156,48 +162,33 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
     // tool that lives in an INCLUDED layer, so the composed set has to be known
     // before deciding what is missing. Resolving the root first reported
     // `PartialLayer` for a perfectly resolvable composed tool.
-    let composed: Vec<(String, std::path::PathBuf)> = compose_tools(&layer, store)?;
+    let offers: Vec<Offer> = composition_offers(pin, &layer, store)?;
 
-    let tool_names: Vec<String> = match &pin.tools {
-        Some(subset) => subset.clone(),
-        None => {
-            let bin = layer.root.join("bin");
-            let mut names: Vec<String> = match std::fs::read_dir(&bin) {
-                Ok(entries) => entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_file())
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect(),
-                Err(_) => Vec::new(),
-            };
-            // Unrestricted pins expose the whole composition.
-            names.extend(composed.iter().map(|(n, _)| n.clone()));
-            names.sort();
-            names.dedup();
-            names
-        }
-    };
+    // What the pin exposes, and where it has CHOSEN a realm for a name
+    // (REQ-REALM2-001 clause 4a).
+    let (tool_names, chosen) = exposed_and_chosen(pin, &offers);
+
+    // The one decision: which provider a BARE name dispatches to. It is made
+    // over every provider the composition has, then narrowed to what the pin
+    // exposes — so a collision the pin never asked about cannot refuse a
+    // command that does not touch it.
+    let exposed: Vec<crate::compose::ToolProvider> = offers
+        .iter()
+        .filter(|o| tool_names.contains(&o.provider.tool))
+        .map(|o| o.provider.clone())
+        .collect();
+    let dispatch = crate::compose::select_tools(&exposed, &chosen)?;
 
     let mut tools = Vec::new();
     let mut missing = Vec::new();
-    for name in tool_names {
-        // The root layer wins only because a duplicate is refused outright
-        // below; there is never a silent shadowing choice.
-        let own = store.tool_path(&layer, &name);
-        let from_composition = composed.iter().find(|(n, _)| n == &name);
-        match (own, from_composition) {
-            (Some(_), Some(_)) => {
-                return Err(ResolveError::Compose(
-                    crate::compose::ComposeError::AmbiguousTool {
-                        tool: name,
-                        first: layer.digest.clone(),
-                        second: "an included layer".into(),
-                    },
-                ));
-            }
-            (Some(path), None) => tools.push((name, path)),
-            (None, Some((_, path))) => tools.push((name, path.clone())),
-            (None, None) => missing.push(name),
+    for name in &tool_names {
+        match dispatch
+            .get(name)
+            .and_then(|p| offers.iter().find(|o| o.provider == *p))
+            .and_then(|o| o.path.clone())
+        {
+            Some(path) => tools.push((name.clone(), path)),
+            None => missing.push(name.clone()),
         }
     }
     if !missing.is_empty() {
@@ -211,7 +202,7 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
                 .manifest_tool_names(&layer)
                 .unwrap_or_default()
                 .into_iter()
-                .chain(composed.iter().map(|(n, _)| n.clone()))
+                .chain(offers.iter().map(|o| o.provider.tool.clone()))
                 .collect();
             available.sort();
             available.dedup();
@@ -237,6 +228,15 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
             missing,
         });
     }
+
+    // Clause 4b: every provider of an exposed name stays addressable, chosen
+    // or not. Losing the binary the pin did not pick would be a worse answer
+    // than the refusal this feature replaces.
+    let qualified: Vec<(crate::compose::ToolProvider, PathBuf)> = offers
+        .iter()
+        .filter(|o| tool_names.contains(&o.provider.tool))
+        .filter_map(|o| o.path.clone().map(|p| (o.provider.clone(), p)))
+        .collect();
 
     // Runner contracts from the stored manifest's entry annotations —
     // lenient read: legacy layers without them simply have none.
@@ -270,31 +270,83 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
     Ok(Resolved {
         layer,
         tools,
+        qualified,
         runners,
     })
 }
 
-/// Resolve the tools an installed layer's COMPOSITION exposes, excluding the
-/// layer's own. Included layers must already be installed; fetching them
+/// The names a pin exposes, and the realm it CHOSE for each name it qualified
+/// (REQ-REALM2-001 clause 4a).
+///
+/// A pin with no `tools` exposes the whole composition and chooses nothing —
+/// which is why an unchosen collision still refuses. A pin with `tools`
+/// exposes exactly those names, in the order written, and every qualified
+/// entry records its realm.
+fn exposed_and_chosen(
+    pin: &Pin,
+    offers: &[Offer],
+) -> (Vec<String>, std::collections::BTreeMap<String, String>) {
+    let Some(subset) = &pin.tools else {
+        let mut names: Vec<String> = offers.iter().map(|o| o.provider.tool.clone()).collect();
+        names.sort();
+        names.dedup();
+        return (names, std::collections::BTreeMap::new());
+    };
+    let mut names = Vec::with_capacity(subset.len());
+    let mut chosen = std::collections::BTreeMap::new();
+    for selector in subset {
+        names.push(selector.name.clone());
+        if let Some(realm) = &selector.realm {
+            chosen.insert(selector.name.clone(), realm.clone());
+        }
+    }
+    (names, chosen)
+}
+
+/// One layer of a composition offering one dispatchable name, and where that
+/// name's bytes are — `None` when the manifest declares a tool whose file is
+/// not on disk, which is an incomplete install rather than a missing tool.
+#[derive(Debug, Clone)]
+struct Offer {
+    provider: crate::compose::ToolProvider,
+    path: Option<PathBuf>,
+}
+
+/// Every dispatchable name the pinned layer's COMPOSITION offers — the root's
+/// own and every included layer's — each labelled with the realm whose root
+/// vouches for it. Included layers must already be installed; fetching them
 /// transitively is deliberately out of scope for v0.23.0 (REQ-COMPOSE-001), so
 /// a missing one is an error naming it and its corrective install.
-fn compose_tools(
+///
+/// A name is offered if the SIGNED manifest declares it or a file of that name
+/// sits in the layer's `bin/` — but only if SOME layer of the composition has
+/// it on disk. All three parts earn their place:
+///
+/// * `bin/` alone would let a corrupt install decide dispatch: a root whose
+///   declared `wasm-tools` failed to land would silently hand the bare name to
+///   an included layer, which is exactly the install-state-dependent choice
+///   clause 4c forbids. Reading the signed manifest keeps that a refusal.
+/// * the manifest alone over-reports: a layer's manifest declares a tool for
+///   EVERY platform it ships, and a tool absent for this host (loom ships no
+///   aarch64-apple-darwin) would become an exposed name nothing can resolve.
+/// * so a name no layer has on disk is dropped: on this host it is not a
+///   collision and not a dispatchable name, it is simply not here.
+fn composition_offers(
+    pin: &Pin,
     layer: &InstalledLayer,
     store: &Store,
-) -> Result<Vec<(String, std::path::PathBuf)>, ResolveError> {
+) -> Result<Vec<Offer>, ResolveError> {
+    let root_realm = pin.realm.clone().unwrap_or_default();
     let path = layer.root.join("layer.json");
-    let Ok(bytes) = std::fs::read(&path) else {
+    let root_view = match std::fs::read(&path) {
+        // A manifest we cannot read is an ERROR, not an empty composition —
+        // an earlier version returned Ok(empty) here and silently resolved a
+        // composed layer to none of its included tools.
+        Ok(bytes) => crate::compose::view(&bytes)?,
         // No stored manifest at all: a pre-composition layer laid down by an
         // older varve. Nothing to compose, and nothing hidden.
-        return Ok(Vec::new());
+        Err(_) => crate::compose::LayerView::default(),
     };
-    // A manifest we cannot read is an ERROR, not an empty composition — the
-    // earlier version returned Ok(empty) here and silently resolved a composed
-    // layer to none of its included tools.
-    let root_view = crate::compose::view(&bytes)?;
-    if root_view.includes.is_empty() {
-        return Ok(Vec::new());
-    }
     // Every declared include must already be installed. Fetching transitively
     // is deliberately out of scope (REQ-COMPOSE-001), so name it and its fix.
     for inc in &root_view.includes {
@@ -312,35 +364,56 @@ fn compose_tools(
             });
         }
     }
-    let walked = crate::compose::walk(&layer.digest, &root_view, |digest| {
+    let walked = crate::compose::walk(&layer.digest, &root_realm, &root_view, |digest| {
         let (_, entry) = store.find_anywhere(digest).ok().flatten()?;
         let bytes = std::fs::read(entry.root.join("layer.json")).ok()?;
         crate::compose::view(&bytes).ok()
     })?;
-    // Refuse a name exposed by more than one layer, before resolving any path.
-    crate::compose::union_tools(&walked)?;
 
     let mut out = Vec::new();
-    for (digest, _) in walked.iter().skip(1) {
-        let Some((owner, entry)) = store.find_anywhere(digest)? else {
-            continue;
-        };
-        let bin = entry.root.join("bin");
-        let Ok(rd) = std::fs::read_dir(&bin) else {
-            continue;
-        };
-        let mut names: Vec<String> = rd
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_file())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        for name in names {
-            if let Some(path) = owner.tool_path(&entry, &name) {
-                out.push((name, path));
+    for step in &walked {
+        // The root is already in hand; an included layer is looked up wherever
+        // its realm partitioned it.
+        let (owner, entry) = if step.digest == layer.digest {
+            (store.clone(), layer.clone())
+        } else {
+            match store.find_anywhere(&step.digest)? {
+                Some(found) => found,
+                None => continue,
             }
+        };
+        let mut names: Vec<String> = step.view.tools.clone();
+        if let Ok(rd) = std::fs::read_dir(entry.root.join("bin")) {
+            names.extend(
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.path().is_file())
+                    .map(|e| e.file_name().to_string_lossy().into_owned()),
+            );
+        }
+        names.sort();
+        names.dedup();
+        for name in names {
+            out.push(Offer {
+                path: owner.tool_path(&entry, &name),
+                provider: crate::compose::ToolProvider {
+                    tool: name,
+                    realm: step.realm.clone(),
+                    layer: entry.layer.to_string(),
+                    digest: step.digest.clone(),
+                },
+            });
         }
     }
+    // Drop names no layer of this composition actually has on this host. A
+    // manifest declares a tool for every platform the layer ships, so without
+    // this an unrestricted pin would expose `loom` on a machine whose platform
+    // that release skipped and then refuse to resolve it.
+    let on_disk: std::collections::BTreeSet<String> = out
+        .iter()
+        .filter(|o| o.path.is_some())
+        .map(|o| o.provider.tool.clone())
+        .collect();
+    out.retain(|o| on_disk.contains(&o.provider.tool));
     Ok(out)
 }
 
@@ -791,6 +864,62 @@ mod tests {
         assert_eq!(
             before, after,
             "select/verify/report must never mutate the core"
+        );
+    }
+
+    // rivet: verifies REQ-REALM2-001
+    #[test]
+    fn a_tool_the_manifest_declares_for_other_platforms_is_not_exposed_here() {
+        // A layer's manifest declares a tool for EVERY platform it ships. loom
+        // ships no aarch64-apple-darwin, so on that host the name is declared
+        // and no file lands. Exposing it would make an unrestricted pin refuse
+        // to resolve at all — caught by the two-realm system gate, where
+        // `varve verify` failed with `missing ["loom"]` on a layer that had
+        // deliberately omitted it.
+        let (_tmp, store) = store();
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"2026.07.0","eu.pulseengine.varve.channel":"qualified"}},"manifests":[
+{{"digest":"sha256:aa","annotations":{{"eu.pulseengine.tool":"rivet","eu.pulseengine.platform":"{here}"}}}},
+{{"digest":"sha256:bb","annotations":{{"eu.pulseengine.tool":"loom","eu.pulseengine.platform":"some-other-triple"}}}}]}}"#,
+            here = crate::platform::host_platform()
+        );
+        // Only `rivet` lands, exactly as the installer would place it.
+        store
+            .lay_down(manifest.as_bytes(), &[("rivet", b"r")])
+            .unwrap();
+        let resolved = resolve(&qualified_pin("2026.07.0"), &store).unwrap();
+        let names: Vec<&str> = resolved.tools.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["rivet"], "loom is declared, not laid down here");
+    }
+
+    // rivet: verifies REQ-REALM2-001
+    #[test]
+    fn a_declared_tool_whose_bytes_are_missing_still_collides_with_a_composed_one() {
+        // The other half of the same rule, and the reason it reads the SIGNED
+        // manifest at all. If the root's `wasm-tools` failed to land, deciding
+        // from `bin/` alone would hand the bare name to the included layer
+        // without a word — dispatch chosen by install state, which is exactly
+        // what clause 4c forbids. The composed layer HAS the name on disk, so
+        // the collision is real and must still be refused.
+        let (_tmp, store) = store();
+        let up = manifest_composing("2026.08.0", &["wasm-tools"], "sha256:none");
+        // Strip the include from the upstream layer: it is a leaf.
+        let up = String::from_utf8(up).unwrap().replace(
+            r#",{"digest":"sha256:none","annotations":{"eu.pulseengine.varve.kind":"layer"}}"#,
+            "",
+        );
+        let up_digest = store
+            .lay_down(up.as_bytes(), &[("wasm-tools", b"upstream")])
+            .unwrap();
+        // The root DECLARES wasm-tools and lays down only rivet.
+        let root = manifest_composing("2026.07.0", &["wasm-tools", "rivet"], &up_digest);
+        store.lay_down(&root, &[("rivet", b"r")]).unwrap();
+
+        let err = resolve(&qualified_pin("2026.07.0"), &store).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("provided by more than one layer"),
+            "a half-installed root must not silently yield the name: {msg}"
         );
     }
 }

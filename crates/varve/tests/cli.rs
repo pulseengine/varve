@@ -6589,3 +6589,261 @@ fn inspect_refuses_a_layer_it_cannot_verify_rather_than_describing_it() {
         .success()
         .stdout(predicate::str::contains("wasi-interfaces"));
 }
+
+/// The topology v0.29.0 is built for: a PulseEngine realm whose layer composes
+/// a bytecodealliance realm's layer, and BOTH ship a tool called `wasm-tools`
+/// — because the fork exists precisely where upstream does not attest.
+///
+/// Returns the project directory pinned to the COMPOSING layer.
+#[cfg(unix)]
+fn two_realms_shipping_wasm_tools(fx: &Fixture) -> std::path::PathBuf {
+    let parent = fx.project.parent().unwrap().to_path_buf();
+    let mut realms_toml = String::new();
+    let mut keys = std::collections::BTreeMap::new();
+    for org in ["pulseengine", "bytecodealliance"] {
+        let (sk, pk) = varve_core::generate_root_keypair();
+        realms_toml.push_str(&format!(
+            "[realm.{org}]\nregistry = \"oci://example.invalid/{org}\"\ntrust-root = \"{}\"\n\n",
+            hex::encode(&pk)
+        ));
+        keys.insert(org.to_string(), sk);
+    }
+    std::fs::write(parent.join("varve-realms.toml"), realms_toml).unwrap();
+
+    // Upstream first: its own root, its own layer, its own `wasm-tools`.
+    let (up_archive, up_digest) = signed_payload_layer(
+        fx,
+        "realm2-upstream",
+        "2026.08.0",
+        &keys["bytecodealliance"],
+        &[Payload {
+            kind: "tool",
+            name: "wasm-tools",
+            version: "1.257.1",
+            platform: None,
+            bytes: b"#!/bin/sh\necho wasm-tools-from=bytecodealliance\n".to_vec(),
+        }],
+        &[],
+    );
+    // The fork, plus a tool nothing else provides, composing upstream.
+    let (own_archive, _) = signed_payload_layer(
+        fx,
+        "realm2-own",
+        "2026.09.0",
+        &keys["pulseengine"],
+        &[
+            Payload {
+                kind: "tool",
+                name: "wasm-tools",
+                version: "1.257.1-pulseengine.1",
+                platform: None,
+                bytes: b"#!/bin/sh\necho wasm-tools-from=pulseengine\n".to_vec(),
+            },
+            Payload {
+                kind: "tool",
+                name: "rivet",
+                version: "0.34.0",
+                platform: None,
+                bytes: b"#!/bin/sh\necho rivet-ran\n".to_vec(),
+            },
+        ],
+        &[&format!("{up_digest}@bytecodealliance")],
+    );
+
+    // Each layer installs under its own realm's pin — the sequence a consumer
+    // adopting someone else's realm actually performs.
+    let upstream_project = parent.join("realm2-upstream-project");
+    std::fs::create_dir_all(&upstream_project).unwrap();
+    std::fs::write(
+        upstream_project.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nrealm = \"bytecodealliance\"\nchannel = \"qualified\"\nlayer = \"2026.08.0\"\n",
+    )
+    .unwrap();
+    in_realm_project(fx, &upstream_project)
+        .args(["install", "--from"])
+        .arg(&up_archive)
+        .assert()
+        .success();
+
+    let project = parent.join("realm2-project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nrealm = \"pulseengine\"\nchannel = \"qualified\"\nlayer = \"2026.09.0\"\n",
+    )
+    .unwrap();
+    in_realm_project(fx, &project)
+        .args(["install", "--from"])
+        .arg(&own_archive)
+        .assert()
+        .success();
+    project
+}
+
+/// A varve invocation inside a realm-pinned project: the realms file is
+/// authoritative, so no ambient `VARVE_TRUST_ROOT` may be in play.
+#[cfg(unix)]
+fn in_realm_project(fx: &Fixture, project: &std::path::Path) -> Command {
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &fx.root)
+        .env_remove("VARVE_TRUST_ROOT")
+        .current_dir(project);
+    cmd
+}
+
+/// Rewrite the composing project's pin, optionally with a `tools` list.
+#[cfg(unix)]
+fn pin_with_tools(project: &std::path::Path, tools: Option<&str>) {
+    let mut pin = "manifest-version = 1\n[toolchain]\nrealm = \"pulseengine\"\n\
+                   channel = \"qualified\"\nlayer = \"2026.09.0\"\n"
+        .to_string();
+    if let Some(tools) = tools {
+        pin.push_str(&format!("tools = [{tools}]\n"));
+    }
+    std::fs::write(project.join("varve.toml"), pin).unwrap();
+}
+
+// rivet: verifies REQ-REALM2-001
+#[cfg(unix)]
+#[test]
+fn a_realm_qualifier_decides_which_wasm_tools_a_bare_name_runs() {
+    // Clause 4a and 4c. Two realms shipping `wasm-tools` is the ORDINARY case
+    // the moment a fork exists beside its upstream, and until now the pin had
+    // no way to say which one it meant: `tools` filters by NAME, and the
+    // collision is two layers exposing the SAME name.
+    let fx = fixture(None, &[]);
+    let project = two_realms_shipping_wasm_tools(&fx);
+
+    pin_with_tools(&project, Some("\"bytecodealliance/wasm-tools\", \"rivet\""));
+    // The bare name runs what the PIN chose, not what installed last.
+    in_realm_project(&fx, &project)
+        .args(["run", "wasm-tools"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wasm-tools-from=bytecodealliance"));
+
+    // Flip the qualifier; the same bare name now runs the fork.
+    pin_with_tools(&project, Some("\"pulseengine/wasm-tools\", \"rivet\""));
+    in_realm_project(&fx, &project)
+        .args(["run", "wasm-tools"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wasm-tools-from=pulseengine"));
+
+    // A bare name where nothing collides keeps working, unchanged.
+    in_realm_project(&fx, &project)
+        .args(["run", "rivet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rivet-ran"));
+}
+
+// rivet: verifies REQ-REALM2-001
+#[cfg(unix)]
+#[test]
+fn the_unselected_layer_stays_installed_verified_and_addressable() {
+    // Clause 4b. "Compare our fork against upstream" is a real workflow, and
+    // losing the other binary entirely would be a worse answer than refusing.
+    let fx = fixture(None, &[]);
+    let project = two_realms_shipping_wasm_tools(&fx);
+    pin_with_tools(&project, Some("\"bytecodealliance/wasm-tools\", \"rivet\""));
+
+    // The layer the pin did NOT choose still verifies as part of the
+    // composition — it is installed, not discarded.
+    in_realm_project(&fx, &project)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("composes"));
+
+    // …and both halves remain reachable, each by its own realm.
+    in_realm_project(&fx, &project)
+        .args(["run", "pulseengine/wasm-tools"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wasm-tools-from=pulseengine"));
+    in_realm_project(&fx, &project)
+        .args(["run", "bytecodealliance/wasm-tools"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wasm-tools-from=bytecodealliance"));
+
+    // `which` answers qualified too, or "compare the two" has no way to find
+    // the file it is meant to compare — and it names the layer that OWNS the
+    // binary, which the pin's own layer line does not.
+    in_realm_project(&fx, &project)
+        .args(["which", "pulseengine/wasm-tools"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("/bin/wasm-tools")
+                .and(predicate::str::contains("provided by realm 'pulseengine'")),
+        );
+    in_realm_project(&fx, &project)
+        .args(["which", "bytecodealliance/wasm-tools"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "provided by realm 'bytecodealliance' layer 2026.08.0",
+        ));
+}
+
+// rivet: verifies REQ-REALM2-001
+#[cfg(unix)]
+#[test]
+fn exactly_one_shim_exists_per_name_whatever_the_pin_chose() {
+    // Clause 4c. What a bare name dispatches is decided by the pin; the shim
+    // directory is a flat namespace and must stay one entry per name.
+    let fx = fixture(None, &[]);
+    let project = two_realms_shipping_wasm_tools(&fx);
+    pin_with_tools(&project, Some("\"bytecodealliance/wasm-tools\", \"rivet\""));
+    in_realm_project(&fx, &project)
+        .args(["shim", "install"])
+        .assert()
+        .success();
+    let mut shims: Vec<String> = std::fs::read_dir(fx.root.join("shims"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    shims.sort();
+    assert_eq!(
+        shims,
+        vec!["rivet".to_string(), "wasm-tools".to_string()],
+        "one shim per NAME — a qualifier is pin syntax, never a file name"
+    );
+}
+
+// rivet: verifies REQ-REALM2-001
+#[cfg(unix)]
+#[test]
+fn an_unchosen_collision_names_both_realms_and_the_qualified_form() {
+    // Clause 4d. The old refusal named two layer DIGESTS and then offered
+    // "Restrict the pin's `tools`" — advice structurally incapable of working,
+    // since `tools` filtered by name and the collision is one name. A persona
+    // tried it twice and reported it doing nothing; they were right.
+    let fx = fixture(None, &[]);
+    let project = two_realms_shipping_wasm_tools(&fx);
+    pin_with_tools(&project, None); // the pin has not chosen
+    let assert = in_realm_project(&fx, &project)
+        .args(["which", "wasm-tools"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    for needle in [
+        "realm 'pulseengine'",
+        "realm 'bytecodealliance'",
+        "bytecodealliance/wasm-tools",
+        "tools = [",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "the refusal must name both providers WITH their realms and show the qualified \
+             form to copy; missing {needle:?} in:\n{stderr}"
+        );
+    }
+    assert!(
+        !stderr.contains("Restrict the pin's `tools`"),
+        "the advice that cannot work must be gone:\n{stderr}"
+    );
+}

@@ -16,9 +16,15 @@ layer   = "2026.08.2"         # required; always YYYY.MM.P, three parts
 digest  = "sha256:83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"   # EXAMPLE — `varve list` prints yours
 # when present, the digest WINS over the layer name
 tools   = ["rivet", "synth"]  # optional; restrict to a subset of the layer
+# …or, where two realms of one composition ship the same name:
+# tools = ["bytecodealliance/wasm-tools", "rivet"]
 ```
 
-`digest` makes resolution constant-time and byte-exact — prefer it. `tools` entries must be plain names: a path there would resolve outside the verified layer, so it is refused.
+`digest` makes resolution constant-time and byte-exact — prefer it.
+
+A `tools` entry is either a plain name (`"rivet"`) or a **realm-qualified** one (`"bytecodealliance/wasm-tools"`). Anything else — a path, a deeper path, an empty half — is refused, because a tool name indexes the verified layer and a path there would resolve outside it.
+
+The qualifier is how a pin chooses between two realms shipping one name, which is the ordinary case once a fork sits beside its upstream. It changes only what a **bare** name dispatches to; the layer you did not choose stays installed and verified, and `varve run pulseengine/wasm-tools` still reaches it. Where nothing collides, a bare name behaves exactly as it always did.
 
 ### `[[export]]` — what this project materialises out of the layer
 
