@@ -3213,7 +3213,7 @@ artifacts:
     type: requirement
     title: An advisory that can never fire is refused when it is signed
     status: implemented
-    release: v0.28.0
+    release: v0.30.0
     description: >
       A typo in an advisory's `affected` layer id signs cleanly and the advisory
       then never fires for anyone (varve#61). The producer sees success; the
@@ -3364,7 +3364,7 @@ artifacts:
     type: requirement
     title: The producer pipeline is exercised, not only the consumer path
     status: implemented
-    release: v0.28.0
+    release: v0.30.0
     description: >
       REQ-SYSTEST-001 gave the CONSUMER half a system gate: deposit, install,
       verify, export, offline build, at real scale. The PRODUCER half — the
@@ -3452,3 +3452,170 @@ artifacts:
         the reach gap without either cost, and works for a realm that publishes
         no index at all.
     tags: [architecture, security]
+
+  - id: REQ-INGEST-001
+    type: requirement
+    title: varve ingests what upstream actually publishes, and records which mechanism vouched
+    status: draft
+    release: v0.29.0
+    description: >
+      The layer assembler accepts exactly ONE proof that an upstream artifact
+      is what it claims: a cosign-signed `SHA256SUMS.txt`. Every PulseEngine
+      repo publishes that, so the constraint was invisible until a second realm
+      was attempted. It does not generalise. Measured 2026-08-21:
+      `bytecodealliance/wasm-tools` publishes NO sums and NO cosign bundle —
+      but DOES publish GitHub build provenance, which verifies
+      (`gh attestation verify` accepts the real artifact and rejects a bogus
+      one, confirmed with a negative control). `bytecodealliance/wit-bindgen`
+      publishes neither. `bytecodealliance/cargo-component` ships no release
+      assets at all.
+      .
+      Build provenance is not a weaker substitute for a sums file — it is
+      STRONGER. A sums file says "these bytes hash to this". An attestation
+      binds the artifact to a workflow, a repository and a source commit
+      (observed: `publish.yml@refs/heads/main`, commit `3ef3cefc…`), which is
+      what `[tool.source]` has always wanted to record and could not.
+      .
+      Clauses: (1) The assembler shall accept build provenance as a
+      first-class ingestion proof alongside cosign-signed sums. (2) It shall
+      record INSIDE the signed layer payload WHICH mechanism vouched for each
+      tool, and what that mechanism asserted — a consumer must be able to tell
+      a cosign-signed tool from an attested one from an unverifiable one
+      without leaving the layer. (3) A tool with NEITHER mechanism shall be
+      refused by default, so "we could not verify this" can never be the
+      silent path; shipping one anyway shall require an explicit, recorded
+      decision. (4) The refusal shall name the alternative that exists — a
+      fork release through this org's signed pipeline — because for
+      `wit-bindgen` that is the actual answer and the operator should not have
+      to infer it. (5) The choice of mechanism shall be visible in
+      `varve inspect`, since a layer mixing both is now the ordinary case.
+
+  - id: REQ-LAYERREPO-001
+    type: requirement
+    title: A realm's layers are assembled outside varve, in that realm's own repository
+    status: draft
+    release: v0.29.0
+    description: >
+      `deposit-layer.yml` lives inside varve and hard-codes one realm's tool
+      list, so bumping a tool version is a commit to the tool that installs
+      tools, and a second realm's signing key would live in varve's repository
+      settings. That couples varve's release cadence to every tool bump and
+      puts two realms' custody in one place — which `docs root-ceremony`
+      argues against in the same breath as it argues for split custody.
+      .
+      Clauses: (1) Layer assembly shall live in a repository per realm, each
+      holding its own tool manifest and its own signing secret. (2) The
+      assembler itself shall stay in varve and be CONSUMED by those repos as a
+      released artifact — it is system-tested here (REQ-SYSTEST-002) and a
+      copy per realm is a copy that drifts, which is the same defect as a gate
+      testing a re-implementation. (3) A layers repo shall need no varve
+      source checkout: it takes a released varve and a released assembler.
+      (4) The pulseengine realm shall migrate first and keep publishing without
+      a gap, so the split is proven by the realm that already has consumers
+      rather than by the new one. (5) varve's own repository shall stop
+      carrying any realm's signing secret once the migration completes.
+
+  - id: REQ-REALM2-001
+    type: requirement
+    title: A second realm exists end to end, and composition stops being a fixture
+    status: draft
+    release: v0.29.0
+    description: >
+      Layer composition (REQ-COMPOSE-001, v0.23.0) has always been exercised
+      by fixtures. Every defect it has had — a diamond refused as a cycle,
+      cross-realm verification that was dead code under test, an export that
+      followed only the root, an install check that was direct-only — was
+      found by review or by a persona, never by use. The topology this project
+      exists for (PulseEngine tools that CHECK, bytecodealliance tools that
+      BUILD, someone else's layer extending both) has never actually been run.
+      .
+      Clauses: (1) A `bytecodealliance` realm shall exist with its own root,
+      its own layers repo, and its own published layers. (2) A consumer pin
+      shall compose across both realms and resolve tools from each, verified
+      each against ITS OWN realm's root. (3) The system gate shall exercise
+      that composition, not a fixture of it. (4) varve#91 shall be settled by
+      the attempt: a tool-name collision between two real realms currently has
+      NO escape — the error's own suggested fix ("restrict the pin's `tools`")
+      does not work, and the other ("remove the duplicate") is unavailable to
+      a consumer composing a realm they do not control. Two realms shipping
+      `wasm-tools` is not hypothetical. (5) `docs composition` shall document
+      the real two-realm setup (varve#57) with commands verified against the
+      real binary, replacing the fixture-shaped example.
+
+  - id: REQ-ROLLING-001
+    type: requirement
+    title: Upstream movement is noticed automatically; publishing it stays a deliberate act
+    status: draft
+    release: v0.29.0
+    description: >
+      A manually-cut layer cannot keep up. Measured 2026-08-21, days after
+      `2026.08.3` was published: rivet had moved v0.33.1 to v0.34.0, spar
+      v0.36.0 to v0.40.0 (FOUR minors), synth v0.55.0 to v0.58.0, witness
+      v0.39.0 to v0.43.0, ordeal v0.18.0 to v0.19.0. A consumer on `rolling`
+      is not getting a rolling toolchain; they are getting whatever was
+      current the last time a human remembered.
+      .
+      Clauses: (1) A scheduled job shall detect upstream releases for every
+      tool a realm carries and open a PULL REQUEST carrying the version diff,
+      not a published layer. (2) That PR shall run the full assembly gate
+      (REQ-SYSTEST-002) so the proposal is known-assemblable before anyone
+      looks at it. (3) The signed deposit shall be triggered by the MERGE, so
+      every signature remains an act a person took — see DD-024. (4) The PR
+      shall show what actually changed: which tools moved, by how much, and
+      which ingestion mechanism vouched for each new artifact
+      (REQ-INGEST-001 clause 2). (5) A tool whose new release cannot be
+      verified shall block that tool, not the whole proposal — one
+      unattested upstream must not freeze the other seven. (6) The job shall
+      be silent when nothing moved; a scheduled task that reports every hour
+      is one people filter out of their inbox.
+
+  - id: DD-024
+    type: design-decision
+    title: Automate noticing, not signing
+    status: accepted
+    release: v0.29.0
+    description: >
+      Automating the whole rolling pipeline — scan, assemble, sign, publish,
+      hourly — was the obvious reading of "make it automatic", and it is
+      wrong for varve specifically.
+      .
+      In varve, `channel = "rolling"` is NOT a trust boundary. It is an
+      annotation inside a layer signed by the same realm root as `qualified`.
+      The REALM is the trust boundary. So "automate the rolling channel"
+      means the root key signs unattended, dozens of times a week.
+      .
+      That contradicts the custody model shipped in v0.28.0 one release
+      earlier. `docs root-ceremony` says to use the root as rarely as
+      possible, ideally on an air-gapped host, with a two-person rule and
+      every use recorded as a ceremony entry. A key used by a cron job is a
+      CI credential, whatever the ceremony document calls it.
+      .
+      It is also unrecoverable. varve has no revocation and no rotation — both
+      stated in `threat-model` and `root-ceremony`. A layer published in error
+      cannot be withdrawn; the only remedy is a yank, which needs the same
+      key. And an upstream compromise would propagate to every rolling
+      consumer within the hour, with no window in which a human could notice.
+      .
+      DECISION: automate the TOIL, not the JUDGEMENT. The scanner notices,
+      diffs, assembles and gates; a person merges; the merge signs. Every
+      signature stays something someone chose to make.
+      .
+      Rejected for now, but the right shape if unattended publishing is ever
+      wanted: a SEPARATE realm with its own root for machine-signed layers.
+      That is what realms are for, and it would let consumers opt into
+      lower-assurance artifacts knowingly rather than by not reading. It costs
+      a second root, second custody and second layers repo, and it should not
+      be built until someone actually wants the fast lane.
+    links:
+      - type: satisfies
+        target: REQ-ROLLING-001
+    fields:
+      rationale: >
+        The rolling CHANNEL is not a trust boundary; the realm is. Automating
+        signing on it turns the realm root into a cron credential in a system
+        with no revocation and no rotation, one release after publishing a
+        ceremony document that says the opposite. Automating detection and
+        assembly removes all the toil and none of the assurance: the human
+        step that remains is the one that carries meaning.
+      tags: [architecture, security, process]
+
