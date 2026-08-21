@@ -420,13 +420,32 @@ PY
 # and reachable, and says plainly what is still missing.
 if ( cd "$WORK/project" && PATH="$CLEAN_PATH" "$VARVE" inspect --json ) \
      > "$WORK/logs/inspect.json" 2>"$WORK/logs/inspect.err"; then
-  if grep -q '"ingest_proof"' "$WORK/logs/inspect.json"; then
-    echo "   varve inspect --json reports the mechanism"
-  else
-    echo "   NOTE (REQ-INGEST-001 clause 5, NOT satisfied): the mechanism is in the signed \
-payload but \`varve inspect --json\` does not surface it — no \"ingest_proof\" key. See the \
-wiring named in the REQ-INGEST-001 report."
-  fi
+  # REQ-INGEST-001 clause 5. This was a NOTE while the CLI wiring was owned by
+  # someone else; it is an ASSERTION now, because a clause reported as
+  # "not satisfied" by a passing gate is a clause nothing enforces.
+  grep -q '"ingest_proof"' "$WORK/logs/inspect.json" || {
+    echo "FAIL: clause 5 — the mechanism is in the signed payload but \
+\`varve inspect --json\` does not surface it (no \"ingest_proof\" key)" >&2
+    exit 1
+  }
+  # …and it must report the REAL mechanisms this layer mixes, not a constant.
+  for mech in build-provenance cosign-sums; do
+    grep -q "\"$mech\"" "$WORK/logs/inspect.json" || {
+      echo "FAIL: clause 5 — inspect does not report '$mech', which this layer carries" >&2
+      exit 1
+    }
+  done
+  # The summary counts exist so a CI gate can assert "nothing went unverified"
+  # without walking the payload list.
+  grep -q '"unrecorded"' "$WORK/logs/inspect.json" || {
+    echo "FAIL: clause 5 — inspect --json summary has no 'unrecorded' count" >&2
+    exit 1
+  }
+  echo "   varve inspect --json reports the mechanism per payload, both kinds, \
+and the summary counts"
+else
+  echo "FAIL: varve inspect --json did not run: $(tail -1 "$WORK/logs/inspect.err")" >&2
+  exit 1
 fi
 
 # ── 4. the shapes that must be REFUSED ───────────────────────────────────────

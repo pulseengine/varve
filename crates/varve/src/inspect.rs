@@ -40,6 +40,16 @@ struct Row {
     /// `dispatched` | `held` | `unknown` (the kind annotation is one this
     /// varve does not recognise, so whether it dispatches is not knowable).
     dispatch: &'static str,
+    /// Which mechanism vouched for this payload's UPSTREAM bytes
+    /// (REQ-INGEST-001 clause 5). `unrecorded` where the layer predates the
+    /// requirement — absence of a claim is not a claim, and restating a
+    /// hundred existing payloads as either verified or unverified would be
+    /// inventing one. An unknown mechanism is reported verbatim, like `kind`.
+    ingest_proof: String,
+    /// The identity credited with vouching, where one is recorded — the fact
+    /// a consumer might filter on ("refuse anything not signed under
+    /// pulseengine/"), which is why it is its own field and not prose.
+    proof_signer: Option<String>,
     /// Are these bytes on disk here? `install` lays down only the host
     /// platform's entries, so another platform's entry is present in the
     /// signed manifest and absent from the store — which is correct, and worth
@@ -102,6 +112,11 @@ pub fn run(store: &Store, layer: Option<&str>, json: bool) -> anyhow::Result<()>
                     Ok(_) => HELD,
                     Err(_) => UNKNOWN,
                 },
+                ingest_proof: match e.ingest_proof() {
+                    Ok(p) => varve_core::IngestProof::label(p).to_string(),
+                    Err(varve_core::UnknownProof(raw)) => raw,
+                },
+                proof_signer: e.annotations.get(varve_core::ANN_PROOF_SIGNER).cloned(),
                 present: store_of(l).entry_path(&l.entry, e).is_some(),
                 layer: l.entry.layer.to_string(),
                 realm: l.realm.clone(),
@@ -146,8 +161,10 @@ fn store_of(l: &crate::ComposedLayer) -> &Store {
 ///   "host_platform",                          what `present` was decided against
 ///   "composition": [ {"layer","manifest_digest","realm","root"} ],
 ///   "payloads":    [ {"name","version","kind","known_kind","platform",
-///                     "dispatch","digest","present","layer","realm"} ],
-///   "summary": {"payloads","dispatched","held","layers"}
+///                     "dispatch","ingest_proof","proof_signer","digest",
+///                     "present","layer","realm"} ],
+///   "summary": {"payloads","dispatched","held","layers",
+///               "unverified","unrecorded"}
 /// }
 /// ```
 ///
@@ -183,6 +200,8 @@ fn print_json(
                 "known_kind": r.known_kind,
                 "platform": r.platform,
                 "dispatch": r.dispatch,
+                "ingest_proof": r.ingest_proof,
+                "proof_signer": r.proof_signer,
                 "digest": r.digest,
                 "present": r.present,
                 "layer": r.layer,
@@ -203,6 +222,13 @@ fn print_json(
             "dispatched": rows.iter().filter(|r| r.dispatch == DISPATCHED).count(),
             "held": rows.iter().filter(|r| r.dispatch == HELD).count(),
             "layers": layers.len(),
+            // Surfaced in the SUMMARY, not only per payload, so a CI gate can
+            // assert "nothing in this layer went unverified" without walking
+            // the list. `unrecorded` is counted separately from `unverified`:
+            // a layer minted before REQ-INGEST-001 made no claim either way,
+            // and collapsing the two would invent one.
+            "unverified": rows.iter().filter(|r| r.ingest_proof == "unverified").count(),
+            "unrecorded": rows.iter().filter(|r| r.ingest_proof == "unrecorded").count(),
         },
     });
     println!(

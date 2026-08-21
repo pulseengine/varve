@@ -33,7 +33,7 @@
 
 # The order is the priority: the first mechanism that vouches wins, and its id
 # is what the proposal reports.
-UPSTREAM_MECHANISMS="${UPSTREAM_MECHANISMS:-cosign-sums gh-provenance}"
+UPSTREAM_MECHANISMS="${UPSTREAM_MECHANISMS:-cosign-sums build-provenance}"
 
 # ── cosign-signed SHA256SUMS.txt ─────────────────────────────────────────────
 # What every pulseengine/* release carries today, and exactly what
@@ -89,7 +89,7 @@ _um_gh_provenance() { # repo version release-json workdir
   rm -rf "$dir"; mkdir -p "$dir"
   gh release download "$version" --repo "$repo" -p "$asset" -D "$dir" >/dev/null 2>&1 || return 1
   gh attestation verify "$dir/$asset" --repo "$repo" >"$dir/verify.log" 2>&1 || return 1
-  printf 'gh-provenance\tbuild provenance verified for %s (gh attestation verify --repo %s)\n' \
+  printf 'build-provenance\tbuild provenance verified for %s (gh attestation verify --repo %s)\n' \
     "$asset" "$repo"
 }
 
@@ -100,7 +100,7 @@ upstream_mechanism() { # repo version release-json workdir
   for m in $UPSTREAM_MECHANISMS; do
     case "$m" in
       cosign-sums)   out="$(_um_cosign_sums   "$repo" "$version" "$rel" "$work")" || continue ;;
-      gh-provenance) out="$(_um_gh_provenance "$repo" "$version" "$rel" "$work")" || continue ;;
+      build-provenance) out="$(_um_gh_provenance "$repo" "$version" "$rel" "$work")" || continue ;;
       *)
         # A typo in an override must not silently downgrade every tool to
         # "unverifiable" — that would read as an upstream problem.

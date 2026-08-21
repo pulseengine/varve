@@ -238,9 +238,9 @@ grep -q "pin is ahead" "$OUT/resolved.tsv" || fail "zeta was held for the wrong 
 echo "== each move names the mechanism that vouched for it"
 [ "$(mech_of "$OUT" pulseengine/alpha)" = cosign-sums ] \
   || fail "alpha should be vouched by cosign-sums, got '$(mech_of "$OUT" pulseengine/alpha)'"
-[ "$(mech_of "$OUT" outside/tool)" = gh-provenance ] \
-  || fail "outside/tool should be vouched by gh-provenance, got '$(mech_of "$OUT" outside/tool)'"
-grep -q 'gh-provenance' "$OUT/pr-body.md" || fail "the proposal does not report the provenance mechanism"
+[ "$(mech_of "$OUT" outside/tool)" = build-provenance ] \
+  || fail "outside/tool should be vouched by build-provenance, got '$(mech_of "$OUT" outside/tool)'"
+grep -q 'build-provenance' "$OUT/pr-body.md" || fail "the proposal does not report the provenance mechanism"
 grep -q 'cosign-sums'   "$OUT/pr-body.md" || fail "the proposal does not report the cosign mechanism"
 echo "   two mechanisms in one proposal, each named beside the tool it vouched for"
 
@@ -315,7 +315,7 @@ echo "== something moved but nothing could be vouched for"
 write_workflow "alpha:v1.3.0 beta:v0.5.0:betad gamma:v2.0.0 delta:v0.1.0 epsilon:v3.0.0 zeta:v9.9.9 outside/tool:v1.257.1" \
                "v0.12.0" \
                "alpha:v1.3.0:alpha-ext:alpha-ext-%P-%V.vsix"
-UPSTREAM_MECHANISMS="cosign-sums gh-provenance" run_scan blocked-only || true
+UPSTREAM_MECHANISMS="cosign-sums build-provenance" run_scan blocked-only || true
 # gamma and delta are the only movers now, and neither verifies.
 [ "$(cat "$WORK/out-blocked-only/status")" = blocked-only ] \
   || fail "status is '$(cat "$WORK/out-blocked-only/status")', expected 'blocked-only'"
