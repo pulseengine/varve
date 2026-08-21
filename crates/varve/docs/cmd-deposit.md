@@ -21,4 +21,4 @@ The spec schema is in `varve docs config-reference`. Note `kind = "crate"` on a 
 
 deposit writes a LOCAL oci-layout directory and does not publish; see `varve docs deploy`.
 
-Deposit into a FRESH `--out` every time. Re-running deposit into a layout that already had a line-status, line-index or attestation attached succeeds — and silently drops every attached referrer, because deposit writes the whole `index.json`. The ordering of the producer pipeline is `varve docs ci`.
+Deposit into a FRESH `--out` every time. Re-running deposit into a layout that already carries a line-status, line-index or attestation is REFUSED (exit 1), because deposit writes the whole `index.json` and would drop every attached referrer. The refusal names what it found and the re-attach sequence, and leaves the layout byte-identical. `--force` overwrites deliberately. Until v0.28.0 this silently succeeded and destroyed them. The ordering of the producer pipeline is `varve docs ci`.

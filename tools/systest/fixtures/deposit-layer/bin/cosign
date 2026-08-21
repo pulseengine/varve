@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# A fixture-backed `cosign verify-blob` for the REQ-SYSTEST-002 producer gate.
+#
+# SCOPE (REQ-SYSTEST-001 clause 3). This double does NOT verify a sigstore
+# signature and proves nothing about cosign's cryptography or about Fulcio and
+# Rekor. Real keyless verification needs the network and a real release that
+# still exists, which is exactly what this gate must not depend on. What it
+# does check is the part the assembler is responsible for: that the bundle it
+# passes belongs to the blob it passes, that the identity regexp it builds
+# matches the signing identity of the repo it is verifying, and that the issuer
+# is the one it claims. A bundle from another repo, a blob that has changed, or
+# an identity regexp built for the wrong repo all fail here.
+#
+# Environment:
+#   VARVE_FIXTURE_COSIGN_LOG     append one line per invocation
+#   VARVE_FIXTURE_COSIGN_REJECT  repo whose verification must fail (fault
+#                                injection: proves the assembler stops)
+
+set -uo pipefail
+printf 'cosign %s\n' "$*" >> "${VARVE_FIXTURE_COSIGN_LOG:-/dev/null}"
+
+[ "${1:-}" = "verify-blob" ] || { echo "fake cosign: only verify-blob is modelled; got: $*" >&2; exit 64; }
+shift
+
+bundle=""; identity_re=""; issuer=""; blob=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bundle)                     bundle="$2"; shift 2 ;;
+    --certificate-identity-regexp) identity_re="$2"; shift 2 ;;
+    --certificate-oidc-issuer)    issuer="$2"; shift 2 ;;
+    -*) echo "fake cosign: unmodelled flag '$1'" >&2; exit 64 ;;
+    *)  blob="$1"; shift ;;
+  esac
+done
+[ -n "$bundle" ] && [ -n "$identity_re" ] && [ -n "$issuer" ] && [ -n "$blob" ] || {
+  echo "fake cosign: verify-blob needs --bundle, --certificate-identity-regexp, --certificate-oidc-issuer and a blob" >&2
+  exit 64
+}
+[ -f "$bundle" ] || { echo "Error: opening bundle: no such file $bundle" >&2; exit 1; }
+[ -f "$blob" ]   || { echo "Error: opening blob: no such file $blob" >&2; exit 1; }
+
+# The fixture bundle records what a real one binds together: who signed, under
+# which issuer, and the digest of the blob.
+b_repo="$(sed -n 's/^repo=//p' "$bundle")"
+b_identity="$(sed -n 's/^identity=//p' "$bundle")"
+b_issuer="$(sed -n 's/^issuer=//p' "$bundle")"
+b_digest="$(sed -n 's/^sha256=//p' "$bundle")"
+
+if [ -n "${VARVE_FIXTURE_COSIGN_REJECT:-}" ] && [ "$VARVE_FIXTURE_COSIGN_REJECT" = "$b_repo" ]; then
+  echo "Error: verifying blob [name=$blob]: signature verification failed" >&2
+  exit 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$blob" | awk '{print $1}')"
+else got="$(shasum -a 256 "$blob" | awk '{print $1}')"; fi
+if [ "$got" != "$b_digest" ]; then
+  echo "Error: verifying blob [name=$blob]: bundle is for digest $b_digest, blob hashes to $got" >&2
+  exit 1
+fi
+if ! printf '%s' "$b_identity" | grep -Eq -- "$identity_re"; then
+  echo "Error: none of the expected identities matched what was in the certificate: identity $b_identity does not match $identity_re" >&2
+  exit 1
+fi
+if [ "$b_issuer" != "$issuer" ]; then
+  echo "Error: expected oidc issuer $issuer, certificate carries $b_issuer" >&2
+  exit 1
+fi
+echo "Verified OK"

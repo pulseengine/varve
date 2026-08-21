@@ -1,5 +1,102 @@
 # Changelog
 
+## v0.28.0 — 2026-08-21
+
+The release that makes varve safe to operate. **Two exit codes changed — read
+the breaking section before upgrading a pipeline.**
+
+Not a feature release. Reading the open issues together, the sharpest were all
+one defect class: **varve reporting success over a bad outcome.** A check that
+cannot see the thing it checks is worse than no check, because it is believed.
+
+| | before | now |
+|---|---|---|
+| `verify --all` | exit 0 over a backdoored binary in another realm | walks every partition, each against its own realm's root |
+| `deposit` | destroyed signed referrers; success message identical to a clean run | refuses, names what it found, leaves the layout byte-identical |
+| `status` | exit 0 while printing YANKED | exits 3 |
+| `sign-status` | a typo'd `affected` id signed cleanly and fired for nobody | refused against a listing, and states which check it did NOT run |
+| `install` | exit 0 on a composition `verify` rejects two hops down | transitive, and refuses before claiming success |
+| `archive` | silently shipped an artifact whose `varve status` can never work | warns, naming the consequence |
+| the layer pipeline | no test; exercised only against the real registry | hermetic CI gate running the production assembler |
+
+### Breaking
+
+- **`varve status` exits 3 when the pinned layer is YANKED** (was 0). The point
+  of signing a yank is to stop a build; exiting 0 was the failure varve exists
+  to prevent. A `set -e` pipeline that previously ignored a yank now fails.
+  `varve exit-codes` prints the full contract.
+- **`varve docs --grep` exits 4 on no match** (was 0), so it can gate too.
+
+### Fixed — silent success
+
+- **`varve verify --all` checked only the pinned realm's partition** while its
+  `--help` promised every installed layer. A security auditor planted a
+  backdoored binary in a second realm, ran it, got exit 0, and executed the
+  backdoor. It now walks every partition, verifies each layer against **its
+  own realm's** root, reports every failure rather than the first, names each
+  by layer id and path, prints the scope it covered, and reports rather than
+  skips a partition whose realm is no longer defined. (REQ-VERIFYALL-001, #84)
+- **`varve deposit` into a used `--out` destroyed its referrers** — line-status,
+  line-index, attestations — and exited 0 with a success message byte-identical
+  to a clean run. Three of ten personas hit it independently; one by accident.
+  Now refused, with the re-attach sequence in the message and the layout left
+  byte-identical; `--force` overrides. The guard sits at the single layout
+  writer, so `archive` inherits it. (REQ-NODESTROY-001, #82, #85)
+- **A typo in an advisory's `affected` id signed cleanly and fired for nobody** —
+  producer sees success, consumer sees nothing, the yank silently does not
+  exist. Shape is now always checked; existence is checked against a listing,
+  and `sign-status --layouts` derives one from the producer's own layouts with
+  no network and no published index. Where nothing is in reach the tool states
+  which check it did not perform. (REQ-ADVISORY-002, #61)
+- **`varve install` exited 0 on a composition `verify` rejects.** The include
+  check was direct-only, so a chain whose leaf was missing passed at depth 2 —
+  while `docs verify` promises the CI gate and the install agree. Now
+  transitive, and it refuses BEFORE printing success instead of after.
+  (REQ-NOSILENT-001, #88)
+- **`varve archive` silently omitted the baseline line-status**, handing every
+  air-gapped consumer a permanently broken `varve status`. It now warns loudly,
+  naming the consequence; `--allow-no-status` silences it.
+
+### Added
+
+- **`varve inspect`** — what is actually inside a layer: name, version, kind and
+  platform per payload, DISPATCHED vs HELD, following the composition, with
+  `--json`. Nothing reported this before; an audit persona chose an export
+  adapter by running all four and reading which errored. (REQ-INSPECT-001, #92)
+- **An exit-code contract** — `varve exit-codes [--json]`, plus `--json` on every
+  `(CI)` command. The contract is *rendered from* the same enum `main()` exits
+  with, and a test executes a real scenario per code, so it cannot drift.
+  (REQ-CIGATE-001, #90)
+- **`varve docs root-ceremony`** — air-gapped generation, custody, paper backup
+  and restore, and an honest list of what varve does not do (no rotation, no
+  revocation, no expiry, no transparency log). Includes the finding that
+  **splitting the key file in half is not split custody**: the first 64 hex
+  characters are the seed and the public half derives from them, so a
+  "two-person" split of that shape has one person's worth of security.
+  (REQ-CUSTODY-001, #89)
+- **A hermetic gate for the layer pipeline.** The assembler was extracted from
+  the workflow so the gate runs the production code rather than a copy, driven
+  by recorded release metadata. It carries its own mutation and refuses to run
+  if the guards it checks are reworded. (REQ-SYSTEST-002, #95)
+
+### Known limitations, stated rather than discovered
+
+- **`varve check-status` does not exist.** DD-023 splits advisory checking in
+  two — signing stays offline, and checking a signed advisory against a LIVE
+  source is a separate keyless command. Only the offline half shipped.
+  Validating against a registry would let a registry that HIDES a layer block
+  the yank of that layer, on the same unauthenticated listing
+  REQ-INDEXAUTH-001 exists to distrust.
+- **Three export adapters have no system test** — `export-bazel`,
+  `export-bazel-distdir`, `export-sdk` (#99). A ratchet now refuses to let the
+  list grow, and refuses to let an adapter that gains a test stay on it.
+- **`select` in an `[[export]]` declaration is still consumed by nothing** (from
+  v0.27.0).
+- **`varve sbom` is still composition-blind**, while the export adapters and
+  `inspect` follow the whole composition.
+- **`[tool.source].sha256` is signed and never verified.** Now disclaimed in
+  `config-reference`, `payload-kinds`, and the `export-bazel` header itself.
+
 ## v0.27.0 — 2026-08-19
 
 Distribution beyond binaries, and the system-level exercise that keeps it

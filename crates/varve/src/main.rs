@@ -16,6 +16,10 @@ use clap::{Parser, Subcommand};
 use varve_core::{Pin, Store, discover, resolve};
 
 mod docs;
+mod exit;
+mod inspect;
+
+use exit::Outcome;
 
 #[derive(Parser)]
 #[command(
@@ -37,6 +41,29 @@ enum Cmd {
     },
     /// Layers present in the local core.
     List,
+    /// What is actually IN a layer: every payload's name, version, kind and
+    /// platform, whether varve DISPATCHES it or merely HOLDS it, and every
+    /// layer of the composition it came from (REQ-INSPECT-001).
+    ///
+    /// `list` prints layer ids and `sbom` collapses every non-tool payload to a
+    /// CycloneDX `library`; neither answers "what is in here". Offline: the
+    /// store already holds the answer, and the layer is re-verified before any
+    /// of it is printed.
+    Inspect {
+        /// Layer to inspect, e.g. `2026.08.0`. Defaults to the resolved pin.
+        #[arg(long)]
+        layer: Option<String>,
+        /// Machine-readable output (see `varve docs inspect` for the shape).
+        #[arg(long)]
+        json: bool,
+    },
+    /// The exit-code contract every varve command obeys — what a pipeline
+    /// gates on (REQ-CIGATE-001). Also `varve docs exit-codes`.
+    ExitCodes {
+        /// Machine-readable: `{"codes":[{"code","name","meaning","commands"}]}`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Resolve this project's pin, fetch, verify against the trust root, and
     /// lay the layer down in the core.
     Install {
@@ -90,6 +117,16 @@ enum Cmd {
         /// pass it when the core was laid down with `varve install --platform`.
         #[arg(long, value_name = "TRIPLE")]
         platform: Option<String>,
+        /// Overwrite a destination that already carries referrers, destroying
+        /// them (REQ-NODESTROY-001). Without this, archiving over a layout
+        /// that holds a line-status or attestations is REFUSED.
+        #[arg(long)]
+        force: bool,
+        /// Archive even though this core cached no baseline line-status — the
+        /// consumer's `varve status` will then fail for as long as they hold
+        /// the archive, and a yank can never reach them (REQ-NOSILENT-001).
+        #[arg(long)]
+        allow_no_status: bool,
     },
     /// Dispatch a tool from the pinned layer, with the layer identity in the
     /// environment (VARVE_LAYER, VARVE_LAYER_MANIFEST_DIGEST) so provenance
@@ -158,6 +195,17 @@ enum Cmd {
         /// Tool to include, as `name@version=path`. Repeatable.
         #[arg(long = "tool", value_name = "NAME@VERSION=PATH")]
         tools: Vec<String>,
+        /// Machine-readable result on stdout. A pipeline needs the layer's
+        /// manifest digest; before this it had to scrape it out of a prose
+        /// sentence (REQ-CIGATE-001).
+        #[arg(long)]
+        json: bool,
+        /// Overwrite an `--out` that already carries referrers, destroying
+        /// them. Without this, depositing into a used layout is REFUSED
+        /// (REQ-NODESTROY-001) — it used to drop the line-status, line-index
+        /// and attestations and report success.
+        #[arg(long)]
+        force: bool,
     },
     /// Compile a Bazel checksum registry (rules_wasm_component schema) from
     /// a verified installed layer — every hash Bazel enforces becomes a
@@ -264,11 +312,19 @@ enum Cmd {
     },
     /// Support window, yank state and known problems for the pinned layer,
     /// from the newest verified line-status document.
+    ///
+    /// EXITS 3 WHEN THE PINNED LAYER IS YANKED — a signed yank exists to stop
+    /// a build, so a pipeline gates on the exit code and never on stdout.
+    /// See `varve docs exit-codes`.
     Status {
         /// Ingest a status envelope first: verify, cache (monotonic), then
         /// report. Without it, report from the local cache.
         #[arg(long = "from-file", value_name = "ENVELOPE")]
         from_file: Option<PathBuf>,
+        /// Machine-readable report on stdout. The exit code still carries the
+        /// verdict; this carries the detail.
+        #[arg(long)]
+        json: bool,
     },
     /// (CI) Sign a statement binding an attestation to a layer: "this digest,
     /// of this kind, from this producer, accompanies this layer"
@@ -305,6 +361,9 @@ enum Cmd {
         /// evidence and no error says so.
         #[arg(long = "attach-to", value_name = "DIR")]
         attach_to: Option<PathBuf>,
+        /// Machine-readable result on stdout (REQ-CIGATE-001).
+        #[arg(long)]
+        json: bool,
     },
     /// Check that an attestation belongs to the pinned layer: verify the
     /// statement against the trust root, then re-hash the carried bytes and
@@ -331,6 +390,24 @@ enum Cmd {
         key_id: String,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
+        /// Machine-readable result on stdout (REQ-CIGATE-001).
+        #[arg(long)]
+        json: bool,
+        /// The realm's signed line-index envelope (from `varve sign-index`).
+        /// Without it the `affected` and yank ids can only be checked for
+        /// SHAPE, and sign-status says which check it did not perform
+        /// (REQ-ADVISORY-002).
+        #[arg(long, value_name = "ENVELOPE")]
+        index: Option<PathBuf>,
+        /// Directories holding this line's oci-layouts (what `varve deposit
+        /// --out` wrote, or a directory of them). The producer's own layers
+        /// are the listing that needs no network and no published index —
+        /// `signed-index` is false by default (DD-023). Repeatable.
+        #[arg(long = "layouts", value_name = "DIR")]
+        layouts: Vec<PathBuf>,
+        /// Sign an advisory naming a layer that is not deposited yet.
+        #[arg(long)]
+        force: bool,
     },
     /// (CI) Validate and sign a line-index document — the realm's statement of
     /// which layers a line contains (REQ-INDEXAUTH-001). Without one, the
@@ -350,6 +427,9 @@ enum Cmd {
         key_id: String,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
+        /// Machine-readable result on stdout (REQ-CIGATE-001).
+        #[arg(long)]
+        json: bool,
     },
     /// (CI) Attach a signed line-index envelope to a deposit layout, so an
     /// offline consumer of a realm declaring `signed-index = true` can obtain
@@ -362,6 +442,9 @@ enum Cmd {
         /// The signed line-index DSSE envelope (from `varve sign-index`).
         #[arg(long, value_name = "ENVELOPE")]
         index: PathBuf,
+        /// Machine-readable result on stdout (REQ-CIGATE-001).
+        #[arg(long)]
+        json: bool,
     },
     /// (CI) Attach a signed line-status envelope to a deposit layout as its
     /// baseline, so `varve status` works after an offline install and the
@@ -373,6 +456,14 @@ enum Cmd {
         /// The signed line-status DSSE envelope (from `varve sign-status`).
         #[arg(long, value_name = "ENVELOPE")]
         status: PathBuf,
+        /// Machine-readable result on stdout (REQ-CIGATE-001).
+        #[arg(long)]
+        json: bool,
+        /// Attach an advisory naming a layer this line does not (yet) have.
+        /// Without this the attach is REFUSED, because an advisory whose
+        /// `affected` id names nothing can never fire (REQ-ADVISORY-002).
+        #[arg(long)]
+        force: bool,
     },
     /// Shims on PATH: thin dispatchers that resolve the pin from the
     /// invocation's working directory and exec — switching projects is cd.
@@ -401,6 +492,9 @@ enum Cmd {
         key_id: String,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
+        /// Machine-readable result on stdout (REQ-CIGATE-001).
+        #[arg(long)]
+        json: bool,
     },
     /// Update varve itself: check the latest release, verify it with the
     /// RUNNING binary against the trust root (old-verifies-new), replace
@@ -460,12 +554,17 @@ enum ShimCmd {
     },
 }
 
+/// The one place a varve process turns an answer into an exit status
+/// (REQ-CIGATE-001). Every code comes from `exit::Outcome`, which is also what
+/// `varve exit-codes` prints and what the `exit-codes` docs topic is generated
+/// from — so the contract cannot be documented in one place and implemented in
+/// another.
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(outcome) => ExitCode::from(outcome.code()),
         Err(err) => {
             eprintln!("error: {err:#}");
-            ExitCode::FAILURE
+            ExitCode::from(Outcome::Error.code())
         }
     }
 }
@@ -491,7 +590,7 @@ fn dispatch_tool_name(argv0: Option<&std::ffi::OsStr>) -> Option<String> {
     Some(name.to_string())
 }
 
-fn run() -> anyhow::Result<()> {
+fn run() -> anyhow::Result<Outcome> {
     // Invoked under another name? Then this binary IS the shim: dispatch.
     let mut args = std::env::args_os();
     let argv0 = args.next();
@@ -500,10 +599,16 @@ fn run() -> anyhow::Result<()> {
         // Arguments pass through as OsString: a shim must hand the tool the
         // exact bytes the caller typed, and unix arguments are arbitrary bytes.
         let rest: Vec<std::ffi::OsString> = args.collect();
-        return run_tool(&store, None, &tool, &rest);
+        run_tool(&store, None, &tool, &rest)?;
+        return Ok(Outcome::Ok);
     }
     let cli = Cli::parse();
     let store = Store::at(store_root()?);
+    // Two commands report a VERDICT rather than merely succeeding or failing —
+    // a yanked layer and an empty search are ANSWERS, and their exit code is
+    // the answer (REQ-CIGATE-001). They write it here; every other command
+    // succeeds as `Ok` or fails as `Error`.
+    let mut outcome = Outcome::Ok;
     match cli.command {
         Cmd::Which { tool } => which(&store, &tool),
         Cmd::List => list(&store),
@@ -517,7 +622,9 @@ fn run() -> anyhow::Result<()> {
             layer,
             dest,
             platform,
-        } => archive(&store, &layer, &dest, platform),
+            force,
+            allow_no_status,
+        } => archive(&store, &layer, &dest, platform, force, allow_no_status),
         Cmd::Run {
             varve,
             tool_and_args,
@@ -540,6 +647,8 @@ fn run() -> anyhow::Result<()> {
             key_id,
             out,
             tools,
+            json,
+            force,
         } => deposit_cmd(
             spec.as_deref(),
             layer.as_deref(),
@@ -550,6 +659,8 @@ fn run() -> anyhow::Result<()> {
             &key_id,
             &out,
             &tools,
+            json,
+            force,
         ),
         Cmd::ExportBazel { layer, out } => export_bazel(&store, layer.as_deref(), &out),
         Cmd::ExportCargo { layer, out } => export_cargo(&store, layer.as_deref(), &out),
@@ -566,13 +677,28 @@ fn run() -> anyhow::Result<()> {
         Cmd::Sbom { layer, format, out } => {
             sbom_cmd(&store, layer.as_deref(), &format, out.as_deref())
         }
-        Cmd::Status { from_file } => status(&store, from_file.as_deref()),
+        Cmd::Status { from_file, json } => {
+            status(&store, from_file.as_deref(), json).map(|o| outcome = o)
+        }
         Cmd::SignStatus {
             file,
             key,
             key_id,
             out,
-        } => sign_status(&file, &key, &key_id, &out),
+            json,
+            index,
+            layouts,
+            force,
+        } => sign_status(
+            &file,
+            &key,
+            &key_id,
+            &out,
+            json,
+            index.as_deref(),
+            &layouts,
+            force,
+        ),
         Cmd::Keygen { out, public } => keygen(&out, public.as_deref()),
         Cmd::Pubkey { key } => pubkey(&key),
         Cmd::SignAttestation {
@@ -584,6 +710,7 @@ fn run() -> anyhow::Result<()> {
             key_id,
             out,
             attach_to,
+            json,
         } => sign_attestation(
             &store,
             layer.as_deref(),
@@ -594,16 +721,27 @@ fn run() -> anyhow::Result<()> {
             &key_id,
             &out,
             attach_to.as_deref(),
+            json,
         ),
         Cmd::CheckAttestation { statement, file } => check_attestation(&store, &statement, &file),
-        Cmd::AttachStatus { layout, status } => attach_status(&layout, &status),
+        Cmd::AttachStatus {
+            layout,
+            status,
+            json,
+            force,
+        } => attach_status(&layout, &status, json, force),
         Cmd::SignIndex {
             file,
             key,
             key_id,
             out,
-        } => sign_index(&file, &key, &key_id, &out),
-        Cmd::AttachIndex { layout, index } => attach_index(&layout, &index),
+            json,
+        } => sign_index(&file, &key, &key_id, &out, json),
+        Cmd::AttachIndex {
+            layout,
+            index,
+            json,
+        } => attach_index(&layout, &index, json),
         Cmd::Shim(ShimCmd::Install { extra_tools }) => shim_install(&store, &extra_tools),
         Cmd::Env { shell } => print_env(&store, &shell),
         Cmd::Completions { shell } => {
@@ -616,7 +754,8 @@ fn run() -> anyhow::Result<()> {
             key,
             key_id,
             out,
-        } => sign_sums(&sums, &key, &key_id, &out),
+            json,
+        } => sign_sums(&sums, &key, &key_id, &out, json),
         Cmd::SelfUpdate { check, to } => self_update(check, to.as_deref()),
         Cmd::SelfVerify { archive, envelope } => self_verify(&archive, &envelope),
         Cmd::Docs {
@@ -633,7 +772,42 @@ fn run() -> anyhow::Result<()> {
             coverage,
             strict,
             &format,
-        ),
+        )
+        .map(|o| outcome = o),
+        Cmd::ExitCodes { json } => {
+            if json {
+                println!("{}", exit::render_json());
+            } else {
+                print!("{}", exit::render_text());
+            }
+            Ok(())
+        }
+        Cmd::Inspect { layer, json } => inspect::run(&store, layer.as_deref(), json),
+    }?;
+    Ok(outcome)
+}
+
+/// Report a command's result to whoever asked: the prose a person reads, or
+/// the JSON a pipeline parses — never both, because a pipeline reads stdout and
+/// two documents on one stream is not a document.
+///
+/// Every command tagged `(CI)` in `--help` takes `--json` and reports through
+/// here (REQ-CIGATE-001). Before this, a pipeline that needed a layer's
+/// manifest digest had to scrape it out of an English sentence, and every
+/// wording change was a silent breaking change to somebody's CI.
+///
+/// The shape is a compatibility promise, so it is deliberately flat and
+/// self-describing: a `command` field naming the subcommand, then that
+/// command's own facts as named scalars. Paths are reported exactly as varve
+/// was given them.
+fn report(json: bool, human: &str, machine: serde_json::Value) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&machine).expect("report serialises")
+        );
+    } else {
+        println!("{human}");
     }
 }
 
@@ -786,6 +960,7 @@ fn sign_sums(
     key: &std::path::Path,
     key_id: &str,
     out: &std::path::Path,
+    json: bool,
 ) -> anyhow::Result<()> {
     let bytes = std::fs::read(sums).with_context(|| format!("cannot read {}", sums.display()))?;
     let hex_key = std::fs::read_to_string(key)
@@ -796,11 +971,34 @@ fn sign_sums(
     let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
     let envelope = varve_core::sign_release_sums(&bytes, &sk, key_id)?;
     std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
-    println!("signed release sums -> {}", out.display());
+    report(
+        json,
+        &format!("signed release sums -> {}", out.display()),
+        serde_json::json!({
+            "command": "sign-sums",
+            "sums": sums.display().to_string(),
+            "sums_digest": varve_core::manifest_digest(&bytes),
+            "key_id": key_id,
+            "out": out.display().to_string(),
+        }),
+    );
     Ok(())
 }
 
-fn status(store: &Store, from_file: Option<&std::path::Path>) -> anyhow::Result<()> {
+/// `varve status` — and, since v0.28.0, a GATE.
+///
+/// BREAKING (REQ-CIGATE-001): a yanked layer exits 3, not 0. Signing a yank
+/// exists to stop a build; while this command exited 0 the only way to act on
+/// one was to grep stdout for the word YANKED, which two personas of a
+/// ten-persona audit independently failed to do — and a gate nobody can write
+/// is not a gate. The report itself is unchanged and still goes to stdout, so a
+/// script that only reads output keeps working; a script that checks `$?` now
+/// gets the answer.
+fn status(
+    store: &Store,
+    from_file: Option<&std::path::Path>,
+    json: bool,
+) -> anyhow::Result<Outcome> {
     let ctx = project_ctx(store)?;
     let pin = &ctx.pin;
     let root_pk = ctx_root_bytes(&ctx)?;
@@ -843,44 +1041,110 @@ fn status(store: &Store, from_file: Option<&std::path::Path>) -> anyhow::Result<
             doc.line
         );
     }
-    let report = doc.report_for(&pin.layer);
-    println!(
-        "layer {} (line {line}, status document #{})",
-        pin.layer, doc.counter
-    );
-    match &report.yanked_reason {
-        Some(reason) => println!("  YANKED: {reason}"),
-        None => println!("  not yanked"),
+    let verdict = doc.report_for(&pin.layer);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "command": "status",
+                "layer": pin.layer.to_string(),
+                "line": line.to_string(),
+                "status_counter": doc.counter,
+                "yanked": verdict.yanked_reason.is_some(),
+                "yanked_reason": verdict.yanked_reason,
+                "support_until": verdict.support_until,
+                "known_problems": verdict.problems_total,
+                "known_problems_with_workaround": verdict.problems_with_workaround,
+                "exit_code": if verdict.yanked_reason.is_some() {
+                    Outcome::Yanked.code()
+                } else {
+                    Outcome::Ok.code()
+                },
+            }))
+            .expect("status report serialises")
+        );
+    } else {
+        println!(
+            "layer {} (line {line}, status document #{})",
+            pin.layer, doc.counter
+        );
+        match &verdict.yanked_reason {
+            Some(reason) => println!("  YANKED: {reason}"),
+            None => println!("  not yanked"),
+        }
+        match &verdict.support_until {
+            Some(until) => println!("  supported until {until}"),
+            None => println!("  no stated support window"),
+        }
+        println!(
+            "  {} known problem(s) affect this layer, {} with workarounds",
+            verdict.problems_total, verdict.problems_with_workaround
+        );
     }
-    match &report.support_until {
-        Some(until) => println!("  supported until {until}"),
-        None => println!("  no stated support window"),
-    }
-    println!(
-        "  {} known problem(s) affect this layer, {} with workarounds",
-        report.problems_total, report.problems_with_workaround
-    );
-    Ok(())
+    // The verdict IS the exit code (REQ-CIGATE-001). Note it is not an error:
+    // stderr stays empty and the report above is complete, because varve
+    // answered the question correctly — the answer is just one that stops a
+    // build.
+    Ok(match verdict.yanked_reason {
+        Some(_) => Outcome::Yanked,
+        None => Outcome::Ok,
+    })
 }
 
-fn attach_status(layout: &std::path::Path, status: &std::path::Path) -> anyhow::Result<()> {
+fn attach_status(
+    layout: &std::path::Path,
+    status: &std::path::Path,
+    json: bool,
+    force: bool,
+) -> anyhow::Result<()> {
     let envelope = std::fs::read(status)
         .with_context(|| format!("cannot read status envelope {}", status.display()))?;
-    let (line, counter) = varve_core::attach_status_envelope_to_layout(layout, &envelope)?;
-    println!(
-        "attached baseline line-status #{counter} for line {line} to {}",
-        layout.display()
+    // REQ-ADVISORY-002: where the layout carries a line-index, the `affected`
+    // ids are checked against the layers the line actually has. `check.note`
+    // says which check ran — and, when no listing was in reach, which one did
+    // NOT. Printing it is clause 3: a partial check must not read as a
+    // complete one.
+    let (line, counter, check) =
+        varve_core::attach_status_envelope_to_layout_checked(layout, &envelope, force)?;
+    report(
+        json,
+        &format!(
+            "attached baseline line-status #{counter} for line {line} to {}\n  {}",
+            layout.display(),
+            check.note
+        ),
+        serde_json::json!({
+            "command": "attach-status",
+            "line": line.to_string(),
+            "counter": counter,
+            "layout": layout.display().to_string(),
+            "existence_checked": check.existence_checked,
+            "note": check.note,
+        }),
     );
     Ok(())
 }
 
-fn attach_index(layout: &std::path::Path, index: &std::path::Path) -> anyhow::Result<()> {
+fn attach_index(
+    layout: &std::path::Path,
+    index: &std::path::Path,
+    json: bool,
+) -> anyhow::Result<()> {
     let envelope = std::fs::read(index)
         .with_context(|| format!("cannot read index envelope {}", index.display()))?;
     let (line, counter) = varve_core::attach_index_envelope_to_layout(layout, &envelope)?;
-    println!(
-        "attached signed line-index #{counter} for line {line} to {}",
-        layout.display()
+    report(
+        json,
+        &format!(
+            "attached signed line-index #{counter} for line {line} to {}",
+            layout.display()
+        ),
+        serde_json::json!({
+            "command": "attach-index",
+            "line": line.to_string(),
+            "counter": counter,
+            "layout": layout.display().to_string(),
+        }),
     );
     Ok(())
 }
@@ -890,6 +1154,7 @@ fn sign_index(
     key: &std::path::Path,
     key_id: &str,
     out: &std::path::Path,
+    json: bool,
 ) -> anyhow::Result<()> {
     let bytes = std::fs::read(file)
         .with_context(|| format!("cannot read index document {}", file.display()))?;
@@ -909,21 +1174,37 @@ fn sign_index(
     let envelope = doc.sign(&sk, key_id)?;
     std::fs::write(out, envelope)
         .with_context(|| format!("cannot write envelope {}", out.display()))?;
-    println!(
-        "signed line-index #{} for line {} ({} layer(s)) -> {}",
-        doc.counter,
-        doc.line,
-        doc.layers.len(),
-        out.display()
+    report(
+        json,
+        &format!(
+            "signed line-index #{} for line {} ({} layer(s)) -> {}",
+            doc.counter,
+            doc.line,
+            doc.layers.len(),
+            out.display()
+        ),
+        serde_json::json!({
+            "command": "sign-index",
+            "line": doc.line,
+            "counter": doc.counter,
+            "layers": doc.layers.len(),
+            "key_id": key_id,
+            "out": out.display().to_string(),
+        }),
     );
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sign_status(
     file: &std::path::Path,
     key: &std::path::Path,
     key_id: &str,
     out: &std::path::Path,
+    json: bool,
+    index: Option<&std::path::Path>,
+    layouts: &[PathBuf],
+    force: bool,
 ) -> anyhow::Result<()> {
     let bytes = std::fs::read(file)
         .with_context(|| format!("cannot read status document {}", file.display()))?;
@@ -937,14 +1218,51 @@ fn sign_status(
     // varve used to accept 64 bytes of entropy here and emit a signed layer no
     // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
     let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
-    let envelope = doc.sign(&sk, key_id)?;
+    // REQ-ADVISORY-002: a typo in an `affected` layer id used to sign cleanly,
+    // and the advisory then never fired for anyone — producer sees success,
+    // consumer sees nothing, the yank silently does not exist. Shape is always
+    // checked. EXISTENCE is checked only where a listing of the line is in
+    // reach, and where it is not, `check.note` says so rather than letting a
+    // partial check read as a complete one.
+    let known = match index {
+        Some(path) => {
+            let env = std::fs::read(path)
+                .with_context(|| format!("cannot read line-index envelope {}", path.display()))?;
+            varve_core::known_layers_from_index(&env, &sk[32..])?
+        }
+        // The producer's own layouts: no network, no published index. This is
+        // the path that actually runs for most realms (DD-023 clause 5).
+        None if !layouts.is_empty() => varve_core::known_layers_in_layout_dirs(layouts, &doc.line),
+        None => varve_core::KnownLayers::unknown(
+            "no listing of this line was supplied — pass `--layouts <DIR>` (the directory \
+             `varve deposit --out` wrote, or one holding several) to check the `affected` \
+             and yank ids against the layers you actually deposited, or `--index \
+             <envelope>` if this realm publishes a signed line-index",
+        ),
+    };
+    let (envelope, check) = doc.sign_against(&known, force, &sk, key_id)?;
     std::fs::write(out, envelope)
         .with_context(|| format!("cannot write envelope {}", out.display()))?;
-    println!(
-        "signed line-status #{} for line {} -> {}",
-        doc.counter,
-        doc.line,
-        out.display()
+    report(
+        json,
+        &format!(
+            "signed line-status #{} for line {} -> {}\n  {}",
+            doc.counter,
+            doc.line,
+            out.display(),
+            check.note
+        ),
+        serde_json::json!({
+            "command": "sign-status",
+            "line": doc.line,
+            "counter": doc.counter,
+            "yanked": doc.yanked.keys().collect::<Vec<_>>(),
+            "known_problems": doc.known_problems.len(),
+            "existence_checked": check.existence_checked,
+            "note": check.note,
+            "key_id": key_id,
+            "out": out.display().to_string(),
+        }),
     );
     Ok(())
 }
@@ -1023,7 +1341,7 @@ fn docs_cmd(
     coverage: bool,
     strict: bool,
     format: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Outcome> {
     use clap::CommandFactory;
     let json = match format {
         "text" => false,
@@ -1047,7 +1365,7 @@ fn docs_cmd(
                 docs::REQUIRED_TOPICS.len(),
                 docs::TOPICS_NEEDING_EXAMPLES.len()
             );
-            return Ok(());
+            return Ok(Outcome::Ok);
         }
         if !missing_topics.is_empty() {
             eprintln!(
@@ -1077,7 +1395,7 @@ fn docs_cmd(
                     bare_topics.len()
                 );
             }
-            return Ok(());
+            return Ok(Outcome::Ok);
         }
         eprintln!("docs coverage: {} subcommand(s) undocumented:", gaps.len());
         for g in &gaps {
@@ -1099,17 +1417,47 @@ fn docs_cmd(
                 }
             );
         }
-        return Ok(());
+        return Ok(Outcome::Ok);
     }
     if let Some(q) = grep {
         let hits = docs::grep(q);
+        // A search that matched nothing EXITS NON-ZERO (REQ-CIGATE-001). It
+        // used to print one prose line and exit 0, so a docs check could not
+        // gate on the docs — `varve docs --grep "exit code"` returned nothing
+        // across all fifty topics, quietly, successfully.
+        //
+        // It is code 4, not 1: nothing failed. The search ran and the answer is
+        // empty, which is a result a pipeline branches on and not an incident
+        // it reports.
         if hits.is_empty() {
-            println!("no topic matches '{q}'");
+            if json {
+                println!("[]");
+            } else {
+                println!("no topic matches '{q}'");
+            }
+            return Ok(Outcome::NoMatch);
         }
-        for (slug, line) in hits {
-            println!("{slug}: {line}");
+        if json {
+            let arr: Vec<_> = hits
+                .iter()
+                .map(|(slug, line)| {
+                    serde_json::json!({
+                        "slug": slug,
+                        "title": docs::find(slug).map(|t| t.title),
+                        "line": line,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&arr).expect("grep hits serialise")
+            );
+        } else {
+            for (slug, line) in hits {
+                println!("{slug}: {line}");
+            }
         }
-        return Ok(());
+        return Ok(Outcome::Ok);
     }
     if list || topic.is_none() {
         if json {
@@ -1117,7 +1465,7 @@ fn docs_cmd(
         } else {
             print!("{}", docs::render_list());
         }
-        return Ok(());
+        return Ok(Outcome::Ok);
     }
     let slug = topic.unwrap();
     match docs::find(slug) {
@@ -1129,7 +1477,7 @@ fn docs_cmd(
             bail!("unknown topic: {slug}");
         }
     }
-    Ok(())
+    Ok(Outcome::Ok)
 }
 
 fn self_verify(archive: &std::path::Path, envelope: &std::path::Path) -> anyhow::Result<()> {
@@ -1163,8 +1511,25 @@ fn run_tool(
     }
     let resolved = resolve(&pin, &ctx.store)?;
     let Some((_, path)) = resolved.tools.iter().find(|(name, _)| name == tool) else {
+        // The same correction `which` carries: the layer HOLDS a `wit`, `crate`
+        // or `vsix` payload, it just does not dispatch one (REQ-INSPECT-001
+        // clause 3). "not part of layer" sends the reader to re-deposit
+        // something that is already there.
+        if let Some((kind, version, in_layer)) = held_payload(&ctx.store, &resolved.layer, tool) {
+            bail!(
+                "'{tool}' is a HELD `{kind}` payload{version} of layer {in_layer}, not a \
+                 dispatched tool — varve cannot exec it. Only a `tool` is dispatched by name. \
+                 Run `varve inspect` to see every payload, or the matching `varve export-*` \
+                 to materialise this one.",
+                version = match version {
+                    Some(v) => format!(" ({v})"),
+                    None => String::new(),
+                },
+            );
+        }
         bail!(
-            "tool '{tool}' is not part of layer {} — it exposes: {}",
+            "tool '{tool}' is not part of layer {} — it exposes: {}. `varve inspect` lists \
+             every payload, dispatched and held.",
             resolved.layer.layer,
             resolved
                 .tools
@@ -1767,6 +2132,7 @@ fn sign_attestation(
     key_id: &str,
     out: &std::path::Path,
     attach_to: Option<&std::path::Path>,
+    json: bool,
 ) -> anyhow::Result<()> {
     let kind: varve_core::attest::AttestationKind = kind.parse()?;
     // Trust first, as everywhere: binding an attestation to a layer we cannot
@@ -1803,7 +2169,7 @@ fn sign_attestation(
             },
         )?;
     }
-    println!(
+    let mut human = format!(
         "signed a {kind} attestation statement by {producer} -> {out}\n\
          \u{20}\u{20}attestation digest : {adigest}\n\
          \u{20}\u{20}bound to layer     : {layer} ({ldigest})\n\
@@ -1815,13 +2181,28 @@ fn sign_attestation(
         ldigest = st.layer_manifest_digest,
     );
     if let Some(layout) = attach_to {
-        println!(
-            "attached to layout {} as referrer artifacts — the statement AND the bytes, so it \
+        human.push_str(&format!(
+            "\nattached to layout {} as referrer artifacts — the statement AND the bytes, so it \
              travels with the layer through a registry push, `varve archive`, and an offline \
              install",
             layout.display()
-        );
+        ));
     }
+    report(
+        json,
+        &human,
+        serde_json::json!({
+            "command": "sign-attestation",
+            "kind": kind.to_string(),
+            "producer": producer,
+            "attestation_digest": st.digest,
+            "layer": entry.layer.to_string(),
+            "layer_manifest_digest": st.layer_manifest_digest,
+            "key_id": key_id,
+            "out": out.display().to_string(),
+            "attached_to": attach_to.map(|l| l.display().to_string()),
+        }),
+    );
     Ok(())
 }
 
@@ -1942,6 +2323,19 @@ fn export_cargo(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
         config.display(),
         varve_core::crateexport::REGISTRY_SUBDIR,
         out.display(),
+    );
+    // REQ-NOSILENT-001 clause 2. Until v0.27.0 the index carried "deps":[] and
+    // "features":{} for every crate, and the worst observed outcome was a
+    // build that exits 0 having compiled everything featureless — not a
+    // failure anyone would notice. That is fixed, but the index is only ever
+    // as good as what each `.crate` declares, and a registry index cannot
+    // express everything a vendor directory can. Say which one is stronger,
+    // on every run, rather than closing with an instruction to run the very
+    // build that can succeed while being wrong.
+    println!(
+        "  the index is derived from each .crate's own Cargo.toml. If a build resolves \
+         differently than you expect, `varve export-crates-vendor` sidesteps index \
+         resolution entirely by vendoring the sources — it is the stronger of the two."
     );
     write_export_stamp(out, &target.entry, "cargo")?;
     Ok(())
@@ -2141,6 +2535,8 @@ fn deposit_cmd(
     key_id: &str,
     out: &std::path::Path,
     tools: &[String],
+    json: bool,
+    force: bool,
 ) -> anyhow::Result<()> {
     if let Some(spec_path) = spec {
         let text = std::fs::read_to_string(spec_path)
@@ -2188,6 +2584,8 @@ fn deposit_cmd(
             out,
             deposit_tools,
             includes,
+            json,
+            force,
         );
     }
     let (layer, channel, counter) = (
@@ -2233,6 +2631,8 @@ fn deposit_cmd(
         // Composition is expressed in a spec file's [[include]] tables; the
         // individual flags deliberately do not grow a way to say it.
         Vec::new(),
+        json,
+        force,
     )
 }
 
@@ -2247,6 +2647,8 @@ fn run_deposit(
     out: &std::path::Path,
     deposit_tools: Vec<varve_core::DepositTool>,
     includes: Vec<varve_core::deposit::DepositInclude>,
+    json: bool,
+    force: bool,
 ) -> anyhow::Result<()> {
     // `deposit` writes an oci-layout DIRECTORY. A registry-shaped --out used to
     // report success while creating a local directory literally named
@@ -2274,13 +2676,46 @@ fn run_deposit(
         issued_at: issued_at.to_string(),
         tools: deposit_tools,
     };
-    let outcome = varve_core::deposit(&spec, &sk, key_id, out)?;
-    println!(
-        "deposited layer {} (counter {}) {} at {}",
-        outcome.layer,
-        outcome.counter,
-        outcome.digest,
-        out.display()
+    let entries = spec.tools.len();
+    let includes = spec.includes.len();
+    let channel = spec.channel.clone();
+    let issued_at = spec.issued_at.clone();
+    // REQ-NODESTROY-001: refuses by default when `out` already carries
+    // referrers. `--force` is the deliberate override, and the refusal names
+    // it — so the flag has to exist, or the message is telling the operator to
+    // run something clap will reject.
+    let outcome = varve_core::deposit_with_options(
+        &spec,
+        &sk,
+        key_id,
+        out,
+        &varve_core::DepositOptions { force },
+    )?;
+    report(
+        json,
+        &format!(
+            "deposited layer {} (counter {}) {} at {}",
+            outcome.layer,
+            outcome.counter,
+            outcome.digest,
+            out.display()
+        ),
+        // `manifest_digest` is the field a pipeline came here for: it is what
+        // a pin records, what a `[[include]]` names, and what an attestation
+        // binds to. It used to be recoverable only by cutting an English
+        // sentence apart on spaces.
+        serde_json::json!({
+            "command": "deposit",
+            "layer": outcome.layer.to_string(),
+            "channel": channel,
+            "counter": outcome.counter,
+            "issued_at": issued_at,
+            "manifest_digest": outcome.digest,
+            "entries": entries,
+            "includes": includes,
+            "key_id": key_id,
+            "out": out.display().to_string(),
+        }),
     );
     Ok(())
 }
@@ -2290,6 +2725,8 @@ fn archive(
     layer: &str,
     dest: &std::path::Path,
     platform: Option<String>,
+    force: bool,
+    allow_no_status: bool,
 ) -> anyhow::Result<()> {
     let platform = platform.unwrap_or_else(varve_core::host_platform);
     // Use the PROJECT'S store. `archive` filtered the ambient top-level core,
@@ -2317,7 +2754,16 @@ fn archive(
              not supported yet; clean up the core first"
         ),
     };
-    let summary = varve_core::export_archive(&store, &entry, dest, &platform)?;
+    let summary = varve_core::export_archive_with_options(
+        &store,
+        &entry,
+        dest,
+        &platform,
+        &varve_core::ArchiveOptions {
+            force,
+            allow_no_status,
+        },
+    )?;
     println!(
         "archived layer {} {} as oci-layout at {}",
         entry.layer,
@@ -2348,6 +2794,20 @@ fn archive(
              layer there.",
             if total == 1 { "y" } else { "ies" },
             summary.platform
+        );
+    }
+    // REQ-NOSILENT-001 clause 1: loud, on stderr, and it names the consequence
+    // rather than the condition. `archive` was already verbose about omitted
+    // PLATFORM payloads and silent about this — the inconsistency that hid it.
+    if summary.baseline_missing {
+        eprintln!(
+            "warning: this core cached no baseline line-status for line {}, so the archive \
+             carries none. Every consumer of it gets a permanently failing `varve status` and \
+             no yank can ever reach them — and an air-gapped consumer cannot ask a registry \
+             instead. Install from a source that carries the baseline (a registry, or a layout \
+             with one attached) and archive again. Pass --allow-no-status to silence this if \
+             you are shipping an archive that is not meant to receive advisories.",
+            entry.layer.line()
         );
     }
     Ok(())
@@ -2520,10 +2980,6 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         platform: &platform,
     };
     let outcome = varve_core::install(pin, source, &verifier, store, &mut marks, &policy)?;
-    println!(
-        "installed layer {} (counter {}) {}",
-        outcome.layer, outcome.counter, outcome.digest
-    );
     // Clause 4: REPORT what the realm asserts the line contains, beside what
     // this install accepted. Reported and NOT enforced, deliberately — raising
     // the anti-rollback mark to the newest counter that merely EXISTS would
@@ -2566,35 +3022,59 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         );
     }
 
-    // A composed layer is only usable once what it composes is installed too.
-    // install exited 0 on a composition `verify` rejects, so `run` then
-    // executed a tool from an unverified included layer — and the error the
-    // user eventually hit named `varve install`, which cannot take a layer or a
-    // digest, so following it was a no-op loop.
-    if let Some(entry) = ctx.store.get(&outcome.digest)?
-        && let Ok(bytes) = std::fs::read(entry.root.join("layer.json"))
-        && let Ok(view) = varve_core::compose::view(&bytes)
-        && !view.includes.is_empty()
-    {
-        let missing: Vec<String> = view
-            .includes
-            .iter()
-            .filter(|inc| {
-                ctx.store
-                    .find_anywhere(&inc.digest)
-                    .ok()
-                    .flatten()
-                    .is_none()
-            })
-            .map(|inc| {
-                let name = inc.layer.clone().unwrap_or_else(|| inc.digest.clone());
-                match &inc.realm {
-                    Some(r) => format!("{name} (realm '{r}')"),
-                    None => name,
+    // A composed layer is only usable once EVERYTHING it composes is installed
+    // — transitively (REQ-NOSILENT-001 clause 4). install exited 0 on a
+    // composition `verify` rejects, so `run` then executed a tool from an
+    // unverified included layer, and the error the user eventually hit named
+    // `varve install`, which cannot take a layer or a digest, so following it
+    // was a no-op loop.
+    //
+    // The check used to look only at the root's OWN includes, so a chain
+    // root -> mid -> leaf with `leaf` missing passed: root's direct includes
+    // were all present. `verify` walks the whole graph and rejects it at depth
+    // 2, while `docs verify` promises "the CI gate and the install agree".
+    // They now reach the same verdict.
+    let mut composed_count = 0usize;
+    if let Some(entry) = ctx.store.get(&outcome.digest)? {
+        let mut missing: Vec<String> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut queue: Vec<varve_core::store::InstalledLayer> = vec![entry];
+        let mut depth = 0usize;
+        while let Some(current) = queue.pop() {
+            depth += 1;
+            if depth > varve_core::compose::MAX_DEPTH * 4 {
+                break;
+            }
+            let Ok(bytes) = std::fs::read(current.root.join("layer.json")) else {
+                continue;
+            };
+            let Ok(view) = varve_core::compose::view(&bytes) else {
+                continue;
+            };
+            for inc in &view.includes {
+                if !seen.insert(inc.digest.clone()) {
+                    continue;
                 }
-            })
-            .collect();
+                composed_count += 1;
+                match ctx.store.find_anywhere(&inc.digest)? {
+                    Some((_, found)) => queue.push(found),
+                    None => {
+                        // Name the realm too: "install it" is not actionable
+                        // without knowing WHOSE layer it is, and a consumer
+                        // composing two realms cannot tell them apart by id.
+                        let name = inc.layer.clone().unwrap_or_else(|| inc.digest.clone());
+                        missing.push(match &inc.realm {
+                            Some(r) => format!("{name} (realm '{r}')"),
+                            None => name,
+                        });
+                    }
+                }
+            }
+        }
         if !missing.is_empty() {
+            // Clause 3: REFUSE BEFORE claiming success. This used to print
+            // "installed layer X" and THEN error, leaving a layer in
+            // `varve list` that no other command would touch.
             bail!(
                 "layer {} composes {} layer(s) that are not installed: {}.\n\
                  Install each first — a composed layer names what it needs by digest, \
@@ -2602,16 +3082,23 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
                  pointing --from at the other source is not enough: give the included \
                  layer its own pin (a directory whose varve.toml names that realm, \
                  channel and layer), run `varve install` there, then re-run this one. \
-                 Both land in the same store. See `varve docs composition`.",
+                 Both land in the same store. The list above is TRANSITIVE — a layer \
+                 named here may be one this layer composes only indirectly. \
+                 See `varve docs composition`.",
                 outcome.layer,
                 missing.len(),
                 missing.join(", ")
             );
         }
+    }
+    println!(
+        "installed layer {} (counter {}) {}",
+        outcome.layer, outcome.counter, outcome.digest
+    );
+    if composed_count > 0 {
         println!(
-            "  composes {} installed layer(s) — `varve verify` checks each against its own \
-             realm's trust root",
-            view.includes.len()
+            "  composes {composed_count} installed layer(s), transitively — `varve verify` \
+             checks each against its own realm's trust root"
         );
     }
 
@@ -2647,11 +3134,16 @@ fn verify(
     let ctx = project_ctx(store)?;
     let verifier = ctx_verifier(&ctx)?;
     let store = &ctx.store;
-    let layers = if all {
-        store.list()?
-    } else {
-        vec![varve_core::resolve(&ctx.pin, store)?.layer]
-    };
+    if all {
+        // REQ-VERIFYALL-001: EVERY partition, each layer against ITS OWN
+        // realm's root. `--help` has always promised "every installed layer";
+        // this used to list only the pinned realm's partition, so a tampered
+        // layer in another realm passed with exit 0 (varve#84). The realm
+        // boundary is preserved in WHICH KEY verifies WHAT, not in what gets
+        // looked at.
+        return verify_every_partition(&ctx);
+    }
+    let layers = vec![varve_core::resolve(&ctx.pin, store)?.layer];
     if layers.is_empty() {
         bail!("nothing to verify — no layers installed");
     }
@@ -2694,6 +3186,106 @@ fn verify(
     // anti-rollback is varve's most defensible property; the command a
     // consumer runs to check it must check it.
     verify_no_rollback(&ctx, store)?;
+    Ok(())
+}
+
+/// `varve verify --all` (REQ-VERIFYALL-001): walk EVERY partition in the store.
+///
+/// Three properties this must have, each of which the old version lacked:
+///   * every realm partition is walked, not only the pinned project's;
+///   * each layer is checked against the root of the realm that OWNS its
+///     partition — using the pinned project's root for another realm's layer
+///     would be trust widening, the precise thing realms exist to prevent;
+///   * every failure is reported, with layer id AND path, and the scope
+///     actually covered is printed. It was fail-fast and in one observed run
+///     the only layer id on screen belonged to a different, healthy layer.
+fn verify_every_partition(ctx: &ProjectCtx) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    // fingerprint -> (realm name, verifier). A partition whose realm is not
+    // defined here cannot be checked, and is REPORTED rather than skipped: an
+    // unverifiable layer sitting in the store is what this command is for.
+    let mut by_fp: std::collections::BTreeMap<String, (String, varve_core::PinnedKeyVerifier)> =
+        std::collections::BTreeMap::new();
+    for name in varve_core::realm::realm_names(&cwd).unwrap_or_default() {
+        if let Ok(realm) = varve_core::resolve_realm(&cwd, &name)
+            && let Ok(v) = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
+        {
+            by_fp.insert(realm.fingerprint(), (name, v));
+        }
+    }
+
+    // The pin's own root, for the top-level (non-realm) partition.
+    let own = ctx_verifier(ctx)?;
+    let host = varve_core::host_platform();
+    let mut failures: Vec<String> = Vec::new();
+    let mut checked_layers = 0usize;
+    let mut total_layers = 0usize;
+    let mut partitions_seen = 0usize;
+
+    for (fp, part) in ctx.store.partitions() {
+        let layers = part.list().unwrap_or_default();
+        if layers.is_empty() {
+            continue;
+        }
+        partitions_seen += 1;
+        // Whose root speaks for this partition?
+        let chosen = match &fp {
+            Some(fp) => by_fp.get(fp).map(|(n, v)| (n.clone(), v)),
+            // The top-level core is not realm-scoped: the pin's own root.
+            None => Some(("(no realm)".to_string(), &own)),
+        };
+        for layer in layers {
+            total_layers += 1;
+            let Some((realm_name, verifier)) = &chosen else {
+                failures.push(format!(
+                    "layer {} ({}) sits in realm partition {} which varve-realms.toml does not \
+                     define — nothing here can vouch for it. Add that realm, or remove the \
+                     partition; an unverifiable layer in the store is exactly what `--all` is \
+                     for.\n    at {}",
+                    layer.layer,
+                    layer.digest,
+                    fp.clone().unwrap_or_default(),
+                    layer.root.display()
+                ));
+                continue;
+            };
+            match varve_core::verify_installed(&part, &layer, *verifier, &host) {
+                Ok(n) => {
+                    checked_layers += 1;
+                    println!(
+                        "layer {} {} [realm {realm_name}] verified: signature OK, {n} tool(s) \
+                         match their signed digests",
+                        layer.layer, layer.digest
+                    );
+                }
+                Err(e) => failures.push(format!(
+                    "layer {} ({}) in realm {realm_name} FAILED: {e}\n    at {}",
+                    layer.layer,
+                    layer.digest,
+                    layer.root.display()
+                )),
+            }
+        }
+    }
+
+    if total_layers == 0 {
+        bail!("nothing to verify — no layers installed");
+    }
+    // The scope, always — so a future regression that narrows what `--all`
+    // covers shows up in the output instead of passing quietly.
+    println!(
+        "checked {checked_layers} of {total_layers} layer(s) across {partitions_seen} partition(s)"
+    );
+    if !failures.is_empty() {
+        for f in &failures {
+            eprintln!("  {f}");
+        }
+        bail!(
+            "{} of {} installed layer(s) did not verify — see `varve docs recovery`",
+            failures.len(),
+            total_layers
+        );
+    }
     Ok(())
 }
 
@@ -3227,8 +3819,26 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
     let resolved = resolve(&ctx.pin, &ctx.store)?;
     let Some((_, path)) = resolved.tools.iter().find(|(name, _)| name == tool) else {
+        // "is not part of layer" was FALSE for a held payload: the layer holds
+        // it, verifies it, and hands it to an export adapter — it is simply not
+        // DISPATCHED by name (REQ-INSPECT-001 clause 3). Saying a `wit` package
+        // is not in the layer sends the reader to re-deposit something that is
+        // already there.
+        if let Some((kind, version, in_layer)) = held_payload(&ctx.store, &resolved.layer, tool) {
+            bail!(
+                "'{tool}' is a HELD `{kind}` payload{version} of layer {in_layer}, not a \
+                 dispatched tool — varve stores and verifies it but does not put it on PATH. \
+                 Only a `tool` is dispatched by name. Run `varve inspect` to see every \
+                 payload, or the matching `varve export-*` to materialise this one.",
+                version = match version {
+                    Some(v) => format!(" ({v})"),
+                    None => String::new(),
+                },
+            );
+        }
         bail!(
-            "tool '{tool}' is not part of layer {} as pinned here — the pin exposes: {}",
+            "tool '{tool}' is not part of layer {} as pinned here — the pin exposes: {}. \
+             `varve inspect` lists every payload, dispatched and held.",
             resolved.layer.layer,
             resolved
                 .tools
@@ -3322,6 +3932,80 @@ fn list(store: &Store) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Does this layer — or anything it composes — HOLD a payload of that name, one
+/// varve stores and verifies but does not dispatch (REQ-INSPECT-001 clause 3)?
+/// Returns its kind, version and the layer it is in.
+///
+/// Read from the SIGNED manifests rather than from `resolve()`, which unions
+/// only the DISPATCHABLE entries — that is precisely why a held payload was
+/// invisible to every "is it in the layer?" question varve asked, and why
+/// `which` reported a `wit` package as "not part of layer".
+///
+/// The composition is followed for the same reason `resolve` follows it: a
+/// composed layer's payloads are part of what the pin delivers, so a held
+/// payload one layer down is just as present as one in the root. The first
+/// version of this looked only at the root and a CLI test caught it.
+///
+/// Best effort by design — it only ever improves an error message. A manifest
+/// that cannot be read, an include that is not installed, or a cycle all end
+/// the walk and fall back to the generic refusal, rather than replacing one
+/// failure with a different one. It asserts no trust it has not got: `which`
+/// does not verify signatures at all, and this claims only that a name appears
+/// in a manifest already reached through the pinned layer's own signed
+/// `[[include]]` chain.
+fn held_payload(
+    store: &Store,
+    layer: &varve_core::store::InstalledLayer,
+    name: &str,
+) -> Option<(String, Option<String>, String)> {
+    let mut queue = vec![layer.clone()];
+    let mut seen: Vec<String> = vec![layer.digest.clone()];
+    while let Some(current) = queue.pop() {
+        if seen.len() > varve_core::compose::MAX_DEPTH {
+            return None;
+        }
+        let Ok(bytes) = std::fs::read(current.root.join("layer.json")) else {
+            continue;
+        };
+        let Ok(manifest) = varve_core::LayerManifest::parse(&bytes) else {
+            continue;
+        };
+        let hit = manifest.entries.iter().find_map(|e| {
+            if e.annotations.get("eu.pulseengine.tool").map(String::as_str) != Some(name) {
+                return None;
+            }
+            // A dispatchable entry is not held — if we are here at all it did
+            // not resolve, and the generic message is the honest one.
+            let kind = match e.kind() {
+                Ok(k) if k.is_dispatchable() => return None,
+                Ok(k) => k.as_str().to_string(),
+                Err(varve_core::UnknownKind(raw)) => raw,
+            };
+            Some((
+                kind,
+                e.annotations.get("eu.pulseengine.tool.version").cloned(),
+                current.layer.to_string(),
+            ))
+        });
+        if hit.is_some() {
+            return hit;
+        }
+        let Ok(view) = varve_core::compose::view(&bytes) else {
+            continue;
+        };
+        for inc in &view.includes {
+            if seen.contains(&inc.digest) {
+                continue;
+            }
+            seen.push(inc.digest.clone());
+            if let Ok(Some((_, entry))) = store.find_anywhere(&inc.digest) {
+                queue.push(entry);
+            }
+        }
+    }
+    None
+}
+
 /// The realm name for a store-partition fingerprint, when this project's
 /// realms file defines one that matches. Best effort: a fingerprint with no
 /// local definition is still listed, under its fingerprint.
@@ -3336,6 +4020,99 @@ fn realm_name_for(fingerprint: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod cli_contract_tests {
+    use clap::CommandFactory;
+
+    /// Every subcommand whose help text tags it `(CI)`.
+    fn ci_marked() -> Vec<String> {
+        super::Cli::command()
+            .get_subcommands()
+            .filter(|c| {
+                let about = c.get_about().map(|a| a.to_string()).unwrap_or_default();
+                let long = c
+                    .get_long_about()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default();
+                // The tag is on the SUBCOMMAND, not on a flag inside it:
+                // `sign-attestation --attach-to` is documented "(CI)" too, and
+                // matching that would count a command twice.
+                about.trim_start().starts_with("(CI)") || long.trim_start().starts_with("(CI)")
+            })
+            .map(|c| c.get_name().to_string())
+            .collect()
+    }
+
+    // rivet: verifies REQ-CIGATE-001
+    #[test]
+    fn every_ci_marked_subcommand_offers_json() {
+        // Clause 2, checked against clap rather than against a list somebody
+        // maintains by hand. A command that GAINS the `(CI)` tag and not the
+        // flag fails here — which is the only way "every (CI) command offers
+        // --json" stays true after this release.
+        let marked = ci_marked();
+        assert!(
+            marked.len() >= 7,
+            "only {} subcommand(s) are tagged (CI); the producer pipeline has seven — this \
+             check is reading the wrong thing: {marked:?}",
+            marked.len()
+        );
+        let cmd = super::Cli::command();
+        let mut without: Vec<&str> = Vec::new();
+        for name in &marked {
+            let sub = cmd
+                .get_subcommands()
+                .find(|c| c.get_name() == name)
+                .expect("the subcommand exists");
+            if !sub.get_arguments().any(|a| a.get_long() == Some("json")) {
+                without.push(name);
+            }
+        }
+        assert!(
+            without.is_empty(),
+            "these commands are tagged (CI) and offer no --json, so a pipeline must scrape \
+             their prose (REQ-CIGATE-001 clause 2): {without:?}"
+        );
+    }
+
+    // rivet: verifies REQ-CIGATE-001
+    #[test]
+    fn the_ci_tag_check_can_actually_find_a_command() {
+        // The gate above asserts an EMPTY result over a set it computes itself.
+        // If `ci_marked` silently returned nothing — a clap upgrade moving the
+        // doc comment from `about` to `long_about` would do it — the assertion
+        // would pass while checking nothing. Name the commands it must find.
+        let marked = ci_marked();
+        for expected in [
+            "deposit",
+            "sign-attestation",
+            "sign-status",
+            "sign-index",
+            "attach-index",
+            "attach-status",
+            "sign-sums",
+        ] {
+            assert!(
+                marked.iter().any(|m| m == expected),
+                "`{expected}` is tagged (CI) in --help and the tag scan does not see it: \
+                 {marked:?}"
+            );
+        }
+    }
+
+    // rivet: verifies REQ-INSPECT-001
+    #[test]
+    fn inspect_is_a_real_subcommand_with_json() {
+        let cmd = super::Cli::command();
+        let sub = cmd
+            .get_subcommands()
+            .find(|c| c.get_name() == "inspect")
+            .expect("REQ-INSPECT-001 needs a command, not a flag on an existing one");
+        assert!(sub.get_arguments().any(|a| a.get_long() == Some("json")));
+        assert!(sub.get_arguments().any(|a| a.get_long() == Some("layer")));
+    }
 }
 
 #[cfg(test)]

@@ -37,10 +37,37 @@ pub const REF_NAME: &str = "org.opencontainers.image.ref.name";
 /// missing, and cannot be told why (varve#80).
 pub const ANN_ARCHIVED_FOR: &str = "eu.pulseengine.varve.archived-for";
 
+/// What can go wrong writing a layout: an io failure, or a refusal to
+/// overwrite signed work (REQ-NODESTROY-001).
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LayoutWriteError {
+    #[error("io error at {path}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    WouldDestroy(#[from] crate::referrers::WouldDestroy),
+}
+
+impl From<LayoutWriteError> for ArchiveError {
+    fn from(e: LayoutWriteError) -> Self {
+        match e {
+            LayoutWriteError::Io { path, source } => ArchiveError::Io { path, source },
+            LayoutWriteError::WouldDestroy(d) => ArchiveError::WouldDestroy(d),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
     #[error("the layer's baseline line-status could not be carried into the archive: {0}")]
     LineStatus(String),
+    /// REQ-NODESTROY-001 clause 4: `archive` writes a layout in place too, so
+    /// it is guarded by the same rule as `deposit` — through the same code.
+    #[error(transparent)]
+    WouldDestroy(#[from] crate::referrers::WouldDestroy),
     #[error("io error at {path}")]
     Io {
         path: String,
@@ -107,6 +134,10 @@ pub enum ArchiveError {
 /// an air gap, so the omission is counted here and printed by the CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportSummary {
+    /// True when this core cached no baseline line-status for the line, so the
+    /// archive carries none and the consumer's `varve status` will fail for as
+    /// long as they hold it (REQ-NOSILENT-001 clause 1).
+    pub baseline_missing: bool,
     /// The platform whose payloads this archive carries — the only one.
     pub platform: String,
     /// Payload blobs written (the manifest and its envelope are not counted).
@@ -135,6 +166,28 @@ pub fn export(
     layer: &InstalledLayer,
     dest: &Path,
     platform: &str,
+) -> Result<ExportSummary, ArchiveError> {
+    export_with_options(store, layer, dest, platform, &ArchiveOptions::default())
+}
+
+/// How an archive treats a destination that already carries signed work
+/// (REQ-NODESTROY-001 clauses 2 and 4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArchiveOptions {
+    /// Overwrite a layout that already carries referrers, destroying them.
+    pub force: bool,
+    /// Produce an archive even though the installing core cached no baseline
+    /// line-status for this line (REQ-NOSILENT-001 clause 1).
+    pub allow_no_status: bool,
+}
+
+/// `export`, with the destructive case available to callers that ask for it.
+pub fn export_with_options(
+    store: &Store,
+    layer: &InstalledLayer,
+    dest: &Path,
+    platform: &str,
+    options: &ArchiveOptions,
 ) -> Result<ExportSummary, ArchiveError> {
     let io = |path: &Path, source: std::io::Error| ArchiveError::Io {
         path: path.display().to_string(),
@@ -247,8 +300,9 @@ pub fn export(
         &manifest.channel,
         Some(platform),
         dest,
+        options.force,
     )
-    .map_err(|(path, source)| ArchiveError::Io { path, source })?;
+    .map_err(ArchiveError::from)?;
     for c in &carried {
         crate::attestcarry::attach(dest, &c.statement, &c.bytes)?;
     }
@@ -269,15 +323,37 @@ pub fn export(
     // partition keeps its baseline under `realms/<fingerprint>/state`.
     // Reading from the varve root instead would have found nothing for every
     // realm install — the same drop this fix exists to close, one layer down.
+    let mut baseline_missing = false;
     let cache = crate::linestatus::StatusCache::at_root(store.root());
-    if let Some(envelope) = cache
+    match cache
         .envelope_bytes(layer.layer.line())
         .map_err(|e| ArchiveError::LineStatus(e.to_string()))?
     {
-        crate::linestatus::attach_to_layout(dest, layer.layer.line(), &envelope)
-            .map_err(|e| ArchiveError::LineStatus(e.to_string()))?;
+        Some(envelope) => {
+            crate::linestatus::attach_to_layout(dest, layer.layer.line(), &envelope)
+                .map_err(|e| ArchiveError::LineStatus(e.to_string()))?;
+        }
+        // REQ-NOSILENT-001 clause 1: this used to be a silent no-op. `archive`
+        // was already verbose about omitted PLATFORM payloads and mute about
+        // the advisory — the inconsistency that hid it — and the result was an
+        // air-gap artifact whose `varve status` is permanently broken for
+        // every consumer of it. Refuse, unless the operator says otherwise.
+        // REQ-NOSILENT-001 clause 1. This was a silent no-op: `archive` was
+        // verbose about omitted PLATFORM payloads and mute about the advisory,
+        // and the result was an air-gap artifact whose `varve status` is
+        // permanently broken for every consumer of it.
+        //
+        // It WARNS rather than refusing. Refusing was the first cut and it
+        // broke four legitimate flows, which is the useful signal: `archive`
+        // is most often run by the CONSUMER exporting their own core for
+        // transport, and they cannot retroactively add a baseline the producer
+        // never published. A gate that fires on a correct setup nobody can fix
+        // is one people learn to pass `--allow-no-status` to reflexively, and
+        // then it protects nothing.
+        None => baseline_missing = !options.allow_no_status,
     }
     Ok(ExportSummary {
+        baseline_missing,
         platform: platform.to_string(),
         archived: blobs.len(),
         omitted,
@@ -287,11 +363,18 @@ pub fn export(
 /// Write the canonical directory-shaped OCI image layout shared by `archive`
 /// (exporting an installed layer) and `deposit` (creating one): `oci-layout`,
 /// `blobs/sha256/<hex>` for payload + envelope + tools, and an `index.json`
-/// referencing the manifest and its signature blob. Errors as (path, io).
+/// referencing the manifest and its signature blob.
 ///
 /// `platform` is `Some` only for an ARCHIVE, which carries one platform's
 /// payloads because that is all the archiving machine installed; a `deposit`
 /// carries every platform the producer built and passes `None`.
+///
+/// This is the ONLY code in varve that writes a layout, which is why
+/// REQ-NODESTROY-001's guard lives here rather than in each caller: a command
+/// that starts writing layouts later inherits it and cannot forget it. That is
+/// also why it takes one argument over clippy's threshold — the alternative is
+/// a guard each caller can omit, which is the requirement's whole subject.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_oci_layout(
     payload: &[u8],
     envelope: &[u8],
@@ -300,14 +383,22 @@ pub(crate) fn write_oci_layout(
     channel: &str,
     platform: Option<&str>,
     dest: &Path,
-) -> Result<(), (String, std::io::Error)> {
-    let io = |path: &Path, source: std::io::Error| (path.display().to_string(), source);
+    force: bool,
+) -> Result<(), LayoutWriteError> {
+    // BEFORE the first mkdir. A refused layout must be left byte-identical:
+    // a half-written one is neither the old artifact nor the new one, and no
+    // message describes it (REQ-NODESTROY-001 clause 5).
+    crate::referrers::guard(dest, force)?;
+    let io = |path: &Path, source: std::io::Error| LayoutWriteError::Io {
+        path: path.display().to_string(),
+        source,
+    };
     let payload_digest = manifest_digest(payload);
     let envelope_digest = manifest_digest(envelope);
 
     let blob_dir = dest.join("blobs").join("sha256");
     std::fs::create_dir_all(&blob_dir).map_err(|e| io(&blob_dir, e))?;
-    let write_blob = |digest: &str, bytes: &[u8]| -> Result<(), (String, std::io::Error)> {
+    let write_blob = |digest: &str, bytes: &[u8]| -> Result<(), LayoutWriteError> {
         let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
         let path = blob_dir.join(hex);
         std::fs::write(&path, bytes).map_err(|e| io(&path, e))
@@ -682,6 +773,66 @@ mod tests {
             kilnd_a
         );
         (tmp, store, layer, verifier, kilnd_a, kilnd_b, anyplat)
+    }
+
+    // rivet: verifies REQ-NODESTROY-001
+    #[test]
+    fn archiving_over_a_layout_that_carries_evidence_is_refused_by_the_same_guard() {
+        // Clause 4: `deposit` is not the only command that writes a layout in
+        // place. `archive` writes one too, and an operator refreshing archive
+        // media into the directory they used last time would have dropped the
+        // baseline line-status and every attestation on it — the same loss,
+        // reached from the consumer side, on the transport that most needs the
+        // advisory to arrive. The guard is not repeated here: `write_oci_layout`
+        // is the single writer and asks once, so this test is what proves the
+        // structural claim rather than a second copy of the rule.
+        let (tmp, store, layer, _v, _payload) = installed();
+        let dest = tmp.path().join("archive");
+        export(&store, &layer, &dest, "test-platform").unwrap();
+
+        // Something is attached to the archive media afterwards.
+        let (sk, _pk) = generate_root_keypair();
+        let status = crate::linestatus::LineStatus {
+            line: "2026.07".into(),
+            counter: 1,
+            issued_at: "2026-08-07T00:00:00Z".into(),
+            support_until: None,
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        };
+        crate::linestatus::attach_to_layout(
+            &dest,
+            &"2026.07".parse().unwrap(),
+            status.sign(&sk, "k").unwrap().as_bytes(),
+        )
+        .unwrap();
+        let before = std::fs::read(dest.join("index.json")).unwrap();
+
+        let err = export(&store, &layer, &dest, "test-platform")
+            .expect_err("re-archiving over attached evidence must be refused");
+        assert!(
+            matches!(&err, ArchiveError::WouldDestroy(_)),
+            "got: {err:?}"
+        );
+        assert!(err.to_string().contains("line-status"), "{err}");
+        assert_eq!(
+            before,
+            std::fs::read(dest.join("index.json")).unwrap(),
+            "a refused archive must leave the layout byte-identical"
+        );
+
+        // …and --force is the deliberate way through, here as for deposit.
+        export_with_options(
+            &store,
+            &layer,
+            &dest,
+            "test-platform",
+            &ArchiveOptions {
+                force: true,
+                allow_no_status: true,
+            },
+        )
+        .expect("--force overrides the guard");
     }
 
     // rivet: verifies REQ-OFFLINE-001

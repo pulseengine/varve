@@ -127,6 +127,25 @@ that owns it, which is the entire point of composing. Omit `realm` only when the
 included layer is signed by the same root the project pins. Because the
 annotation is inside the signed payload, adding it later means re-depositing.
 
+**`[tool.source].sha256` is signed, and varve never verifies it.** The four
+`[tool.source]` fields are recorded verbatim into the signed payload as
+annotations and are not checked against anything — not at deposit, not at
+`varve verify`, not at install. In particular `sha256` is **not** compared with
+the hash of the file at `path`: it describes an upstream *release asset* varve
+never fetches, while the entry's own digest — the one `verify` enforces — covers
+the bytes you deposited. Nothing detects a `sha256` that is a typo, stale, or
+copied from the wrong asset.
+
+That matters because it does not stay inert. `varve export-bazel` emits this
+value as the checksum Bazel will enforce on its own download, under a header
+reading *"digests transcribed from the signed layer manifest"*. True as far as
+it goes: it was signed, so nobody altered it in transit. It does not mean varve
+checked it. **Whatever you paste into `sha256` becomes the hash a Bazel build
+trusts**, so hash the upstream asset yourself and paste the result — a value
+transcribed by hand from a release page inherits nothing from the signature but
+authenticity of transcription. `varve docs payload-kinds` says the same from the
+adapter's side.
+
 **`kind = "crate"` on a `[[tool]]` table is how you deposit a crate** — there is no `[[crate]]`. That is what the export adapters and `verify --lockfile` consume.
 
 `counter` is not checked against previous deposits; the depositor owns monotonicity and clients enforce it.

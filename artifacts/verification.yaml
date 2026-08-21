@@ -2871,3 +2871,198 @@ artifacts:
     links:
       - type: verifies
         target: REQ-SYSTEST-001
+
+  - id: VER-SYSTEST-002
+    type: verification
+    title: The layer assembler is exercised end to end, without publishing
+    status: verified
+    release: v0.28.0
+    method: test
+    fields:
+      description: >
+        REQ-SYSTEST-002 clause by clause. The producer pipeline — the workflow
+        that assembles the official signed layer — previously had NO test and
+        was exercised only by dispatching it against the real GHCR registry.
+        That is where the 2026.08.3 deposit failed, on a bug a seventeen-check
+        CI gate including a twenty-nine-minute mutation run could not have
+        caught, because nothing in CI executed that workflow (varve#95).
+        .
+        Clause 1: the assembler was EXTRACTED from deposit-layer.yml's inline
+        run-block into tools/build-deposit-spec.sh, and the workflow now calls
+        it. This matters more than it looks: a gate that re-implements the
+        logic tests a COPY, which is the same lie as stubbing. The production
+        path and the tested path are now the same file.
+        .
+        Clause 2: the gate covers every shape that has broken or would be
+        dangerous — a repo appearing in BOTH lists (the bug that shipped), a
+        per-platform vsix set, a portable one, a binary rename, raw
+        per-platform binaries, a tool missing an asset for one platform, and
+        a repo requested at TWO versions, which must be refused because
+        otherwise one release's assets are checked against another release's
+        sums.
+        .
+        Clause 3: the spec is asserted to parse and to deposit; the run stops
+        before `oras push`, because publishing is not what needs testing.
+        .
+        Clause 4 is the reason this record exists. A pre-flight that stubs the
+        component under test is not coverage: the dry-run that preceded the
+        failed deposit stubbed `verify_release` and `asset_sha` — exactly the
+        function that broke — and reported success. Here the seam is the
+        external SERVICE (gh, cosign) and not the component: every line of the
+        assembler executes against a recorded asset inventory, hermetically,
+        with no network and no dependence on a release still existing.
+        .
+        The gate carries its own mutation: it deletes the idempotence guards
+        from a COPY of the assembler and requires red on the real
+        "already exists" message, refusing to run at all if the guards move or
+        are reworded. A gate nobody watches fail rots into a rubber stamp.
+        .
+        Declared scope, per REQ-SYSTEST-001 clause 3: the fixture asset BYTES
+        are stand-ins, so nothing here claims anything about the shipped
+        tools; and the cosign double checks bundle-to-blob binding, identity
+        regexp and issuer — the assembler's responsibilities — not sigstore
+        signatures, which would need the network the gate must not depend on.
+      steps:
+        # The gate itself, exactly as CI invokes it.
+        - run: bash tools/systest/deposit-layer.sh
+        # The assembler is a real file the workflow calls, not a copy.
+        - run: grep -q "tools/build-deposit-spec.sh" .github/workflows/deposit-layer.yml
+        - run: test -x tools/build-deposit-spec.sh
+        # The job is wired in.
+        - run: grep -q "deposit-layer.sh" .github/workflows/systest.yml
+        # The scripts parse (CI runs them verbatim).
+        - run: bash -n tools/build-deposit-spec.sh
+        - run: bash -n tools/systest/deposit-layer.sh
+        - run: python3 -m py_compile tools/systest/assert-deposit-spec.py
+    links:
+      - type: verifies
+        target: REQ-SYSTEST-002
+
+  - id: VER-VERIFYALL-001
+    type: verification
+    title: verify --all covers every realm, reports every failure, and says what it covered
+    status: verified
+    release: v0.28.0
+    method: test
+    fields:
+      description: >
+        REQ-VERIFYALL-001 clause by clause. `verify --all --help` promised
+        "every installed layer" and walked only the PINNED realm's partition:
+        a security auditor planted a backdoored binary in a second realm, ran
+        it, got exit 0, and executed the backdoor (varve#84). Clause 1 is the
+        walk; clause 2 reports EVERY failure rather than stopping at the first
+        (in one observed run the only layer id on screen belonged to a
+        different, HEALTHY layer); clause 3 names the layer AND its path;
+        clause 4 prints the scope covered so a future narrowing is visible in
+        the output rather than silent; clause 5 REPORTS a partition whose
+        realm varve-realms.toml no longer defines, because nothing can vouch
+        for it and that is exactly what a store-wide check is for.
+        .
+        Clean-room review confirmed all five by mutation: deleting the
+        scope line, and dropping the path from the failure format, each turned
+        tests red. It also drove the two-realm case live and saw
+        `checked 3 of 3 layer(s) across 2 partition(s)`.
+      steps:
+        - run: cargo test -p varve --test cli verify_all_covers_every_realm_not_only_the_pinned_one
+        - run: cargo test -p varve --test cli verify_all_reports_every_failure_and_refuses_to_skip_an_undefined_realm
+    links:
+      - type: verifies
+        target: REQ-VERIFYALL-001
+
+  - id: VER-NODESTROY-001
+    type: verification
+    title: A producer command refuses to destroy signed work, and leaves the layout untouched
+    status: verified
+    release: v0.28.0
+    method: test
+    fields:
+      description: >
+        REQ-NODESTROY-001. `deposit` into a layout already carrying referrers
+        dropped the line-status, line-index and attestations, exited 0, and
+        printed a message byte-identical to a clean run (varve#82, varve#85).
+        Three of ten personas hit it independently; the own-realm operator hit
+        it by ACCIDENT. It was warned about in three docs topics and guarded by
+        no code — documentation doing the tool's safety job.
+        .
+        Clause 4 is met structurally rather than by repetition: the guard sits
+        at `archive::write_oci_layout`, the single place varve writes a layout,
+        so `archive` inherits it and so will the next writer. An unrecognised
+        `artifactType` counts as work, because enumerating today's three
+        referrer kinds would silently stop protecting the fourth.
+        .
+        Clause 5 ("a refused layout is left byte-identical") is the one worth
+        checking hardest, since "nothing was written" is easy to claim and easy
+        to get wrong. Clean-room review verified it by recursive sha256
+        snapshot before and after, for BOTH deposit and archive, and confirmed
+        by mutation that moving the guard past the blob writes turns the test
+        red.
+      steps:
+        - run: cargo test -p varve --test producer
+        - run: cargo test -p varve-core --lib every_referrer_kind_is_named_including_one_varve_does_not_know
+        - run: cargo test -p varve-core --lib a_deposit_that_would_drop_a_referrer_is_refused_before_a_byte_is_written
+        - run: cargo build
+    links:
+      - type: verifies
+        target: REQ-NODESTROY-001
+
+  - id: VER-CIGATE-001
+    type: verification
+    title: The exit-code contract is generated from the code that exits, not written by hand
+    status: verified
+    release: v0.28.0
+    method: test
+    fields:
+      description: >
+        REQ-CIGATE-001. `varve status` exited 0 while printing YANKED, so a
+        pipeline had to grep stdout to fail on a yanked toolchain; no (CI)
+        command offered `--json`, so a pipeline scraped the layer digest out of
+        an English sentence; and `varve docs --grep "exit code"` returned
+        nothing across all fifty topics.
+        .
+        The part that makes this durable rather than merely done: the contract
+        is RENDERED from a single `exit::Outcome`, which is also what `main()`
+        exits with and what the `exit-codes` docs topic is generated from. A
+        hand-written table is what goes stale, and
+        `every_documented_exit_code_is_produced_by_a_real_invocation` executes
+        a real scenario per code with a panicking catch-all arm, so a new code
+        cannot be documented without being demonstrated.
+        .
+        BREAKING, and stated as such in the CHANGELOG: `status` exits 3 on
+        YANKED; `docs --grep` exits 4 on no match.
+      steps:
+        - run: cargo test -p varve --bin varve exit
+        - run: cargo test -p varve --bin varve docs
+        - run: cargo run -q -p varve -- exit-codes --json
+    links:
+      - type: verifies
+        target: REQ-CIGATE-001
+
+  - id: VER-INSPECT-001
+    type: verification
+    title: A consumer can see what is inside a layer, including what it composes
+    status: verified
+    release: v0.28.0
+    method: test
+    fields:
+      description: >
+        REQ-INSPECT-001. Nothing reported a layer's payloads: `varve list`
+        printed layer ids only and `varve sbom` collapsed every non-tool kind
+        to CycloneDX `library`. In the ten-persona audit the build engineer
+        chose an export adapter by running all four and reading which errored;
+        the newcomer learned the tool set by typo-ing a name into
+        `varve which`.
+        .
+        Clause 3 corrects a message that was FALSE: `which`/`run` on a held
+        `wit` payload said it "is not part of layer", when it is part of the
+        layer and simply not dispatched. Clause 4 follows the composition,
+        because a composed layer's payloads are part of what the pin delivers
+        and `varve sbom` being composition-blind is a known limitation this
+        was not going to repeat. Clause 5 needs no network — the store already
+        holds the answer, and clean-room review confirmed `RegistrySource` is
+        constructed at exactly one call site, which `inspect` does not reach.
+      steps:
+        - run: cargo test -p varve --test cli inspect
+        - run: cargo test -p varve --bin varve inspect
+    links:
+      - type: verifies
+        target: REQ-INSPECT-001

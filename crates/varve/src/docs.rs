@@ -9,10 +9,23 @@
 //! gate, not review discipline).
 
 /// One documentation topic: a stable slug, a title, and markdown body.
+#[derive(Clone, Copy)]
 pub struct Topic {
     pub slug: &'static str,
     pub title: &'static str,
     pub body: &'static str,
+    /// The file under `crates/varve/docs/` this body was compiled from, or
+    /// `None` for a topic GENERATED from one of the binary's own tables.
+    ///
+    /// Recorded so `every_shipped_doc_file_is_reachable_as_a_topic` can compare
+    /// the registry against the directory. `concept-root-ceremony.md` was
+    /// written, shipped, and cross-referenced from two other topics while no
+    /// entry here registered it: `varve docs root-ceremony` answered "unknown
+    /// topic", and every gate stayed green — the coverage check only ever
+    /// looked at clap subcommands and `REQUIRED_TOPICS`, so a file nothing
+    /// pointed at was invisible to it. The same "gate that cannot see the
+    /// thing" shape as an exit-code table nothing verifies.
+    pub file: Option<&'static str>,
 }
 
 macro_rules! topic {
@@ -21,13 +34,66 @@ macro_rules! topic {
             slug: $slug,
             title: $title,
             body: include_str!(concat!("../docs/", $file)),
+            file: Some($file),
         }
     };
 }
 
+/// The `inspect` topic (REQ-INSPECT-001). Written here rather than in
+/// `docs/cmd-inspect.md` because the command it documents landed in the same
+/// change and the docs directory is another agent's; the file-shaped topics are
+/// the norm and this should join them.
+const INSPECT_TOPIC: &str = r#"# inspect — what is actually in this layer
+
+`varve list` prints layer ids. `varve sbom` collapses every non-tool payload to
+a CycloneDX `library` and is blind to composition. Neither answers the question
+a person actually has: *what is in here, and can I run it?*
+
+`varve inspect` reports every payload of the pinned layer — and of every layer
+it composes — with its name, version, kind and platform, and says whether varve
+DISPATCHES it or merely HOLDS it.
+
+```sh
+varve inspect                     # the pinned layer, plus its composition
+varve inspect --layer 2026.08.0   # a specific installed layer
+varve inspect --json              # the same answer, for a pipeline
+```
+
+Nothing here touches the network: the store already holds the answer, and the
+layer is re-verified against its realm's trust root before anything is printed.
+
+## DISPATCHED and HELD
+
+A `tool` is DISPATCHED: `varve run`, `varve which` and the PATH shims resolve it
+by bare name, so a name means exactly one binary.
+
+Every other kind is HELD. varve stores it, verifies it, and hands it to an
+export adapter — it is not on your PATH and `varve which` will not find it. That
+is not a defect and it is not a missing payload:
+
+```sh
+varve which my-interfaces
+# error: 'my-interfaces' is a HELD `wit` payload of layer 2026.07.0 …
+```
+
+The layer holds it. It is simply not something varve dispatches. `varve inspect`
+is how you see it.
+
+## Composition
+
+A composed layer's payloads are part of what your pin delivers, so they are part
+of what `inspect` reports — each row names the layer and the realm it came from,
+and the composition block lists every layer that was followed. `varve sbom` is
+blind to composition; this is not.
+"#;
+
 /// The embedded topic registry. Command topics use the exact clap subcommand
 /// name (kebab-case) so the coverage check can match them mechanically.
-pub const TOPICS: &[Topic] = &[
+///
+/// Use [`topics()`], not this constant: two topics are not files at all —
+/// `exit-codes` is GENERATED from the exit-code contract, so that a documented
+/// table cannot drift from the binary it documents.
+const EMBEDDED_TOPICS: &[Topic] = &[
     // ── concepts ──────────────────────────────────────────────────────
     topic!(
         "config-reference",
@@ -59,6 +125,11 @@ pub const TOPICS: &[Topic] = &[
         "signing-keys",
         "Signing keys — the format, and what varve checks",
         "concept-signing-keys.md"
+    ),
+    topic!(
+        "root-ceremony",
+        "The root ceremony — generating and holding a realm root",
+        "concept-root-ceremony.md"
     ),
     topic!(
         "trust-roots",
@@ -247,10 +318,39 @@ pub const TOPICS: &[Topic] = &[
         "cmd-self-verify.md"
     ),
     topic!("docs", "docs — this documentation", "cmd-docs.md"),
+    Topic {
+        slug: "inspect",
+        title: "inspect — what is actually in this layer",
+        body: INSPECT_TOPIC,
+        file: None,
+    },
 ];
 
+/// Every topic: the embedded files, plus the ones generated from the binary's
+/// own tables.
+///
+/// `exit-codes` is generated (see [`crate::exit::render_topic`]). A hand-written
+/// markdown table of exit codes is precisely the artefact that goes stale the
+/// first time a code is added and that nothing notices — and "a documented
+/// table nothing verifies" is the failure mode REQ-CIGATE-001 exists to close.
+pub fn topics() -> &'static [Topic] {
+    static ALL: std::sync::LazyLock<Vec<Topic>> = std::sync::LazyLock::new(|| {
+        let mut all = EMBEDDED_TOPICS.to_vec();
+        all.push(Topic {
+            slug: "exit-codes",
+            title: "Exit codes — the contract a pipeline gates on",
+            // Leaked once, at first use, for the life of the process: a topic
+            // body is `&'static str` because every other one is compiled in.
+            body: Box::leak(crate::exit::render_topic().into_boxed_str()),
+            file: None,
+        });
+        all
+    });
+    &ALL
+}
+
 pub fn find(slug: &str) -> Option<&'static Topic> {
-    TOPICS.iter().find(|t| t.slug == slug)
+    topics().iter().find(|t| t.slug == slug)
 }
 
 /// Topics that must exist because a user cannot do the job without them. The
@@ -287,6 +387,19 @@ pub const REQUIRED_TOPICS: &[&str] = &[
     // attestation needs an installed layer) and there was no key-into-CI story
     // at all (varve#56).
     "ci",
+    // REQ-CIGATE-001. `varve docs --grep "exit code"` returned NOTHING across
+    // all fifty topics, so the consumer CI gate that three topics tell a reader
+    // to write had no contract to be written against — and two personas of a
+    // ten-persona audit independently failed to write it.
+    "exit-codes",
+    // REQ-INSPECT-001. No topic said what a layer holds, so a build engineer
+    // chose an export adapter by running all four and reading which errored.
+    "inspect",
+    // REQ-CUSTODY-001 clause 1. varve has no rotation and no revocation, so the
+    // ceremony that produces a realm root IS that key's security — and
+    // `signing-keys` said "generated in a ceremony, not on a build machine" and
+    // stopped there. The topic file shipped registered by nothing at all.
+    "root-ceremony",
 ];
 
 /// Topics a user must ACT on, which therefore have to show a literal example
@@ -337,11 +450,18 @@ pub const TOPICS_NEEDING_EXAMPLES: &[&str] = &[
     "sign-status",
     "attach-status",
     "sign-sums",
+    // REQ-CIGATE-001 / REQ-INSPECT-001. Both topics exist to be COPIED — a
+    // pipeline snippet and an invocation. Prose versions teach nothing.
+    "exit-codes",
+    "inspect",
+    // REQ-CUSTODY-001. A ceremony described without its literal commands is a
+    // page an operator cannot follow at the one moment they cannot improvise.
+    "root-ceremony",
 ];
 
 /// Required topics that are missing entirely.
 pub fn missing_required_topics() -> Vec<&'static str> {
-    missing_required_topics_in(TOPICS)
+    missing_required_topics_in(topics())
 }
 
 /// The gate, over an arbitrary topic set. Split out so a test can hand it a
@@ -359,7 +479,7 @@ pub fn missing_required_topics_in(topics: &[Topic]) -> Vec<&'static str> {
 
 /// Topics that must show a worked example and do not.
 pub fn topics_without_examples() -> Vec<&'static str> {
-    topics_without_examples_in(TOPICS)
+    topics_without_examples_in(topics())
 }
 
 /// A fenced block is the proxy for "you can copy this and it works" — so an
@@ -405,7 +525,7 @@ pub fn coverage_gaps(cmd: &clap::Command) -> Vec<String> {
 /// Render the topic list (slug + title).
 pub fn render_list() -> String {
     let mut out = String::from("varve docs — topics (varve docs <topic>):\n\n");
-    for t in TOPICS {
+    for t in topics() {
         out.push_str(&format!("  {:<22} {}\n", t.slug, t.title));
     }
     out
@@ -418,27 +538,47 @@ pub fn render_list() -> String {
 pub fn render_json(slug: Option<&str>) -> String {
     match slug {
         None => {
-            let list: Vec<_> = TOPICS
+            let list: Vec<_> = topics()
                 .iter()
                 .map(|t| serde_json::json!({"slug": t.slug, "title": t.title}))
                 .collect();
             serde_json::to_string_pretty(&list).expect("topic list serialises")
         }
         Some(s) => match find(s) {
-            Some(t) => serde_json::to_string_pretty(
-                &serde_json::json!({"slug": t.slug, "title": t.title, "body": t.body}),
-            )
+            // `file` names the source under `crates/varve/docs/` — which is
+            // what a contributor asks next, and null for a topic generated from
+            // one of the binary's own tables (there is no file to edit; edit
+            // the table).
+            Some(t) => serde_json::to_string_pretty(&serde_json::json!({
+                "slug": t.slug, "title": t.title, "file": t.file, "body": t.body,
+            }))
             .expect("topic serialises"),
             None => "{}".to_string(),
         },
     }
 }
 
-/// grep across all topic bodies + titles; returns (slug, matching line).
+/// grep across every topic's SLUG, TITLE and body; returns (slug, hit line).
+///
+/// This doc comment said "bodies + titles" while the code searched bodies only
+/// (REQ-CIGATE-001 clause 5). The consequence was not cosmetic: the string a
+/// reader is most likely to type is the title they just read in `varve docs`,
+/// and it matched nothing.
+///
+/// A title hit is prefixed `title:` and a slug hit `topic:`, so a caller can
+/// tell "this topic is ABOUT x" from "x is mentioned once in passing" — the
+/// difference between a search and a gate. There is no separate summary field
+/// to search: a topic is (slug, title, body), and all three are covered.
 pub fn grep(query: &str) -> Vec<(&'static str, String)> {
     let q = query.to_lowercase();
     let mut hits = Vec::new();
-    for t in TOPICS {
+    for t in topics() {
+        if t.slug.to_lowercase().contains(&q) {
+            hits.push((t.slug, format!("topic: {}", t.slug)));
+        }
+        if t.title.to_lowercase().contains(&q) {
+            hits.push((t.slug, format!("title: {}", t.title)));
+        }
         for line in t.body.lines() {
             if line.to_lowercase().contains(&q) {
                 hits.push((t.slug, line.trim().to_string()));
@@ -466,7 +606,7 @@ mod tests {
 
     /// Every fenced block in the docs, with the topic it came from.
     fn fenced_blocks(slug: &str) -> Vec<(String, String)> {
-        let body = TOPICS
+        let body = topics()
             .iter()
             .find(|t| t.slug == slug)
             .unwrap_or_else(|| panic!("topic '{slug}' must exist"))
@@ -512,6 +652,7 @@ mod tests {
             slug: "getting-started",
             title: "Getting started",
             body: "# Getting started\n\nRead the other topics.\n\n```sh\n```\n",
+            file: None,
         }];
         assert!(
             topics_without_examples_in(STUBBED).contains(&"getting-started"),
@@ -523,6 +664,7 @@ mod tests {
             slug: "getting-started",
             title: "Getting started",
             body: "# Getting started\n\n```sh\nvarve install\n```\n",
+            file: None,
         }];
         assert!(
             !topics_without_examples_in(REAL).contains(&"getting-started"),
@@ -537,7 +679,7 @@ mod tests {
         // the workspace: reduced to a title plus a line of filler with no code
         // fence at all, every gate stayed green. They are two of the three
         // flagship features the requirement says shipped with no entry point.
-        let composition = TOPICS
+        let composition = topics()
             .iter()
             .find(|t| t.slug == "composition")
             .unwrap()
@@ -554,7 +696,7 @@ mod tests {
             );
         }
 
-        let threat = TOPICS
+        let threat = topics()
             .iter()
             .find(|t| t.slug == "threat-model")
             .unwrap()
@@ -577,7 +719,7 @@ mod tests {
     }
 
     fn body(slug: &str) -> &'static str {
-        TOPICS
+        topics()
             .iter()
             .find(|t| t.slug == slug)
             .unwrap_or_else(|| panic!("topic {slug} must exist"))
@@ -755,7 +897,15 @@ mod tests {
                 "ci",
                 &[
                     "Never re-run `deposit`",
-                    "silently drops every referrer",
+                    // v0.28.0 changed the BEHAVIOUR this needle pinned:
+                    // re-depositing over referrers is now refused, not
+                    // silently destructive (REQ-NODESTROY-001). The boundary
+                    // still has to be stated — the topic must say what varve
+                    // does now, not what it used to do — so the needle tracks
+                    // the new truth rather than being deleted. A gate that
+                    // pins a sentence has to move when the sentence stops
+                    // being true, or it starts protecting a falsehood.
+                    "varve REFUSES that (exit 1)",
                     "must be INSTALLED",
                     "no trust root configured",
                     "/dev/stdin",
@@ -809,7 +959,7 @@ mod tests {
             .map(|s| s.get_name().to_string())
             .collect();
         let mut checked = 0;
-        for topic in TOPICS.iter() {
+        for topic in topics().iter() {
             for (lang, block) in fenced_blocks(topic.slug) {
                 if lang != "sh" && lang != "bash" && lang != "console" {
                     continue;
@@ -857,7 +1007,11 @@ mod tests {
         // running. The honest limits are the most deletable part of a page
         // whose other job is to make installing easy, so they are the part
         // that needs a gate.
-        let body = TOPICS.iter().find(|t| t.slug == "bootstrap").unwrap().body;
+        let body = topics()
+            .iter()
+            .find(|t| t.slug == "bootstrap")
+            .unwrap()
+            .body;
         for needle in [
             // The limit itself, named.
             "trust on first use",
@@ -893,7 +1047,7 @@ mod tests {
         // test compares against the file the release actually ships.
         let published = include_str!("../../../trust-roots/rolling.pub").trim();
         assert_eq!(published.len(), 64, "the shipped root must be 64 hex chars");
-        for topic in TOPICS.iter() {
+        for topic in topics().iter() {
             for (lang, block) in fenced_blocks(topic.slug) {
                 if lang != "toml" || !block.contains("[realm.pulseengine]") {
                     continue;
@@ -926,7 +1080,7 @@ mod tests {
         // [tool.source], while three adapters share kind = "crate". A build
         // engineer whose whole brief is choosing an adapter was misdirected by
         // the one topic that addresses it.
-        let body = TOPICS
+        let body = topics()
             .iter()
             .find(|t| t.slug == "payload-kinds")
             .unwrap()
@@ -958,7 +1112,7 @@ mod tests {
         // no documented way out, and they believed anti-rollback refused the
         // repair. Running it proves an EQUAL counter is not a regression, so
         // re-installing repairs in place; the refused case is going BACKWARDS.
-        let body = TOPICS.iter().find(|t| t.slug == "recovery").unwrap().body;
+        let body = topics().iter().find(|t| t.slug == "recovery").unwrap().body;
         assert!(
             body.contains("varve install --from"),
             "the repair must be a command, not a description"
@@ -992,11 +1146,11 @@ mod tests {
             ("README.md", readme),
             (
                 "the deposit topic",
-                TOPICS.iter().find(|t| t.slug == "deposit").unwrap().body,
+                topics().iter().find(|t| t.slug == "deposit").unwrap().body,
             ),
             (
                 "the deploy topic",
-                TOPICS.iter().find(|t| t.slug == "deploy").unwrap().body,
+                topics().iter().find(|t| t.slug == "deploy").unwrap().body,
             ),
         ] {
             for line in text.lines() {
@@ -1029,7 +1183,7 @@ mod tests {
         // holding one empty ```sh fence, and BOTH gates stayed green: `docs
         // check --coverage --strict` printed OK and the workspace suite passed.
         // The recorded evidence was three shell greps that no CI job runs.
-        let body = TOPICS.iter().find(|t| t.slug == "deploy").unwrap().body;
+        let body = topics().iter().find(|t| t.slug == "deploy").unwrap().body;
         // The push itself.
         for needle in ["oras blob push", "oras manifest push"] {
             assert!(body.contains(needle), "the push must show `{needle}`");
@@ -1081,8 +1235,10 @@ mod tests {
         // Every topic, not just config-reference: the elided `sha256:83a699…`
         // and `trust-root = "83a699…"` that this gate first caught were copied
         // across five topics, and a user pastes whichever one they read.
-        let blocks: Vec<(String, String)> =
-            TOPICS.iter().flat_map(|t| fenced_blocks(t.slug)).collect();
+        let blocks: Vec<(String, String)> = topics()
+            .iter()
+            .flat_map(|t| fenced_blocks(t.slug))
+            .collect();
         let mut unclassified: Vec<String> = Vec::new();
         for (lang, block) in blocks {
             if matches!(lang.as_str(), "toml" | "json") {
@@ -1170,7 +1326,7 @@ mod tests {
             ("[[include]]", "config-reference"),
         ];
         for (fact, topic) in must_appear {
-            let body = TOPICS
+            let body = topics()
                 .iter()
                 .find(|t| t.slug == *topic)
                 .unwrap_or_else(|| panic!("topic '{topic}' must exist"))
@@ -1190,7 +1346,7 @@ mod tests {
         // task's title. The audit found no task-shaped topic anywhere, so the
         // three flagship features shipped with no entry point.
         for name in ["getting-started", "own-realm"] {
-            let body = TOPICS.iter().find(|t| t.slug == name).unwrap().body;
+            let body = topics().iter().find(|t| t.slug == name).unwrap().body;
             let commands = body.matches("varve ").count();
             assert!(
                 commands >= 4,
@@ -1227,6 +1383,95 @@ mod tests {
         );
     }
 
+    // rivet: verifies REQ-CIGATE-001
+    #[test]
+    fn every_shipped_doc_file_is_reachable_as_a_topic() {
+        // `concept-root-ceremony.md` was written, shipped, and cross-referenced
+        // from two other topics while nothing registered it: `varve docs
+        // root-ceremony` printed "unknown topic" and EVERY gate stayed green,
+        // because the coverage check only ever looked at clap subcommands and
+        // `REQUIRED_TOPICS`. A file nothing points at was invisible to it —
+        // the same shape as an exit-code table nothing verifies.
+        //
+        // This closes it from the other direction: the DIRECTORY is the source
+        // of truth, and a `.md` no topic registers fails the build.
+        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/docs"));
+        let registered: std::collections::BTreeSet<&str> =
+            topics().iter().filter_map(|t| t.file).collect();
+        let mut orphans = Vec::new();
+        let mut seen = 0;
+        for entry in std::fs::read_dir(dir).expect("the docs directory must be readable") {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".md") {
+                continue;
+            }
+            seen += 1;
+            if !registered.contains(name.as_str()) {
+                orphans.push(name);
+            }
+        }
+        assert!(
+            orphans.is_empty(),
+            "these files ship in the binary's docs directory and no topic registers them, so \
+             `varve docs <topic>` cannot reach them: {orphans:?}"
+        );
+        // …and the check is not vacuous because the directory read empty.
+        assert_eq!(
+            seen,
+            registered.len(),
+            "the docs directory holds {seen} .md file(s) and the registry names {} — every \
+             registered file must exist and every existing file must be registered",
+            registered.len()
+        );
+    }
+
+    // rivet: verifies REQ-CIGATE-001
+    #[test]
+    fn every_topic_title_is_greppable_and_attributed_to_its_own_topic() {
+        // `--grep` searched bodies only. The one string a reader is most likely
+        // to type is the TITLE they just read in `varve docs`, and it matched
+        // nothing — so the command could not be used to find a topic, and could
+        // not gate on one either.
+        //
+        // Exhaustive on purpose. A single hand-picked needle is how the first
+        // version of the CLI test for this passed BEFORE the fix was written:
+        // the substring it grepped happened to appear in another topic's body.
+        for t in topics() {
+            let hits = grep(t.title);
+            assert!(
+                hits.iter().any(|(slug, _)| *slug == t.slug),
+                "grepping the title of '{}' ({:?}) does not find it",
+                t.slug,
+                t.title
+            );
+        }
+    }
+
+    // rivet: verifies REQ-CIGATE-001
+    #[test]
+    fn grep_reports_which_field_matched() {
+        // A hit has to say whether the title or the body carried it, or a
+        // pipeline cannot tell "this topic is ABOUT x" from "x is mentioned
+        // once in passing".
+        assert!(
+            !grep("exit code").is_empty(),
+            "the exit-code contract must be greppable — it returned nothing across all fifty \
+             topics, which is why two personas could not write the CI gate"
+        );
+        assert!(
+            grep("Exit codes — the contract a pipeline gates on")
+                .iter()
+                .any(|(slug, line)| *slug == "exit-codes" && line.starts_with("title:")),
+            "a title hit must be labelled as one"
+        );
+        assert!(
+            grep("root-ceremony")
+                .iter()
+                .any(|(slug, line)| *slug == "root-ceremony" && line.starts_with("topic:")),
+            "a slug hit must be labelled as one"
+        );
+    }
+
     // rivet: verifies REQ-DOCS-001
     #[test]
     fn topics_are_findable_and_greppable() {
@@ -1245,7 +1490,7 @@ mod tests {
     fn topic_list_renders_as_machine_readable_json() {
         let v: serde_json::Value = serde_json::from_str(&render_json(None)).unwrap();
         let arr = v.as_array().expect("--format json list is a JSON array");
-        assert_eq!(arr.len(), TOPICS.len());
+        assert_eq!(arr.len(), topics().len());
         // Every entry carries slug + title; the list form omits the body.
         let first = &arr[0];
         assert!(first.get("slug").and_then(|s| s.as_str()).is_some());
@@ -1267,7 +1512,7 @@ mod tests {
     // rivet: verifies REQ-DOCS-001
     #[test]
     fn no_topic_body_is_empty() {
-        for t in TOPICS {
+        for t in topics() {
             assert!(
                 t.body.trim().len() > 40,
                 "topic {} is too short to be real documentation",

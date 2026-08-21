@@ -13,3 +13,6 @@ __pycache__/
 *.pyc
 mutants.out/
 mutants.out.old/
+
+# Agent worktrees — never commit these (they are live git repos)
+.claude/worktrees/

@@ -41,6 +41,7 @@ pub mod manifest;
 pub mod pin;
 pub mod platform;
 pub mod realm;
+pub mod referrers;
 pub mod registry;
 pub mod resolve;
 pub mod reverify;
@@ -55,10 +56,13 @@ pub mod update;
 pub mod verify;
 pub mod vsixexport;
 
-pub use archive::{ArchiveError, ExportSummary, OciLayoutSource, export as export_archive};
+pub use archive::{
+    ArchiveError, ArchiveOptions, ExportSummary, OciLayoutSource, export as export_archive,
+    export_with_options as export_archive_with_options,
+};
 pub use deposit::{
-    DepositError, DepositFileSpec, DepositOutcome, DepositSpec, DepositTool, RunnerSpec,
-    ToolSource, deposit, parse_deposit_spec,
+    DepositError, DepositFileSpec, DepositOptions, DepositOutcome, DepositSpec, DepositTool,
+    RunnerSpec, ToolSource, deposit, deposit_with_options, parse_deposit_spec,
 };
 pub use install::{
     InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
@@ -71,10 +75,12 @@ pub use lineindex::{
     attach_to_layout as attach_index_to_layout, read_from_layout as read_index_from_layout,
 };
 pub use linestatus::{
-    KnownProblem, LayerStatusReport, LineStatus, LineStatusError, StatusCache,
-    attach_envelope_to_layout as attach_status_envelope_to_layout,
+    KnownLayers, KnownProblem, LayerStatusReport, LineStatus, LineStatusError, RefCheck,
+    StatusCache, attach_envelope_to_layout as attach_status_envelope_to_layout,
+    attach_envelope_to_layout_checked as attach_status_envelope_to_layout_checked,
     attach_to_layout as attach_status_to_layout,
-    cache_baseline_from_source as cache_baseline_line_status,
+    cache_baseline_from_source as cache_baseline_line_status, known_layers_from_index,
+    known_layers_in_layout, known_layers_in_layout_dirs,
     read_any_from_layout as read_any_status_from_layout,
     read_from_layout as read_status_from_layout,
 };
@@ -85,6 +91,9 @@ pub use pin::{
 };
 pub use platform::host_platform;
 pub use realm::{Realm, RealmError, resolve_realm};
+pub use referrers::{
+    CarriedWork, WouldDestroy, guard as guard_layout, scan as scan_layout_referrers,
+};
 pub use registry::{RegistryRef, RegistrySource};
 pub use resolve::{ResolveError, Resolved, RunnerContract, resolve};
 pub use reverify::{ReverifyError, verify_installed};

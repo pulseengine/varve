@@ -105,6 +105,25 @@ pub enum LineStatusError {
         line: String,
         reason: String,
     },
+    /// REQ-ADVISORY-002. The id is a well-formed layer of this line and names
+    /// no layer that EXISTS — a typo one character deep. It signs cleanly, the
+    /// producer sees success, the consumer sees nothing, and the yank silently
+    /// does not exist. Refused wherever the signer can see the line's layers;
+    /// `--force` is for the legitimate case of pre-signing an advisory for a
+    /// layer not deposited yet.
+    #[error(
+        "{what} names layer '{id}', which line {line} does not contain — it exposes: {existing}. \
+         `varve status` matches layer ids EXACTLY, so this entry would fire for nobody: you \
+         would see success, every consumer would see nothing, and the advisory would silently \
+         not exist. Fix the id, or pass --force to pre-sign an advisory for a layer that is not \
+         deposited yet."
+    )]
+    UnknownLayer {
+        what: String,
+        id: String,
+        line: String,
+        existing: String,
+    },
     #[error(
         "{layout} is not an OCI image layout (it has no index.json) — point --layout at the \
          directory `varve deposit --out` produced"
@@ -119,6 +138,204 @@ pub enum LineStatusError {
         #[source]
         source: std::io::Error,
     },
+}
+
+/// What the signer could see of a line's layers when it validated an advisory
+/// (REQ-ADVISORY-002).
+///
+/// The distinction is the whole point. An `affected` id is only checkable
+/// against a LISTING of the line — the realm's signed line-index. A deposit
+/// layout holds one layer, so it is not a listing, and treating it as one
+/// would refuse advisories about layers that exist perfectly well elsewhere.
+/// Where no listing is in reach the check cannot be run, and the caller must
+/// be told WHICH check was skipped rather than handed a success that implies
+/// a complete one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnownLayers {
+    /// The ids the signer could enumerate, and where they came from.
+    Known {
+        /// For the note: which document these came out of.
+        source: String,
+        /// The line the listing covers, when it names one — a listing for
+        /// another line is not a listing for this one.
+        line: Option<String>,
+        layers: Vec<String>,
+    },
+    /// The signer could not see the line's layers, and why not.
+    Unknown { why: String },
+}
+
+impl KnownLayers {
+    /// The realm's own statement of which layers a line has — the only
+    /// authoritative listing varve has.
+    pub fn from_index(index: &crate::lineindex::LineIndex) -> Self {
+        KnownLayers::Known {
+            source: format!(
+                "the signed line-index for {} (counter {})",
+                index.line, index.counter
+            ),
+            line: Some(index.line.clone()),
+            layers: index.layers.iter().map(|e| e.layer.clone()).collect(),
+        }
+    }
+
+    pub fn unknown(why: impl Into<String>) -> Self {
+        KnownLayers::Unknown { why: why.into() }
+    }
+}
+
+/// Which validation actually ran, so a caller reports the check it performed
+/// and not the one it did not (REQ-ADVISORY-002).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefCheck {
+    /// True only when every id was matched against a real listing of the
+    /// line's layers.
+    pub existence_checked: bool,
+    /// One line for the operator: the check that ran, or the one that did not.
+    pub note: String,
+}
+
+/// The layers a signed line-index asserts, verified against the root that is
+/// about to sign the advisory (REQ-ADVISORY-002 clause 2).
+///
+/// Verified, not merely parsed: an unverified listing is one an attacker could
+/// choose, and one that names the typo'd layer would wave the dead advisory
+/// through. At sign time the producer holds the key, so the check is free.
+pub fn known_layers_from_index(
+    envelope: &[u8],
+    root_public_key: &[u8],
+) -> Result<KnownLayers, crate::lineindex::IndexError> {
+    let doc = crate::lineindex::LineIndex::verify_and_parse(envelope, root_public_key)?;
+    Ok(KnownLayers::from_index(&doc))
+}
+
+/// The line's layers as the PRODUCER can see them, from their own layouts —
+/// no network, and no published index required (REQ-ADVISORY-002 clause 5,
+/// DD-023).
+///
+/// `signed-index` is false by default, so an index-only existence check would
+/// rarely have anything to check against: opt-in safety, which is how a typo'd
+/// `affected` id came to sign cleanly and fire for nobody. The producer already
+/// HOLDS the layers on disk. That listing is more trustworthy than a registry's
+/// — a compromised registry can hide a layer and thereby block the yank of the
+/// very layer it hides (the reason DD-023 keeps the network out of the signing
+/// command) — and it works for a realm that never publishes an index at all.
+///
+/// Each path is either a layout directory or a directory OF layout
+/// directories, because a producer's output tree is usually the latter.
+pub fn known_layers_in_layout_dirs(dirs: &[std::path::PathBuf], line: &str) -> KnownLayers {
+    let mut layers: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    let visit = |dir: &Path, layers: &mut Vec<String>| {
+        // A real `varve deposit --out` writes an OCI layout: index.json plus
+        // blobs/sha256/. The bare `manifests/`+`blobs/` shape is the other
+        // source form varve accepts. Both are read, because a fixture that
+        // only spoke one of them is how this function first shipped passing a
+        // test against bytes the tool never produces.
+        let mut candidates: Vec<Vec<u8>> = Vec::new();
+        if let Ok(index) = std::fs::read(dir.join("index.json"))
+            && let Ok(idx) = serde_json::from_slice::<serde_json::Value>(&index)
+        {
+            for m in idx
+                .get("manifests")
+                .and_then(|m| m.as_array())
+                .into_iter()
+                .flatten()
+            {
+                if let Some(d) = m.get("digest").and_then(|d| d.as_str())
+                    && let Some((_, hex)) = d.split_once(':')
+                    && let Ok(b) = std::fs::read(dir.join("blobs").join("sha256").join(hex))
+                {
+                    candidates.push(b);
+                }
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(dir.join("manifests")) {
+            for e in entries.filter_map(|e| e.ok()) {
+                if let Ok(b) = std::fs::read(e.path()) {
+                    candidates.push(b);
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return false;
+        }
+        for bytes in candidates {
+            // A layout stores the SIGNED envelope; the layer id lives in its
+            // payload. Unverified is correct here: this is the producer's own
+            // output tree, and the id is being used to catch a typo, not to
+            // decide trust.
+            let payload = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|t| wsc::dsse::DsseEnvelope::from_json(t).ok())
+                .and_then(|env| env.payload_bytes().ok())
+                .unwrap_or_else(|| bytes.clone());
+            if let Ok(m) = crate::manifest::LayerManifest::parse(&payload) {
+                let id = m.layer.to_string();
+                if id.starts_with(&format!("{line}.")) && !layers.contains(&id) {
+                    layers.push(id);
+                }
+            }
+        }
+        true
+    };
+    for dir in dirs {
+        if visit(dir, &mut layers) {
+            scanned += 1;
+            continue;
+        }
+        // Not a layout itself — try its children.
+        if let Ok(children) = std::fs::read_dir(dir) {
+            for c in children.filter_map(|e| e.ok()) {
+                if c.path().is_dir() && visit(&c.path(), &mut layers) {
+                    scanned += 1;
+                }
+            }
+        }
+    }
+    if scanned == 0 {
+        return KnownLayers::unknown(format!(
+            "no oci-layout was found under {} — pass the directory `varve deposit --out` \
+             wrote, or one holding several of them",
+            dirs.iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    layers.sort();
+    KnownLayers::Known {
+        source: format!("{scanned} local layout(s) the producer holds"),
+        line: Some(line.to_string()),
+        layers,
+    }
+}
+
+/// What a deposit layout can tell a producer about the line's layers.
+///
+/// A layout carries the realm's signed index only once `attach-index` has run,
+/// and the documented CI order attaches the status FIRST — so the ordinary
+/// answer here is `Unknown`, stated plainly rather than passed off as a clean
+/// bill of health.
+pub fn known_layers_in_layout(layout: &Path, line: &str) -> KnownLayers {
+    match crate::lineindex::read_from_layout(layout, line) {
+        Ok(Some(envelope)) => match crate::lineindex::parse_unverified(&envelope) {
+            Ok(doc) if doc.line == line => KnownLayers::from_index(&doc),
+            Ok(doc) => KnownLayers::unknown(format!(
+                "the line-index this layout carries is for line {}, not {line}",
+                doc.line
+            )),
+            Err(e) => KnownLayers::unknown(format!(
+                "the line-index this layout carries could not be read ({e})"
+            )),
+        },
+        Ok(None) => KnownLayers::unknown(format!(
+            "this layout carries no signed line-index for {line}, and a layout holds ONE layer \
+             — it is not a listing of the line. Attach the index first (`varve attach-index`), \
+             or sign against it (`varve sign-status --index <envelope>`)"
+        )),
+        Err(e) => KnownLayers::unknown(format!("the layout's index.json could not be read ({e})")),
+    }
 }
 
 impl LineStatus {
@@ -161,6 +378,145 @@ impl LineStatus {
         let payload = serde_json::to_vec_pretty(self).expect("status serializes");
         dsse_sign_typed(&payload, LINE_STATUS_PAYLOAD_TYPE, secret_key, key_id)
             .map_err(|VerifyError(msg)| LineStatusError::Sign(msg))
+    }
+
+    /// Sign, having checked every advisory reference against what the signer
+    /// can actually see of the line (REQ-ADVISORY-002). Returns the envelope
+    /// and a statement of which check ran — a caller that prints only
+    /// "signed" implies a completeness it may not have.
+    pub fn sign_against(
+        &self,
+        known: &KnownLayers,
+        force: bool,
+        secret_key: &[u8],
+        key_id: &str,
+    ) -> Result<(String, RefCheck), LineStatusError> {
+        let check = self.check_layer_refs_against(known, force)?;
+        let payload = serde_json::to_vec_pretty(self).expect("status serializes");
+        let envelope = dsse_sign_typed(&payload, LINE_STATUS_PAYLOAD_TYPE, secret_key, key_id)
+            .map_err(|VerifyError(msg)| LineStatusError::Sign(msg))?;
+        Ok((envelope, check))
+    }
+
+    /// Every yank key and every `affected` id, checked as far as this signer
+    /// can see (REQ-ADVISORY-002).
+    ///
+    /// Two checks, deliberately separated:
+    ///
+    ///  * SHAPE and line membership — always run, never overridable. An id
+    ///    that is not a well-formed layer identifier of this line cannot
+    ///    become correct later, so `--force` has nothing to allow.
+    ///  * EXISTENCE — run only where a listing of the line is in reach.
+    ///    `--force` allows it through, because pre-signing an advisory for a
+    ///    layer about to be deposited is a legitimate thing to do. Silence is
+    ///    not: where the check does not run, the returned `RefCheck` says so.
+    pub fn check_layer_refs_against(
+        &self,
+        known: &KnownLayers,
+        force: bool,
+    ) -> Result<RefCheck, LineStatusError> {
+        self.check_layer_refs()?;
+        // How many layer ids this document actually asserts anything about.
+        // A BASELINE status — no yanks, no known problems — refers to nothing,
+        // so there is nothing an existence check could have caught. Warning
+        // there is cry-wolf: it fires on the correct setup `docs own-realm`
+        // tells every new operator to perform, and REQ-SHADOW-001's own lesson
+        // is that a check which fires on correct setups is one people switch
+        // off. Found by clean-room review, which noted it also printed TWICE
+        // (sign-status and attach-status) on the documented happy path.
+        let referenced = self.yanked.len()
+            + self
+                .known_problems
+                .iter()
+                .map(|p| p.affected.len())
+                .sum::<usize>();
+        let (source, layers) = match known {
+            KnownLayers::Unknown { .. } if referenced == 0 => {
+                return Ok(RefCheck {
+                    existence_checked: true,
+                    note: "this document names no layer — nothing to check against the line"
+                        .to_string(),
+                });
+            }
+            KnownLayers::Unknown { why } => {
+                return Ok(RefCheck {
+                    existence_checked: false,
+                    note: format!(
+                        "advisory references were checked for SHAPE only — NOT against the \
+                         layers line {} actually has: {why}. An id naming a layer that does not \
+                         exist still signs cleanly here and fires for nobody.",
+                        self.line
+                    ),
+                });
+            }
+            KnownLayers::Known {
+                source,
+                line,
+                layers,
+            } => {
+                // A listing for another line answers a different question. It
+                // would either wave everything through or refuse everything,
+                // and both verdicts would be reported as if they meant
+                // something.
+                if let Some(listing_line) = line
+                    && listing_line != &self.line
+                {
+                    return Err(LineStatusError::LineMismatch {
+                        expected: self.line.clone(),
+                        got: listing_line.clone(),
+                    });
+                }
+                (source, layers)
+            }
+        };
+        if force {
+            return Ok(RefCheck {
+                existence_checked: false,
+                note: format!(
+                    "--force: advisory references were NOT checked against the layers line {} \
+                     has. An entry naming a layer that has not been deposited yet fires only \
+                     once it is.",
+                    self.line
+                ),
+            });
+        }
+        let existing = if layers.is_empty() {
+            "no layers at all — this line has none yet".to_string()
+        } else {
+            layers.join(", ")
+        };
+        let mut refs = 0usize;
+        let mut check = |what: String, id: &str| -> Result<(), LineStatusError> {
+            refs += 1;
+            if layers.iter().any(|l| l == id) {
+                return Ok(());
+            }
+            Err(LineStatusError::UnknownLayer {
+                what,
+                id: id.to_string(),
+                line: self.line.clone(),
+                existing: existing.clone(),
+            })
+        };
+        for id in self.yanked.keys() {
+            check("the yank entry".to_string(), id)?;
+        }
+        for kp in &self.known_problems {
+            for id in &kp.affected {
+                check(format!("known problem '{}'", kp.id), id)?;
+            }
+        }
+        Ok(RefCheck {
+            existence_checked: true,
+            note: format!(
+                "{refs} advisory reference{} checked against the {} layer{} {source} lists for \
+                 line {}",
+                if refs == 1 { "" } else { "s" },
+                layers.len(),
+                if layers.len() == 1 { "" } else { "s" },
+                self.line
+            ),
+        })
     }
 
     /// Every yank key and every known problem's `affected` id must be a layer
@@ -423,6 +779,17 @@ pub fn attach_envelope_to_layout(
     layout: &Path,
     envelope: &[u8],
 ) -> Result<(Line, u64), LineStatusError> {
+    let (line, counter, _) = attach_envelope_to_layout_checked(layout, envelope, false)?;
+    Ok((line, counter))
+}
+
+/// `attach_envelope_to_layout`, reporting which advisory check it was able to
+/// run and allowing the deliberate override (REQ-ADVISORY-002).
+pub fn attach_envelope_to_layout_checked(
+    layout: &Path,
+    envelope: &[u8],
+    force: bool,
+) -> Result<(Line, u64, RefCheck), LineStatusError> {
     // Refuse a directory that is not a layout BEFORE writing anything into
     // it: the old path created blobs/ inside an arbitrary directory and then
     // failed on the missing index.json with a bare io error (varve#60).
@@ -445,8 +812,11 @@ pub fn attach_envelope_to_layout(
         .map_err(|e| LineStatusError::Payload(format!("status line '{}': {e}", doc.line)))?;
     // A yank or affected id outside the layout's line would attach fine and
     // fire for nobody (varve#61) — this command knows the line, so it is the
-    // last producer-side place the typo is cheap to fix.
-    doc.check_layer_refs()?;
+    // last producer-side place the typo is cheap to fix. And where the layout
+    // carries the realm's signed index, the ids can be checked against the
+    // layers that actually EXIST, not merely against the shape of a layer id
+    // (REQ-ADVISORY-002).
+    let check = doc.check_layer_refs_against(&known_layers_in_layout(layout, &doc.line), force)?;
     // Monotonicity holds here too. `status --from-file` and `install` both
     // refuse a counter regression; attaching did not, so a re-run CI step could
     // silently downgrade a layout's baseline — shipping a pre-yank document
@@ -476,7 +846,7 @@ pub fn attach_envelope_to_layout(
         });
     }
     attach_to_layout(layout, &line, envelope)?;
-    Ok((line, doc.counter))
+    Ok((line, doc.counter, check))
 }
 
 /// The bytes are not a DSSE envelope — with the commonest cause named: the
@@ -1213,5 +1583,373 @@ mod tests {
         let carried = read_any_from_layout(&dest).unwrap().unwrap();
         let parsed = LineStatus::verify_and_parse(&carried, &pk).unwrap();
         assert_eq!(parsed.counter, 3);
+    }
+
+    // ───────────────────────── REQ-ADVISORY-002 ─────────────────────────
+
+    /// A listing naming exactly the layers of the July line the fixture
+    /// document talks about.
+    fn listing(layers: &[&str]) -> KnownLayers {
+        KnownLayers::Known {
+            source: "the signed line-index for 2026.07 (counter 1)".into(),
+            line: Some("2026.07".into()),
+            layers: layers.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn an_affected_id_naming_no_existing_layer_is_refused_and_the_verdict_lists_what_does_exist() {
+        // The defect: one wrong character. `2026.07.10` is a well-formed layer
+        // id of the right line, so every shape check passes; it names no layer
+        // that exists, so `varve status` — which matches ids EXACTLY — never
+        // fires it. The producer sees success, the consumer sees nothing.
+        let mut doc = status(1);
+        doc.yanked.clear();
+        doc.known_problems = vec![KnownProblem {
+            id: "KP-1".into(),
+            title: "t".into(),
+            severity: "high".into(),
+            affected: vec!["2026.07.10".into()],
+            workaround: None,
+            detection: None,
+            mitigation: None,
+        }];
+        let err = doc
+            .check_layer_refs_against(&listing(&["2026.07.0", "2026.07.1"]), false)
+            .expect_err("an advisory that can never fire must be refused");
+        assert!(
+            matches!(&err, LineStatusError::UnknownLayer { id, .. } if id == "2026.07.10"),
+            "got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("KP-1"), "name the entry at fault: {msg}");
+        // The ids that DO exist — the shape varve already uses for tools
+        // ("it exposes: …"). A refusal that does not show the alternatives
+        // sends the operator back to the registry to guess.
+        assert!(
+            msg.contains("2026.07.0") && msg.contains("2026.07.1"),
+            "the refusal must list the ids that exist: {msg}"
+        );
+        assert!(msg.contains("--force"), "{msg}");
+    }
+
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn a_yank_key_is_checked_against_existing_layers_too_not_only_affected() {
+        // A yank is the entry with the most consequence and the least
+        // redundancy: nothing else in the document repeats it, so a typo'd
+        // yank key is a withdrawal that silently never happened.
+        let mut doc = status(1);
+        doc.known_problems.clear();
+        doc.yanked = BTreeMap::from([("2026.07.9".to_string(), "CVE".to_string())]);
+        let err = doc
+            .check_layer_refs_against(&listing(&["2026.07.0"]), false)
+            .expect_err("a yank naming no layer must be refused");
+        assert!(
+            matches!(&err, LineStatusError::UnknownLayer { what, id, .. }
+                     if what.contains("yank") && id == "2026.07.9"),
+            "got: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn a_document_whose_ids_all_exist_passes_and_says_what_was_checked() {
+        // The other half of the rule: the check must be capable of PASSING, or
+        // it is not a check, it is a ban on advisories.
+        let check = status(1)
+            .check_layer_refs_against(&listing(&["2026.07.0", "2026.07.1"]), false)
+            .expect("every id in the fixture exists on the line");
+        assert!(check.existence_checked);
+        assert!(
+            check.note.contains("checked against") && check.note.contains("2 layers"),
+            "the note must state the check that RAN: {}",
+            check.note
+        );
+    }
+
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn where_the_line_is_not_visible_the_answer_says_which_check_was_not_run() {
+        // "Silence must not." Where no listing is in reach the existence check
+        // cannot run, and a bare "signed" would imply a completeness that was
+        // never established — the exact shape of the defect, moved one level
+        // up into the tool's own reporting.
+        let check = status(1)
+            .check_layer_refs_against(&KnownLayers::unknown("no line-index was supplied"), false)
+            .unwrap();
+        assert!(
+            !check.existence_checked,
+            "an unchecked document must not report itself as checked"
+        );
+        assert!(
+            check.note.contains("NOT") && check.note.contains("no line-index was supplied"),
+            "the note must name the check that did NOT run, and why: {}",
+            check.note
+        );
+    }
+
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn force_allows_a_layer_not_deposited_yet_but_never_a_malformed_id() {
+        // `--force` exists for one legitimate case: pre-signing an advisory
+        // for a layer about to be deposited. It must not become a way past the
+        // SHAPE check — an id that is not a layer identifier of this line
+        // cannot become correct later, so there is nothing for force to allow.
+        let mut doc = status(1);
+        doc.yanked.clear();
+        doc.known_problems = vec![KnownProblem {
+            id: "KP-1".into(),
+            title: "t".into(),
+            severity: "high".into(),
+            affected: vec!["2026.07.9".into()],
+            workaround: None,
+            detection: None,
+            mitigation: None,
+        }];
+        let check = doc
+            .check_layer_refs_against(&listing(&["2026.07.0"]), true)
+            .expect("--force pre-signs for a layer not deposited yet");
+        assert!(
+            !check.existence_checked,
+            "forcing must not report the check as having run"
+        );
+        assert!(check.note.contains("--force"), "{}", check.note);
+
+        // …and the same document with a typo that is not a layer id at all is
+        // still refused, force or no force.
+        for id in ["2026.07", "twenty-twenty-six", "2026.08.0"] {
+            doc.known_problems[0].affected = vec![id.to_string()];
+            match doc.check_layer_refs_against(&listing(&["2026.07.0"]), true) {
+                Err(LineStatusError::DeadReference { .. }) => {}
+                other => panic!("'{id}' must be refused even under --force, got: {other:?}"),
+            }
+        }
+    }
+
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn a_listing_for_another_line_is_refused_rather_than_used() {
+        // A listing for a different line answers a different question. Used
+        // anyway it would either wave everything through or refuse everything,
+        // and both verdicts would be reported as if they meant something.
+        let wrong = KnownLayers::Known {
+            source: "the signed line-index for 2026.08".into(),
+            line: Some("2026.08".into()),
+            layers: vec!["2026.08.0".into()],
+        };
+        let err = status(1)
+            .check_layer_refs_against(&wrong, false)
+            .expect_err("a listing for another line must not be used as this line's");
+        assert!(
+            matches!(&err, LineStatusError::LineMismatch { expected, got }
+                     if expected == "2026.07" && got == "2026.08"),
+            "got: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn a_layout_becomes_a_listing_only_once_the_signed_index_is_attached() {
+        // Where the signer CAN see the line's layers, and where it cannot. A
+        // deposit layout holds ONE layer — it is not a listing of the line, and
+        // treating it as one would refuse advisories about layers that exist
+        // perfectly well elsewhere. The realm's signed index IS a listing.
+        use crate::deposit::{DepositSpec, DepositTool, deposit};
+        let (sk, _pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("layout");
+        deposit(
+            &DepositSpec {
+                includes: Vec::new(),
+                layer: "2026.07.0".parse().unwrap(),
+                channel: "qualified".into(),
+                counter: 1,
+                issued_at: "2026-08-07T00:00:00Z".into(),
+                tools: vec![DepositTool {
+                    name: "synth".into(),
+                    version: "1".into(),
+                    platform: None,
+                    bytes: b"t".to_vec(),
+                    source: None,
+                    runner: None,
+                    kind: None,
+                    sdk_prefix: None,
+                }],
+            },
+            &sk,
+            "k",
+            &dest,
+        )
+        .unwrap();
+
+        // No index yet: NOT a listing, and it says why rather than pretending.
+        let known = known_layers_in_layout(&dest, "2026.07");
+        assert!(
+            matches!(&known, KnownLayers::Unknown { why } if why.contains("not a listing")),
+            "got: {known:?}"
+        );
+
+        let index = crate::lineindex::LineIndex {
+            line: "2026.07".into(),
+            counter: 1,
+            issued_at: "2026-08-07T00:00:00Z".into(),
+            layers: vec![crate::lineindex::IndexedLayer {
+                layer: "2026.07.0".into(),
+                digest: "sha256:aa".into(),
+                channel: "qualified".into(),
+                counter: 1,
+            }],
+        };
+        crate::lineindex::attach_to_layout(
+            &dest,
+            "2026.07",
+            index.sign(&sk, "k").unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        let known = known_layers_in_layout(&dest, "2026.07");
+        assert_eq!(
+            known,
+            KnownLayers::Known {
+                source: "the signed line-index for 2026.07 (counter 1)".into(),
+                line: Some("2026.07".into()),
+                layers: vec!["2026.07.0".into()],
+            }
+        );
+
+        // …and the attach seam now refuses the advisory that could never fire,
+        // while the same document naming the real layer attaches and reports
+        // the check it ran.
+        let mut doc = status(2);
+        doc.yanked.clear();
+        doc.known_problems = vec![KnownProblem {
+            id: "KP-1".into(),
+            title: "t".into(),
+            severity: "high".into(),
+            affected: vec!["2026.07.1".into()],
+            workaround: None,
+            detection: None,
+            mitigation: None,
+        }];
+        let err = attach_envelope_to_layout(&dest, doc.sign(&sk, "k").unwrap().as_bytes())
+            .expect_err("2026.07.1 is not on this line's index");
+        assert!(
+            matches!(&err, LineStatusError::UnknownLayer { .. }),
+            "got: {err}"
+        );
+
+        doc.known_problems[0].affected = vec!["2026.07.0".into()];
+        let (_line, counter, check) =
+            attach_envelope_to_layout_checked(&dest, doc.sign(&sk, "k").unwrap().as_bytes(), false)
+                .unwrap();
+        assert_eq!(counter, 2);
+        assert!(check.existence_checked, "{}", check.note);
+    }
+
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn signing_reports_the_check_it_ran_alongside_the_envelope() {
+        // The producing seam. `sign_against` hands back the envelope AND what
+        // was verified about it, so the CLI can print the check rather than a
+        // bare "signed" that implies a complete one.
+        let (sk, pk) = generate_root_keypair();
+        let (envelope, check) = status(1)
+            .sign_against(&listing(&["2026.07.0", "2026.07.1"]), false, &sk, "k")
+            .unwrap();
+        assert!(check.existence_checked);
+        assert_eq!(
+            LineStatus::verify_and_parse(envelope.as_bytes(), &pk).unwrap(),
+            status(1),
+            "the checked path must sign the same document the plain path does"
+        );
+
+        // And a document that could never fire is not signed at all — the
+        // point is that the signature must not exist.
+        let mut doc = status(1);
+        doc.yanked.clear();
+        doc.known_problems[0].affected = vec!["2026.07.7".into()];
+        doc.known_problems[1].affected = vec!["2026.07.0".into()];
+        assert!(
+            doc.sign_against(&listing(&["2026.07.0"]), false, &sk, "k")
+                .is_err()
+        );
+    }
+
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn a_producer_can_list_their_own_line_without_a_network_or_an_index() {
+        // DD-023 clause 5. `signed-index` is false by default, so an
+        // index-only existence check would usually have nothing to check
+        // against — and opt-in safety is how a typo'd `affected` id came to
+        // sign cleanly and fire for nobody. The producer holds the layers.
+        let tmp = tempfile::tempdir().unwrap();
+        let (sk, _pk) = crate::generate_root_keypair();
+        // REAL layouts, written by `deposit` itself. The first version of this
+        // test built them with `DirSource::put`, which writes the bare
+        // manifests/+blobs/ SOURCE shape — not what `varve deposit --out`
+        // produces. It passed, and the CLI then found nothing at all. A
+        // fixture speaking a shape the tool never emits is the defect this
+        // release is named for, so this one uses the real writer.
+        for (id, counter, dir) in [
+            ("2026.08.0", 1u64, "out-a"),
+            ("2026.08.1", 2, "out-b"),
+            // A layer of a DIFFERENT line must not be counted as this line's.
+            ("2026.09.0", 1, "out-other"),
+        ] {
+            let spec = crate::deposit::DepositSpec {
+                layer: id.parse().unwrap(),
+                channel: "rolling".into(),
+                counter,
+                issued_at: "2026-08-07T00:00:00Z".into(),
+                tools: vec![crate::DepositTool {
+                    name: "t".into(),
+                    version: "1.0".into(),
+                    platform: None,
+                    bytes: b"x".to_vec(),
+                    source: None,
+                    runner: None,
+                    kind: None,
+                    sdk_prefix: None,
+                }],
+                includes: Vec::new(),
+            };
+            crate::deposit(&spec, &sk, "k", &tmp.path().join(dir)).unwrap();
+        }
+
+        // Pointed at the PARENT of several layouts, which is the usual shape.
+        let known = known_layers_in_layout_dirs(&[tmp.path().to_path_buf()], "2026.08");
+        match &known {
+            KnownLayers::Known { layers, line, .. } => {
+                assert_eq!(layers, &["2026.08.0", "2026.08.1"], "got {layers:?}");
+                assert_eq!(line.as_deref(), Some("2026.08"));
+            }
+            KnownLayers::Unknown { why } => panic!("expected a listing, got: {why}"),
+        }
+
+        // …and it actually catches the typo it exists for.
+        let mut doc = status(2);
+        doc.line = "2026.08".into();
+        doc.yanked = BTreeMap::from([(
+            "2026.08.10".to_string(),
+            "typo — never deposited".to_string(),
+        )]);
+        doc.known_problems.clear();
+        let err = doc
+            .check_layer_refs_against(&known, false)
+            .expect_err("a yank naming a layer this line does not have must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("2026.08.10") && msg.contains("2026.08.0"),
+            "the refusal must name the bad id AND the ids that exist: {msg}"
+        );
+
+        // A directory holding no layout says so rather than passing clean.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            known_layers_in_layout_dirs(&[empty.path().to_path_buf()], "2026.08"),
+            KnownLayers::Unknown { .. }
+        ));
     }
 }

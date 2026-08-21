@@ -320,6 +320,31 @@ impl Store {
         }
     }
 
+    /// Every partition under this varve root: the top-level core first, then
+    /// each realm partition in a stable order, paired with the realm
+    /// fingerprint that names it (`None` for the top-level core, which is not
+    /// realm-scoped).
+    ///
+    /// `find_anywhere` had this enumeration inline and private, so a caller
+    /// that needed to WALK the store rather than look one digest up had no way
+    /// to do it — which is how `verify --all` came to check only the pinned
+    /// realm's partition while its `--help` promised every installed layer
+    /// (REQ-VERIFYALL-001, varve#84).
+    pub fn partitions(&self) -> Vec<(Option<String>, Store)> {
+        let root = self.varve_root();
+        let mut out: Vec<(Option<String>, Store)> = vec![(None, Store::at(&root))];
+        if let Ok(rd) = std::fs::read_dir(root.join("realms")) {
+            let mut parts: Vec<std::path::PathBuf> =
+                rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+            parts.sort();
+            for p in parts {
+                let fp = p.file_name().map(|n| n.to_string_lossy().into_owned());
+                out.push((fp, Store::at(p)));
+            }
+        }
+        out
+    }
+
     /// Find a layer by digest in ANY partition under this varve root — the
     /// top-level core or any realm's. A digest is content-addressed, so where
     /// it happens to live does not change what it is; a cross-realm composition

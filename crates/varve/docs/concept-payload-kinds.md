@@ -39,6 +39,29 @@ provenance recorded at deposit`, and if nothing qualifies it fails with
 `nothing exported`. Record them with `[tool.source]` and `platform` in the
 deposit spec (`varve docs config-reference`).
 
+### What `export-bazel` actually vouches for
+
+The registries it writes carry the header *"digests transcribed from the signed
+layer manifest. Do not hand-edit. The source-asset sha256 is transcribed from
+the deposit spec and is NOT verified by varve against the asset it names."*
+Read that precisely — and note the second sentence was added in v0.28.0,
+because the first on its own read as though varve had vouched for the value. The `sha256` in each
+platform entry is `[tool.source].sha256` from the deposit spec, copied verbatim
+into the signed payload at deposit time and copied out again here. **varve never
+verifies it against anything** — not at deposit, not at `varve verify`, not at
+install. It describes an upstream release asset varve does not fetch; the digest
+`verify` enforces covers the extracted binary in the store instead, which is a
+different artifact.
+
+So what the signature buys is that the value reached Bazel unaltered and
+counter-protected, from the realm that signed the layer. It is not evidence that
+the value is the true hash of the asset Bazel will download. If the depositor
+pasted the wrong hash, `export-bazel` exports the wrong hash, the header still
+says "transcribed from the signed layer manifest", and the first thing that
+notices is Bazel's own fetch failing. Whoever writes the deposit spec owns that
+number: hash the asset, do not transcribe it from a web page. The field is
+documented in `varve docs config-reference`.
+
 Every adapter writes a `.varve-export.json` stamp binding the directory to the
 layer that produced it, so `varve verify --export DIR` fails when your pin moves
 and the export does not.
