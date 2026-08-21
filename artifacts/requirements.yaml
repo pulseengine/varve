@@ -3524,7 +3524,7 @@ artifacts:
   - id: REQ-REALM2-001
     type: requirement
     title: A second realm exists end to end, and composition stops being a fixture
-    status: draft
+    status: verified
     release: v0.29.0
     description: >
       Layer composition (REQ-COMPOSE-001, v0.23.0) has always been exercised
