@@ -3348,10 +3348,22 @@ artifacts:
       That shall be stated in `config-reference` and `payload-kinds`, and the
       export header shall stop implying varve vouched for it.
 
+  # `implemented`, NOT `verified`, and this is the correction clean-room review
+  # asked for. Clauses 1-4 are discharged (VER-SYSTEST-002). Clause 5 said "no
+  # adapter ships without a system test" and NOTHING enforced it: six export
+  # adapters ship, three have one. The requirement read `verified` anyway —
+  # exactly the overclaim this release exists to remove, sitting inside the
+  # release. Enforcement now exists as a RATCHET
+  # (`no_new_export_adapter_ships_without_a_system_test`): the known-uncovered
+  # set is written down, a NEW uncovered adapter fails, and an adapter that
+  # gains coverage while still listed also fails. A hard wall would have turned
+  # CI red for three adapters' worth of unrelated work, and a gate people
+  # switch off protects nothing. Advances to `verified` when the list is empty
+  # — tracked as varve#99.
   - id: REQ-SYSTEST-002
     type: requirement
     title: The producer pipeline is exercised, not only the consumer path
-    status: verified
+    status: implemented
     release: v0.28.0
     description: >
       REQ-SYSTEST-001 gave the CONSUMER half a system gate: deposit, install,

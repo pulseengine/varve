@@ -307,4 +307,90 @@ mod tests {
         assert_eq!(codes[0]["code"], 0);
         assert_eq!(codes[0]["name"], "ok");
     }
+
+    /// REQ-SYSTEST-002 clause 5, as a RATCHET rather than a wall.
+    ///
+    /// The clause says no export adapter ships without a system test. Six
+    /// adapters ship and three have one, so enforcing it outright would turn
+    /// CI red for work unrelated to the change that tripped it — and a gate
+    /// people switch off protects nothing (REQ-SHADOW-001's lesson). Instead
+    /// the KNOWN-uncovered set is written down here, and this test fails when
+    /// it GROWS: a new adapter cannot ship uncovered, and removing one from
+    /// the list is a deliberate edit that has to be justified.
+    ///
+    /// The requirement stays `implemented`, not `verified`, until the list is
+    /// empty. Clean-room review caught it reading `verified` while clause 5
+    /// had no enforcement at all.
+    // rivet: verifies REQ-SYSTEST-002
+    #[test]
+    fn no_new_export_adapter_ships_without_a_system_test() {
+        use clap::CommandFactory;
+        let adapters: Vec<String> = crate::Cli::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .filter(|n| n.starts_with("export-"))
+            .collect();
+        assert!(
+            adapters.len() >= 6,
+            "the adapter enumeration found {} — if clap's shape changed this test \
+             is measuring nothing: {adapters:?}",
+            adapters.len()
+        );
+
+        // What the system gates actually exercise, read from the gates.
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let mut gate_text = String::new();
+        for rel in [
+            "tools/systest/selfhost.sh",
+            "tools/systest/deposit-layer.sh",
+            "tools/systest/oci-roundtrip.sh",
+            ".github/workflows/systest.yml",
+        ] {
+            gate_text.push_str(&std::fs::read_to_string(root.join(rel)).unwrap_or_default());
+        }
+        assert!(
+            gate_text.contains("export-cargo"),
+            "the system-gate sources could not be read — this test would then \
+             report every adapter as uncovered, which is a different lie"
+        );
+
+        // Longest-name-first, so `export-bazel` does not match inside
+        // `export-bazel-distdir` and report it covered when it is not.
+        let mut by_len = adapters.clone();
+        by_len.sort_by_key(|a| std::cmp::Reverse(a.len()));
+        let uncovered: std::collections::BTreeSet<String> = adapters
+            .iter()
+            .filter(|a| {
+                !gate_text.match_indices(a.as_str()).any(|(i, _)| {
+                    gate_text[i + a.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !c.is_alphanumeric() && c != '-')
+                })
+            })
+            .cloned()
+            .collect();
+
+        // The recorded gap. Shrinking this is the work; growing it is refused.
+        let known_uncovered: std::collections::BTreeSet<String> =
+            ["export-bazel", "export-bazel-distdir", "export-sdk"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+
+        let regressed: Vec<_> = uncovered.difference(&known_uncovered).collect();
+        assert!(
+            regressed.is_empty(),
+            "export adapter(s) {regressed:?} have no system test and are not in the \
+             recorded gap. REQ-SYSTEST-002 clause 5: no adapter ships without one. \
+             Add a gate under tools/systest/, or add it to `known_uncovered` here \
+             with a reason — deliberately, in a reviewed diff."
+        );
+        let fixed: Vec<_> = known_uncovered.difference(&uncovered).collect();
+        assert!(
+            fixed.is_empty(),
+            "{fixed:?} now HAS a system test but is still listed as a known gap — \
+             remove it from `known_uncovered`, so the list keeps meaning what it says"
+        );
+    }
 }
