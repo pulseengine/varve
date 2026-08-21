@@ -3816,3 +3816,47 @@ artifacts:
         type-binding regression is designed out.
       tags: [architecture, security]
 
+  - id: REQ-BUNDLEVERIFY-001
+    type: requirement
+    title: Prove trust-bundle provisioning on varve's own release, not on the realm model
+    status: draft
+    release: v0.30.0
+    description: >
+      DD-026's next move. Keyless is deferred because the trust bundle is
+      itself signed with a long-lived key the consumer must pin — so it
+      relocates varve's secret rather than removing it, and makes an
+      air-gapped consumer's position worse (hard expiry at day 396, immediate
+      failure with no clock). But the CUSTODY gain is real, and the question
+      that decides whether it is ever worth taking is empirical: can a
+      consumer actually keep a trust bundle fresh?
+      .
+      That question is answered on the cheapest surface, not the most
+      expensive one. `varve self-verify` already verifies varve's OWN release
+      sums out of band, against a key the user obtains separately (DD-009).
+      Adding the trust bundle as an ADDITIONAL accepted verifier there
+      exercises provisioning, expiry and refresh against a real consumer on a
+      path where a hard failure is RECOVERABLE — the user downloads varve
+      again. Betting the realm model on it first would put the same failure
+      on a path where recovery means re-pinning a realm.
+      .
+      Clauses: (1) `self-verify` shall accept a trust-bundle-verified release
+      signature IN ADDITION to the existing path, never instead of it — the
+      current mechanism keeps working untouched. (2) The bundle's expiry state
+      shall be REPORTED at use, including days remaining, because "it hard-
+      fails at day 396" is only survivable if the operator was told at day
+      300. (3) A device with no reliable clock shall get a message naming that
+      as the cause; wsc's verification path fails closed there and a bare
+      failure would be unactionable. (4) varve shall not claim inclusion
+      proof. What is verified offline is the Rekor SET — a countersignature
+      proving the log saw the entry at a time — which is TIMESTAMPING, not
+      inclusion, and does not detect an equivocating log. `docs threat-model`
+      shall keep saying so. (5) This requirement shall NOT change
+      varve-realms.toml, `Realm::fingerprint()`, or any realm's trust root.
+      Whether a realm can ever be keyless is DD-026's open question and is
+      decided by what this teaches, not by this.
+      .
+      BLOCKED until wsc 0.11.0 is published to crates.io (sigil#257). varve
+      pins 0.10.0, whose airgapped verifier is a stub that fails OPEN —
+      building against it would produce a gate that verifies nothing, which is
+      the defect class this project exists to remove.
+
