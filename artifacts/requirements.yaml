@@ -3510,9 +3510,15 @@ artifacts:
       copy per realm is a copy that drifts, which is the same defect as a gate
       testing a re-implementation. (3) A layers repo shall need no varve
       source checkout: it takes a released varve and a released assembler.
-      (4) The pulseengine realm shall migrate first and keep publishing without
-      a gap, so the split is proven by the realm that already has consumers
-      rather than by the new one. (5) varve's own repository shall stop
+      (4) EXACTLY ONE layers repo shall be stood up first — `pulseengine-layers`,
+      the realm that already has consumers and an existing key — and it shall
+      publish a layer successfully before a second repo is created. The
+      two-realm topology is proven in the gate (REQ-REALM2-001 clause 1)
+      rather than by standing up two repos at once, so a migration failure
+      lands on the realm we can fix rather than on a new realm's first
+      impression. A single repo holding BOTH realms was rejected: it puts two
+      roots' secrets in one repo's settings, and unpicking that later means
+      rotating keys varve cannot rotate. (5) varve's own repository shall stop
       carrying any realm's signing secret once the migration completes.
 
   - id: REQ-REALM2-001
@@ -3529,8 +3535,14 @@ artifacts:
       exists for (PulseEngine tools that CHECK, bytecodealliance tools that
       BUILD, someone else's layer extending both) has never actually been run.
       .
-      Clauses: (1) A `bytecodealliance` realm shall exist with its own root,
-      its own layers repo, and its own published layers. (2) A consumer pin
+      Clauses: (1) A `bytecodealliance` realm shall be constructible and
+      COMPOSABLE end to end, proven by a system gate that builds both realms
+      from real upstream artifacts and real roots. PUBLISHING that realm is an
+      operational step, deliberately NOT a condition of this requirement:
+      generating a realm root is a ceremony `docs root-ceremony` says should
+      be air-gapped, two-person and unhurried, and blocking a code release on
+      it would either delay the release or rush the ceremony. Tracked
+      separately; the gate is what this requirement verifies. (2) A consumer pin
       shall compose across both realms and resolve tools from each, verified
       each against ITS OWN realm's root. (3) The system gate shall exercise
       that composition, not a fixture of it. (4) varve#91 shall be settled by
