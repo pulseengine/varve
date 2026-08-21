@@ -3456,7 +3456,7 @@ artifacts:
   - id: REQ-INGEST-001
     type: requirement
     title: varve ingests what upstream actually publishes, and records which mechanism vouched
-    status: draft
+    status: verified
     release: v0.29.0
     description: >
       The layer assembler accepts exactly ONE proof that an upstream artifact
@@ -3545,7 +3545,7 @@ artifacts:
   - id: REQ-ROLLING-001
     type: requirement
     title: Upstream movement is noticed automatically; publishing it stays a deliberate act
-    status: draft
+    status: verified
     release: v0.29.0
     description: >
       A manually-cut layer cannot keep up. Measured 2026-08-21, days after
