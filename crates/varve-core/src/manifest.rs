@@ -36,6 +36,29 @@ impl ManifestEntry {
             None => Ok(crate::kind::PayloadKind::default()),
         }
     }
+
+    /// The mechanism that vouched for this entry's upstream bytes
+    /// (REQ-INGEST-001 clause 2).
+    ///
+    /// Three answers, and they are three different things:
+    ///
+    /// * `Ok(Some(p))` — the layer declares mechanism `p`;
+    /// * `Ok(None)` — the layer declares NOTHING, because it was deposited
+    ///   before this requirement existed. It reads as `unrecorded`
+    ///   (`IngestProof::label(None)`), never as verified: absence of a claim
+    ///   is not a claim;
+    /// * `Err(UnknownProof(raw))` — a mechanism a newer varve minted. The
+    ///   bytes still verify against the signed digest; only the claim about how
+    ///   they were vouched for is unreadable here, so report it verbatim rather
+    ///   than collapse it into a mechanism this build does understand.
+    pub fn ingest_proof(
+        &self,
+    ) -> Result<Option<crate::ingest::IngestProof>, crate::ingest::UnknownProof> {
+        match self.annotations.get(crate::ingest::ANN_PROOF) {
+            Some(s) => s.parse().map(Some),
+            None => Ok(None),
+        }
+    }
 }
 
 /// A layer manifest accepted for installation.

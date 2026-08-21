@@ -30,6 +30,7 @@ pub mod crateexport;
 pub mod deposit;
 pub mod discover;
 pub mod exportstamp;
+pub mod ingest;
 pub mod install;
 pub mod keys;
 pub mod kind;
@@ -64,6 +65,7 @@ pub use deposit::{
     DepositError, DepositFileSpec, DepositOptions, DepositOutcome, DepositSpec, DepositTool,
     RunnerSpec, ToolSource, deposit, deposit_with_options, parse_deposit_spec,
 };
+pub use ingest::{ANN_PROOF, ANN_PROOF_ASSERTS, ANN_PROOF_SIGNER, IngestProof, UnknownProof};
 pub use install::{
     InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
 };
