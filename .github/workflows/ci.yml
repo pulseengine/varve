@@ -174,6 +174,13 @@ jobs:
         # The org gate (REQ-MUTATE-001, rivet's mutants-cli pattern): the
         # modules that hold the trust decisions must kill every mutant.
         # The nightly workflow covers the full workspace, advisory.
+        #
+        # compose.rs joined the list in v0.29.0: `select_tools` decides which
+        # binary a bare tool name dispatches to across two realms
+        # (REQ-REALM2-001 clause 4c), which is a trust decision by any reading.
+        # It was at three survivors when it was advisory-only — two off-by-ones
+        # in the depth bound and one refusal branch — all killed before it was
+        # promoted, since a gate admitted with known survivors is not a gate.
         run: |
           cargo mutants --no-shuffle \
             -f crates/varve-core/src/rollback.rs \
@@ -183,6 +190,7 @@ jobs:
             -f crates/varve-core/src/pin.rs \
             -f crates/varve-core/src/realm.rs \
             -f crates/varve-core/src/resolve.rs \
+            -f crates/varve-core/src/compose.rs \
             -f crates/varve-core/src/install.rs \
             -f crates/varve-core/src/selfverify.rs \
             -f crates/varve-core/src/reverify.rs \
