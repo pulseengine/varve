@@ -1,0 +1,67 @@
+# Payload kinds, and which export adapter to run
+
+A layer entry declares its kind: `tool` (an executable), `crate` (a Rust
+`.crate`), `wit` (a WIT package), `zephyr-module`, `sdk`, `wasm-component`, or
+`vsix` (a VS Code extension package).
+
+Only a `tool` is **dispatched by name** — `varve run`, `varve which` and the
+argv[0] shims resolve a bare name — so only a tool is laid down at `bin/<name>`
+with the execute bit. Every other kind is *held*: its identity is
+(name, version), it lands under `payloads/<name>/<version>`, and it is data
+varve hands to another program (mode 0644). That is why one layer can carry
+`serde` at two versions, or one extension at two versions, and why a `.vsix` is
+never executable.
+
+The kind does **not** change verification — every kind is a signed digest
+checked against the trust root, exactly as a tool binary is. An unknown kind is
+refused where it is consumed; install is kind-agnostic, so a layer using a kind
+your varve does not know still installs.
+
+## Choosing an adapter
+
+The kind does not by itself select the adapter. Three adapters key on
+`kind = "crate"`; `export-bazel` ignores kind entirely and keys on **`platform`
+plus `[tool.source]`**, both set at deposit time.
+
+| Your consumer is | Run | It produces | Entries it takes |
+|---|---|---|---|
+| Cargo, offline | `varve export-cargo --out D` | `D/registry/` + a `.cargo/config.toml` redirecting crates.io | `kind = "crate"` |
+| `cargo vendor`-style tree | `varve export-crates-vendor --out D` | unpacked crate sources + a vendor config | `kind = "crate"` |
+| Bazel `rules_rust`, air-gapped | `varve export-bazel-distdir --out D` | `.crate` tarballs for `bazel build --distdir=D` | `kind = "crate"` |
+| Bazel `rules_wasm_component` | `varve export-bazel --out D` | one `<tool>.json` checksum registry per tool | any entry with a **platform** and **`[tool.source]`** |
+| VS Code / VSCodium | `varve export-vsix --out D` | `publisher.name-version.vsix` files for `code --install-extension` | `kind = "vsix"` |
+
+`export-bazel` is the exception because a Bazel toolchain repository rule
+fetches from the upstream URL itself — so varve can only emit a registry for an
+entry whose upstream repo, asset name and sha256 were recorded when it was
+deposited. Without those it prints `skipped <tool> (<platform>): no source
+provenance recorded at deposit`, and if nothing qualifies it fails with
+`nothing exported`. Record them with `[tool.source]` and `platform` in the
+deposit spec (`varve docs config-reference`).
+
+### What `export-bazel` actually vouches for
+
+The registries it writes carry the header *"digests transcribed from the signed
+layer manifest. Do not hand-edit. The source-asset sha256 is transcribed from
+the deposit spec and is NOT verified by varve against the asset it names."*
+Read that precisely — and note the second sentence was added in v0.28.0,
+because the first on its own read as though varve had vouched for the value. The `sha256` in each
+platform entry is `[tool.source].sha256` from the deposit spec, copied verbatim
+into the signed payload at deposit time and copied out again here. **varve never
+verifies it against anything** — not at deposit, not at `varve verify`, not at
+install. It describes an upstream release asset varve does not fetch; the digest
+`verify` enforces covers the extracted binary in the store instead, which is a
+different artifact.
+
+So what the signature buys is that the value reached Bazel unaltered and
+counter-protected, from the realm that signed the layer. It is not evidence that
+the value is the true hash of the asset Bazel will download. If the depositor
+pasted the wrong hash, `export-bazel` exports the wrong hash, the header still
+says "transcribed from the signed layer manifest", and the first thing that
+notices is Bazel's own fetch failing. Whoever writes the deposit spec owns that
+number: hash the asset, do not transcribe it from a web page. The field is
+documented in `varve docs config-reference`.
+
+Every adapter writes a `.varve-export.json` stamp binding the directory to the
+layer that produced it, so `varve verify --export DIR` fails when your pin moves
+and the export does not.

@@ -1,0 +1,81 @@
+# Load-bearing claims, bound to checkable evidence (REQ-CLAIM-001 — the
+# witness claim-check discipline). CI fails when a claim's evidence
+# disappears; a claim without evidence here must not appear in the docs.
+#
+# evidence kinds:
+#   test:      a #[test] function name that must exist in the sources
+#   file:      a path that must exist in the repo
+#   workflow:  substring that must appear in the named workflow file
+
+claims:
+  - claim: "A pinned layer resolves exactly or the command fails — no fallback"
+    evidence:
+      - { kind: test, ref: missing_layer_fails_with_the_corrective_command }
+      - { kind: test, ref: partial_layer_is_an_error_not_a_fallback }
+      - { kind: test, ref: which_fails_closed_when_the_pinned_layer_is_not_installed }
+
+  - claim: "Sources cannot influence acceptance (kill-criterion)"
+    evidence:
+      - { kind: test, ref: kill_criterion_two_sources_one_verdict }
+      - { kind: test, ref: kill_criterion_registry_and_archive_agree_on_accept_and_reject }
+
+  - claim: "A stale, validly-signed layer cannot be passed off as current"
+    evidence:
+      - { kind: test, ref: a_counter_below_the_mark_is_rejected }
+      - { kind: test, ref: a_rolled_back_layer_is_refused_by_the_cli }
+
+  - claim: "Self-update is old-verifies-new and refusals leave the binary untouched"
+    evidence:
+      - { kind: test, ref: the_running_binary_verifies_and_installs_its_successor }
+      - { kind: test, ref: a_successor_signed_by_an_impostor_is_refused_and_nothing_is_replaced }
+
+  - claim: "Cross-realm acceptance is cryptographically impossible"
+    evidence:
+      - { kind: test, ref: two_realms_same_layer_name_zero_cross_talk }
+
+  - claim: "Mutation-checked: trust-critical modules carry a zero-survivor gate"
+    evidence:
+      - { kind: file, ref: mutants.toml }
+      - { kind: workflow, ref: "cargo mutants", file: .github/workflows/ci.yml }
+      - { kind: workflow, ref: "cargo mutants", file: .github/workflows/mutants.yml }
+
+  - claim: "README states the true implementation status (not 'nothing implemented')"
+    evidence:
+      - { kind: workflow, ref: "implemented", file: README.md }
+      - { kind: file, ref: SECURITY.md }
+
+  - claim: "Untrusted-input parsers are continuously fuzzed"
+    evidence:
+      - { kind: file, ref: fuzz/Cargo.toml }
+      - { kind: workflow, ref: "cargo fuzz", file: .github/workflows/fuzz.yml }
+
+  - claim: "The requirement-to-test graph is mechanically audited"
+    evidence:
+      - { kind: file, ref: artifacts/verification.yaml }
+      - { kind: workflow, ref: "verification-evidence", file: .github/workflows/ci.yml }
+
+  - claim: "Each release from v0.14.0 carries a recorded independent-review verdict"
+    evidence:
+      - { kind: file, ref: tools/review-check.py }
+      - { kind: workflow, ref: "method: review", file: artifacts/verification.yaml }
+      - { kind: workflow, ref: "review-check", file: .github/workflows/ci.yml }
+
+  # v0.27.0 split the single offline-build test in two — one per adapter — when
+  # cargo_offline.rs was rebuilt as a real dependency graph. The claim kept
+  # pointing at the old name, so `claim-check.py` was RED: the claim's evidence
+  # had been renamed out from under it. Both current tests are named here.
+  - claim: "A varve-verified crate builds offline through a real Cargo"
+    evidence:
+      - { kind: test, ref: a_varve_exported_registry_resolves_a_real_graph_and_builds_it_correctly }
+      - { kind: test, ref: a_varve_vendored_crate_builds_offline_through_cargo }
+      - { kind: test, ref: deposit_a_crate_kind_entry_and_export_a_cargo_registry }
+
+  - claim: "A released binary reports the version it is tagged as"
+    evidence:
+      - { kind: workflow, ref: "does not match Cargo.toml version", file: .github/workflows/release.yml }
+
+  - claim: "A release carries its rivet traceability as queryable, assessor-importable evidence"
+    evidence:
+      - { kind: file, ref: tools/tracepack-check.py }
+      - { kind: workflow, ref: "traceability.reqif", file: .github/workflows/release.yml }
+      - { kind: workflow, ref: "tracepack-check", file: .github/workflows/ci.yml }

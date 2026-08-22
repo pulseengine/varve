@@ -1,0 +1,3068 @@
+artifacts:
+  # ─────────────────────────────────────────────────────────────────────
+  # The right side of the V, as GRAPH rather than prose (REQ-VGATE-001).
+  # One verification artifact per requirement, each naming concrete test
+  # functions in `fields.steps[].run` — the shape `rivet check
+  # verification-evidence` mechanically audits against the Rust sources,
+  # so a renamed or deleted test goes red instead of leaving a
+  # requirement silently "verified". Source markers (// rivet: verifies)
+  # remain the fine-grained per-test map; these artifacts are the
+  # graph-level closure the org's requirement-verification rule counts.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: VER-PIN-001
+    type: verification
+    title: Fail-closed pin resolution verified at library and CLI boundaries
+    status: verified
+    release: v0.1.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core resolves_the_pinned_layer_by_name
+        - run: cargo test -p varve-core missing_layer_fails_with_the_corrective_command
+        - run: cargo test -p varve-core partial_layer_is_an_error_not_a_fallback
+        - run: cargo test -p varve-core pinned_digest_wins_and_a_mismatching_name_is_a_hard_failure
+        - run: cargo test -p varve which_fails_closed_when_the_pinned_layer_is_not_installed
+        - run: cargo test -p varve which_fails_closed_when_no_pin_exists
+    links:
+      - type: verifies
+        target: REQ-PIN-001
+
+  - id: VER-VERIFY-001
+    type: verification
+    title: Source-independent signature verification incl. the kill-criterion
+    status: verified
+    release: v0.2.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core kill_criterion_two_sources_one_verdict
+        - run: cargo test -p varve-core an_unverified_manifest_fetches_no_blobs_and_installs_nothing
+        - run: cargo test -p varve-core a_source_that_alters_a_blob_is_caught_by_the_signed_digest
+        - run: cargo test -p varve-core install_accepts_a_properly_signed_layer_and_rejects_the_same_bytes_resigned_by_an_impostor
+        - run: cargo test -p varve-core a_freshly_installed_layer_reverifies
+        - run: cargo test -p varve install_refuses_a_layer_signed_by_the_wrong_root
+    links:
+      - type: verifies
+        target: REQ-VERIFY-001
+
+  - id: VER-COEXIST-001
+    type: verification
+    title: Layer coexistence in the content-addressed core
+    status: verified
+    release: v0.1.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core two_layers_coexist_and_are_independently_addressable
+        - run: cargo test -p varve-core store_key_is_the_manifest_digest
+        - run: cargo test -p varve list_shows_every_installed_layer
+    links:
+      - type: verifies
+        target: REQ-COEXIST-001
+
+  - id: VER-OFFLINE-001
+    type: verification
+    title: Archive round-trip with verification unchanged, no registry
+    status: verified
+    release: v0.3.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core export_writes_a_standard_oci_image_layout
+        - run: cargo test -p varve-core an_archived_layer_installs_into_a_fresh_core_with_verification_unchanged
+        - run: cargo test -p varve-core export_refuses_a_layer_without_its_envelope
+        - run: cargo test -p varve archive_then_offline_install_round_trips_with_verification_unchanged
+        # varve#80: a MULTI-platform layer, where one tool name repeats across
+        # triples. Every fixture before these had one platform, and with one
+        # platform the name does not repeat and every blob is correct — which
+        # is why an archive holding 26 mislabelled blobs shipped.
+        - run: cargo test -p varve-core a_multi_platform_layer_archives_only_this_platforms_payloads
+        - run: cargo test -p varve-core a_multi_platform_archive_reinstalls_and_reverifies_on_its_own_platform
+        - run: cargo test -p varve-core a_consumer_on_another_platform_is_told_the_archive_carries_none_for_it
+        - run: cargo test -p varve-core a_payload_whose_bytes_do_not_match_its_signed_digest_is_never_archived
+        - run: cargo test -p varve-core an_archive_that_would_carry_no_payload_at_all_is_refused
+        - run: cargo test -p varve-core a_blob_missing_from_an_archive_of_this_platform_is_not_blamed_on_the_platform
+        - run: cargo test -p varve archive_of_a_multi_platform_layer_says_what_it_carries_and_refuses_elsewhere
+    links:
+      - type: verifies
+        target: REQ-OFFLINE-001
+
+  - id: VER-NOUPDATE-001
+    type: verification
+    title: No mechanism moves a project between layers without a pin edit
+    status: verified
+    release: v0.1.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_newer_layer_in_the_core_cannot_change_what_a_pin_resolves_to
+        - run: cargo test -p varve-core ambiguous_name_fails_closed_instead_of_choosing
+        - run: cargo test -p varve run_with_an_explicit_layer_override_does_not_touch_the_pin
+    links:
+      - type: verifies
+        target: REQ-NOUPDATE-001
+
+  - id: VER-PROV-001
+    type: verification
+    title: Provenance contract pinned across varve run and wsc-attestation
+    status: verified
+    release: v0.5.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve --test provenance toolinfo_captures_the_layer_identity_varve_run_exports
+        - run: cargo test -p varve run_dispatches_with_the_layer_identity_in_the_environment
+    links:
+      - type: verifies
+        target: REQ-PROV-001
+
+  - id: VER-SCOPE-001
+    type: verification
+    title: Selection and reporting never mutate the core
+    status: verified
+    release: v0.1.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core resolution_and_listing_never_write_to_the_core
+    links:
+      - type: verifies
+        target: REQ-SCOPE-001
+
+  - id: VER-ROLLBACK-001
+    type: verification
+    title: Anti-rollback counters, staleness, and CLI refusal
+    status: verified
+    release: v0.2.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_counter_below_the_mark_is_rejected
+        - run: cargo test -p varve-core counters_are_scoped_per_line
+        - run: cargo test -p varve-core marks_survive_a_new_session
+        - run: cargo test -p varve-core a_rolled_back_layer_is_refused_at_install
+        - run: cargo test -p varve-core a_failed_install_does_not_advance_the_high_water_mark
+        - run: cargo test -p varve-core corrupt_state_is_an_error_not_a_reset
+        - run: cargo test -p varve a_rolled_back_layer_is_refused_by_the_cli
+    links:
+      - type: verifies
+        target: REQ-ROLLBACK-001
+
+  - id: VER-PATCH-001
+    type: verification
+    title: Three-part layer grammar with corrective guidance
+    status: verified
+    release: v0.1.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core parses_three_part_identifier_into_line_and_patch
+        - run: cargo test -p varve-core patch_stays_inside_the_frozen_line
+        - run: cargo test -p varve-core rejects_two_part_identifier_with_corrective_guidance
+        - run: cargo test -p varve-core rejects_malformed_identifiers
+    links:
+      - type: verifies
+        target: REQ-PATCH-001
+
+  - id: VER-KP-001
+    type: verification
+    title: Line-status evidence — signing, attachment, cache monotonicity, reporting
+    status: verified
+    release: v0.5.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_signed_status_document_round_trips
+        - run: cargo test -p varve-core a_layer_manifest_envelope_cannot_pose_as_a_status_document
+        - run: cargo test -p varve-core attaching_status_to_a_layout_leaves_every_layer_blob_untouched
+        - run: cargo test -p varve-core the_cache_refuses_a_counter_regression
+        - run: cargo test -p varve status_reports_yank_and_known_problems_from_attached_evidence
+        - run: cargo test -p varve status_refuses_a_stale_document_and_keeps_the_newer_cache
+    links:
+      - type: verifies
+        target: REQ-KP-001
+
+  - id: VER-SELF-001
+    type: verification
+    title: Self-verification against varve-native signed release sums
+    status: verified
+    release: v0.5.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_release_archive_verifies_against_the_signed_sums
+        - run: cargo test -p varve-core a_tampered_archive_is_refused
+        - run: cargo test -p varve-core sums_signed_by_an_untrusted_key_are_refused
+        - run: cargo test -p varve self_verify_accepts_a_signed_release_file_and_refuses_a_tampered_one
+        - run: cargo test -p varve sign_sums_produces_an_envelope_self_verify_accepts
+    links:
+      - type: verifies
+        target: REQ-SELF-001
+
+  - id: VER-DEPOSIT-001
+    type: verification
+    title: Deterministic, signed, pipeline-compatible deposits
+    status: verified
+    release: v0.4.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_deposit_round_trips_through_the_standard_install_pipeline
+        - run: cargo test -p varve-core identical_specs_deposit_identical_digests
+        - run: cargo test -p varve-core empty_and_duplicate_tool_lists_are_refused
+        - run: cargo test -p varve deposit_creates_a_layer_the_standard_pipeline_installs
+    links:
+      - type: verifies
+        target: REQ-DEPOSIT-001
+
+  - id: VER-SHIM-001
+    type: verification
+    title: Per-invocation shim resolution — switching projects is cd
+    status: verified
+    release: v0.6.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve shims_resolve_per_invocation_so_switching_projects_is_cd
+    links:
+      - type: verifies
+        target: REQ-SHIM-001
+
+  - id: VER-PLATFORM-001
+    type: verification
+    title: Host-filtered platform selection, wrong-arch fails closed
+    status: verified
+    release: v0.6.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core install_selects_only_entries_for_the_target_platform
+        - run: cargo test -p varve-core a_layer_with_nothing_for_the_host_platform_fails_closed
+        - run: cargo test -p varve-core unstamped_legacy_entries_install_on_any_platform
+    links:
+      - type: verifies
+        target: REQ-PLATFORM-001
+
+  - id: VER-REGISTRY-001
+    type: verification
+    title: Registry pulls through the OCI double, kill-criterion spanning transports
+    status: verified
+    release: v0.6.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core --test registry_double a_layer_installs_by_name_from_the_registry
+        - run: cargo test -p varve-core --test registry_double kill_criterion_registry_and_archive_agree_on_accept_and_reject
+        - run: cargo test -p varve-core --test registry_double blobs_larger_than_ten_mib_pull_cleanly
+    links:
+      - type: verifies
+        target: REQ-REGISTRY-001
+
+  - id: VER-REGISTRY-002
+    type: verification
+    title: Spec-compliant registry client — challenge, credentials, pagination, media types, refusals, redirects
+    status: verified
+    release: v0.26.0
+    fields:
+      method: automated-test
+      # One clause at a time. The lib tests are the mutation-gate kill
+      # criteria (`cargo mutants --workspace --lib` cannot be killed by an
+      # integration test); the registry_double tests prove the same clauses
+      # over a real socket against a registry that is deliberately NOT ghcr.io.
+      steps:
+        # (1) the token endpoint comes from the WWW-Authenticate challenge
+        - run: cargo test -p varve-core --lib a_bearer_challenge_yields_realm_service_and_scope
+        - run: cargo test -p varve-core --lib the_token_url_comes_from_the_realm_the_registry_named
+        - run: cargo test -p varve-core --lib a_token_response_is_read_from_either_spelling
+        - run: cargo test -p varve-core --test registry_double the_token_comes_from_the_realm_the_challenge_names_not_a_guessed_path
+        # (2) credentials without exec, and no cleartext realm
+        - run: cargo test -p varve-core --lib a_docker_config_auths_entry_becomes_a_credential
+        - run: cargo test -p varve-core --lib a_credential_helper_is_named_and_never_run
+        - run: cargo test -p varve-core --lib the_environment_variable_is_a_username_colon_password_pair
+        - run: cargo test -p varve-core --lib precedence_prefers_a_real_credential_and_otherwise_keeps_the_explanation
+        - run: cargo test -p varve-core --lib config_files_are_read_in_order_and_a_broken_one_is_skipped
+        - run: cargo test -p varve-core --lib base64_round_trips_and_decodes_a_docker_auth_field
+        - run: cargo test -p varve-core --lib an_https_registry_may_not_redirect_its_token_realm_to_cleartext
+        - run: cargo test -p varve-core --lib a_credential_never_reaches_a_debug_line_or_an_error_message
+        # (3) tags/list pagination, bounded (varve#70)
+        - run: cargo test -p varve-core --lib a_link_header_names_the_next_page_and_only_within_the_origin
+        - run: cargo test -p varve-core --lib a_tags_page_is_parsed_and_a_broken_one_is_not_an_empty_repository
+        - run: cargo test -p varve-core --lib the_first_tags_page_asks_the_registry_to_paginate
+        - run: cargo test -p varve-core --test registry_double a_digest_pin_survives_a_paginated_tag_list
+        - run: cargo test -p varve-core --test registry_double an_endless_tag_list_stops_with_an_error_rather_than_looping_or_truncating
+        # (4) both manifest media types
+        - run: cargo test -p varve-core --lib the_manifest_accept_header_offers_the_docker_type_as_well_as_the_oci_one
+        - run: cargo test -p varve-core --test registry_double a_registry_serving_the_docker_manifest_media_type_is_reachable
+        # (5) refusals are said out loud, and say WHICH
+        - run: cargo test -p varve-core --lib a_refusal_distinguishes_no_credential_from_a_rejected_one
+        - run: cargo test -p varve-core --test registry_double a_refused_pull_says_whether_varve_had_no_credential_or_a_bad_one
+        - run: cargo test -p varve-core --test registry_double a_token_the_api_still_refuses_is_reported_rather_than_swallowed
+        # (6) no Authorization across a redirect. The integration test is
+        # discriminating, not vacuous: the CDN double is on the same host and
+        # a different PORT, and ureq's SameHost setting was measured to
+        # forward the header across a port change — so flipping the config
+        # turns this test red.
+        - run: cargo test -p varve-core --lib the_agent_never_carries_authorization_across_a_redirect
+        - run: cargo test -p varve-core --test registry_double a_blob_redirect_to_another_host_does_not_carry_the_authorization_header
+    links:
+      - type: verifies
+        target: REQ-REGISTRY-002
+
+  - id: VER-ENV-001
+    type: verification
+    title: Idempotent sourced environment and shell completions
+    status: verified
+    release: v0.7.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve env_is_evaluable_and_idempotent
+        - run: cargo test -p varve shim_install_writes_a_sourceable_env_file
+        - run: cargo test -p varve completions_emit_per_shell_scripts
+    links:
+      - type: verifies
+        target: REQ-ENV-001
+
+  - id: VER-UPDATE-001
+    type: verification
+    title: Self-update — old verifies new, refusals leave the binary untouched
+    status: verified
+    release: v0.8.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core --test selfupdate_double the_running_binary_verifies_and_installs_its_successor
+        - run: cargo test -p varve-core --test selfupdate_double an_unsigned_release_is_refused_not_installed
+        - run: cargo test -p varve-core --test selfupdate_double a_successor_signed_by_an_impostor_is_refused_and_nothing_is_replaced
+        - run: cargo test -p varve-core version_comparison_is_strict_and_fails_closed
+    links:
+      - type: verifies
+        target: REQ-UPDATE-001
+
+  - id: VER-BAZEL-001
+    type: verification
+    title: Signature-anchored Bazel registry compilation
+    status: verified
+    release: v0.9.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core registries_compile_in_the_rules_schema_with_source_digests
+        - run: cargo test -p varve-core a_tool_without_source_provenance_is_skipped_loudly
+        - run: cargo test -p varve spec_deposit_then_export_bazel_compiles_a_signature_anchored_registry
+        - run: cargo test -p varve export_bazel_refuses_without_a_trust_root
+    links:
+      - type: verifies
+        target: REQ-BAZEL-001
+
+  - id: VER-REALM-001
+    type: verification
+    title: Realm isolation — one shim, two universes, zero cross-talk
+    status: verified
+    release: v0.10.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core realms_resolve_by_name_with_walk_up_discovery
+        - run: cargo test -p varve-core different_roots_mean_different_namespaces
+        - run: cargo test -p varve-core an_undefined_realm_fails_closed_naming_what_exists
+        - run: cargo test -p varve two_realms_same_layer_name_zero_cross_talk
+    links:
+      - type: verifies
+        target: REQ-REALM-001
+
+  - id: VER-RUNNER-001
+    type: verification
+    title: Portable wasm entries dispatch through their layer runner
+    status: verified
+    release: v0.11.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core wasm32_entries_are_portable_to_every_host
+        - run: cargo test -p varve portable_wasm_entries_dispatch_through_their_layer_runner
+    links:
+      - type: verifies
+        target: REQ-RUNNER-001
+
+  - id: VER-VGATE-001
+    type: verification
+    title: Verification-evidence check green over the closed graph
+    status: verified
+    release: v0.12.0
+    fields:
+      method: analysis
+      steps:
+        - run: rivet check verification-evidence
+    links:
+      - type: verifies
+        target: REQ-VGATE-001
+
+  - id: VER-MUTATE-001
+    type: verification
+    title: Zero surviving mutants across the six trust-critical modules
+    status: verified
+    release: v0.12.0
+    fields:
+      method: analysis
+      steps:
+        - run: cargo mutants -f crates/varve-core/src/rollback.rs -f crates/varve-core/src/layer.rs -f crates/varve-core/src/platform.rs -f crates/varve-core/src/verify.rs -f crates/varve-core/src/pin.rs -f crates/varve-core/src/realm.rs
+        - run: cargo test -p varve-core epoch_day_arithmetic_matches_the_civil_calendar
+    links:
+      - type: verifies
+        target: REQ-MUTATE-001
+
+  - id: VER-CLAIM-001
+    type: verification
+    title: Claim-check green — every claim's evidence present
+    status: verified
+    release: v0.12.0
+    fields:
+      method: analysis
+      steps:
+        - run: python3 tools/claim-check.py
+    links:
+      - type: verifies
+        target: REQ-CLAIM-001
+
+  - id: VER-FUZZ-001
+    type: verification
+    title: Fuzz targets on the untrusted-input parsers (found + fixed a real bug)
+    status: verified
+    release: v0.13.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core non_canonical_leading_zero_patches_are_rejected
+        - run: cargo test -p varve-core a_non_date_issued_at_is_refused_not_silently_undated
+    links:
+      - type: verifies
+        target: REQ-FUZZ-001
+
+  - id: VER-PROP-001
+    type: verification
+    title: Property-based invariants — round-trip, rollback monotonicity, platform totality
+    status: verified
+    release: v0.13.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core --test properties layer_id_parse_display_round_trips
+        - run: cargo test -p varve-core --test properties rollback_is_monotone
+        - run: cargo test -p varve-core --test properties advance_never_lowers_the_mark
+        - run: cargo test -p varve-core --test properties platform_matching_is_total_and_wasm_is_universal
+    links:
+      - type: verifies
+        target: REQ-PROP-001
+
+  - id: VER-MATRIX-001
+    type: verification
+    title: MSRV build + multi-OS test matrix + coverage evidence
+    status: verified
+    release: v0.13.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo build --workspace --locked
+    links:
+      - type: verifies
+        target: REQ-MATRIX-001
+
+  - id: VER-ONBOARD-001
+    type: verification
+    title: Cold-start reaches verified install; status auto-works; error guides
+    status: verified
+    release: v0.13.1
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve install_auto_caches_a_layout_carried_line_status_so_status_just_works
+        - run: cargo test -p varve the_trust_root_error_points_to_the_realm_path
+    links:
+      - type: verifies
+        target: REQ-ONBOARD-001
+
+  - id: VER-STATUS-DIST-001
+    type: verification
+    title: Baseline line-status rides with the layer, is re-verified, and caches at install
+    status: verified
+    release: v0.14.0
+    fields:
+      method: automated-test
+      steps:
+        # A source carries the baseline; absence is not an error.
+        - run: cargo test -p varve-core a_source_carrying_a_baseline_line_status_yields_it
+        - run: cargo test -p varve-core a_source_without_a_line_status_is_not_an_error
+        # Registry: the role-annotated layer is discovered in the artifact manifest.
+        - run: cargo test -p varve-core a_role_annotated_layer_digest_is_found_and_absence_is_none
+        # The baseline is verified against the root and cached; an impostor's is refused.
+        - run: cargo test -p varve-core a_source_baseline_is_verified_and_cached_so_status_works_offline
+        - run: cargo test -p varve-core a_baseline_signed_by_an_impostor_is_refused_not_cached
+        - run: cargo test -p varve-core a_baseline_for_the_wrong_line_is_refused_not_miscached
+        # Layout: the baseline is recoverable and attachable by envelope.
+        - run: cargo test -p varve-core a_deposit_layouts_baseline_is_readable_without_naming_the_line
+        - run: cargo test -p varve-core attaching_by_envelope_derives_the_line_from_the_document
+        # End-to-end: deposit -> sign -> attach -> install -> status works offline.
+        - run: cargo test -p varve an_attached_baseline_makes_status_work_after_an_offline_install
+    links:
+      - type: verifies
+        target: REQ-STATUS-DIST-001
+
+  - id: VER-INDEP-001
+    type: verification
+    title: The recorded-review checker catches broken records and is advisory on absence
+    status: verified
+    release: v0.14.0
+    fields:
+      method: automated-test
+      steps:
+        # The checker's own oracle: a malformed or dangling record FAILS,
+        # a coherent one PASSES, a missing one only WARNS (exit 0).
+        - run: python3 tools/review-check.py --self-test
+    links:
+      - type: verifies
+        target: REQ-INDEP-001
+
+  - id: VER-REVIEW-v0.14.0
+    type: verification
+    title: v0.14.0 scope independently reviewed by a refute-framed clean-room reviewer
+    status: verified
+    release: v0.14.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        VERDICT pass. Reviewer: clean-room agent (general-purpose, fresh
+        context, refute-framed), 2026-08-11, over the feat/v0.14.0 tree.
+        The reviewer re-ran every suite itself — cargo test -p varve-core
+        (118 then 119 after the fix), cargo test -p varve --test cli (33),
+        review-check --self-test (exit 0) — and attempted five refutations:
+        (a) tampered/unsigned bytes cannot be cached — cache_baseline_from_source
+        DSSE-verifies against the root before caching, proven across registry,
+        layout, and --from-file paths; (b) the baseline is a SEPARATE signed
+        referrer, never folded into the layer's signed payload (layer digest
+        unchanged); (c) malformed/dangling review records are caught by rivet
+        validate; (d) a missing review is advisory/non-blocking, matching
+        DD-019; (e) reviewer==author passes coherence — a DISCLOSED limitation
+        (independence recorded/advisory at v0.x, enforcement at v1.0), not an
+        overclaim. One low-severity finding — the cache load path lacked the
+        wrong-line guard the --from-file path had — was FIXED before release
+        (LineStatusError::LineMismatch across all three cache paths, regression
+        test a_baseline_for_the_wrong_line_is_refused_not_miscached). The
+        recorded independence of DD-019, made a graph node instead of a
+        parallel file.
+    links:
+      - type: verifies
+        target: REQ-STATUS-DIST-001
+      - type: verifies
+        target: REQ-INDEP-001
+
+  - id: VER-KIND-001
+    type: verification
+    title: Payload kinds parse canonically, default to tool, and refuse unknowns
+    status: verified
+    release: v0.15.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core every_kind_round_trips_through_its_wire_string
+        - run: cargo test -p varve-core an_unknown_kind_is_refused_not_guessed
+        - run: cargo test -p varve-core the_default_kind_is_tool_for_back_compat
+        - run: cargo test -p varve-core an_entry_kind_defaults_to_tool_and_refuses_unknowns
+    links:
+      - type: verifies
+        target: REQ-KIND-001
+
+  - id: VER-CRATE-001
+    type: verification
+    title: A varve-exported crate builds offline through a real Cargo
+    status: verified
+    release: v0.15.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core index_paths_follow_cargos_layout
+        - run: cargo test -p varve-core an_index_line_carries_the_cksum_cargo_will_verify
+        - run: cargo test -p varve-core config_redirects_crates_io_to_the_local_registry
+        - run: cargo test -p varve-core materialising_writes_the_crate_and_a_matching_index_entry
+        # The honest oracle: a real `cargo build --offline` against the export.
+        - run: cargo test -p varve-core --test cargo_offline a_varve_exported_registry_resolves_a_real_graph_and_builds_it_correctly
+        # Full CLI path: deposit crate-kind -> install -> export-cargo.
+        - run: cargo test -p varve --test cli deposit_a_crate_kind_entry_and_export_a_cargo_registry
+    links:
+      - type: verifies
+        target: REQ-CRATE-001
+
+  - id: VER-RELVER-001
+    type: verification
+    title: The release pipeline gates on tag == Cargo.toml version
+    status: verified
+    release: v0.15.0
+    fields:
+      method: inspection
+      steps:
+        # The guard job exists and asserts the agreement before any build.
+        - run: grep -q "does not match Cargo.toml version" .github/workflows/release.yml
+        # Artifact-level twin (varve#38): the built binary's --version is asserted == tag.
+        - run: grep -q "built binary reports" .github/workflows/release.yml
+    links:
+      - type: verifies
+        target: REQ-RELVER-001
+
+  - id: VER-REVIEW-v0.15.0
+    type: verification
+    title: v0.15.0 scope independently reviewed by a refute-framed clean-room reviewer
+    status: verified
+    release: v0.15.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        VERDICT pass. Reviewer: clean-room agent (general-purpose, fresh
+        context, refute-framed), 2026-08-12, over the feat/v0.15.0 tree. It
+        re-ran every suite itself (127 lib, 1 cargo_offline, 34 CLI) AND ran an
+        independent tamper experiment — an --offline build against a registry
+        with a WRONG cksum, which Cargo rejected ("failed to verify the
+        checksum") — proving the offline oracle is non-vacuous. All five
+        refutations failed: (a) kind stamping leaves tool-layer digests
+        byte-identical and install/verify never consult kind; (b) the index
+        cksum is the signature-anchored sha256 and export_cargo verifies the
+        layer trust-first; (c) the offline build is real; (d) version-guard
+        gates the whole release via the needs-chain; (e) the index dedup does
+        not false-prefix-match adjacent versions. Two minor gaps were fixed in
+        response before release: the "unknown kind refused" claim was narrowed
+        to its true scope (deposit + kind-consuming exports; install is
+        kind-agnostic for forward-compat), and export_cargo now re-hashes the
+        on-disk bytes against the signed digest itself rather than relying on
+        Cargo's checksum as the only tie.
+    links:
+      - type: verifies
+        target: REQ-KIND-001
+      - type: verifies
+        target: REQ-CRATE-001
+      - type: verifies
+        target: REQ-RELVER-001
+
+  - id: VER-UPDATE-002
+    type: verification
+    title: A wrong version string degrades to a no-op instead of an update loop
+    status: verified
+    release: v0.15.1
+    fields:
+      method: automated-test
+      steps:
+        # The pure identity anchor.
+        - run: cargo test -p varve-core a_wrong_version_string_does_not_force_an_update_when_the_bytes_match
+        # The behavioral claim, end-to-end through a release-API double: a
+        # mis-reported version resolves to AlreadyCurrent (no loop), differing
+        # bytes to Available, and an impostor is refused before being offered.
+        - run: cargo test -p varve-core --test selfupdate_double a_mis_reported_version_converges_on_artifact_identity_not_a_loop
+        - run: cargo test -p varve-core --test selfupdate_double resolve_update_verifies_before_it_offers_an_impostor
+    links:
+      - type: verifies
+        target: REQ-UPDATE-002
+
+  - id: VER-REVIEW-v0.15.1
+    type: verification
+    title: v0.15.1 self-update fix independently reviewed — dissent raised, resolved, re-confirmed
+    status: verified
+    release: v0.15.1
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Two independent clean-room reviews (fresh context, refute-framed). The
+        FIRST found the implementation sound (all five refutations failed — the
+        loop breaks, trust is preserved, digests are sound, --check's root
+        requirement is disclosed, the release version-assertion is correct) but
+        DISSENTED on one substantive ground: REQ-UPDATE-002 is a handler-level
+        requirement, yet its only evidence was a pure unit test of the
+        `already_current` helper — the handler behaviour (loop-break,
+        verify-before-compare, --check no-op) had zero coverage. Resolved before
+        release: the decision was lifted into a core `resolve_update`
+        (UpToDate/AlreadyCurrent/Available), the handler reduced to a thin
+        wrapper, and behavioural tests added through the real release-API mock
+        server (signed archive, real ed25519 verify) — a mis-reported version
+        with identical on-disk bytes resolves to AlreadyCurrent (loop
+        terminates), and an impostor is refused before ever being offered. A
+        SECOND independent review re-ran the suites (6 self-update, 128 lib, 34
+        CLI) and confirmed VERDICT pass, DISSENT CLOSED — the identity decision
+        is genuinely exercised end-to-end. Residual, non-blocking: the handler's
+        printed-message glue and --check install-gate have no test at any level
+        (cli.rs carries no self-update case); the identity decision they wrap is
+        covered. Tracked as a follow-up hardening, not a release blocker.
+    links:
+      - type: verifies
+        target: REQ-UPDATE-002
+
+  - id: VER-VENDOR-001
+    type: verification
+    title: The cargo-vendor export builds offline through bare Cargo
+    status: verified
+    release: v0.16.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core vendoring_unpacks_the_crate_and_preserves_the_upstream_hash
+        - run: cargo test -p varve-core the_vendored_config_replaces_with_a_directory_source
+        - run: cargo test -p varve-core --test cargo_offline a_varve_vendored_crate_builds_offline_through_cargo
+        - run: cargo test -p varve --test cli deposit_a_crate_kind_entry_and_export_crates_vendor
+    links:
+      - type: verifies
+        target: REQ-VENDOR-001
+
+  - id: VER-CORROSION-001
+    type: verification
+    title: Corrosion builds a varve-vendored crate offline (real CMake build)
+    status: verified
+    release: v0.16.0
+    fields:
+      method: automated-test
+      steps:
+        # Gated (VARVE_CORROSION_TEST=1 + cmake) — a real CMake+Corrosion build
+        # compiling varve's export_vendor_dir output offline. Runs in the
+        # dedicated `corrosion` CI job; verified locally 2026-08-12.
+        - run: cargo test -p varve-core --test corrosion_offline corrosion_builds_a_varve_vendored_crate_offline
+    links:
+      - type: verifies
+        target: REQ-CORROSION-001
+
+  - id: VER-BRIDGE-001
+    type: verification
+    title: The vendored export preserves the upstream integrity anchor
+    status: verified
+    release: v0.16.0
+    fields:
+      method: automated-test
+      steps:
+        # .cargo-checksum.json package == the sha256 varve signs (upstream hash preserved).
+        - run: cargo test -p varve-core vendoring_unpacks_the_crate_and_preserves_the_upstream_hash
+    links:
+      - type: verifies
+        target: REQ-BRIDGE-001
+
+  - id: VER-REVIEW-v0.16.0
+    type: verification
+    title: v0.16.0 independently reviewed — CLI overclaim dissent raised, resolved, re-confirmed
+    status: verified
+    release: v0.16.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Two independent clean-room reviews (fresh context, refute-framed). The
+        FIRST found the vendor/Corrosion engineering sound — all refutations
+        failed (correct cargo-vendor tree, real offline Cargo build, real
+        CMake+Corrosion build compiling varve's own export_vendor_dir output,
+        upstream sha256 anchor preserved, trust-first collection) — but
+        DISSENTED on honesty: two USER-FACING CLI strings (the ExportCratesVendor
+        --help doc and the export_crates_vendor success message) still claimed
+        rules_rust/crates_vendor "consume the bare vendor tree hermetically",
+        the exact capability the v0.16.0 Bazel spike disproved
+        ("Failed to get crate index config"). The library comments, README, and
+        rivet were already honest; only the CLI surface overclaimed. Resolved
+        before release: both strings reworded to name bare Cargo + Corrosion as
+        the proven consumers and defer rules_rust to REQ-VENDOR-002; a dedicated
+        real-.crate CLI test for export-crates-vendor added and VER-VENDOR-001
+        pointed at it; REQ-BRIDGE-001 narrowed to the proven .crate sha256
+        anchor. A SECOND independent review confirmed VERDICT pass, DISSENT
+        CLOSED — zero residual rules_rust overclaim anywhere, 185 tests pass,
+        clippy clean. The Bazel spike + this review together PREVENTED shipping
+        a rules_rust capability claim that does not yet hold.
+    links:
+      - type: verifies
+        target: REQ-VENDOR-001
+      - type: verifies
+        target: REQ-CORROSION-001
+      - type: verifies
+        target: REQ-BRIDGE-001
+
+  - id: VER-VENDOR-002
+    type: verification
+    title: The varve distdir holds the verified crate bytes keyed for Bazel by sha256
+    status: verified
+    release: v0.17.0
+    fields:
+      method: automated-test
+      steps:
+        # varve's exported .crate bytes ARE present and their sha256 == the
+        # crate_universe pin (the --distdir join key). The end-to-end Bazel
+        # --distdir consumption was manually confirmed; an automated
+        # zero-network gate is a tracked follow-up (see REQ-VENDOR-002 scope).
+        - run: cargo test -p varve-core a_distdir_holds_the_verified_crate_bytes_keyed_for_bazel
+    links:
+      - type: verifies
+        target: REQ-VENDOR-002
+
+  - id: VER-TRACEPACK-001
+    type: verification
+    title: The release traceability exports (ReqIF + HTML) produce valid evidence
+    status: verified
+    release: v0.17.0
+    fields:
+      method: automated-test
+      steps:
+        # The oracle: rivet export --format reqif (well-formed, >=10 spec-objects)
+        # + html both succeed; run in CI and by the release step it mirrors.
+        - run: python3 tools/tracepack-check.py
+        # The release actually packs the three evidence assets.
+        - run: grep -q "traceability.reqif" .github/workflows/release.yml
+        - run: grep -q "traceability-html.tar.gz" .github/workflows/release.yml
+        - run: grep -q "rivet-artifacts.tar.gz" .github/workflows/release.yml
+    links:
+      - type: verifies
+        target: REQ-TRACEPACK-001
+
+  - id: VER-REVIEW-v0.17.0
+    type: verification
+    title: v0.17.0 independently reviewed — pass, no overclaim of the offline property
+    status: verified
+    release: v0.17.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-12,
+        over both v0.17.0 requirements. VERDICT pass, no dissent. Re-ran the
+        suites (131 lib, 186 workspace) and tools/tracepack-check.py (real
+        ReqIF+HTML export). Confirmed: (a) export_distdir writes verified bytes
+        verbatim and collect_verified_crates is trust-first (verify_installed +
+        re-hash vs signed digest), so cksum == signed digest == sha256(bytes) —
+        the crate_universe join key; (b) NO overclaim of a zero-network bazel
+        build anywhere — every offline assertion is either Bazel's documented
+        `--distdir` behavior under a stated precondition or explicitly labeled
+        manual/follow-up in REQ-VENDOR-002 + VER-VENDOR-002; (c) tracepack-check
+        genuinely validates (ReqIF well-formed + >=10 spec-objects, HTML index)
+        and is not vacuous in CI (the rivet job guarantees rivet); (d) the three
+        traceability assets are staged BEFORE SHA256SUMS so the cosign signature
+        covers them, and the rivet fetch is cosign-verified, not TOFU. Three
+        immaterial nits noted (join split across two layers; substring floor;
+        skip-safe only because CI guarantees rivet) — none a defect.
+    links:
+      - type: verifies
+        target: REQ-VENDOR-002
+      - type: verifies
+        target: REQ-TRACEPACK-001
+
+  - id: VER-REVIEW-v0.17.1
+    type: verification
+    title: v0.17.1 independently reviewed — pass; --format json overclaim fixed pre-release
+    status: verified
+    release: v0.17.1
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-13,
+        of `varve docs` (REQ-DOCS-001). VERDICT pass; all five claims re-derived
+        from evidence and CONFIRMED. Confirmed: (a) coverage is genuinely
+        mechanical — coverage_gaps walks the live clap tree (get_subcommands),
+        so a new subcommand without a topic makes `docs check --coverage
+        --strict` exit non-zero AND fails the unit test; (b) docs are embedded
+        via include_str! and print real prose offline; --grep searches bodies;
+        (c) the strict check is a real CI gate (ci.yml rust job, both OSes); (d)
+        REQ-DOCS-001 → VER-DOCS-001 is coherent, rivet validate + check
+        verification-evidence pass, all named tests exist. Full local gate
+        re-run with verified exit codes (fmt/clippy/test all 0). The reviewer
+        found ONE real overclaim: REQ-DOCS-001 promised `--format json` that did
+        not exist. FIXED before release — `--format json` implemented (TDD:
+        render_json + two tests, list and single-topic), wired into the CLI,
+        exercised end-to-end; and the "walks the clap subcommand tree" wording
+        was narrowed to "top-level subcommands" to match the (non-recursive)
+        implementation. Two immaterial nits noted (body-length floor guards
+        emptiness not quality; nested `shim install` documented in its parent
+        topic, not separately) — neither a defect.
+    links:
+      - type: verifies
+        target: REQ-DOCS-001
+
+  - id: VER-DOCS-001
+    type: verification
+    title: Docs are embedded, queryable, and every subcommand is a covered topic
+    status: verified
+    release: v0.17.1
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve every_cli_subcommand_has_a_documented_topic
+        - run: cargo test -p varve topics_are_findable_and_greppable
+        - run: cargo test -p varve no_topic_body_is_empty
+        # `--format json` makes the docs machine-queryable (rivet-docs parity).
+        - run: cargo test -p varve topic_list_renders_as_machine_readable_json
+        - run: cargo test -p varve single_topic_renders_as_json_with_body
+        # The user-facing CLI gate mirrors the invariant in CI.
+        - run: grep -q "docs check --coverage --strict" .github/workflows/ci.yml
+    links:
+      - type: verifies
+        target: REQ-DOCS-001
+
+  - id: VER-EXPORT-SYNC-001
+    type: verification
+    title: Exports are stamped and verify hard-fails on pin/export drift
+    status: verified
+    release: v0.18.0
+    fields:
+      method: automated-test
+      steps:
+        # Core: stamp round-trips; absent and malformed stamps are failures;
+        # the drift verdict is current iff the digests match.
+        - run: cargo test -p varve-core write_then_read_round_trips
+        - run: cargo test -p varve-core read_missing_stamp_is_missing_error
+        - run: cargo test -p varve-core read_malformed_stamp_is_malformed_error
+        - run: cargo test -p varve-core status_is_current_when_digests_match
+        - run: cargo test -p varve-core status_is_stale_when_digests_differ
+        # CLI gate: a fresh stamp passes, a stale stamp hard-fails, a missing
+        # stamp hard-fails — the loud CI gate the requirement promises.
+        - run: cargo test -p varve --test cli verify_export_passes_when_the_stamp_matches_the_pin
+        - run: cargo test -p varve --test cli verify_export_hard_fails_on_a_stale_stamp
+        - run: cargo test -p varve --test cli verify_export_hard_fails_when_the_stamp_is_missing
+        - run: cargo test -p varve --test cli verify_export_hard_fails_on_a_malformed_stamp
+    links:
+      - type: verifies
+        target: REQ-EXPORT-SYNC-001
+
+  - id: VER-REVIEW-v0.18.0
+    type: verification
+    title: v0.18.0 independently reviewed — pass, anti-stale export gate genuinely bites
+    status: verified
+    release: v0.18.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-13,
+        of anti-stale exports (REQ-EXPORT-SYNC-001) at HEAD 64236f1. VERDICT pass,
+        no dissent. Full gate re-run with captured exit codes (fmt/clippy/test 0;
+        rivet validate PASS; verification-evidence 126/126). Confirmed: (1) the
+        stamp's manifest_digest IS the sha256 of the DSSE-signed layer manifest
+        (InstalledLayer.digest, proven signed by verify_installed's envelope
+        check + byte-for-byte payload==layer.json), written from the SAME verified
+        entry the export used; all four handlers stamp; (2) export_target verifies
+        the layer on BOTH the explicit-layer and pin-default branches — no
+        unverified export path; (3) the gate hard-fails on stale, missing, AND
+        malformed stamps (read_stamp? propagates; Stale bail!s), the fresh test
+        learns the REAL installed digest from verify's stdout (not hardcoded) so
+        it is not a false pass; (4) the collect_verified_crates refactor kept the
+        per-blob re-hash-against-signed-digest and the layer is verified exactly
+        once, not zero times. Three findings, all below dissent and none a defect
+        of this feature: a pre-existing store-integrity shortcut (digest read from
+        the dir name, not recomputed — invariant holds via lay_down); malformed
+        stamp had only core coverage (CLOSED post-review with a CLI test); and a
+        non-blocking rivet WARN (no satisfies link) that does not affect the
+        earned verified status.
+    links:
+      - type: verifies
+        target: REQ-EXPORT-SYNC-001
+
+  - id: VER-CRATENAME-001
+    type: verification
+    title: Unrepresentable crate names and versions fail closed at every adapter
+    status: verified
+    release: v0.18.1
+    fields:
+      method: automated-test
+      steps:
+        # The reproduced panic (café-utils / 日本語 / ααα) is now an error, and
+        # index_path itself is total — the test calls it on each bad name.
+        - run: cargo test -p varve-core a_non_ascii_crate_name_is_an_error_not_a_panic
+        # A name/version that would corrupt the index JSON is refused.
+        - run: cargo test -p varve-core a_name_or_version_that_would_corrupt_the_index_json_is_refused
+        # All three export adapters fail closed on the same input.
+        - run: cargo test -p varve-core export_refuses_an_unrepresentable_crate_name
+        # The untar path is depositor-controlled bytes: pin that neither a
+        # `..` entry nor a symlink-then-write-through can escape the vendor dir.
+        - run: cargo test -p varve-core vendoring_never_writes_outside_the_vendor_directory
+    links:
+      - type: verifies
+        target: REQ-CRATENAME-001
+
+  - id: VER-SHIM-002
+    type: verification
+    title: The shim is varve itself; argv[0] dispatch fails closed
+    status: verified
+    release: v0.19.0
+    fields:
+      method: automated-test
+      steps:
+        # The shim must not be a script, and on unix must be a symlink to varve
+        # (so self-update cannot leave it stale).
+        - run: cargo test -p varve --test cli a_shim_is_varve_itself_not_a_shell_script
+        # The pre-existing end-to-end dispatch test still passes through the NEW
+        # mechanism: same shim, two projects, each resolving its own pin, and a
+        # pinless directory failing closed. This is the regression guard.
+        - run: cargo test -p varve --test cli shims_resolve_per_invocation_so_switching_projects_is_cd
+        # argv[0] is caller-controlled: validated, never trusted as a path.
+        - run: cargo test -p varve varve_invoked_as_itself_is_not_a_dispatch
+        - run: cargo test -p varve a_shim_name_is_the_file_name_only
+        - run: cargo test -p varve a_hostile_argv0_cannot_smuggle_a_path
+    links:
+      - type: verifies
+        target: REQ-SHIM-002
+
+  - id: VER-PERF-001
+    type: verification
+    title: Dispatch cost is measured, and the complexity claim is the measurement
+    status: verified
+    release: v0.19.0
+    fields:
+      method: automated-test
+      baseline: >
+        criterion, release build, 2026-08-13. resolve/digest is FLAT across a
+        66x change in store size — 37.0 us (3 layers), 37.1 us (50), 37.2 us
+        (200) — while resolve/name_only grows linearly: 73.8 us (3), 646 us
+        (50), 2.51 ms (200), i.e. 68x slower than the digest pin at 200 layers.
+        This is the evidence for the documented claim that a digest-carrying pin
+        resolves in constant time and a name-only pin is linear in installed
+        layers; `concept-pins` tells users to pin the digest because of it.
+        Separately, removing the /bin/sh hop (REQ-SHIM-002) takes ~2.4 ms per
+        dispatch off the interactive path, measured over 200 execs.
+      steps:
+        # The benchmark exists and runs (--test mode executes each once).
+        - run: cargo bench -p varve-core --bench resolve -- --test
+    links:
+      - type: verifies
+        target: REQ-PERF-001
+
+  - id: VER-PIN-002
+    type: verification
+    title: A pin naming a path instead of a tool is refused
+    status: verified
+    release: v0.19.0
+    fields:
+      method: automated-test
+      steps:
+        # Absolute, traversal, nested, dot and empty names are all refused;
+        # ordinary names still parse.
+        - run: cargo test -p varve-core rejects_a_tool_name_that_is_a_path
+    links:
+      - type: verifies
+        target: REQ-PIN-002
+
+  - id: VER-REVIEW-v0.19.0
+    type: verification
+    title: v0.19.0 independently reviewed — DISSENT, then closed; caught a real regression
+    status: verified
+    release: v0.19.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-13,
+        of the argv[0] shim (REQ-SHIM-002) and the dispatch benchmark
+        (REQ-PERF-001) at HEAD 0297d1a. VERDICT: DISSENT — and it was right on
+        both counts. Confirmed by the reviewer: no shell remains anywhere on the
+        dispatch path (zero shebangs generated; run_tool is Command::new + exec,
+        never re-entering `varve run`); the pre-existing end-to-end test really
+        does gate the NEW mechanism (argv[0] = .../shims/probe), and would fail
+        if dispatch regressed; argv[0] could NOT be broken after a determined
+        attempt (the real boundary is exact string equality against names read
+        from the layer's bin/, so the derived name never reaches a Path::join);
+        the benchmark numbers reproduced within noise (digest flat at
+        36.9/37.2/37.1 us; name_only 73.2 us/647 us/2.49 ms) and the setup
+        measures the divergence it claims. The reviewer independently measured
+        the shell removal at ~4.7 ms/dispatch — our ~2.4 ms claim was
+        CONSERVATIVE, not inflated.
+        DISSENT rested on two real defects, both now closed. (1) REGRESSION
+        INTRODUCED BY THIS CHANGE: the dispatch path used `to_string_lossy`, so
+        a non-UTF-8 argument was SILENTLY corrupted where the old script had
+        hard-errored — silent data loss in a tool whose premise is exactness.
+        Fixed losslessly: OsString end-to-end on both the dispatch and `varve
+        run` paths, with a test asserting byte-for-byte passthrough of
+        b"bad\xff\xfename". (2) FALSE CLAIM SHIPPED IN DOCS: "shims do not go
+        stale when varve updates itself" is false on Windows (a shim is a copy)
+        and has a demonstrated ZERO differential on unix — the reviewer showed
+        the old script survived an in-place self-update identically. The claim
+        was DELETED rather than scoped, and the Windows consequence documented.
+        Two further findings were adopted: the renamed-binary sharp edge (a copy
+        called `myvarve` loses the CLI entirely — rustup behaves the same, but
+        it was undocumented) is now stated in `varve docs shim`; and a
+        PRE-EXISTING seam, `tools = ["/usr/bin/id"]` in a pin resolving outside
+        the verified layer via Path::join, contradicting the documented
+        no-fallback guarantee, is fixed as REQ-PIN-002. One finding is deferred
+        with an issue: `varve env` still interpolates the store root into a live
+        shell string (same class, off the dispatch path, needs a hostile
+        VARVE_ROOT).
+    links:
+      - type: verifies
+        target: REQ-SHIM-002
+      - type: verifies
+        target: REQ-PERF-001
+      - type: verifies
+        target: REQ-PIN-002
+
+  - id: VER-PROOF-001
+    type: verification
+    title: SMT obligations discharged with certificates, negative controls included
+    status: verified
+    release: v0.20.0
+    fields:
+      method: automated-test
+      baseline: >
+        ordeal 0.14.0, 2026-08-13. rollback-advance-monotone: unsat with a
+        20092-byte checker-validated LRAT certificate. Its negative control
+        (min() instead of max()): sat, model p=0 m=0x8000000000000000 — the gate
+        demonstrably goes red. rollback-verdict-total: unsat.
+        epoch-days-leap-mutant-is-distinguishable: sat, model y=0x2000 (8192),
+        which became the 8192-02-29 regression test.
+      steps:
+        - run: python3 tools/proof-check.py
+        - run: cargo test -p varve-core the_leap_rule_holds_at_the_year_the_solver_found
+        # The boundary obligation's witness (c == h) is exactly this test.
+        - run: cargo test -p varve-core an_equal_counter_reinstalls_cleanly
+    links:
+      - type: verifies
+        target: REQ-PROOF-001
+
+  - id: VER-MUTATE-002
+    type: verification
+    title: The trust-decision modules are in the required mutation gate
+    status: verified
+    release: v0.20.0
+    fields:
+      method: automated-test
+      baseline: >
+        cargo-mutants 27.0.0, 2026-08-13. Adding resolve/install/selfverify/
+        reverify/exportstamp found 2 survivors, both the same NotFound-guard
+        defect; after the two tests below, re-running reverify.rs +
+        exportstamp.rs gave 15 caught, 0 missed, 2 unviable.
+      steps:
+        - run: cargo test -p varve-core an_unreadable_envelope_is_an_io_error_not_a_missing_one
+        - run: cargo test -p varve-core an_unreadable_stamp_is_an_io_error_not_a_missing_one
+        - run: grep -q "selfverify.rs" .github/workflows/ci.yml
+    links:
+      - type: verifies
+        target: REQ-MUTATE-002
+
+  - id: VER-SBOM-001
+    type: verification
+    title: The SBOM transcribes the signed manifest, deterministically and self-bound
+    status: verified
+    release: v0.21.0
+    fields:
+      method: automated-test
+      baseline: >
+        Exercised against the real pulseengine rolling layer 2026.08.2
+        (2026-08-13): 35 components, every one carrying a version and a SHA-256,
+        upstream vcs/distribution references transcribed from the depositor's
+        source annotations, and two consecutive emissions byte-identical
+        (`cmp` clean). The document records manifest digest
+        sha256:83a699600dea..., counter 3, channel rolling. Emission for an
+        unverifiable layer fails closed with the trust-root error.
+      steps:
+        - run: cargo test -p varve-core every_component_is_transcribed_from_the_signed_manifest
+        - run: cargo test -p varve-core emission_is_deterministic
+        - run: cargo test -p varve-core the_document_binds_itself_to_the_layer_it_describes
+        - run: cargo test -p varve-core per_platform_entries_are_distinguishable_not_duplicates
+        - run: cargo test -p varve-core an_unknown_format_is_refused_not_guessed
+        # THE invariant: no signed entry may ever be dropped. Clean-room review
+        # refuted the first version here (3 signed entries -> 1 component).
+        - run: cargo test -p varve-core no_signed_entry_is_ever_dropped_from_the_document
+        # REQ-SBOM-001 says "shall fail closed"; this tests it at the CLI.
+        - run: cargo test -p varve --test cli sbom_fails_closed_on_a_layer_it_cannot_verify
+    links:
+      - type: verifies
+        target: REQ-SBOM-001
+
+  - id: VER-REVIEW-v0.21.0
+    type: verification
+    title: v0.21.0 independently reviewed — DISSENT on silent omission, then closed
+    status: verified
+    release: v0.21.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-13,
+        of `varve sbom` (REQ-SBOM-001) at HEAD 72c05a8. VERDICT: DISSENT — and
+        it was right, on the one claim that mattered most. Confirmed by the
+        reviewer: nothing is read from disk but the verified layer.json (sbom.rs
+        imports no std::fs); the command fails closed on BOTH the explicit
+        --layer and pin-default paths (empirically: no trust root, unknown
+        layer, and a TAMPERED layer.json each exit 1 with a 0-byte output);
+        emission is deterministic in code and by `cmp`; and the document is
+        SCHEMA-VALID against the real CycloneDX 1.6 schema fetched from
+        CycloneDX/specification (0 errors, with potent negative controls — a
+        bad type enum, a bad serialNumber and a missing bomFormat each produced
+        exactly 1 error).
+        DISSENT rested on a REFUTED headline claim. `component()` returned
+        Option and was filter_map'd, so a signed entry with no tool annotation
+        (which foreign-platform entries legitimately lack) or with a payload
+        kind this build does not recognise was DROPPED SILENTLY — proven with
+        three signed entries emitting one component, exit 0. For a document
+        sold as "a scanner can miss a component; a transcription cannot", that
+        is the defect that matters. FIXED: component() is now infallible —
+        whatever is unknown is LABELLED (kind.unrecognised, unnamed+digest
+        identity), never dropped — and `map` replaces `filter_map`, with a test
+        asserting component count == signed entry count.
+        The reviewer also found that a JUSTIFYING COMMENT WAS FALSE: sbom.rs
+        said "kind() already refuses it before we are called", and kind.rs
+        claimed install refuses unknown kinds. Neither is true — kind() is not
+        consulted by install or verify at all. Both comments corrected to state
+        reality; the behavioural question is deferred to varve#49 rather than
+        changed mid-release. Three further findings adopted: the CLI reported
+        the INPUT entry count rather than the emitted component count (it could
+        disagree with the file just written); REQ-SBOM-001 said "shall fail
+        closed" with no test, now covered at the CLI boundary; and the serial
+        number parsed as UUID "version 11", now a conformant RFC 9562 v8. Two
+        quality findings adopted for the CRA use the docs invoke: purl is now
+        emitted (pkg:github/owner/name@version — what lets a consumer match a
+        component to a CVE feed) and externalReferences are now followable URLs
+        rather than a bare `owner/name` slug.
+    links:
+      - type: verifies
+        target: REQ-SBOM-001
+
+  - id: VER-REVIEW-v0.18.1
+    type: verification
+    title: v0.18.1 independently reviewed (retroactive) — pass
+    status: verified
+    release: v0.18.1
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Retroactive independent clean-room review, 2026-08-13, commissioned
+        because the project's own review-check flagged that v0.18.1 had shipped
+        with a verified requirement and no recorded verdict — the advisory
+        mechanism working as intended. VERDICT pass. Confirmed: `index_path` is
+        now total (all slicing is chars().skip().take() on the same lowercased
+        string) and the reviewer could construct no panicking input, including
+        count-changing lowercase forms and astral-plane characters; validation
+        runs as the FIRST statement of all three export adapters, before any
+        directory or file is created, so a bad name cannot reach the unescaped
+        index_line; and the untar-escape test is NOT vacuous — it builds a real
+        gzip tar with a symlink to an absolute outside path plus a write through
+        it, varve has no guard of its own, and tar 0.4.46's protection is
+        precisely what the test pins. One finding adopted: `cksum` was the third
+        string interpolated into the index JSON without validation — unreachable
+        via the CLI (which re-hashes bytes against the signed digest first) but
+        reachable through the public library API. Now validated as 64 hex
+        digits, and the test fixtures corrected from unrealistic short values to
+        real-length digests.
+    links:
+      - type: verifies
+        target: REQ-CRATENAME-001
+
+  - id: VER-REVIEW-v0.20.0
+    type: verification
+    title: v0.20.0 independently reviewed (retroactive) — DISSENT on a tautological proof
+    status: verified
+    release: v0.20.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Retroactive independent clean-room review, 2026-08-13. VERDICT DISSENT,
+        and it was right twice — both times against claims varve itself made.
+        REQ-MUTATE-002 CONFIRMED outright: the five trust-decision modules are
+        in the gate, and the reviewer re-ran cargo-mutants over reverify.rs +
+        exportstamp.rs to get 15 caught / 2 unviable / 0 missed, confirming the
+        two NotFound-guard tests genuinely kill their mutants. The proof gate's
+        MECHANICS were confirmed by experiment: removing both negative controls
+        makes proof-check exit 1 ("no negative control"), so that requirement is
+        real and not decorative.
+        DISSENT 1 — TAUTOLOGY. `rollback-verdict-total.smt2` asserted
+        `c >= h AND c < h`, a bare contradiction that is unsat whatever
+        rollback.rs does. No mutation of `check` could make it sat, and it had
+        no negative-control twin. It was theatre inflating the obligation count
+        — precisely the hollow-gate failure this suite exists to prevent.
+        REPLACED with `rollback-boundary-mutant-is-distinguishable.smt2`, which
+        asks where `<` and `<=` disagree; it returns c == h, the re-install
+        case, and `an_equal_counter_reinstalls_cleanly` is exactly that test.
+        DISSENT 2 — UNSUPPORTED PROVENANCE. The leap proof's comment claimed
+        three 2026-08-08 cargo-mutants survivors were `||`->`&&` in the leap
+        predicate at rollback.rs:136. The reviewer checked git history: the leap
+        predicate has never been at line 136 (it is at 145), and the commit
+        introducing it also introduced the 2000-02-29 anchor that already kills
+        that mutant; the survivors killed that day were the OTHER `||`s, per
+        commit cc08bf1 "kill epoch_days validation-guard mutants". The claim had
+        been asserted from a summary rather than verified against history. The
+        comment now carries the correction as the record, and states honestly
+        that the 8192 case is defence in depth rather than the only killer —
+        though the reviewer did confirm mechanically that mutating the predicate
+        makes that test fail. Two minor findings adopted: the chmod-000 tests
+        would fail (loudly, not silently) as root, and now skip after testing
+        their own premise portably; and the cksum gap noted under VER-REVIEW-v0.18.1.
+    links:
+      - type: verifies
+        target: REQ-PROOF-001
+      - type: verifies
+        target: REQ-MUTATE-002
+
+  - id: VER-ATTEST-001
+    type: verification
+    title: An attestation binds to its layer and its bytes, or it is refused
+    status: verified
+    release: v0.22.0
+    fields:
+      method: automated-test
+      steps:
+        # The statement names the bytes and the layer, and agrees with both.
+        - run: cargo test -p varve-core a_statement_names_the_bytes_and_the_layer
+        # The two fail-closed bindings.
+        - run: cargo test -p varve-core swapped_bytes_are_refused
+        - run: cargo test -p varve-core an_attestation_for_another_layer_is_refused
+        # Renamed after review: the old name collided with a test in kind.rs,
+        # so this evidence step passed via a homonym and could be deleted
+        # without the gate noticing.
+        - run: cargo test -p varve-core an_unknown_attestation_kind_is_refused_not_guessed
+        # A statement whose own name and digest disagree is refused, the rule
+        # `resolve` applies to pins.
+        - run: cargo test -p varve-core a_statement_whose_own_two_identities_disagree_is_refused
+        # Signature round-trip, and the wrong root cannot vouch.
+        - run: cargo test -p varve-core a_statement_round_trips_through_a_signature
+        - run: cargo test -p varve-core the_wrong_root_cannot_vouch_for_an_association
+        # End to end at the CLI: sbom -> sign-attestation -> check-attestation,
+        # with tampered bytes, a wrong root and an unknown kind all refused.
+        - run: cargo test -p varve --test cli an_attestation_binds_to_its_layer_and_nothing_else
+        # The checker re-verifies the LAYER, not just the statement: review
+        # found it reporting OK over a tampered binary and a forged layer.json.
+        - run: cargo test -p varve --test cli check_attestation_refuses_a_tampered_layer
+    links:
+      - type: verifies
+        target: REQ-ATTEST-001
+
+  - id: VER-REVIEW-v0.22.0
+    type: verification
+    title: v0.22.0 independently reviewed — DISSENT on a consumer-side trust hole, then closed
+    status: verified
+    release: v0.22.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-13,
+        of REQ-ATTEST-001 at HEAD 56c9aa1. VERDICT DISSENT — the fifth
+        consecutive review to dissent and the fifth to be right. Confirmed by
+        the reviewer: the signed payload asserts nothing about the producer's
+        claim and `producer` is copied uninterpreted, so the "statement ABOUT,
+        never OF" split is real in what actually gets signed; all four payload
+        types are distinct and type confusion was refuted in BOTH directions by
+        probe (a layer manifest and a line-status each rejected as a statement,
+        and a statement rejected by the layer verifier); the signer is
+        trust-first (a tampered tool binary made sign-attestation exit 1).
+        DISSENT 1, the serious one: `check-attestation` verified the STATEMENT
+        but never the LAYER. The reviewer reproduced "attestation OK", exit 0,
+        over both a tampered tool binary and a forged layer.json — states where
+        `varve verify` exits 1 — because InstalledLayer.digest is the store
+        DIRECTORY NAME and .layer is parsed from the possibly-tampered
+        layer.json, neither authenticated until the retained envelope is
+        re-checked. Every sibling command routes through export_target; this
+        one, the command a disconnected consumer runs, did not. FIXED, with a
+        regression test asserting it now reaches the same verdict as `verify`.
+        DISSENT 2: REQ-ATTEST-001 was flipped to `verified` with two of its own
+        shall-clauses unimplemented — the text still promised OCI referrer
+        transport and `varve verify` reporting, neither of which shipped — in
+        the very commit that honestly retargeted REQ-INDEXAUTH-001. Exactly the
+        overclaim varve's claim-check discipline exists to prevent. FIXED by
+        narrowing REQ-ATTEST-001 to the binding half that shipped and splitting
+        the transport half into REQ-ATTEST-002 at v0.23.0.
+        Three further findings adopted: both commands printed the ATTESTATION
+        digest in the slot the codebase reserves for the LAYER manifest digest,
+        never showing the actual join key (now both are labelled explicitly);
+        `check` never compared the statement's layer NAME against anything
+        while the CLI printed it as fact, so a mis-issued statement could make
+        varve print a confident, signed-looking, wrong identity (now refused,
+        the same rule `resolve` applies to pins); and VER-ATTEST-001's kind step
+        was VACUOUS — the test name collided with one in kind.rs, so the
+        evidence passed via a homonym and could be deleted without the gate
+        noticing (renamed). DD-021 now records the "statement ABOUT, never OF"
+        decision, which had existed only in a doc comment.
+    links:
+      - type: verifies
+        target: REQ-ATTEST-001
+
+  - id: VER-COMPOSE-001
+    type: verification
+    title: One pin resolves a composition; ambiguity, cycles and missing includes fail closed
+    status: verified
+    release: v0.23.0
+    fields:
+      method: automated-test
+      steps:
+        # The consumer's case end to end: one pin, tools from both layers.
+        - run: cargo test -p varve --test cli one_pin_resolves_tools_from_a_composed_layer
+        # varve refuses to choose between two layers exposing one tool.
+        - run: cargo test -p varve --test cli a_tool_in_two_composed_layers_refuses_to_resolve
+        # Transitive fetch is out of scope, so a missing include names itself.
+        - run: cargo test -p varve --test cli a_composed_layer_that_is_not_installed_names_itself
+        # The security clause: install ACCEPTS a composed layer, and verify
+        # REFUSES one whose included layer is unsigned. Review demonstrated the
+        # old behaviour — unsigned include dispatched, verify exited 0.
+        - run: cargo test -p varve --test cli verify_refuses_a_composition_whose_included_layer_is_unsigned
+        # A diamond (two layers sharing a base) is walked once, not misreported
+        # as a cycle — the most ordinary composition shape there is.
+        - run: cargo test -p varve-core a_diamond_is_walked_once_not_refused_as_a_cycle
+        # Depth is bounded, so "refused" never means "followed until abort".
+        - run: cargo test -p varve-core depth_is_bounded_so_a_long_chain_cannot_exhaust_the_walker
+        # UNIT-level guards on composition. The mutation gate kills with
+        # `--workspace --lib`, so the CLI tests above cannot protect this code:
+        # `compose_tools -> Ok(vec![])` survived until these existed.
+        - run: cargo test -p varve-core resolve_returns_the_composed_layers_tools
+        - run: cargo test -p varve-core resolve_refuses_a_tool_exposed_by_both_layers
+        - run: cargo test -p varve-core a_pin_restricting_tools_also_restricts_the_composition
+        # Core: union, ambiguity, cycles, uninstalled includes, and back-compat
+        # for every layer that composes nothing.
+        - run: cargo test -p varve-core a_composition_exposes_both_layers_tools
+        - run: cargo test -p varve-core a_tool_in_two_layers_is_an_error_not_a_silent_choice
+        - run: cargo test -p varve-core a_cycle_is_refused_not_followed
+        - run: cargo test -p varve-core an_uninstalled_include_is_skipped_for_the_caller_to_report
+        - run: cargo test -p varve-core a_layer_without_includes_composes_to_itself
+    links:
+      - type: verifies
+        target: REQ-COMPOSE-001
+
+  - id: VER-LOCKPIN-001
+    type: verification
+    title: A pinned crate disagreeing with the lockfile fails verify
+    status: verified
+    release: v0.23.0
+    fields:
+      method: automated-test
+      steps:
+        - run: cargo test -p varve-core a_lockfile_parses_to_name_version_and_checksum
+        # The consumer's reported drift (layer pins 0.58.0, lock resolves 0.41.0).
+        - run: cargo test -p varve-core the_reported_drift_is_caught
+        - run: cargo test -p varve-core same_version_different_bytes_is_the_more_serious_case
+        # Agreement is silent, and unpinned packages are not varve's business.
+        - run: cargo test -p varve-core agreement_is_silent_and_unpinned_packages_are_not_our_business
+        # Failing OPEN on an unreadable lockfile would be the worst answer.
+        - run: cargo test -p varve-core a_malformed_lockfile_is_an_error_not_a_silent_pass
+        - run: cargo test -p varve --test cli verify_lockfile_fails_when_a_pinned_crate_disagrees
+        # The gate must not pass on a file it never opened. A docs audit found
+        # it exiting 0 on a nonexistent path, naming it in the output.
+        - run: cargo test -p varve --test cli verify_lockfile_refuses_a_file_it_could_not_read
+    links:
+      - type: verifies
+        target: REQ-LOCKPIN-001
+
+  - id: VER-REVIEW-v0.23.0
+    type: verification
+    title: v0.23.0 independently reviewed — DISSENT (feature unreachable), fixed forward, re-verified
+    status: verified
+    release: v0.23.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-14,
+        of REQ-COMPOSE-001 and REQ-LOCKPIN-001 at HEAD 0db9f84. VERDICT DISSENT
+        — the sixth consecutive review to dissent and the sixth to be right, and
+        the most serious to date. The requirement claimed composition was
+        EXPRESSED, RESOLVED and VERIFIED; only resolution existed. `deposit`
+        could not emit an include, `install` REJECTED one (every entry required
+        eu.pulseengine.tool, so a real composed layer could not be installed at
+        all — every shipped test bypassed install via store.lay_down), and
+        `verify` checked only the root, so an entirely UNSIGNED included layer
+        dispatched its tools while verify exited 0. The realm clause — "verified
+        against ITS OWN realm's trust root" — was parsed into an error string
+        and otherwise unimplemented. This was the SECOND consecutive release
+        marking a requirement `verified` with a shall-clause unbuilt.
+        Three further defects: cycle detection used a global seen-set, so a
+        DIAMOND (two layers sharing a base — the most ordinary composition
+        shape) was refused with a message falsely claiming the layer "includes
+        itself"; the lockfile gate mapped EVERY collect_verified_crates error to
+        "pins no crates", and since that function does not platform-filter, one
+        foreign-platform crate entry silently disabled the gate over a real
+        disagreement; and the CLI test named
+        `verify_lockfile_fails_when_a_pinned_crate_disagrees` contained no
+        disagreement and asserted .success() twice, including that a MALFORMED
+        lockfile passes.
+        FIXED FORWARD rather than narrowed a third time (user decision). All six
+        were then RE-VERIFIED independently and empirically at HEAD a6f42c0: a
+        deposited include appears inside the DSSE-signed payload; install
+        accepts a composed layer and lays no blob for the include; verify fails
+        on an unsigned include and passes on a properly signed one; the realm
+        case was constructed BOTH directions (signed by the named realm's key
+        passes; re-signed by a third key fails; a missing varve-realms.toml
+        names the realm); diamond walks, real cycle refused, chain of 9 refused;
+        and the lockfile gate now fails closed on the foreign-platform case that
+        previously went green.
+        That re-verification found ONE NEW defect, introduced by the fix:
+        `verify_composition` recursed with no cycle or depth guard, so
+        `varve verify --all` STACK-OVERFLOWED (SIGABRT) on a self-referencing
+        store entry — "followed until the process aborts" is not "refused",
+        least of all in the command whose job is to inspect adversarial store
+        state. Both walkers are now bounded, with a regression test.
+    links:
+      - type: verifies
+        target: REQ-COMPOSE-001
+      - type: verifies
+        target: REQ-LOCKPIN-001
+
+  - id: VER-KEYGEN-001
+    type: verification
+    title: An organisation can mint a key, and stand up its own realm with it
+    status: verified
+    release: v0.24.0
+    fields:
+      method: automated-test
+      baseline: >
+        Exercised end to end 2026-08-14: `varve keygen --out acme.key --pub
+        acme.pub` printed a realm skeleton carrying the trust-root inline;
+        `varve pubkey acme.key` re-printed the identical 64 hex characters;
+        a layer deposited under that key installed and VERIFIED against a realm
+        pinning it. The key format was confirmed empirically rather than assumed
+        — 64-byte secret (128 hex) = 32-byte seed followed by its 32-byte
+        public half, and the public half IS secret[32..].
+      steps:
+        # The route that did not exist: key -> the value trust-root accepts.
+        - run: cargo test -p varve-core a_minted_key_yields_the_public_half_a_realm_pins
+        # The property that makes keygen more than formatting: a minted key
+        # signs a layer that its printed public half verifies.
+        - run: cargo test -p varve-core a_minted_key_actually_signs_and_verifies_end_to_end
+        - run: cargo test -p varve-core the_wrong_length_says_what_it_wanted
+        - run: cargo test -p varve-core non_hex_is_its_own_error_not_a_length_complaint
+        # The whole extender path at the CLI, which four of five blocked
+        # personas could not complete.
+        - run: cargo test -p varve --test cli an_organisation_can_stand_up_its_own_realm
+    links:
+      - type: verifies
+        target: REQ-KEYGEN-001
+
+  - id: VER-PRODUCER-001
+    type: verification
+    title: The produce side fails closed on every input it signs
+    status: verified
+    release: v0.24.0
+    fields:
+      method: automated-test
+      baseline: >
+        The audit's exact case reproduced and now refused: 64 bytes of entropy
+        as a signing key produced "deposited layer … OK" before; it now fails
+        with "NO trust root can verify". A 32-byte secret — the format the
+        --key help text WRONGLY described — now names both lengths and the
+        command that mints a real key, replacing "Ed25519 signature function
+        error". All four signing-key read sites validate.
+      steps:
+        - run: cargo test -p varve-core a_key_that_signs_unverifiably_is_refused_before_it_signs
+        - run: cargo test -p varve --test cli deposit_refuses_a_key_that_would_sign_unverifiably
+        # The other four clauses, each reproducing an audit case that used to
+        # exit 0: a channel no pin can name, and an issued-at that is a date
+        # rather than a timestamp (it lands verbatim in the SBOM).
+        - run: cargo test -p varve-core a_channel_no_pin_could_name_is_refused_before_signing
+        - run: cargo test -p varve-core issued_at_must_be_a_timestamp_not_merely_a_date
+    links:
+      - type: verifies
+        target: REQ-PRODUCER-001
+
+  - id: VER-STORE-001
+    type: verification
+    title: A layer `which` resolves is a layer `list` and `--layer` can see
+    status: verified
+    release: v0.24.0
+    fields:
+      method: automated-test
+      baseline: >
+        Reproduced before fixing: after a successful realm install and a passing
+        `verify`, `varve list` printed "no layers installed in <root>" with exit
+        0. `list` now walks the top-level core AND every realm partition,
+        labelling each by realm name where the project's realms file defines
+        one. `--layer` resolves through the project's store rather than the
+        top-level core. Confirmed against the real production store
+        (2026.08.0/.1/.2 all listed) and the README's headline example
+        `sbom --layer 2026.08.2` now emits CycloneDX instead of failing.
+      steps:
+        # The walkthrough asserts list AND --layer after a realm install —
+        # the two commands that could not see what `which` resolved.
+        - run: cargo test -p varve --test cli an_organisation_can_stand_up_its_own_realm
+        # The composition clause the shall-clause names: a cross-realm include
+        # lives under the INCLUDED realm's fingerprint, so a single-partition
+        # lookup reported it missing while `list` showed it installed.
+        - run: cargo test -p varve-core a_layer_is_found_in_any_partition_under_the_same_root
+        - run: cargo test -p varve-core the_varve_root_is_recovered_from_a_realm_partition
+    links:
+      - type: verifies
+        target: REQ-STORE-001
+
+  - id: VER-REVIEW-v0.24.0
+    type: verification
+    title: v0.24.0 independently reviewed — DISSENT on unimplemented shall-clauses, fixed forward
+    status: verified
+    release: v0.24.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed), 2026-08-14,
+        at HEAD df2ce6c. VERDICT DISSENT — the seventh consecutive review to
+        dissent and the seventh to be right. Its framing is the finding that
+        matters most: "This is the THIRD consecutive release with requirement
+        text outrunning code, and the verification artifact narrows the scope
+        silently rather than declaring it." Every gate was green while two of
+        three must-priority requirements were partially implemented, because
+        `rivet check verification-evidence` checks that named tests EXIST, not
+        that they cover the shall-clauses.
+        CONFIRMED outright: REQ-KEYGEN-001. The reviewer ran the full extender
+        path with its own key and realm — keygen, deposit, realms file,
+        install, verify, run — and confirmed the printed public half is the one
+        that actually verifies layers signed by that key, that keygen refuses
+        to clobber and sets 0600, and that the secret never reaches stdout.
+        REFUTED, and now fixed: FIVE of six REQ-PRODUCER-001 clauses were
+        unimplemented — only the key check shipped. All five now hold, each
+        verified against the reviewer's own reproduction: a channel no pin can
+        name is refused (the enum is shared with the pin parser so they cannot
+        drift); issued-at must be a TIMESTAMP not merely a date (a bare date
+        passed `epoch_days`, which needs only day resolution, and landed
+        verbatim in the SBOM's metadata.timestamp where it is invalid); a
+        registry-shaped `--out` is refused with the command that would actually
+        publish, instead of writing `./oci:/ghcr.io/...`; attach-status refuses
+        a status whose line disagrees with the layout's; and deposit re-verifies
+        the envelope it just signed before returning.
+        Two of those fixes were themselves wrong on the first attempt and were
+        caught by running the reviewer's cases rather than trusting the diff:
+        the `--out` guard landed in `sign_sums` instead of `run_deposit` (the
+        pattern matched the first of four signing sites), and the RFC-3339
+        check accepted a bare date.
+        REFUTED, and now fixed: REQ-STORE-001's shall-clause names composition,
+        and cross-realm composition still reported an installed include as
+        missing — `list` said installed while verify/which/run said not, and the
+        corrective advice failed. A digest is content-addressed, so a layer is
+        now located in ANY partition under the same varve root while still being
+        VERIFIED against the trust root of the realm that vouches for it.
+        Demonstrated end to end with two realms: verify walks into the other
+        realm and reports "verified against realm 'beta'".
+        Two minor findings also closed: the `signing-keys` topic the requirement
+        promised now exists (and states plainly that varve has no rotation or
+        revocation yet), and keygen refused to clobber a key but silently
+        overwrote a published `--pub` trust root.
+    links:
+      - type: verifies
+        target: REQ-KEYGEN-001
+      - type: verifies
+        target: REQ-PRODUCER-001
+      - type: verifies
+        target: REQ-STORE-001
+
+  - id: VER-CHANNEL-001
+    type: verification
+    title: A qualified pin refuses an installed rolling layer
+    status: verified
+    release: v0.24.0
+    fields:
+      method: automated-test
+      baseline: >
+        Reproduced end to end 2026-08-14 before fixing: install under a rolling
+        pin, edit the pin to `qualified`, then `which` printed
+        "layer 2026.08.0 (rolling) …" and exit 0, `verify` reported
+        "signature OK", and `run` dispatched the tool. After the fix all three
+        refuse with both channels named, and a matching pin still resolves.
+      steps:
+        - run: cargo test -p varve-core a_pin_selecting_qualified_refuses_an_installed_rolling_layer
+        - run: cargo test -p varve-core a_matching_channel_still_resolves
+    links:
+      - type: verifies
+        target: REQ-CHANNEL-001
+
+  - id: VER-DEPLOY-001
+    type: verification
+    title: The publish path is documented and discoverable
+    status: verified
+    release: v0.24.0
+    fields:
+      method: automated-test
+      baseline: >
+        `varve docs deploy` exists and carries the oras sequence varve's own
+        release pipeline runs (blob push per blob, then manifest push under the
+        layer tag), what a consumer needs (registry + trust root), first-contact
+        bootstrapping, and the air-gapped alternative. `docs --grep oras` now
+        returns hits where it previously returned nothing. deposit's --help no
+        longer claims to publish.
+      steps:
+        - run: grep -q "does NOT publish" crates/varve/src/main.rs
+        - run: grep -q "oras blob push" crates/varve/docs/concept-deploy.md
+        - run: cargo run -q -p varve -- docs check --coverage --strict
+    links:
+      - type: verifies
+        target: REQ-DEPLOY-001
+
+  - id: VER-PRODUCE-002
+    type: verification
+    title: Three produce-side paths now fail closed
+    status: verified
+    release: v0.24.0
+    fields:
+      method: automated-test
+      baseline: >
+        Each verified by running the audit's case. attach-status refuses a
+        counter regression (Stale), matching status --from-file and install.
+        install refuses a composition whose includes are missing, naming each
+        with its realm, instead of exiting 0 and letting run dispatch from an
+        unverified layer. export-cargo with a RELATIVE --out now writes
+        local-registry = "/private/tmp/.../vendored/registry" — an absolute path
+        that survives being copied into a project.
+      steps:
+        # The whole workspace must stay green with monotonicity enforced at the
+        # attach path, which the line-status suite exercises heavily.
+        - run: cargo test -p varve-core the_cache_refuses_a_counter_regression
+        - run: cargo test -p varve --test cli an_organisation_can_stand_up_its_own_realm
+        # Unit-level, because the mutation gate runs `--workspace --lib` and
+        # cannot use CLI tests: `realm_names` was replaceable by an empty vec.
+        - run: cargo test -p varve-core every_defined_realm_is_named
+    links:
+      - type: verifies
+        target: REQ-PRODUCE-002
+
+  - id: VER-REVIEW-v0.24.0-late
+    type: verification
+    title: The three v0.24.0 requirements the reviewer never saw — REFUTED on evidence, fixed
+    status: verified
+    release: v0.24.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed),
+        2026-08-14. `review-check` had carried an advisory warning that
+        v0.24.0's review did not cover REQ-CHANNEL-001, REQ-DEPLOY-001 or
+        REQ-PRODUCE-002: all three landed AFTER that release's reviewer had
+        run, so nobody had ever reviewed them. This closes that gap.
+        VERDICT REFUTED on all three, and the shape is different from
+        v0.24.0's. The CODE was real — the reviewer ran every behaviour on the
+        release binary and each did the right thing: a qualified pin refuses an
+        installed rolling layer on `which`, `run`, the shims and `verify` (one
+        `resolve()` chokepoint, which is why one unit test legitimately covers
+        four surfaces); a stale line-status is refused at attach; a
+        composition with an uninstalled include is refused naming the layer and
+        its realm; a relative `--out` yields an absolute path. The prior
+        `--out oci://` and bare-date bugs are confirmed fixed on both the
+        `--spec` and flag paths.
+        The failure was on the EVIDENCE side and it was systematic: of the
+        eight tests named in this file for those three requirements, SEVEN
+        exercise a different function than the clause they are cited for, and
+        `rivet check verification-evidence` passes because those test names
+        exist. 11 of 13 shall-clauses had no killing test. The reviewer proved
+        each with a mutation that left the whole workspace suite green:
+        replacing the entire ChannelMismatch `#[error(...)]` with "channel
+        mismatch"; deleting `!layer.channel.is_empty() &&`; deleting the Stale
+        block from `attach_envelope_to_layout`; `if false && !missing.is_empty()`
+        on the install path; and making `absolute_export_dir` return its
+        argument verbatim.
+        One genuine content defect: README.md:100 still read
+        `varve deposit  # (CI) assemble, sign and publish a layer` — the exact
+        claim REQ-DEPLOY-001 was written to retract, cited twice in its own
+        text, unchanged since before the requirement existed. The `--help` was
+        fixed and the most-read surface was not.
+        All five mutations are now killed and the README claim is gone, each
+        re-run against the reviewer's own mutant to confirm it fails.
+        A SECOND SECRET LEAK was found while auditing rather than reported:
+        `RegistrySource` derived Debug over `token: RefCell<Option<String>>`,
+        so any `{:?}` of the source printed the bearer token in clear. It has a
+        manual redacting Debug now, and un-redacting it fails a test. Both this
+        and the redirect leak predate credentials and would have become live
+        the moment credentials landed — which is why clause 6 shipped WITH
+        clause 2 rather than after it.
+      steps:
+        # Clause: the error names both channels AND what each means. The old
+        # tests asserted struct FIELDS and never rendered the message.
+        - run: cargo test -p varve-core the_channel_refusal_names_both_channels_and_what_they_cost
+        # Clause: a layer with no channel annotation is not refused. Every
+        # fixture in the workspace wrote a channel, so the exemption was
+        # untested and deleting it broke nothing.
+        - run: cargo test -p varve-core a_layer_predating_channel_annotations_is_not_refused
+        # Clause: attach refuses a counter regression. The cited test exercised
+        # StatusCache::update, a different function.
+        - run: cargo test -p varve-core attaching_a_stale_document_over_a_newer_one_is_refused
+        # Clause: install refuses a composition whose include is missing. The
+        # cited test contained no composition at all.
+        - run: cargo test -p varve --test cli install_refuses_a_composition_whose_include_is_not_installed
+        # Clause: a relative --out is RESOLVED, not embedded verbatim. Every
+        # export test passed an ABSOLUTE --out, so the bug was unreachable from
+        # its own evidence. Renamed in v0.27.0: the property is no longer
+        # "absolute" but "not the user's argument, and resolvable where Cargo
+        # resolves it" — see REQ-REPRO-001 clause 1 for the empirical basis.
+        - run: cargo test -p varve --test cli a_relative_out_is_resolved_not_embedded_verbatim
+        # Clause: nothing shipped claims deposit publishes — README included.
+        - run: cargo test -p varve --bin varve nothing_shipped_claims_varve_publishes
+        # Clause: the deploy page carries a sequence a producer can run.
+        - run: cargo test -p varve --bin varve the_deploy_topic_carries_a_sequence_a_producer_can_actually_run
+    links:
+      - type: verifies
+        target: REQ-CHANNEL-001
+      - type: verifies
+        target: REQ-DEPLOY-001
+      - type: verifies
+        target: REQ-PRODUCE-002
+
+  - id: VER-DOCS-002
+    type: verification
+    title: The docs teach the FILES and TASKS — verified against the facts, not topic presence
+    status: verified
+    release: v0.25.0
+    tags: [docs]
+    fields:
+      method: test
+      baseline: >
+        Each test checks a FACT the requirement names, and each was confirmed
+        to fail by mutation. Removing `manifest-version` from
+        config-reference, renaming VARVE_ROOT in environment, and gutting
+        getting-started to prose each fail a named test. The published-key test
+        exists because an independent review found this release teaching a
+        FABRICATED 64-hex value labelled as the real rolling.pub, in the topic
+        whose first line reads "Every file here is literal — copy it": a user
+        who copied it got "No valid signatures". The earlier elision
+        `trust-root = "83a699…"` had been "fixed" by padding the placeholder
+        until the PARSER accepted it, which is how a shape check certifies a
+        false fact. The published root is a fact, so the test compares against
+        trust-roots/rolling.pub — the file the release actually ships.
+      steps:
+        - run: cargo test -p varve --bin varve the_docs_teach_the_facts_a_user_is_rejected_for_not_knowing
+        - run: cargo test -p varve --bin varve the_task_topics_walk_a_user_through_a_sequence
+        # composition and threat-model previously had NO content assertion
+        # anywhere: reduced to a title plus filler, every gate stayed green.
+        - run: cargo test -p varve --bin varve the_two_flagship_topics_teach_their_feature_not_just_its_name
+        - run: cargo test -p varve --bin varve a_topic_showing_the_published_realm_shows_the_published_key
+    links:
+      - type: verifies
+        target: REQ-DOCS-002
+
+  - id: VER-DOCS-003
+    type: verification
+    title: The docs gate checks what the docs teach — and can itself fail
+    status: verified
+    release: v0.25.0
+    tags: [docs, traceability]
+    fields:
+      method: test
+      baseline: >
+        Three successive weaknesses, each found by a reviewer and each closed
+        by a test that fails on the reviewer's own mutant.
+        (1) The gate asserted a topic EXISTS. Restoring the shipped
+        `known-problems`-as-strings defect now fails
+        `every_documented_file_example_parses_with_the_real_parser`, which
+        parses fenced blocks with the SHIPPING parsers — Pin::parse,
+        realm_names + resolve_realm, parse_deposit_spec, LineStatus.
+        (2) That parser gate reached 12 of 35 blocks. A review appended a
+        varve.toml MISSING manifest-version — the exact defect REQ-DOCS-002
+        exists to fix — and it was skipped because the classifier keyed on the
+        very field being tested. It now keys on `[toolchain]`, refuses any
+        unclassified toml/json block, and a companion test checks every
+        `varve <sub>` in all 19 shell blocks against the real clap subcommand
+        list (the review's `varve frobnicate` now fails by name).
+        (3) An EMPTY fence satisfied "carries a worked example", and both gate
+        functions could be neutered to `return Vec::new()` with the whole suite
+        green — the vacuous-gate shape. The check now requires a fence with
+        content, and `the_gate_detects_a_broken_topic_set_not_merely_a_healthy_one`
+        hands the functions a set it KNOWS is broken, so a gate that stops
+        looking fails instead of passing quietly.
+      steps:
+        - run: cargo test -p varve --bin varve every_documented_file_example_parses_with_the_real_parser
+        - run: cargo test -p varve --bin varve every_documented_command_is_a_real_command
+        - run: cargo test -p varve --bin varve the_gate_detects_a_broken_topic_set_not_merely_a_healthy_one
+        - run: cargo test -p varve --bin varve the_workflow_topics_exist
+        - run: cargo test -p varve --bin varve topics_a_user_must_act_on_show_a_worked_example
+    links:
+      - type: verifies
+        target: REQ-DOCS-003
+
+  - id: VER-DOCS-004
+    type: verification
+    title: Recovery and adapter selection — the two paths the persona audit left open
+    status: verified
+    release: v0.25.0
+    tags: [docs, ergonomics]
+    fields:
+      method: test
+      baseline: >
+        The recovery topic's factual claims were established by RUNNING them,
+        not by repeating the persona's assumption. The persona believed
+        anti-rollback refused the repair; it does not — an equal counter is not
+        a regression, so `varve install --from` repairs a corrupted layer.json
+        in place. The refused case is going BACKWARDS, and there is no
+        `--force`. An independent reviewer re-ran all three and reproduced the
+        rollback error character-for-character, including the realm-partitioned
+        state path.
+        `concept-payload-kinds.md` claimed "the kind selects which export
+        adapter applies", false in both directions: export-bazel ignores kind
+        and keys on `platform` plus `[tool.source]` — named in no topic and no
+        --help — while three adapters share `kind = "crate"`.
+      steps:
+        - run: cargo test -p varve --bin varve the_recovery_topic_states_what_repairs_and_what_is_refused
+        - run: cargo test -p varve --bin varve the_adapter_topic_names_every_adapter_and_what_selects_it
+        - run: cargo test -p varve --bin varve the_workflow_topics_exist
+    links:
+      - type: verifies
+        target: REQ-DOCS-004
+
+  - id: VER-LAYOUT-001
+    type: verification
+    title: A deposited layout is addressable by tag
+    status: verified
+    release: v0.25.0
+    tags: [distribution]
+    fields:
+      method: test
+      baseline: >
+        Deleting `REF_NAME: layer_name` from write_oci_layout fails
+        export_writes_a_standard_oci_image_layout, which asserts the tag
+        resolves to the LAYER MANIFEST rather than the envelope. Confirmed live
+        on both paths — `varve deposit --out ./layout` writes
+        "org.opencontainers.image.ref.name": "2026.08.0".
+        The "purely additive" claim was checked by an independent reviewer
+        rather than asserted: re-depositing identical inputs with and without
+        the annotation produced byte-identical blob trees and an identical
+        layer digest, install succeeded both ways, and every index.json reader
+        (OciLayoutSource::fetch_manifest, linestatus::{attach_envelope_to_layout,
+        read_any_from_layout, read_from_layout, layout_line}) keys on
+        artifactType or a eu.pulseengine.varve.* annotation, so none can be
+        perturbed. CONFIRMED.
+        Scope stated honestly: no CI job runs a real OCI client, so "resolves
+        in any OCI client" rests on the annotation being the standard one, not
+        on an executed `oras cp`. Tracked in issue #62.
+      steps:
+        - run: cargo test -p varve-core export_writes_a_standard_oci_image_layout
+    links:
+      - type: verifies
+        target: REQ-LAYOUT-001
+
+  - id: VER-REVIEW-v0.25.0
+    type: verification
+    title: v0.25.0 independently reviewed — DISSENT, including a fabricated trust root
+    status: verified
+    release: v0.25.0
+    tags: [independence, review]
+    fields:
+      method: review
+      baseline: >
+        Independent clean-room review (fresh context, refute-framed),
+        2026-08-14, at HEAD d99529c. VERDICT DISSENT — the eighth consecutive
+        review to dissent and the eighth to be right. 9 of 15 shall-clauses
+        unsupported. All findings accepted; all fixed.
+        FINDING A, the worst, and the reason this review paid for itself:
+        `concept-getting-started.md` taught
+        `trust-root = "83a6991d…"` LABELLED as "the published rolling.pub", in
+        the topic whose first line reads "Every file here is literal — copy
+        it". The real published root is 4e771dc6…. A user who copied it got
+        "manifest signature verification failed … No valid signatures". The
+        same fabricated value appeared under `[realm.pulseengine]` in
+        config-reference and realms, alongside the REAL registry URL. Its
+        origin: 83a699 is the prefix of the LAYER DIGEST, misused as a key.
+        The compounding failure is the important part. An earlier gate had
+        caught the elided `trust-root = "83a699…"` as "not 64 hex", and the
+        remedy was to PAD THE PLACEHOLDER until the parser accepted it — a
+        shape check certifying a false fact. A published key is a fact, so it
+        is now compared against trust-roots/rolling.pub, the file the release
+        ships. The full getting-started transcript was then run from the
+        topic's literal files against the real registry: install, verify (9
+        tools), which, list — all green.
+        FINDING 0: all four requirements were `status: verified` with NO
+        verification artifact — graph orphans — while `rivet check
+        verification-evidence` printed 195 named steps green, vacuously,
+        because none belonged to them. This is the identified failure mode in a
+        STRONGER form than the four prior releases: previously the cited tests
+        tested the wrong function; here nothing was cited at all. VER-DOCS-002,
+        -003, -004 and VER-LAYOUT-001 now exist.
+        GATE WEAKNESSES, each proven by mutation and each now closed: an EMPTY
+        fence satisfied "carries a worked example" (four topics stubbed to a
+        title plus ```sh with nothing in it, gate exit 0); `composition` and
+        `threat-model` had no content assertion anywhere; the parse gate
+        reached 12 of 35 blocks and skipped a varve.toml missing
+        `manifest-version` because it keyed on the very field under test; all
+        19 shell blocks were unchecked, so `varve frobnicate --nonexistent-flag`
+        passed; and both gate functions could be neutered to `return
+        Vec::new()` with the whole suite green — the vacuous-gate shape, since
+        both tests only ever asserted emptiness.
+        DOC DEFECTS: the deploy push sequence fails on a `null` status digest
+        because `deposit` attaches no line-status and `attach-status` was an
+        unstated prerequisite; README's `varve archive 2026.07 core.tar` was
+        wrong on both arguments (a line, not a layer; a tar, not a directory);
+        a `sha256 = "…"` elision survived in a copy-pasteable block; CHANGELOG
+        was twelve releases stale.
+        CONFIRMED by the reviewer against the running binary: REQ-LAYOUT-001's
+        "purely additive" claim (byte-identical blob trees and layer digests,
+        every index.json reader keys on other fields); the recovery topic's
+        three factual claims, reproduced character-for-character; the own-realm
+        and composition transcripts end to end; the environment precedence
+        rules; the known-problems schema; the arg-prefix dispatch order. No
+        regressions found.
+        SCOPE STATED, NOT CLOSED: no CI job runs a real OCI client, so
+        REQ-LAYOUT-001's "resolves in any OCI client" rests on the annotation
+        being the standard one. The reviewer also flagged that the DSSE
+        envelope is a sibling index entry rather than referenced from the
+        tagged manifest, so a tag-scoped `oras cp` may drop the signature.
+        Both are issue #62 — not claimed as verified here.
+      steps:
+        - run: cargo test -p varve --bin varve a_topic_showing_the_published_realm_shows_the_published_key
+        - run: cargo test -p varve --bin varve the_gate_detects_a_broken_topic_set_not_merely_a_healthy_one
+        - run: cargo test -p varve --bin varve every_documented_command_is_a_real_command
+        - run: cargo test -p varve --bin varve every_documented_file_example_parses_with_the_real_parser
+        - run: cargo test -p varve --bin varve the_two_flagship_topics_teach_their_feature_not_just_its_name
+    links:
+      - type: verifies
+        target: REQ-DOCS-002
+      - type: verifies
+        target: REQ-DOCS-003
+      - type: verifies
+        target: REQ-DOCS-004
+      - type: verifies
+        target: REQ-LAYOUT-001
+
+  - id: VER-INDEXAUTH-001
+    type: verification
+    title: The realm's signed line index — a source that hides a layer is caught
+    status: verified
+    release: v0.26.0
+    tags: [security]
+    fields:
+      method: test
+      baseline: >
+        Five numbered clauses, each with a test that fails on its own mutation.
+        Ten mutations were applied, run and reverted. Two of the tests were
+        WRONG when first written and the mutants proved it: the cross-document
+        replay test passed because the two structs' deny_unknown_fields shapes
+        diverge, so it proved schema divergence while claiming to prove the
+        payload-type check; and the counter-regression test called
+        refuse_regression DIRECTLY, so deleting that call from `check` — the
+        function install goes through — left the suite green. Both are fixed
+        and both now fail on their mutant.
+        CLAUSE 4 WAS CORRECTED, not merely implemented. It read "the
+        anti-rollback high-water mark shall be advanceable from the verified
+        index". An integration test through `install` refuted it on the first
+        run: raising the ENFORCEMENT mark to the line's newest counter makes a
+        deliberately-pinned older layer uninstallable the moment the realm
+        publishes a newer one — breaking frozen toolchains, varve's entire
+        purpose, to defend against an attack varve's pin-based model does not
+        have. Uptane's freshness attack presumes a client that wants the
+        latest; a varve consumer names an exact layer. The clause is now
+        REPORTING, and `advance_to` was deleted rather than left as dead
+        trust-critical code.
+        THIS RECORD WAS ITSELF FALSE WHEN FIRST WRITTEN, and an independent
+        review caught it. Every step below was a varve-core test calling
+        `install()` with a policy the PRODUCT NEVER CONSTRUCTED: the CLI's only
+        `InstallPolicy` hardcoded `index: None`, and `fetch_line_index` /
+        `served_layers` were implemented by exactly one type — `MemorySource`,
+        the in-memory test double. `RegistrySource`, `OciLayoutSource` and
+        `DirSource` all inherited the trait defaults returning `Ok(None)`, and
+        `realm.signed_index` was parsed and never read. Five clauses were
+        marked verified while unreachable from the shipped binary. That is the
+        same shape as the two mutant-refuted tests above, one level up:
+        evidence that exercises a different entry point than the clause runs
+        through. The fix wires the policy from the resolved realm, implements
+        both source methods on the registry and the layout, gives clause 2 a
+        cache to compare against (it was passed `None`, so the rule could not
+        fire on any real machine), and reports the index at install. The steps
+        now include tests that DRIVE THE EXECUTABLE, because no test that
+        constructs an `InstallPolicy` itself can detect that nothing else does.
+        Ten further mutations were applied, run and reverted for this fix; one
+        survived and exposed a weak test — the clause-2 install test compared
+        error messages, which the cache's own write-time guard produces
+        identically AFTER laying the layer down, so it now counts blob fetches
+        and asserts the refusal precedes them.
+      steps:
+        - run: cargo test -p varve-core an_index_verifies_only_against_the_realm_that_signed_it
+        - run: cargo test -p varve-core a_signed_line_status_cannot_be_replayed_as_an_index
+        - run: cargo test -p varve-core a_source_that_hides_a_layer_the_index_names_is_refused
+        - run: cargo test -p varve-core check_refuses_a_stale_index_not_only_refuse_regression_does
+        - run: cargo test -p varve-core a_realm_that_promised_an_index_does_not_fall_back_to_an_unsigned_listing
+        - run: cargo test -p varve-core a_source_that_cannot_enumerate_is_not_treated_as_hiding_everything
+        - run: cargo test -p varve-core a_realm_declares_whether_it_publishes_a_signed_index
+        # Through install(), not through the helpers.
+        - run: cargo test -p varve-core install_refuses_a_source_that_hides_an_indexed_layer
+        - run: cargo test -p varve-core install_raises_the_mark_from_the_index_even_when_the_layer_is_hidden
+        - run: cargo test -p varve-core a_replayed_older_index_is_refused_on_the_next_install_not_only_in_theory
+        # Through the REAL SOURCES, not the in-memory double: an HTTP registry
+        # double serving the index under its own tag and answering /tags/list,
+        # and an oci-layout carrying it as a referrer.
+        - run: cargo test -p varve-core --test registry_double a_registry_serves_its_realms_signed_index_and_the_consumer_learns_the_line
+        - run: cargo test -p varve-core --test registry_double a_registry_that_hides_an_indexed_layer_is_refused_over_the_wire
+        - run: cargo test -p varve-core --test registry_double a_registry_cannot_switch_the_check_off_by_answering_404_for_the_index
+        - run: cargo test -p varve-core --test registry_double the_index_tag_is_not_reported_as_a_layer_of_the_line
+        - run: cargo test -p varve-core an_index_attached_to_a_layout_is_what_an_offline_install_reads_back
+        - run: cargo test -p varve-core a_producer_cannot_downgrade_or_misfile_a_published_index
+        - run: cargo test -p varve-core the_cache_is_what_gives_clause_two_something_to_compare_against
+        - run: cargo test -p varve-core a_registrys_listing_for_a_line_is_that_lines_layers_and_nothing_else
+        # THROUGH THE BINARY. These are the decisive ones: they are what the
+        # whole-requirement-unreachable defect could not survive.
+        - run: cargo test -p varve --test cli the_binary_verifies_the_realms_index_and_reports_what_the_line_holds
+        - run: cargo test -p varve --test cli the_binary_refuses_a_declaring_realm_whose_index_is_absent
+        - run: cargo test -p varve --test cli a_realm_that_never_promised_an_index_installs_exactly_as_before
+    links:
+      - type: verifies
+        target: REQ-INDEXAUTH-001
+
+  - id: VER-SHADOW-001
+    type: verification
+    title: varve notices when PATH runs a different binary than the one it pins
+    status: verified
+    release: v0.26.0
+    tags: [ergonomics, security]
+    fields:
+      method: test
+      baseline: >
+        Reported from use (varve#66) and reproduced: `varve which rivet`
+        printed the store path while the shell ran a different binary, and
+        `verify` called the layer perfect — which it was. Every individual
+        answer correct, the composite false, against the README's own words for
+        the command.
+        The first implementation reported EVERY tool on a correctly configured
+        machine as shadowed, and its unit test passed: a varve shim is a
+        symlink to the VARVE BINARY (argv[0] dispatch since v0.19.0), not to
+        the pinned tool, and the test had symlinked to the STORE — testing a
+        mechanism varve does not use. Only the end-to-end run caught it.
+        `check` now takes the dispatcher path and the test asserts both that a
+        real shim agrees AND that omitting the dispatcher reproduces the bug.
+        Flagging the correct configuration is worse than not checking, because
+        it teaches people to ignore the check.
+        The check then found a REAL shadowing on the development machine — a
+        cargo-installed ~/.cargo/bin/synth over the fixture's pinned synth —
+        which turned three unrelated CLI tests red there and green elsewhere.
+        Every command builder in cli.rs now sets a hermetic PATH: a suite whose
+        result depends on what the person running it happens to have installed
+        is not a suite.
+        Four PATH configurations were checked end to end against the release
+        binary: shims first (pass), no shims (pass), foreign binary before the
+        shims (fail), foreign binary after the shims (pass).
+      steps:
+        - run: cargo test -p varve-core a_different_binary_earlier_on_path_is_reported_as_shadowing
+        - run: cargo test -p varve-core a_real_shim_symlinked_to_varve_itself_agrees
+        - run: cargo test -p varve-core a_tool_absent_from_path_is_not_shadowed
+        - run: cargo test -p varve-core resolution_follows_path_order_and_the_executable_bit
+        - run: cargo test -p varve-core a_name_with_a_separator_is_not_a_path_lookup
+        - run: cargo test -p varve --test cli verify_fails_when_path_runs_a_different_binary_than_the_pin
+    links:
+      - type: verifies
+        target: REQ-SHADOW-001
+
+  - id: VER-ATTEST-002
+    type: verification
+    title: Attestations travel with the layer — layout, store, archive, offline install, registry
+    status: verified
+    release: v0.26.0
+    tags: [supply-chain]
+    fields:
+      method: test
+      baseline: >
+        Carriage, proven by a real round trip on the release binary: deposit ->
+        attach -> install -> verify -> archive -> install into a BRAND NEW core,
+        offline -> verify, with the carried bytes byte-identical to what was
+        signed. That last check is not decoration: varve carries another
+        party's judgement verbatim and never restates it (DD-021), so a
+        round trip that altered the bytes would defeat the purpose.
+        Two security defects were found while wiring, both in code written
+        earlier in the same release. `read_all` used an index-supplied digest
+        as a PATH COMPONENT, so a layout naming `sha256:../../..` escaped the
+        layout directory. `persist` named files from the digest the SOURCE
+        declared rather than from the bytes, so a hostile source could name a
+        file inside the layer root, where layer.json and the retained envelope
+        live. Both are refused now, and removing either guard fails a named
+        test.
+        The registry clause landed last and was the one that mattered most: an
+        `oci://` install carried NOTHING, so varve's most-used transport was
+        reproducing the exact mirror-boundary loss the requirement exists to
+        close. Statements pair with their bytes by the
+        `eu.pulseengine.varve.attests` annotation rather than by position, and
+        the test serves TWO attestations precisely so a first-match reader
+        (the line-status shape) cannot pass it.
+        Deliberate and stated: reporting, not refusal. A layer whose own
+        signature and digests are good is a good layer, and failing an install
+        on a third party's stale audit would make varve's verdict depend on
+        someone else's release cadence. An unverified statement's own claims
+        are never echoed as fact.
+        `cargo mutants` under the CI gate's `--workspace --lib` config:
+        install.rs 12 caught / 0 missed; attestcarry.rs 32 caught / 0 missed,
+        after two rounds of strengthening — the first found a surviving `&&` in
+        the traversal guard, the second found `attach`'s retain predicate
+        surviving because counting alone cannot see the index accumulating a
+        stale entry per CI re-run.
+      steps:
+        - run: cargo test -p varve-core an_attestation_travels_with_the_layer_and_still_binds
+        - run: cargo test -p varve-core a_statement_whose_evidence_did_not_travel_is_an_error_not_a_skip
+        - run: cargo test -p varve-core many_attestations_travel_together_and_reattaching_is_idempotent
+        - run: cargo test -p varve-core evidence_survives_the_store_and_can_be_re_emitted
+        - run: cargo test -p varve-core a_layout_naming_a_blob_outside_itself_is_refused_before_anything_is_read
+        - run: cargo test -p varve-core persist_names_files_after_the_bytes_not_after_what_the_source_declared
+        - run: cargo test -p varve-core an_attestation_survives_archive_and_an_offline_install_into_a_fresh_core
+        # The registry clause, through the real HTTP double.
+        - run: cargo test -p varve-core --test registry_double an_oci_install_carries_the_attestations_the_registry_publishes
+        - run: cargo test -p varve --test cli an_attestation_travels_through_deposit_archive_and_an_offline_install
+    links:
+      - type: verifies
+        target: REQ-ATTEST-002
+
+  - id: VER-BOOTSTRAP-001
+    type: verification
+    title: There is a documented, verified way to obtain varve itself
+    status: verified
+    release: v0.26.0
+    tags: [distribution, ergonomics]
+    fields:
+      method: test
+      baseline: >
+        Reported from use: the README's Getting started jumped straight to
+        `varve install` with no step 0, there was no install script, and no
+        crates.io publish workflow — so `cargo install varve` did not work
+        either. A tool for verified toolchain distribution had no documented
+        verified path to itself.
+        install.sh was run against the REAL v0.25.0 release and installed a
+        binary reporting 0.25.0. The negative control is the load-bearing part:
+        with sha256sum and shasum shimmed to return a wrong digest it exits 1
+        with "The bytes you received are not the bytes this release published"
+        and creates nothing — a verifier that cannot fail is not a verifier.
+        Refusal to run as root, refusal when no sha256 tool exists, and the
+        unsupported-platform path were each exercised the same way.
+        Clause 8 — state what the first hop CANNOT prove — shipped as prose
+        with no mechanical check, which is the exact shape that let requirement
+        text outrun code four releases running, and the honest-limits section
+        is the most deletable part of a page whose other job is making
+        installation easy. It is gated now: deleting it fails a named test.
+        Scope stated rather than implied: install.sh entering SHA256SUMS.txt is
+        verified by workflow ORDERING only (staged before the checksum step)
+        and becomes true at the first v0.26.0 tag; `cargo package -p varve`
+        cannot fully succeed until varve-core is actually published; and no
+        Linux binary was executed — the triple mapping was proven with a faked
+        `uname`. The release workflow's verify-install-script job closes the
+        last of these on the first tag.
+      steps:
+        - run: cargo test -p varve --bin varve the_bootstrap_topic_states_what_the_first_hop_cannot_prove
+        - run: cargo test -p varve --bin varve topics_a_user_must_act_on_show_a_worked_example
+        - run: cargo test -p varve --bin varve every_documented_command_is_a_real_command
+        - run: cargo test -p varve --bin varve every_cli_subcommand_has_a_documented_topic
+    links:
+      - type: verifies
+        target: REQ-BOOTSTRAP-001
+
+  - id: VER-STORE-002
+    type: verification
+    title: A layer holds many payloads, including several versions of one name
+    status: verified
+    release: v0.26.0
+    tags: [core, distribution]
+    fields:
+      method: test
+      baseline: >
+        varve#69, raised from use: a layer could not hold two versions of one
+        crate. `deposit` dedupped on (name, platform), ignoring version and
+        kind, so varve could not express its OWN dependency graph as a layer —
+        252 packages in its Cargo.lock, 14 names at more than one version,
+        getrandom at three — and `export-cargo` could never satisfy a real
+        lockfile.
+        The second half was the dangerous one. `Store::lay_down` wrote every
+        payload to `bin/<name>`, so relaxing the deposit check ALONE would have
+        turned a clean error into a SILENT OVERWRITE: the wrong bytes under the
+        wrong name, and verification then failing on the OTHER entry with
+        nothing explaining why. Identity now follows dispatchability — `tool`
+        keeps `bin/<name>` and (name, platform) because it is dispatched by
+        name and must resolve uniquely; everything else lands at
+        `payloads/<name>/<version>` under (name, version, platform).
+        Proven end to end on the release binary rather than asserted: a layer
+        holding serde 1.0.200, serde 1.0.210 and a tool deposits, installs,
+        verifies, archives, re-installs into a fresh core offline, and exports
+        a Cargo registry whose index lists BOTH versions with cksums equal to
+        the sha256 of the tarballs actually on disk — each version exporting
+        its own bytes, not whichever landed last.
+        Two defects were found and fixed that the clauses did not name. A
+        signed manifest naming `../../evil` could previously escape the layer
+        via `bin.join(name)`; path components are now validated. And
+        `lockpin::disagreements` compared every pinned entry against every
+        locked package of the same NAME, so the moment a multi-version layer
+        existed `verify --lockfile` would have reported 1.0.200 vs 1.0.210 as
+        drift and gone red on every real lockfile — a false failure the fix
+        itself would have introduced.
+        Deliberate behaviour change, stated: crate/wit/sdk payloads no longer
+        appear in `bin/`, so `varve which <crate>` no longer resolves them.
+        They used to, accidentally; dispatching a `.crate` tarball was never
+        meaningful. Backward compatible for existing installs — `entry_path`
+        falls back to `bin/<name>`, unambiguous because the old check made a
+        second version impossible, and a pre-change core was reconstructed and
+        verified, exported and archived unchanged.
+        18 hand-applied mutations, all killed, including M1 (every payload back
+        to bin/<name> — the original bug) and M7 (held payloads keyed on
+        (name, platform) again — varve#69 restored). `cargo mutants` over the
+        CI-gated files changed: install.rs and reverify.rs, 28 mutants, 25
+        caught, 3 unviable, 0 missed; store.rs 0 missed.
+      steps:
+        - run: cargo test -p varve-core two_versions_of_one_name_are_two_files_neither_overwriting_the_other
+        - run: cargo test -p varve-core two_payloads_claiming_one_path_are_refused_before_anything_is_written
+        - run: cargo test -p varve-core a_name_or_version_that_escapes_the_layer_is_refused
+        - run: cargo test -p varve-core a_layer_installed_before_this_change_still_resolves_its_crate
+        - run: cargo test -p varve-core only_a_tool_is_dispatched_by_name
+        - run: cargo test -p varve-core two_versions_of_one_crate_are_a_layer_not_a_duplicate
+        - run: cargo test -p varve-core a_tool_may_not_appear_twice_under_one_name_however_its_versions_differ
+        - run: cargo test -p varve-core the_signed_digest_does_not_depend_on_the_order_versions_are_listed_in
+        - run: cargo test -p varve-core each_version_of_one_name_is_checked_against_its_own_signed_digest
+        - run: cargo test -p varve-core a_registry_exported_from_a_layer_offers_every_version_it_pins
+        - run: cargo test -p varve-core a_layer_pinning_two_versions_of_one_crate_agrees_with_a_lockfile_holding_both
+        - run: cargo test -p varve --test cli a_layer_holding_two_versions_of_one_crate_deposits_installs_verifies_and_exports_both
+        - run: cargo test -p varve --test cli two_versions_of_one_tool_are_still_refused_and_the_error_names_both
+    links:
+      - type: verifies
+        target: REQ-STORE-002
+
+  - id: VER-VSIX-001
+    type: verification
+    title: A VS Code extension is a pinned, verified, non-executable payload `code` installs
+    status: verified
+    release: v0.26.0
+    tags: [distribution, ergonomics]
+    fields:
+      method: test
+      baseline: >
+        varve#68: a reproducible environment pins its compiler, its linker and
+        its test runner, then installs editor extensions from a marketplace
+        with no verification at all. A `.vsix` is one zip file, so it needed no
+        tree-shaped store (varve#67) and could ship in this release.
+        Clauses 2 and 4 required NO new code. REQ-STORE-002 (06069af) had
+        already made identity and layout follow `PayloadKind::is_dispatchable`,
+        so adding one non-dispatchable variant gave a `.vsix`
+        `payloads/<name>/<version>` at mode 0644 and a (name, version) identity
+        for free. That was verified by running, not assumed: mutating
+        `is_dispatchable` to include Vsix and mutating store.rs's mode to a
+        constant 0o755 each turned the end-to-end CLI test red.
+        Implemented: `PayloadKind::Vsix` (`kind = "vsix"`, parsed, round-tripped
+        through the SIGNED annotation, not dispatchable); the `export-vsix`
+        adapter, which names each file `publisher.name-version.vsix` — the
+        marketplace convention, and `code --install-extension` dispatches on the
+        `.vsix` suffix, treating anything else as a marketplace id to FETCH;
+        the shared `.varve-export.json` stamp, so `varve verify --export`
+        catches the pin moving on without the export; and the `export-vsix`
+        docs topic, added to TOPICS_NEEDING_EXAMPLES so its worked example is
+        gated rather than trusted.
+        Fail-closed properties the clauses did not name, all from the
+        REQ-STORE-002 lesson: every destination is resolved BEFORE any bytes are
+        written, so an unexportable id leaves the directory untouched rather
+        than half-populated; two entries that would share a file name are a
+        Collision error, not a last-writer-wins overwrite; an id containing `/`
+        (a signed name is attributable, not benign) or starting with `-` (which
+        `code` would parse as a flag) is refused; and a layer carrying no `vsix`
+        entries fails rather than producing an empty directory a consumer would
+        install from and believe complete.
+        Proven end to end on the RELEASE binary: a layer holding two extensions,
+        one of them at two versions, plus a tool — deposited, installed,
+        verified (4 payloads against their own signed digests), and exported.
+        Store listing showed `bin/synth` at 0755 and
+        `payloads/rust-lang.rust-analyzer/{0.3.2260,0.3.2300}` plus
+        `payloads/vadimcn.vscode-lldb/1.11.4` at 0644; the export directory
+        showed three `.vsix` files at 0644 with the stamp; `verify --export`
+        read fresh; `varve which rust-lang.rust-analyzer` was refused while
+        `varve which synth` resolved.
+        13 hand-applied mutations, all killed — including is_dispatchable
+        returning true for Vsix, the signed wire string changing to
+        `vsix-package`, store.rs handing every payload 0o755, the `.vsix`
+        suffix being dropped from the exported name, the export setting 0o755,
+        validation moving from the plan to the write loop, the stamp not being
+        written, and the topic shipping with empty fences.
+      steps:
+        - run: cargo test -p varve-core only_a_tool_is_dispatched_by_name
+        - run: cargo test -p varve-core every_kind_round_trips_through_its_wire_string
+        - run: cargo test -p varve-core the_kind_list_the_other_tests_iterate_holds_every_variant
+        - run: cargo test -p varve-core extensions_deposit_as_vsix_entries_at_several_versions
+        - run: cargo test -p varve-core the_file_name_is_the_one_code_and_a_human_both_read
+        - run: cargo test -p varve-core an_id_that_could_escape_or_look_like_a_flag_is_refused
+        - run: cargo test -p varve-core nothing_is_written_when_one_entry_is_unexportable
+        - run: cargo test -p varve-core two_entries_that_would_share_a_file_are_refused_not_overwritten
+        - run: cargo test -p varve-core every_extension_lands_with_its_own_bytes_and_no_execute_bit
+        - run: cargo test -p varve-core a_tool_keeps_bin_and_a_held_payload_never_borrows_it
+        - run: cargo test -p varve --test cli vsix_extensions_deposit_install_verify_and_export_for_code
+        - run: cargo test -p varve --test cli export_vsix_refuses_a_layer_with_no_extensions_rather_than_writing_an_empty_directory
+        - run: cargo run -p varve -- docs check --coverage --strict
+    links:
+      - type: verifies
+        target: REQ-VSIX-001
+
+  - id: VER-CRATEIDX-001
+    type: verification
+    title: An exported Cargo registry index describes the crates it contains
+    status: verified
+    release: v0.27.0
+    tags: [distribution]
+    fields:
+      method: test
+      baseline: >
+        varve#73. `export-cargo` wrote `"deps":[]` and `"features":{}` for every
+        crate while Cargo resolves the dependency graph FROM the index. Measured
+        again here on varve's own 250-package lockfile through the real export:
+        228 of 250 index entries now declare a dependency or a feature, so the
+        stub was wrong for 91% of a real layer.
+        Implemented: `read_crate_meta` opens the `Cargo.toml` inside the SIGNED
+        `.crate` tarball — the same tarball `export_vendor_dir` already
+        unpacks — and transcribes `[dependencies]`, `[dev-dependencies]`,
+        `[build-dependencies]`, their `[target."cfg(...)"]` forms, `[features]`,
+        `package.links` and `package.rust-version` into the index shape
+        crates.io uses: `deps` with `req`/`features`/`optional`/
+        `default_features`/`target`/`kind`/`registry`/`package`, and features
+        split into `features`/`features2` behind `"v":2` for namespaced (`dep:`)
+        and weak (`?/`) values, exactly as Cargo publishes them. The line is
+        built by a derived `Serialize`, so key order is fixed at the declaration
+        order and nothing is interpolated into JSON by hand.
+        Clause 2 (faithful or refuse) is a closed allow-list: a dependency
+        carrying `git`, unresolved `workspace = true`, a `registry` ALIAS, a
+        `path` with no version, a non-string `version`, a non-boolean flag, or
+        ANY key varve does not know how to transcribe is an error naming the
+        crate, the dependency and the construct — never a dropped entry.
+        `export_local_registry` computes every line BEFORE writing anything, so
+        a refusal leaves no half-written registry.
+        Clause 3 (a REAL graph): `cargo_offline` no longer passes with one
+        dependency-free crate. Its fixture is four packaged crates with
+        transitive dependencies, a non-default feature requested OF a
+        dependency, `default-features = false`, a RENAMED dependency and TWO
+        versions of one name — and the consumer is RUN, not merely built,
+        because the worst observed outcome of the stub was a build that exits 0
+        with a crate compiled featureless.
+        DOGFOOD (the acceptance test): varve's own 250 crates.io packages taken
+        from `~/.cargo/registry/cache`, deposited as `kind = "crate"`,
+        installed, verified (250 payloads against their signed digests),
+        `export-cargo`ed, and then `cargo build --offline --workspace` in an
+        ISOLATED, empty `CARGO_HOME` with no crates.io index present at all —
+        exit 0, 171 crates unpacked from varve's registry. Negative control:
+        the same run with the v0.26.0 stub index restored exits 101 with
+        "package `varve` depends on `clap` with feature `derive` but `clap` does
+        not have that feature" — the exact failure varve#73 reported.
+        Mutations, all applied and reverted: the v0.26.0 stub restored (killed);
+        the crate's own feature map dropped while deps are kept (killed);
+        `default-features = false` silently dropped — the SILENT class, which
+        builds and exits 0 and is caught only by the behavioural assertion,
+        17164 vs 11564 (killed); `[target.*]` dependencies dropped (killed);
+        `features2` emitted without `"v":2` (killed); the git branch and the
+        workspace-inheritance branch deleted (killed, by the message assertion);
+        writing before validating (killed).
+      steps:
+        - run: cargo test -p varve-core an_index_entry_carries_the_crates_real_deps_and_features
+        - run: cargo test -p varve-core namespaced_and_weak_features_go_to_features2_behind_v2
+        - run: cargo test -p varve-core a_dependency_the_index_cannot_express_is_an_error_naming_the_crate
+        - run: cargo test -p varve-core a_feature_the_index_cannot_express_is_an_error_naming_the_crate
+        - run: cargo test -p varve-core a_crate_tarball_without_a_cargo_toml_is_refused_not_stubbed
+        # Clause 3: the REAL graph, RUN rather than merely built.
+        - run: cargo test -p varve-core --test cargo_offline a_varve_exported_registry_resolves_a_real_graph_and_builds_it_correctly
+        - run: cargo test -p varve-core --test cargo_offline an_index_entry_varve_wrote_is_the_entry_cargo_reads
+        # Full CLI path: deposit crate-kind -> install -> export-cargo, with the
+        # deps and features carried through.
+        - run: cargo test -p varve --test cli deposit_a_crate_kind_entry_and_export_a_cargo_registry
+    links:
+      - type: verifies
+        target: REQ-CRATEIDX-001
+
+  - id: VER-COMPOSEEXPORT-001
+    type: verification
+    title: An export follows the composition, or says it did not
+    status: verified
+    release: v0.27.0
+    tags: [distribution, core]
+    fields:
+      method: test
+      baseline: >
+        varve#79. `resolve()` unioned composed TOOLS and `verify` checked each
+        included layer, but every export adapter read ONE `layer.json` — so an
+        extender composing pulseengine's layer ran `export-cargo` and got only
+        their own crates, with no error.
+        Implemented: `composition_for_export` walks the graph from the export
+        target, cycle-guarded on an ancestor PATH (pushed and popped, so a
+        DIAMOND is walked once rather than refused as a cycle) and bounded by
+        `compose::MAX_DEPTH`, verifying each included layer against the trust
+        root of the realm the include NAMES — the including layer's root does
+        not speak for another realm. Every adapter now goes through it:
+        export-cargo, export-crates-vendor, export-bazel-distdir, export-vsix
+        and export-bazel, plus `verify --lockfile`, which was blind in the same
+        way.
+        Clause 2's rule is stated as its own function, `compose::union_payloads`,
+        with its own error type: a name at DIFFERENT versions exports both; the
+        same name AND version at the SAME digest exports once (two realms
+        AGREEING is the ordinary diamond, not a conflict); the same name and
+        version at DIFFERENT digests is an error naming both realms, both
+        layers and both digests. It is deliberately NOT `union_tools`: a tool
+        name is dispatched and must resolve to one binary, a payload is placed
+        in a registry keyed by (name, version) and two versions are what a
+        lockfile requires.
+        Clause 3: a composed layer that is not installed is an error naming it
+        and its corrective install ("this export would silently omit its
+        payloads"), and a composed export prints every layer it followed with
+        the realm that vouched for it.
+        Mutations, all applied and reverted: `composition_for_export` returning
+        only the root — varve#79 restored (killed); the verification of a
+        composed layer ignored (killed); a missing include silently skipped
+        (killed — and this one SURVIVED until the clause-3 test existed, which
+        is why it exists); the conflicting-digest arm disabled (killed); the
+        conflicting-digest arm made unconditional, so agreement is refused
+        (killed); the collision key reduced to the name, so two versions clash
+        (killed); the CLI skipping `union_payloads` entirely (killed).
+      steps:
+        - run: cargo test -p varve-core two_versions_of_one_crate_both_export
+        - run: cargo test -p varve-core the_same_name_and_version_with_the_same_bytes_exports_once
+        - run: cargo test -p varve-core the_same_name_and_version_with_different_bytes_names_both_realms
+        - run: cargo test -p varve --test cli an_export_follows_the_composition
+        - run: cargo test -p varve --test cli an_export_refuses_a_composed_layer_it_cannot_vouch_for
+        - run: cargo test -p varve --test cli an_export_refuses_two_layers_that_disagree_about_one_crate
+        - run: cargo test -p varve --test cli an_export_that_cannot_follow_the_composition_says_so
+    links:
+      - type: verifies
+        target: REQ-COMPOSEEXPORT-001
+
+  - id: VER-REPRO-001
+    type: verification
+    title: What varve emits is a function of the layer, not of the machine
+    status: verified
+    release: v0.27.0
+    tags: [core, supply-chain]
+    fields:
+      method: test
+      baseline: >
+        varve#72: one layer exported twice differed only in
+        `.cargo/config.toml`, which embedded an ABSOLUTE path.
+        THE EMPIRICAL QUESTION, settled before anything changed, as clause 1
+        required. Cargo resolves a relative `local-registry` (and a relative
+        `directory`) against the directory that HOLDS `.cargo/` — never against
+        the invoking cwd. Demonstrated against cargo 1.97.0 with a real
+        registry: config at `<root>/.cargo/config.toml` saying
+        `local-registry = "reg"`, build run from `<root>/sub`; with the registry
+        at `<root>/reg` the build succeeds and Cargo prints the resolved
+        absolute path; with the registry moved to `<root>/sub/reg` (the
+        cwd-relative candidate) or to `<root>/.cargo/reg` (beside the config
+        itself) it fails with "local registry path is not a directory:
+        <root>/reg". Both negative controls ran.
+        So clause 1's first branch applies and clause 2 does not: there is no
+        machine-specific file to separate out. varve emits the bare
+        subdirectory constants `registry` / `vendor`, which are a function of
+        the layer alone and keep working when the export is copied, committed
+        or relocated.
+        CORRECTION TO A SHIPPED TEST. REQ-PRODUCE-002's
+        `a_relative_out_still_yields_an_absolute_path_in_the_generated_config`
+        asserted the WRONG property. The bug it was written for was real — a
+        relative `--out` embedded VERBATIM, and so resolved against whatever cwd
+        the build later ran in — but "absolute" was the wrong fix for it. The
+        test is now
+        `a_relative_out_is_resolved_not_embedded_verbatim`, and it pins both
+        halves: the emitted string is not the user's argument, AND it names the
+        registry where Cargo resolves it from.
+        Clause 3: `every_export_adapter_is_byte_identical_between_two_runs`
+        exports one layer twice, to destinations that differ in NAME as well as
+        location, and compares the complete file tree — every path, every byte,
+        the `.varve-export.json` stamp included — for ALL FIVE adapters
+        (export-cargo, export-crates-vendor, export-bazel-distdir, export-vsix,
+        export-bazel), over a fixture carrying a source-provenance tool, three
+        crates including two versions of one name, and two `.vsix`.
+        Clause 4 is unchanged and deliberately so: `varve docs threat-model`
+        still says varve signs what its build produced and does not prove the
+        build was deterministic. Nothing here makes that sentence false.
+        Mutations, all applied and reverted: `export-cargo` embedding the
+        destination path in the config — varve#72 exactly (killed);
+        `export-crates-vendor` doing the same (killed); the export stamp
+        carrying the destination (killed); `cargo_config_toml` made absolute
+        again (killed, by the corrected REQ-PRODUCE-002 test).
+        One EQUIVALENT mutant, reported rather than hidden: switching
+        `export-bazel`'s registry map to a `HashMap` survives, because the map's
+        iteration order affects only the order of printed lines — each
+        `<tool>.json` file's content is independent of it. The output bytes are
+        unchanged, so there is nothing for a test to catch.
+      steps:
+        - run: cargo test -p varve --test cli every_export_adapter_is_byte_identical_between_two_runs
+        - run: cargo test -p varve --test cli a_relative_out_is_resolved_not_embedded_verbatim
+        - run: cargo test -p varve-core config_redirects_crates_io_to_the_local_registry
+        # The empirical answer, made permanent: the oracle builds from a
+        # subdirectory of the export root and asserts that no registry exists
+        # at either the cwd-relative or the config-dir-relative candidate.
+        - run: cargo test -p varve-core --test cargo_offline a_varve_exported_registry_resolves_a_real_graph_and_builds_it_correctly
+        - run: cargo test -p varve-core --test cargo_offline a_varve_vendored_crate_builds_offline_through_cargo
+    links:
+      - type: verifies
+        target: REQ-REPRO-001
+  - id: VER-SDK-001
+    type: verification
+    title: A tree payload is held as its signed archive and relocated only into an export
+    status: verified
+    release: v0.27.0
+    tags: [distribution]
+    fields:
+      method: test
+      baseline: >
+        Library-level, on a SYNTHETIC tree rather than a real Yocto SDK: a
+        "binary" carrying two NUL-padded path fields, an `environment-setup`
+        text file, an SDK-internal absolute symlink, and a directory, packed as
+        a gzip tar and also as a plain one.
+        Clause 1 is verified in the STORE, where a tree payload is held as the
+        single archive its producer signed at `payloads/<name>/<version>` —
+        two Yocto releases of one SDK coexist, each resolving from its own
+        manifest entry, and neither borrows `bin/`. That clause was CORRECTED
+        during implementation: unpacking a tree in the store would leave
+        `verify` and `archive` with no single file to hash against the single
+        signed digest (contradicting clause 2), and the store path is ~90
+        characters before any content, so an SDK could not be relocated into it
+        anyway (clause 4's own arithmetic).
+        Clause 4 is the constraint everything else follows from, transcribed
+        from `relocate_sdk.py` rather than recalled: `len(new_dl_path) >=
+        p_filesz` fails. A destination one character longer than the build
+        prefix is refused BEFORE the archive is opened, by name, with the
+        budget in the message and nothing written; a destination exactly at the
+        budget is accepted, because the rule is "no longer", and an off-by-one
+        here refuses legitimate destinations. The field-level guard is kept as
+        well and fires on a field too small, refusing rather than truncating —
+        a truncated interpreter path is a binary that cannot exec with nothing
+        to point at.
+        Clause 3 covers both halves of the real installer: a binary's field is
+        patched IN PLACE and re-padded with NUL so the file length and every
+        offset survive; a text file is substituted freely and may change
+        length; an SDK-internal absolute symlink is re-pointed into the export.
+        Clause 2 is asserted as a difference: the exported bytes are NOT the
+        signed bytes, and the archive handed in is byte-identical afterwards —
+        nothing on this path writes back into the store or records a
+        post-relocation digest.
+        Clause 5 is the tree's larger attack surface: every component of every
+        member is validated (`../../evil`, `/etc/passwd`, `a/../../evil`, `a//b`,
+        `a/./b`, ``, `..` all refused) and the good member does not land either;
+        two members claiming one path are a Collision; a symlink to the host, a
+        relative symlink climbing out, and — the escape a per-component check
+        cannot see — a link out followed by a write THROUGH it are each refused
+        with nothing written outside the export. An archive whose member name
+        was written into the tar header directly, bypassing tar-rs's own `..`
+        check, is refused by varve rather than by the dependency.
+        11 hand-applied mutations against these tests, every one killed: the
+        destination fit check disabled; the absolute-destination check
+        disabled; the NUL re-padding removed; the field guard weakened to `>`;
+        every file treated as binary; the symlink left un-repointed; `..`
+        accepted as a path component; the write-through-symlink check disabled;
+        an absolute escaping link accepted; the member collision check
+        disabled; gzip detection disabled; and a hostile archive member
+        silently SKIPPED instead of refused.
+        THE CLI WIRING, added after the library landed unreachable. Until
+        `varve export-sdk` existed, every clause above was verified against a
+        library nothing in the product called — the REQ-INDEXAUTH-001 shape,
+        where a clause is marked verified while no code path constructs the
+        policy. The CLI tests below drive the BINARY, never the library:
+        an `sdk` deposited with its signed prefix installs, verifies, exports
+        as a relocated tree (no occurrence of the build prefix survives in any
+        member, the internal absolute symlink is re-pointed into the export,
+        the binary's length is unchanged because its field was patched in
+        place), and the store still holds the archive BYTE-IDENTICAL to what
+        was deposited — so `verify`, which re-hashes that one file, still
+        passes after the export (clauses 1, 2, 3). The stamp is asserted to be
+        exactly `sdk`, because a declared `[[export]]` is compared against that
+        string and any other spelling reports the declared export as never
+        produced. Clause 4 is exercised in both directions at the boundary: a
+        destination longer than the build prefix is refused by name with the
+        budget in the message and neither stamp nor tree written, and the
+        PRODUCING half is refused too — `deposit` rejects an `sdk` with no
+        `sdk-prefix` (it would install, verify, and be impossible to export,
+        discovered on the far side of an air gap and unfixable without a
+        re-deposit) and rejects the field on any other kind, where it would be
+        signed, ignored, and believed. Clause 5 is exercised at the CLI: an
+        archive whose member name was written into the tar header directly,
+        bypassing tar-rs's own `..` check, is refused by varve with nothing
+        left behind inside the export or outside it.
+        4 mutations against the CLI tests, every one killed: the stamp written
+        as `vsix` instead of `sdk`; the relocation prefix taken from the
+        destination instead of the signed annotation (which also breaks the
+        budget message, so two tests go red); `deposit` accepting an sdk with
+        no prefix; and the sdk-prefix-on-a-tool refusal removed.
+        Run end to end against the RELEASE binary on 2026-08-19: keygen ->
+        deposit (sdk + sdk-prefix) -> install -> `export-sdk` -> declare
+        `[[export]]` -> `verify` exit 0 -> `rm -rf` the export -> `verify`
+        exit 1 naming the missing directory and the command that regenerates
+        it.
+        Not verified here: a real multi-gigabyte Yocto SDK, real ELF PT_INTERP
+        parsing (the field is located by its NUL-terminated string, not by
+        reading program headers), and `--select` against a layer carrying more
+        than one `sdk` (the ambiguity refusal is coded and unit-unexercised).
+      steps:
+        - run: cargo test -p varve-core a_tree_shaped_payload_is_held_by_name_and_version_like_any_other
+        - run: cargo test -p varve-core a_destination_longer_than_the_build_prefix_is_refused_before_anything_is_written
+        - run: cargo test -p varve-core a_relative_or_prefixless_destination_is_refused
+        - run: cargo test -p varve-core a_nul_padded_field_is_patched_in_place_and_the_file_length_is_preserved
+        - run: cargo test -p varve-core a_field_too_small_for_the_new_path_is_refused_rather_than_truncated
+        - run: cargo test -p varve-core a_text_file_is_substituted_and_may_change_length
+        - run: cargo test -p varve-core the_whole_synthetic_tree_lands_relocated_and_the_source_bytes_are_untouched
+        - run: cargo test -p varve-core a_member_whose_path_escapes_the_export_is_refused_and_nothing_is_written
+        - run: cargo test -p varve-core a_symlink_that_leaves_the_export_is_refused_even_though_every_component_is_safe
+        - run: cargo test -p varve-core two_members_claiming_one_path_are_refused_before_anything_is_written
+        - run: cargo test -p varve-core a_signed_archive_unpacks_and_relocates_and_the_archive_is_never_modified
+        - run: cargo test -p varve-core an_archive_member_that_escapes_is_refused_before_the_tree_is_written
+        # THROUGH THE BINARY. Each of these fails if the CLI stops constructing
+        # the policy, which no library-level test can detect.
+        - run: cargo test -p varve --test cli export_sdk_lays_a_relocated_tree_down_through_the_cli
+        - run: cargo test -p varve --test cli export_sdk_refuses_a_destination_the_sdk_cannot_reach_before_writing_anything
+        - run: cargo test -p varve --test cli an_sdk_without_the_signed_prefix_cannot_be_deposited_at_all
+        - run: cargo test -p varve --test cli export_sdk_refuses_a_hostile_archive_member_at_the_cli_boundary
+    links:
+      - type: verifies
+        target: REQ-SDK-001
+  - id: VER-EXPORTDECL-001
+    type: verification
+    title: Declared exports parse, are checked without being named, and explain a shadowed shim
+    status: verified
+    release: v0.27.0
+    tags: [distribution, ergonomics]
+    fields:
+      method: test
+      baseline: >
+        `[[export]]` entries parse out of the pin varve.toml already is, so
+        there is no second discovery path: a project declaring a `cargo`
+        export, a `vsix` export with a two-name subset, and a sourced `sdk`
+        export with its environment round-trips to the adapter, the
+        destination, the selection and the environment, and a pin with no
+        exports still parses — every varve.toml already in the world has none.
+        Refusals, each with the correction in the message: an adapter this
+        varve cannot produce (the refusal lists all six, and each wire string
+        is asserted equal to the one the adapters already stamp, so a
+        declaration and a stamp compare without a translation table); a
+        destination that is absolute, climbs out with `..`, or names no
+        directory; two entries sharing one destination, which would overwrite
+        one stamp and leave `verify` checking one export twice and the other
+        never; a subset selection that is a path rather than a payload name; a
+        selection present but empty.
+        Clause 3 is checked as a set rather than per directory: with nothing
+        generated, EVERY declared export reports Missing — a failure, not a
+        warning; once generated they read Current; when the pin moves they read
+        Stale; a directory stamped by a DIFFERENT adapter is a KindMismatch,
+        because freshness there says nothing about the declared export; and an
+        unreadable stamp is its own verdict, since "re-run the export" is not
+        the fix for a truncated file.
+        Clauses 4 and 5 are the SDK half. An `[export.env]` is refused on a
+        kind that is pointed at rather than sourced, and refused without a
+        declared shim order — the message names both answers AND
+        REQ-SHADOW-001, because the reason is the point: undeclared, `verify`
+        must either miss a genuine hijack or fire on a legitimate sourced SDK.
+        The classification yields three verdicts, not two: a binary inside an
+        export declared `before-shims` is Expected; the same binary under an
+        `after-shims` declaration ContradictsDeclaration; anything else — a
+        distro gcc, or a binary inside a vendor directory that is never sourced
+        — is Undeclared.
+        The emitted `varve env` ordering is asserted to INVERT the declaration,
+        which is why it is computed and not written by hand: sourcing prepends
+        to PATH, so `after-shims` is sourced FIRST and `before-shims` LAST.
+        12 hand-applied mutations against these tests, every one killed:
+        exports dropped from the parse; an unknown adapter guessed as `cargo`;
+        `..` accepted in a destination; the duplicate-destination check
+        disabled; a path accepted as a selection; the shim order defaulted
+        instead of required; `[export.env]` allowed on a pointed-at kind; a
+        missing export reported Current; the two shim-order verdicts swapped;
+        and the emitted sourcing order un-inverted.
+        THE CLI WIRING, added after the library landed unreachable. Until
+        this, `verify` never iterated the declarations, `varve env` printed the
+        shim fragment alone, and `verify_no_shadowing` never consulted the
+        classification — so every clause above was verified against a library
+        nothing in the product called. The tests below drive the BINARY.
+        Clause 3: a pin declaring TWO exports with neither generated fails
+        naming BOTH (a loop that stops at the first fault checks one export and
+        certifies the rest), and each fault names the command that produces it
+        — `bazel-registry` is produced by `varve export-bazel`, so the obvious
+        `format!("export-{kind}")` would print a command that does not exist in
+        the one line whose job is to be run. Generating one leaves the other
+        still failing; with only the generated one declared, `verify` passes
+        and SAYS it looked (a silent pass is indistinguishable from a skipped
+        check). Then, on the same directory: a moved pin is STALE, a stamp from
+        a different adapter is refused as never-produced, and a deleted
+        directory is MISSING — a failure, not a warning.
+        Clause 5: with the SDK's own `synth` first on PATH, `verify` PASSES
+        under a `before-shims` declaration (and says why), FAILS under an
+        `after-shims` one naming the declaration and the script to re-order,
+        and still reports the ordinary hijack — with `varve shim install` as
+        the fix — for a binary in no declared export. Three verdicts, at the
+        boundary, on one machine state.
+        Clause 4: `varve env` in a project declaring one sourced export on each
+        side of the shims emits them in the INVERTED order, and the emitted
+        script is then EVALUATED by `sh` and the resulting PATH inspected —
+        `before-shims` ahead of the shims, `after-shims` behind them. Asserting
+        the text alone would verify the formatter. `--shell fish` fails rather
+        than handing back an environment missing what varve.toml declares,
+        since a producer's `environment-setup-*` is POSIX sh.
+        4 mutations against the CLI tests, every one killed: `verify` returning
+        early from the declared-export loop; `classify_shadowing` replaced by a
+        constant `Undeclared`; `varve env` falling back to the shim fragment
+        whatever the pin declares; and the shim line left unsubstituted so the
+        sourced scripts land around the wrong position.
+        Run end to end against the RELEASE binary on 2026-08-19: an sdk export
+        declared in `varve.toml`, `verify` exit 0, `rm -rf` the directory,
+        `verify` exit 1 naming it.
+        STILL NOT REACHABLE, and the reason this VER stays short of its
+        requirement: clause 2's `select` — a SUBSET of the layer — parses, is
+        validated (a path there is refused, an empty list is refused) and is
+        consumed by NOTHING. No adapter reads `ExportDecl::select`, so a
+        project that declares `select = ["one-extension"]` gets the whole layer
+        exported and `verify` reports it fresh. That is the same
+        accepted-ignored-and-believed shape clause 4 of this requirement
+        condemns, which is why REQ-EXPORTDECL-001 is NOT moved to verified.
+      steps:
+        - run: cargo test -p varve-core a_project_declares_its_exports_in_the_pin_it_already_has
+        - run: cargo test -p varve-core the_declared_kind_is_one_varve_can_actually_produce
+        - run: cargo test -p varve-core a_destination_that_leaves_the_repository_is_refused
+        - run: cargo test -p varve-core two_exports_may_not_share_one_directory
+        - run: cargo test -p varve-core a_subset_selection_names_payloads_not_paths
+        - run: cargo test -p varve-core an_environment_must_say_where_it_sits_relative_to_the_shims
+        - run: cargo test -p varve-core only_an_export_that_is_sourced_may_declare_an_environment
+        - run: cargo test -p varve-core every_declared_export_is_checked_and_an_absent_one_fails
+        - run: cargo test -p varve-core a_declared_sdk_environment_is_not_reported_as_a_hijack
+        - run: cargo test -p varve-core one_command_sources_the_whole_environment_in_the_declared_path_order
+        # THROUGH THE BINARY.
+        - run: cargo test -p varve --test cli verify_checks_every_declared_export_without_being_told_to
+        - run: cargo test -p varve --test cli a_declared_sdk_environment_is_not_reported_as_a_hijack_by_verify
+        - run: cargo test -p varve --test cli env_enters_every_declared_environment_in_the_order_that_inverts_the_file
+    links:
+      - type: verifies
+        target: REQ-EXPORTDECL-001
+  - id: VER-SYSTEST-001
+    type: verification
+    title: varve self-hosts under test; the OCI transport has a real round-trip gate
+    status: verified
+    release: v0.27.0
+    tags: [system-test, methodology]
+    fields:
+      method: automated-test
+      baseline: >
+        REQ-SYSTEST-001, clause by clause. Clause 1 (self-hosting): the
+        `systest` workflow deposits varve's OWN Cargo.lock — 250 registry
+        packages, 14 names at more than one version — as kind="crate"
+        payloads, installs, verifies (including `--lockfile` agreement with
+        the real lock), exports, and builds the varve workspace OFFLINE with
+        an isolated EMPTY CARGO_HOME, through both adapters claiming a Cargo
+        build. A negative control re-runs the offline build without the
+        export wiring and requires it to FAIL, so a leak in the isolation
+        cannot green the gate. On first contact the gate reproduced varve#73
+        immediately: `export-cargo` FAILED at resolution while
+        `export-crates-vendor` passed — the defect the one-crate
+        cargo_offline fixture could not see by construction, and the reason
+        REQ-CRATEIDX-001 exists. That fix landed in this same release.
+        .
+        The gate then went red for a SECOND reason, found by clean-room
+        review: REQ-REPRO-001 made the exported registry/vendor paths
+        relative, and selfhost.sh copied only `.cargo/config.toml` into the
+        consumer, so both adapters failed on a path that resolved against a
+        directory nothing had been carried into. A cross-workstream
+        regression — the repro branch invalidated the systest branch's
+        script, and the merge never re-ran it. The script now copies the
+        whole export.
+        .
+        Re-run locally 2026-08-19 AFTER both fixes, and this is the first run
+        in which clause 1 has actually been demonstrated: BOTH adapters
+        PASS end to end, each with its negative control red as required
+        (`selfhost[export-crates-vendor]: PASS`,
+        `selfhost[export-cargo]: PASS`). The export-cargo job is no longer
+        skip-neutral — repo variable VARVE_SYSTEST_EXPORT_CARGO is set, so it
+        runs and is the proof the adapter stays fixed. Clause 2 (a system
+        gate per transport): the OCI round trip (varve#62) runs a REAL
+        registry (sha256-pinned zot) and pushes the deposited layout with a
+        STANDARD client (oras, the documented `varve docs deploy` recipe),
+        then `varve install --from oci+http://…` into a fresh core, `varve
+        verify`, and `varve status` (the baseline line-status travelled).
+        Run locally 2026-08-19: PASS, 250 payload blobs round-tripped. The
+        Bazel --distdir gate (varve#27) and the ten-persona docs audit are
+        clause-2 obligations NOT yet covered here. Clause 3: both
+        deliberately-small fixtures now declare in their headers exactly
+        what a one-crate graph cannot exercise (dependency resolution,
+        feature resolution, multiple versions of one name, build scripts,
+        proc macros) and point at the self-hosting gate for the real claim.
+        Clause 4 is policy: the machinery exists (a new Cargo adapter is one
+        selfhost.sh invocation in systest.yml), but nothing mechanically
+        blocks an adapter shipping without one — enforcement stays with
+        review.
+      steps:
+        # Clause 1 — both Cargo adapters are wired into the self-host gate.
+        - run: grep -q "selfhost.sh export-crates-vendor" .github/workflows/systest.yml
+        - run: grep -q "selfhost.sh export-cargo" .github/workflows/systest.yml
+        # The isolation and its negative control are in the script itself.
+        - run: grep -q "cargo build --workspace --offline --locked" tools/systest/selfhost.sh
+        - run: grep -q "negative control" tools/systest/selfhost.sh
+        # The spec generator refuses to regress into a toy fixture.
+        - run: grep -q "realistic-scale floor" tools/systest/gen-crate-deposit-spec.py
+        # Clause 2 — the OCI round trip is a workflow job, not a recipe.
+        - run: grep -q "oci-roundtrip.sh" .github/workflows/systest.yml
+        - run: grep -q "oci+http://" tools/systest/oci-roundtrip.sh
+        # Clause 3 — the small fixtures declare their scope. cargo_offline.rs
+        # no longer carries a "CANNOT exercise" disclaimer because it is no
+        # longer a small fixture: v0.27.0 rebuilt it as a REAL GRAPH, so the
+        # honest assertion is that it says so. This step cited the deleted
+        # disclaimer and was RED while `rivet check verification-evidence`
+        # stayed green — that gate resolves cargo-test filters, not greps, so
+        # it could not see it (found by clean-room review).
+        - run: grep -q "REAL GRAPH" crates/varve-core/tests/cargo_offline.rs
+        - run: grep -q "CANNOT exercise" crates/varve-core/tests/corrosion_offline.rs
+        # The scripts parse (the jobs run them verbatim).
+        - run: bash -n tools/systest/selfhost.sh
+        - run: bash -n tools/systest/oci-roundtrip.sh
+        - run: bash -n tools/systest/lib.sh
+        - run: python3 -m py_compile tools/systest/gen-crate-deposit-spec.py
+    links:
+      - type: verifies
+        target: REQ-SYSTEST-001
+
+  - id: VER-SYSTEST-002
+    type: verification
+    title: The layer assembler is exercised end to end, without publishing
+    status: verified
+    release: v0.28.0
+    method: test
+    fields:
+      description: >
+        REQ-SYSTEST-002 clause by clause. The producer pipeline — the workflow
+        that assembles the official signed layer — previously had NO test and
+        was exercised only by dispatching it against the real GHCR registry.
+        That is where the 2026.08.3 deposit failed, on a bug a seventeen-check
+        CI gate including a twenty-nine-minute mutation run could not have
+        caught, because nothing in CI executed that workflow (varve#95).
+        .
+        Clause 1: the assembler was EXTRACTED from deposit-layer.yml's inline
+        run-block into tools/build-deposit-spec.sh, and the workflow now calls
+        it. This matters more than it looks: a gate that re-implements the
+        logic tests a COPY, which is the same lie as stubbing. The production
+        path and the tested path are now the same file.
+        .
+        Clause 2: the gate covers every shape that has broken or would be
+        dangerous — a repo appearing in BOTH lists (the bug that shipped), a
+        per-platform vsix set, a portable one, a binary rename, raw
+        per-platform binaries, a tool missing an asset for one platform, and
+        a repo requested at TWO versions, which must be refused because
+        otherwise one release's assets are checked against another release's
+        sums.
+        .
+        Clause 3: the spec is asserted to parse and to deposit; the run stops
+        before `oras push`, because publishing is not what needs testing.
+        .
+        Clause 4 is the reason this record exists. A pre-flight that stubs the
+        component under test is not coverage: the dry-run that preceded the
+        failed deposit stubbed `verify_release` and `asset_sha` — exactly the
+        function that broke — and reported success. Here the seam is the
+        external SERVICE (gh, cosign) and not the component: every line of the
+        assembler executes against a recorded asset inventory, hermetically,
+        with no network and no dependence on a release still existing.
+        .
+        The gate carries its own mutation: it deletes the idempotence guards
+        from a COPY of the assembler and requires red on the real
+        "already exists" message, refusing to run at all if the guards move or
+        are reworded. A gate nobody watches fail rots into a rubber stamp.
+        .
+        Declared scope, per REQ-SYSTEST-001 clause 3: the fixture asset BYTES
+        are stand-ins, so nothing here claims anything about the shipped
+        tools; and the cosign double checks bundle-to-blob binding, identity
+        regexp and issuer — the assembler's responsibilities — not sigstore
+        signatures, which would need the network the gate must not depend on.
+      steps:
+        # The gate itself, exactly as CI invokes it.
+        - run: bash tools/systest/deposit-layer.sh
+        # The assembler is a real file the workflow calls, not a copy.
+        - run: grep -q "tools/build-deposit-spec.sh" .github/workflows/deposit-layer.yml
+        - run: test -x tools/build-deposit-spec.sh
+        # The job is wired in.
+        - run: grep -q "deposit-layer.sh" .github/workflows/systest.yml
+        # The scripts parse (CI runs them verbatim).
+        - run: bash -n tools/build-deposit-spec.sh
+        - run: bash -n tools/systest/deposit-layer.sh
+        - run: python3 -m py_compile tools/systest/assert-deposit-spec.py
+    links:
+      - type: verifies
+        target: REQ-SYSTEST-002
+
+  - id: VER-VERIFYALL-001
+    type: verification
+    title: verify --all covers every realm, reports every failure, and says what it covered
+    status: verified
+    release: v0.28.0
+    method: test
+    fields:
+      description: >
+        REQ-VERIFYALL-001 clause by clause. `verify --all --help` promised
+        "every installed layer" and walked only the PINNED realm's partition:
+        a security auditor planted a backdoored binary in a second realm, ran
+        it, got exit 0, and executed the backdoor (varve#84). Clause 1 is the
+        walk; clause 2 reports EVERY failure rather than stopping at the first
+        (in one observed run the only layer id on screen belonged to a
+        different, HEALTHY layer); clause 3 names the layer AND its path;
+        clause 4 prints the scope covered so a future narrowing is visible in
+        the output rather than silent; clause 5 REPORTS a partition whose
+        realm varve-realms.toml no longer defines, because nothing can vouch
+        for it and that is exactly what a store-wide check is for.
+        .
+        Clean-room review confirmed all five by mutation: deleting the
+        scope line, and dropping the path from the failure format, each turned
+        tests red. It also drove the two-realm case live and saw
+        `checked 3 of 3 layer(s) across 2 partition(s)`.
+      steps:
+        - run: cargo test -p varve --test cli verify_all_covers_every_realm_not_only_the_pinned_one
+        - run: cargo test -p varve --test cli verify_all_reports_every_failure_and_refuses_to_skip_an_undefined_realm
+    links:
+      - type: verifies
+        target: REQ-VERIFYALL-001
+
+  - id: VER-NODESTROY-001
+    type: verification
+    title: A producer command refuses to destroy signed work, and leaves the layout untouched
+    status: verified
+    release: v0.28.0
+    method: test
+    fields:
+      description: >
+        REQ-NODESTROY-001. `deposit` into a layout already carrying referrers
+        dropped the line-status, line-index and attestations, exited 0, and
+        printed a message byte-identical to a clean run (varve#82, varve#85).
+        Three of ten personas hit it independently; the own-realm operator hit
+        it by ACCIDENT. It was warned about in three docs topics and guarded by
+        no code — documentation doing the tool's safety job.
+        .
+        Clause 4 is met structurally rather than by repetition: the guard sits
+        at `archive::write_oci_layout`, the single place varve writes a layout,
+        so `archive` inherits it and so will the next writer. An unrecognised
+        `artifactType` counts as work, because enumerating today's three
+        referrer kinds would silently stop protecting the fourth.
+        .
+        Clause 5 ("a refused layout is left byte-identical") is the one worth
+        checking hardest, since "nothing was written" is easy to claim and easy
+        to get wrong. Clean-room review verified it by recursive sha256
+        snapshot before and after, for BOTH deposit and archive, and confirmed
+        by mutation that moving the guard past the blob writes turns the test
+        red.
+      steps:
+        - run: cargo test -p varve --test producer
+        - run: cargo test -p varve-core --lib every_referrer_kind_is_named_including_one_varve_does_not_know
+        - run: cargo test -p varve-core --lib a_deposit_that_would_drop_a_referrer_is_refused_before_a_byte_is_written
+        - run: cargo build
+    links:
+      - type: verifies
+        target: REQ-NODESTROY-001
+
+  - id: VER-CIGATE-001
+    type: verification
+    title: The exit-code contract is generated from the code that exits, not written by hand
+    status: verified
+    release: v0.28.0
+    method: test
+    fields:
+      description: >
+        REQ-CIGATE-001. `varve status` exited 0 while printing YANKED, so a
+        pipeline had to grep stdout to fail on a yanked toolchain; no (CI)
+        command offered `--json`, so a pipeline scraped the layer digest out of
+        an English sentence; and `varve docs --grep "exit code"` returned
+        nothing across all fifty topics.
+        .
+        The part that makes this durable rather than merely done: the contract
+        is RENDERED from a single `exit::Outcome`, which is also what `main()`
+        exits with and what the `exit-codes` docs topic is generated from. A
+        hand-written table is what goes stale, and
+        `every_documented_exit_code_is_produced_by_a_real_invocation` executes
+        a real scenario per code with a panicking catch-all arm, so a new code
+        cannot be documented without being demonstrated.
+        .
+        BREAKING, and stated as such in the CHANGELOG: `status` exits 3 on
+        YANKED; `docs --grep` exits 4 on no match.
+      steps:
+        - run: cargo test -p varve --bin varve exit
+        - run: cargo test -p varve --bin varve docs
+        - run: cargo run -q -p varve -- exit-codes --json
+    links:
+      - type: verifies
+        target: REQ-CIGATE-001
+
+  - id: VER-INSPECT-001
+    type: verification
+    title: A consumer can see what is inside a layer, including what it composes
+    status: verified
+    release: v0.28.0
+    method: test
+    fields:
+      description: >
+        REQ-INSPECT-001. Nothing reported a layer's payloads: `varve list`
+        printed layer ids only and `varve sbom` collapsed every non-tool kind
+        to CycloneDX `library`. In the ten-persona audit the build engineer
+        chose an export adapter by running all four and reading which errored;
+        the newcomer learned the tool set by typo-ing a name into
+        `varve which`.
+        .
+        Clause 3 corrects a message that was FALSE: `which`/`run` on a held
+        `wit` payload said it "is not part of layer", when it is part of the
+        layer and simply not dispatched. Clause 4 follows the composition,
+        because a composed layer's payloads are part of what the pin delivers
+        and `varve sbom` being composition-blind is a known limitation this
+        was not going to repeat. Clause 5 needs no network — the store already
+        holds the answer, and clean-room review confirmed `RegistrySource` is
+        constructed at exactly one call site, which `inspect` does not reach.
+      steps:
+        - run: cargo test -p varve --test cli inspect
+        - run: cargo test -p varve --bin varve inspect
+    links:
+      - type: verifies
+        target: REQ-INSPECT-001

@@ -1,0 +1,18 @@
+# cargo-deny — dependency vulnerability + license + source audit
+# (SSDF PW/RV, IEC 62443-4-1 SI/DM). A supply-chain tool must scan its own
+# supply chain.
+[advisories]
+version = 2
+yanked = "deny"
+
+[bans]
+multiple-versions = "warn"
+
+[licenses]
+version = 2
+allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "BSD-2-Clause", "Unicode-3.0", "ISC", "Zlib", "MPL-2.0", "CDLA-Permissive-2.0"]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

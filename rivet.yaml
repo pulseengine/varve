@@ -4,6 +4,11 @@ project:
   schemas:
     - common
     - dev
+    - stpa
+    - stpa-sec
+    - aspice
+    - supply-chain
+    - research
 
 sources:
   - path: artifacts

@@ -5,6 +5,26 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
+homepage = "https://github.com/pulseengine/varve"
+documentation = "https://docs.rs/varve"
+rust-version = "1.89"
+keywords = ["toolchain", "supply-chain", "signing", "reproducible", "oci"]
+categories = ["command-line-utilities", "development-tools", "development-tools::build-utils", "cryptography"]
 
 [dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+clap_complete = "4.6.9"
+serde_json = "1.0.151"
 varve-core.workspace = true
+
+[dev-dependencies]
+flate2 = "1.1.9"
+tar = "0.4.46"
+assert_cmd = "2.2.2"
+hex = "0.4.3"
+predicates = "3.1.4"
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+wsc-attestation = "0.10.0"

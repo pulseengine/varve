@@ -1,0 +1,486 @@
+name: Release
+
+# Release variant: serialize per-tag, never cancel. A cancelled release
+# mid-publish leaves the GitHub Release page, build attestations, and
+# per-target binary archives in an inconsistent state — better to queue
+# than abort. Mirrors the pulseengine/synth release workflow (the
+# canonical Track A implementation per release-artifact-pipeline).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual re-run for a tag whose initial run failed partway. The tag
+  # must already exist; this does not create tags.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)build (e.g. v0.1.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Version guard (REQ-RELVER-001) ────────────────────────────────────
+  # A released binary must report the version it is tagged as. The v0.14.0
+  # release shipped binaries reporting 0.13.1 because the Cargo.toml bump was
+  # a manual step that got missed. This makes it mechanical: the tag and the
+  # workspace version must agree, or nothing builds.
+  version-guard:
+    name: Tag matches Cargo.toml version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Assert tag == workspace version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          TAG_VER="${VERSION#v}"
+          CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=$TAG_VER  Cargo.toml=$CARGO_VER"
+          if [ "$TAG_VER" != "$CARGO_VER" ]; then
+            echo "::error::release tag $VERSION does not match Cargo.toml version $CARGO_VER — bump the workspace version before tagging"
+            exit 1
+          fi
+
+  # ── Cross-platform binary builds ──────────────────────────────────────
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    needs: version-guard
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-14
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.5 --locked
+
+      - name: Build varve (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p varve
+
+      - name: Build varve (cross)
+        if: matrix.cross
+        run: cross build --release --locked --target ${{ matrix.target }} -p varve
+
+      - name: Assert built binary reports the tag version (REQ-RELVER-001)
+        # The artifact-level twin of the version-guard job: run the freshly
+        # built binary and confirm `--version` == the tag. This is the exact
+        # oracle varve#38 asked for — a binary that mis-reports its own version
+        # (as v0.14.0 did) fails the release here. Native targets only; a
+        # cross-built binary cannot be executed on the runner.
+        if: ${{ !matrix.cross }}
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          REPORTED=$("target/${{ matrix.target }}/release/varve" --version | awk '{print $2}')
+          echo "tag=${VERSION#v}  binary --version=$REPORTED"
+          if [ "${VERSION#v}" != "$REPORTED" ]; then
+            echo "::error::built binary reports '$REPORTED' but the release tag is $VERSION"
+            exit 1
+          fi
+
+      - name: Strip binary
+        if: ${{ !matrix.cross }}
+        run: strip "target/${{ matrix.target }}/release/varve" 2>/dev/null || true
+
+      - name: Package archive
+        env:
+          TARGET: ${{ matrix.target }}
+          # Resolve the version once: tag push -> refs/tags/vX.Y.Z;
+          # workflow_dispatch -> the user-supplied tag input. Bound via
+          # env: and dereferenced as $VERSION below — never expand
+          # ${{ ... }} directly inside run: (command-injection vector).
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          ARCHIVE="varve-${VERSION}-${TARGET}.tar.gz"
+          mkdir -p staging
+          cp "target/${TARGET}/release/varve" staging/
+          cp README.md LICENSE staging/ 2>/dev/null || true
+          tar -czf "$ARCHIVE" -C staging .
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: binary-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          retention-days: 7
+
+  # ── Create the GitHub Release: checksums, provenance, signing ─────────
+  create-release:
+    name: Create GitHub Release
+    needs: [build-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      # Keyless signing + provenance need an OIDC token; release-asset
+      # upload needs contents: write; build provenance attestation
+      # needs attestations: write.
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+
+      - name: Flatten release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find artifacts -type f -name "*.tar.gz" -exec cp {} release-assets/ \;
+          ls -la release-assets/
+
+      # Phase 6: CycloneDX SBOM for varve itself. Generated *before*
+      # SHA256SUMS so its digest is captured in the checksum manifest;
+      # the cosign signature over SHA256SUMS.txt transitively covers it.
+      - name: Install cargo-cyclonedx
+        run: cargo install --locked cargo-cyclonedx
+
+      - name: Generate toolchain SBOM (CycloneDX)
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          BARE="${VERSION#v}"
+          # cargo-cyclonedx doesn't proxy cargo's `-p` package-selection
+          # flag; use --manifest-path to target the varve CLI crate — the
+          # generated SBOM lands next to that Cargo.toml.
+          cargo cyclonedx \
+            --manifest-path crates/varve/Cargo.toml \
+            --format json \
+            --spec-version 1.5
+          SBOM_SRC="crates/varve/varve.cdx.json"
+          if [ ! -f "$SBOM_SRC" ]; then
+            SBOM_SRC=$(find crates/varve -maxdepth 2 -name '*.cdx.json' | head -1)
+          fi
+          test -n "$SBOM_SRC" && test -f "$SBOM_SRC"
+          cp "$SBOM_SRC" "release-assets/varve-${BARE}.cdx.json"
+          echo "::notice::Toolchain SBOM written to release-assets/varve-${BARE}.cdx.json"
+          ls -la release-assets/
+
+      - name: Stage onboarding assets (trust root + canonical realms)
+        run: |
+          set -euo pipefail
+          cp trust-roots/rolling.pub release-assets/rolling.pub
+          cp varve-realms.toml release-assets/varve-realms.toml
+          ls -la release-assets/
+
+      # ── The bootstrap script (REQ-BOOTSTRAP-001) ───────────────────────
+      # Staged BEFORE the checksum step on purpose: install.sh's own sha256
+      # must be a line in SHA256SUMS.txt, which cosign then signs. That is
+      # what makes "verify the script, then run it" possible at all — a
+      # script published outside the signed sums can only ever be trusted
+      # on transport, which is the thing varve exists to refuse.
+      - name: Stage the install script
+        run: |
+          set -euo pipefail
+          sh -n install.sh   # a syntax error here would ship a bricked bootstrap
+          cp install.sh release-assets/install.sh
+          chmod 0755 release-assets/install.sh
+          ls -la release-assets/install.sh
+
+      # cosign is installed early: the rivet fetch below verifies rivet's
+      # release with cosign, and the later SHA256SUMS signing reuses it.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      # Phase 6b: the safety-case travels with the release (REQ-TRACEPACK-001).
+      # rivet's own traceability, exported as queryable/assessor-importable
+      # evidence — generated *before* SHA256SUMS so the signed sums (and the
+      # cosign signature over them) transitively cover the safety case too.
+      - name: Fetch rivet (pinned, digest-checked, cosign-verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RIVET_VERSION: v0.32.0
+        run: |
+          set -euo pipefail
+          gh release download "$RIVET_VERSION" --repo pulseengine/rivet \
+            -p "rivet-$RIVET_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            -p SHA256SUMS.txt -p SHA256SUMS.txt.cosign.bundle
+          cosign verify-blob \
+            --bundle SHA256SUMS.txt.cosign.bundle \
+            --certificate-identity-regexp '^https://github.com/pulseengine/rivet/' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            SHA256SUMS.txt
+          sha256sum -c <(grep "x86_64-unknown-linux-gnu" SHA256SUMS.txt)
+          tar xzf "rivet-$RIVET_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          install -m 0755 rivet /usr/local/bin/rivet
+          rm -f SHA256SUMS.txt SHA256SUMS.txt.cosign.bundle
+          rivet --version
+
+      - name: Export traceability evidence (ReqIF + HTML + source artifacts)
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          BARE="${VERSION#v}"
+          # ReqIF — the OMG interchange format an assessor imports directly.
+          rivet export --format reqif --output "release-assets/varve-${BARE}-traceability.reqif"
+          # Browsable HTML report (offline: no external fonts/CDN).
+          rivet export --format html --offline --output rivet-html
+          tar -czf "release-assets/varve-${BARE}-traceability-html.tar.gz" -C rivet-html .
+          # The rivet source artifacts, so consumers query with rivet directly.
+          tar -czf "release-assets/varve-${BARE}-rivet-artifacts.tar.gz" \
+            artifacts/ claims.yaml rivet.yaml
+          echo "::notice::Traceability evidence staged (ReqIF + HTML + rivet artifacts)"
+          ls -la release-assets/
+
+      - name: Generate SHA256 checksums
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum ./* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # ── SLSA build provenance (GitHub-native) ──────────────────────────
+      # in-toto SLSA v1 provenance for every binary archive, signed
+      # keyless via Sigstore and recorded in Rekor. Consumers verify with
+      # `gh attestation verify <file> --repo pulseengine/varve`.
+      - name: Generate SLSA build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: "release-assets/*.tar.gz"
+
+      # ── Sigstore keyless signing (cosign) ──────────────────────────────
+      # Signs SHA256SUMS.txt so a consumer can verify the checksum file
+      # itself was produced by this workflow. Verify with:
+      #   cosign verify-blob \
+      #     --certificate-identity-regexp \
+      #       'https://github.com/pulseengine/varve/.github/workflows/release.yml@.*' \
+      #     --certificate-oidc-issuer \
+      #       'https://token.actions.githubusercontent.com' \
+      #     --bundle SHA256SUMS.txt.cosign.bundle \
+      #     SHA256SUMS.txt
+      - name: Sign SHA256SUMS with cosign (keyless OIDC)
+        run: |
+          set -euo pipefail
+          cd release-assets
+          cosign sign-blob \
+            --yes \
+            --bundle SHA256SUMS.txt.cosign.bundle \
+            --output-signature SHA256SUMS.txt.sig \
+            --output-certificate SHA256SUMS.txt.pem \
+            SHA256SUMS.txt
+          echo "::notice::SHA256SUMS signed via Sigstore keyless flow."
+          ls -la ./*
+
+      # ── varve-native release signature (DD-009 / REQ-SELF-001) ─────────
+      # A DSSE envelope over SHA256SUMS.txt with the PulseEngine root key,
+      # so `varve self-verify` can check a release offline against the same
+      # pinned root that verifies layers. Activates when the root ceremony
+      # provisions the VARVE_ROOT_KEY secret (the v1.0 gate); until then the
+      # step reports loudly that the asset is absent — a missing artifact is
+      # visible to consumers, unlike a silently-skipped gate.
+      - name: Sign SHA256SUMS with the varve root (DSSE)
+        env:
+          VARVE_ROOT_KEY: ${{ secrets.VARVE_ROOT_KEY }}
+          VARVE_ROLLING_KEY: ${{ secrets.VARVE_ROLLING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${VARVE_ROOT_KEY:-}" ]; then
+            SIGNING_KEY="$VARVE_ROOT_KEY"; KEY_ID=varve-root-1
+          elif [ -n "${VARVE_ROLLING_KEY:-}" ]; then
+            # PROVISIONAL (REQ-UPDATE-001): the rolling root signs varve's own
+            # releases until the ceremony provisions VARVE_ROOT_KEY. The
+            # ceremony release will be dual-signed so old-verifies-new
+            # migrates without a flag day.
+            SIGNING_KEY="$VARVE_ROLLING_KEY"; KEY_ID=varve-rolling-1
+            echo "::notice::release sums signed with the PROVISIONAL rolling root (ceremony pending)"
+          else
+            echo "::warning::no signing key provisioned — release ships without \
+          SHA256SUMS.txt.dsse.json; varve self-update/self-verify will fail closed on it."
+            exit 0
+          fi
+          cargo build --release -p varve
+          printf '%s' "$SIGNING_KEY" > /tmp/varve-root.key
+          cd release-assets
+          # The signing code is the same sign_release_sums the verifier
+          # tests against — producer and consumer cannot drift.
+          ../target/release/varve sign-sums \
+            --sums SHA256SUMS.txt \
+            --key /tmp/varve-root.key \
+            --key-id "$KEY_ID" \
+            --out SHA256SUMS.txt.dsse.json
+          rm -f /tmp/varve-root.key
+          ls -la SHA256SUMS.txt.dsse.json
+
+      - name: Capture build environment
+        run: |
+          set -euo pipefail
+          {
+            echo "rustc: $(rustc --version)"
+            echo "cargo: $(cargo --version)"
+            echo "cosign: $(cosign version 2>&1 | head -1)"
+            echo "runner: $(uname -srm)"
+          } > release-assets/build-env.txt
+          cat release-assets/build-env.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Untrusted-input safety: the tag name flows in via env: and is
+          # dereferenced through $VERSION, never expanded into the shell.
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          # Idempotent: re-running the workflow for an existing release
+          # uploads/overwrites assets rather than failing.
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "::notice::Release $VERSION exists; uploading assets"
+            gh release upload "$VERSION" --clobber release-assets/*
+          else
+            echo "::notice::Creating Release $VERSION with assets"
+            gh release create "$VERSION" \
+              --title "varve $VERSION" \
+              --generate-notes \
+              release-assets/*
+          fi
+
+          # Surface the recorded independent-review verdict (REQ-INDEP-001,
+          # DD-019) at the top of the notes, when the release carries a
+          # `method: review` rivet artifact for this version. The verdict lives
+          # in the rivet graph (VER-REVIEW-<version>); this is a fixed-string
+          # presence check, not a parse.
+          if grep -qF "id: VER-REVIEW-${VERSION}" artifacts/verification.yaml; then
+            BODY=$(gh release view "$VERSION" --json body -q .body)
+            {
+              printf '## Independent review\n\n'
+              printf 'This release'\''s scope was independently reviewed by a fresh-context clean-room reviewer (DD-019). The recorded verdict, reviewer, and findings live in the rivet graph as `VER-REVIEW-%s` (`method: review`).\n\n---\n\n' "$VERSION"
+              printf '%s\n' "$BODY"
+            } > /tmp/notes.md
+            gh release edit "$VERSION" --notes-file /tmp/notes.md
+          fi
+
+  # ── The bootstrap actually bootstraps (REQ-BOOTSTRAP-001) ─────────────
+  # `install.sh` is the one release artifact whose correctness cannot be
+  # checked by a unit test: it is a shell script talking to a real release
+  # over the network. So it is exercised against the release that was just
+  # published, on both published OS families — happy path plus two negative
+  # controls, because a verifier that cannot be made to refuse is not a
+  # verifier. Runs after the release exists; a failure here does not unpublish
+  # anything, it tells you the bootstrap is broken before users find out.
+  verify-install-script:
+    name: install.sh bootstraps on ${{ matrix.os }}
+    needs: [create-release]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Present on purpose: the happy path must exercise the cosign branch,
+      # not only the sha256 one.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Happy path — the script installs the tagged binary
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          VARVE_INSTALL_DIR="$RUNNER_TEMP/varve-bin" sh ./install.sh --version "$VERSION"
+          REPORTED=$("$RUNNER_TEMP/varve-bin/varve" --version | awk '{print $2}')
+          echo "tag=${VERSION#v}  installed --version=$REPORTED"
+          if [ "${VERSION#v}" != "$REPORTED" ]; then
+            echo "::error::install.sh installed $REPORTED but the release tag is $VERSION"
+            exit 1
+          fi
+          # The docs promise `varve docs bootstrap` works on the installed binary.
+          "$RUNNER_TEMP/varve-bin/varve" docs bootstrap >/dev/null
+
+      - name: Negative control — a checksum mismatch must refuse and write nothing
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          SHIM="$RUNNER_TEMP/shim-sum"; mkdir -p "$SHIM"
+          printf '#!/bin/sh\necho "deadbeef  $1"\n' > "$SHIM/sha256sum"
+          printf '#!/bin/sh\nshift 2\necho "deadbeef  $1"\n' > "$SHIM/shasum"
+          chmod +x "$SHIM/sha256sum" "$SHIM/shasum"
+          if PATH="$SHIM:$PATH" VARVE_INSTALL_DIR="$RUNNER_TEMP/varve-neg" \
+               sh ./install.sh --version "$VERSION"; then
+            echo "::error::install.sh installed despite a checksum mismatch"
+            exit 1
+          fi
+          if [ -e "$RUNNER_TEMP/varve-neg/varve" ]; then
+            echo "::error::a binary was written despite a checksum mismatch"
+            exit 1
+          fi
+          echo "refused, and wrote nothing — correct"
+
+      - name: Negative control — an unsupported platform must refuse, not guess
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          SHIM="$RUNNER_TEMP/shim-uname"; mkdir -p "$SHIM"
+          printf '#!/bin/sh\ncase "$1" in -s) echo OpenBSD;; -m) echo riscv64;; esac\n' > "$SHIM/uname"
+          chmod +x "$SHIM/uname"
+          if PATH="$SHIM:$PATH" VARVE_INSTALL_DIR="$RUNNER_TEMP/varve-neg2" \
+               sh ./install.sh --version "$VERSION"; then
+            echo "::error::install.sh guessed a triple for an unsupported platform"
+            exit 1
+          fi
+          echo "refused an unsupported platform — correct"

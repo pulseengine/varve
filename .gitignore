@@ -1,5 +1,18 @@
 /target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock tracked (26262-8 config-management: releases must rebuild from VCS)
 .DS_Store
 /dist
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/Cargo.lock
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc
+mutants.out/
+mutants.out.old/
+
+# Agent worktrees — never commit these (they are live git repos)
+.claude/worktrees/

@@ -3,12 +3,20 @@ artifacts:
   # The invariants. These are not features — they are the properties that
   # make a pin trustworthy. Every one of them is meant to be mechanically
   # checked, per oracle-gate-a-change; none may be discharged by prose.
+  #
+  # Release plan (rivet release status <v> is the readiness query):
+  #   v0.1.0  resolution + the core, purely local
+  #   v0.2.0  verified install from a registry
+  #   v0.3.0  the offline core / archive
+  #   v0.4.0  deposit (CI) + provenance stamping
+  #   v0.5.0  known-problems / support-window metadata + self-verification
   # ─────────────────────────────────────────────────────────────────────
 
   - id: REQ-PIN-001
     type: requirement
     title: A pinned layer resolves exactly, or the command fails
-    status: draft
+    status: verified
+    release: v0.1.0
     description: >
       varve shall resolve the pinned layer by walking up from the working
       directory, and shall fail with the corrective install command when the
@@ -19,6 +27,9 @@ artifacts:
       exists to remove — an artifact produced by an unpinned toolchain that
       looks fine. A consumer frozen on a qualified layer must stay frozen.
     tags: [core, safety]
+    links:
+      - type: satisfies
+        target: SC-003
     fields:
       priority: must
       category: functional
@@ -26,7 +37,8 @@ artifacts:
   - id: REQ-VERIFY-001
     type: requirement
     title: Verification is independent of where the bytes came from
-    status: draft
+    status: verified
+    release: v0.2.0
     description: >
       varve shall verify the layer manifest signature and every artifact digest
       against the PulseEngine trust root on every path — anonymous registry
@@ -36,14 +48,18 @@ artifacts:
       yields different accept/reject verdicts. If a source can influence
       acceptance, it has joined the trusted base and the design is broken.
     tags: [core, security]
+    links:
+      - type: satisfies
+        target: SC-002
     fields:
       priority: must
-      category: security
+      category: non-functional
 
   - id: REQ-COEXIST-001
     type: requirement
     title: Layers coexist; switching is by directory
-    status: draft
+    status: verified
+    release: v0.1.0
     description: >
       varve shall keep layers in a content-addressed core keyed by manifest
       digest, so that several layers are installed simultaneously and selecting
@@ -57,7 +73,8 @@ artifacts:
   - id: REQ-OFFLINE-001
     type: requirement
     title: An archived core installs with no registry and no network
-    status: draft
+    status: verified
+    release: v0.3.0
     description: >
       varve shall export a layer as a directory-shaped oci-layout archive, and
       shall install from that archive with no registry reachable, with
@@ -74,7 +91,8 @@ artifacts:
   - id: REQ-NOUPDATE-001
     type: requirement
     title: varve never moves a project between layers on its own
-    status: draft
+    status: verified
+    release: v0.1.0
     description: >
       varve shall not contain any mechanism that changes the layer a project
       resolves to without an edit to a checked-in file. No background update,
@@ -92,14 +110,20 @@ artifacts:
   - id: REQ-PROV-001
     type: requirement
     title: Build outputs record the layer that produced them
-    status: draft
+    status: verified
+    release: v0.5.0
     description: >
       varve shall stamp the layer identity (name and manifest digest) into the
       provenance an artifact carries, so that "which toolchain produced this?"
       is answerable from the artifact alone, offline, with no lookup.
       Implemented as an addition to the existing wsc-attestation ToolInfo, so
-      individual tools need no awareness of layers.
+      individual tools need no awareness of layers. The cross-repo ToolInfo
+      extension is tracked as a sigil issue so it can land upstream on its own
+      cadence before v0.4.0 needs it.
     tags: [traceability]
+    links:
+      - type: satisfies
+        target: SC-004
     fields:
       priority: should
       category: functional
@@ -107,7 +131,8 @@ artifacts:
   - id: REQ-SCOPE-001
     type: requirement
     title: varve selects and verifies; it never transforms code
-    status: draft
+    status: verified
+    release: v0.1.0
     description: >
       varve shall not compile, fuse, optimise, instrument or otherwise
       transform any user artifact. Its qualification scope is limited to
@@ -122,51 +147,137 @@ artifacts:
       category: constraint
 
   # ─────────────────────────────────────────────────────────────────────
-  # Open — both shape the manifest format, so both are cheap now and
-  # expensive once consumers have frozen against the first format.
+  # Formerly open — both decided 2026-08-07 after a research pass over
+  # criticalup/Ferrocene, TUF, Uptane, SUIT (RFC 9019), DO-330 and the
+  # qualified-tool vendor practice (AdaCore, IAR, Wind River). See DD-004,
+  # DD-005 and the research artifacts (CA-*, AR-*) they cite.
   # ─────────────────────────────────────────────────────────────────────
 
   - id: REQ-ROLLBACK-001
     type: requirement
     title: A stale but validly-signed layer cannot be passed off as current
-    status: draft
+    status: verified
+    release: v0.2.0
     description: >
-      OPEN. Digest pinning protects a project that already pins a digest; it
-      does not protect a fresh consumer handed an older, still-valid layer.
-      Consuming Sigstore's TUF root gives no snapshot/timestamp role over the
-      PulseEngine release stream. Needs a decision before the first qualified
-      deposit.
-    tags: [security, open-question]
+      varve shall reject a layer whose release counter is lower than the
+      highest counter it has accepted for that release line, and shall surface
+      a staleness warning when a layer's signed issued-at timestamp exceeds a
+      configurable age. The counter and issued-at live inside the signed layer
+      metadata (never in mutable tag state); the client persists a high-water
+      mark per line. Decided per DD-005 — the SUIT/Uptane monotonic-counter
+      model; tuf-on-ci is the recorded upgrade path should a connected
+      freshness channel be needed.
+    tags: [security]
+    links:
+      - type: satisfies
+        target: SC-001
+      - type: traces-to
+        target: DD-005
     fields:
       priority: must
-      category: security
+      category: non-functional
 
   - id: REQ-PATCH-001
     type: requirement
     title: A frozen line can receive a patch without moving the consumer off it
-    status: draft
+    status: verified
+    release: v0.1.0
     description: >
-      OPEN. A serious defect in the July layer cannot be answered with "move to
-      August" — that is precisely the cost the consumer froze to avoid. A
-      patched layer (2026.07.1) must be expressible, with the qualification
-      delta scoped to what changed.
-
-      This decides whether a layer identifier is two-part or three-part, so it
-      must be settled before the first qualified deposit. Without it, freezing
-      becomes a trap the first time a serious defect lands.
-    tags: [qualification, open-question]
+      The layer identifier shall be three-part from the first deposit —
+      YYYY.MM.P, with .0 for the initial deposit of a line (2026.07.0). A
+      patch (2026.07.1) stays inside the frozen line and carries a signed
+      qualification-delta attestation referencing its baseline, scoped to what
+      changed. Decided per DD-004 — the identifier grammar freezes with
+      manifest-version 1, so it lands in v0.1.0 even though the first patch
+      deposit is far away.
+    tags: [qualification]
+    links:
+      - type: traces-to
+        target: DD-004
     fields:
       priority: must
       category: functional
 
   # ─────────────────────────────────────────────────────────────────────
-  # Decisions already taken (see pulseengine.eu#157 for the full thread).
+  # v0.5.0 — the criticalup gaps worth owning (see CA-CRITICALUP):
+  # metadata that their v2 schema designed but never shipped, and the
+  # self-verification story their CLI only recently gained.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-KP-001
+    type: requirement
+    title: Known-problems, support-window and yank metadata ship and are surfaced
+    status: verified
+    release: v0.5.0
+    description: >
+      A layer shall be able to carry signed known-problems entries
+      (description, scope, workaround, detection, mitigation, affected
+      releases), a stated support window, and a yanked marker — attached as
+      OCI referrers so they can be added after deposit without changing the
+      layer digest. varve status shall surface them for the pinned layer
+      ("2026.07.0: 3 known problems, 2 with workarounds; supported until
+      2028-07"). A yanked layer warns loudly but remains installable — the
+      consumer owns the freeze decision.
+
+      Rationale: the industry's default answer to a defect in a frozen line is
+      a known-problems list, not a forced move (Ferrocene, AdaCore, IAR).
+      criticalup designed exactly this metadata in its v2 schema and never
+      shipped it.
+    tags: [qualification, differentiator]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-SELF-001
+    type: requirement
+    title: varve verifies its own releases the way it verifies layers
+    status: verified
+    release: v0.5.0
+    description: >
+      varve's own release artifacts shall be cosign-signed and varve shall be
+      able to verify a candidate varve binary/archive against the PulseEngine
+      trust root before it replaces itself or is first trusted — failing
+      closed. The tool that gates the toolchain must clear its own gate.
+
+      Rationale: varve sits outside the layer it installs (DD-002), so nothing
+      else verifies it. Dogfooding the attestation chain on ourselves is the
+      strongest end-to-end test of the supply-chain story we can run.
+    tags: [security, differentiator]
+    links:
+      - type: traces-to
+        target: DD-002
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-DEPOSIT-001
+    type: requirement
+    title: A layer is assembled, signed and published by CI in one auditable step
+    status: verified
+    release: v0.4.0
+    description: >
+      varve deposit shall assemble a layer manifest (OCI image index) from the
+      pinned per-tool release artifacts, embed the release counter and
+      issued-at, sign it by digest via sigil, attach referrers, and publish —
+      producing the same bundle whether it lands on a registry or in an
+      oci-layout archive. Deposit is the only way a layer comes into being;
+      hand-edited layer manifests do not exist.
+    tags: [core, ci]
+    fields:
+      priority: must
+      category: functional
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Decisions. DD-001..003 were taken in the pulseengine.eu#157 thread;
+  # DD-004..007 were taken 2026-08-07 with the research artifacts as
+  # evidence. All approved.
   # ─────────────────────────────────────────────────────────────────────
 
   - id: DD-001
     type: design-decision
     title: Distribute layers as OCI image indexes rather than a bespoke format
-    status: draft
+    status: accepted
+    release: v0.1.0
     description: >
       An OCI image index gives content-addressed digests (pinning is native),
       one-index-to-N-artifacts (the bundle shape), per-platform selection
@@ -184,6 +295,8 @@ artifacts:
         target: REQ-VERIFY-001
       - type: satisfies
         target: REQ-COEXIST-001
+      - type: satisfies
+        target: REQ-DEPOSIT-001
     fields:
       rationale: >
         Content-addressed digests make pinning native; one index to N artifacts
@@ -197,7 +310,8 @@ artifacts:
   - id: DD-002
     type: design-decision
     title: varve is a separate tool, outside the layer it installs
-    status: draft
+    status: accepted
+    release: v0.1.0
     description: >
       sigil is a member of the toolchain bundle. A tool that installs a set
       containing sigil cannot itself be sigil — it must be obtainable before
@@ -225,7 +339,8 @@ artifacts:
   - id: DD-003
     type: design-decision
     title: Access is pluggable; acceptance is not
-    status: draft
+    status: accepted
+    release: v0.2.0
     description: >
       Fetch goes through a source abstraction from the first commit, with a
       public-registry implementation as the only one shipped. An entitlement
@@ -246,3 +361,3261 @@ artifacts:
         requiring a redesign, while the single public implementation keeps today
         simple.
     tags: [architecture, security]
+
+  - id: DD-004
+    type: design-decision
+    title: "Layer identifiers are three-part from day one: YYYY.MM.P, frozen-line patch model"
+    status: accepted
+    release: v0.1.0
+    description: >
+      A layer is always YYYY.MM.P — 2026.07.0 is the initial deposit of the
+      July line, 2026.07.1 a patch inside it. Patches stay minimal (critical
+      fixes only) and carry a signed qualification-delta attestation
+      referencing the baseline (the DO-330 change-impact-analysis mechanism).
+      Known-problems entries attach as signed referrers per REQ-KP-001, so the
+      no-patch mitigation path is tooling, not folklore. The identifier
+      grammar is part of manifest-version 1 and never migrates.
+    links:
+      - type: satisfies
+        target: REQ-PATCH-001
+    fields:
+      rationale: >
+        Ferrocene reserves exactly this shape (YY.MM.patch) for its qualified
+        line; AdaCore sustained branches, IAR frozen service packs and Wind
+        River legacy branches all patch frozen lines rather than forcing a
+        jump; DO-330 sanctions qualification reuse via change impact analysis.
+        A two-part identifier becomes ambiguous the day the first patch
+        exists — exactly the resolution ambiguity a qualified pin must not
+        have. Deciding now is cheap; migrating a manifest format consumers
+        have frozen against is not.
+    tags: [architecture, qualification]
+
+  - id: DD-005
+    type: design-decision
+    title: "Anti-rollback: monotonic per-line release counters in signed metadata; tuf-on-ci as upgrade path"
+    status: accepted
+    release: v0.2.0
+    description: >
+      Every layer manifest carries a release counter (monotonic per release
+      line) and an issued-at timestamp inside the signed payload. The client
+      persists a high-water mark per line and hard-rejects any layer below it;
+      issued-at drives staleness warnings with a configurable threshold. Tags
+      are discovery-only — trust lives in digest + signature + counter.
+      Counters are scoped per line, so a consumer frozen on 2026.07 gets
+      rollback protection within the line without ever being pressured toward
+      2026.08. If a connected freshness channel is ever needed, tuf-on-ci
+      (static-file TUF, KMS-signed timestamp/snapshot on CI) is the recorded
+      upgrade path; full TUF is not stood up before varve has users.
+    links:
+      - type: satisfies
+        target: REQ-ROLLBACK-001
+    fields:
+      rationale: >
+        The SUIT manifest (RFC 9019 family) makes a monotonic sequence number
+        a REQUIRED, MUST-reject field for offline/constrained verifiers;
+        Uptane's release counters deliver rollback protection that survives
+        compromise of the online half because they sit in offline-signed
+        metadata plus persisted client state. Both are designed for exactly
+        varve's constraints: static hosting, air-gap, no server. Sigstore
+        machinery proves authenticity at time of signing, never currency, so
+        counters close a gap signatures cannot. criticalup has no rollback or
+        freshness protection at all — this is a differentiator we own.
+        Regulations (UNECE R156, IEC 62443-4-2, RFC 9019) require downgrade
+        control and version identification but mandate no specific framework;
+        a documented signed-counter scheme satisfies them without TUF's
+        re-signing treadmill.
+    tags: [architecture, security]
+
+  - id: DD-006
+    type: design-decision
+    title: Resolution is walk-up discovery plus shims that exec, never fall back
+    status: accepted
+    release: v0.1.0
+    description: >
+      The pin (varve.toml) is discovered by walking up from the working
+      directory, the rust-toolchain.toml reflex. Shims on PATH resolve the pin
+      on every invocation and exec the real binary from the content-addressed
+      core; a missing or partial layer is a hard error carrying the corrective
+      install command. Switching projects is cd. varve which answers "which
+      binary would actually run, and why".
+    links:
+      - type: satisfies
+        target: REQ-PIN-001
+      - type: satisfies
+        target: REQ-COEXIST-001
+    fields:
+      rationale: >
+        rustup and criticalup both converge on per-project manifest + shims —
+        the mechanism developers already trust. Resolving on every invocation
+        makes the drift check free (the shim knows pin and resolution), and
+        exec keeps varve out of the data path per REQ-SCOPE-001. The
+        fail-closed rule is load-bearing: silent fallback would contaminate an
+        output rather than waste an afternoon.
+    tags: [architecture, ergonomics]
+
+  - id: DD-007
+    type: design-decision
+    title: Provenance stamping extends wsc-attestation ToolInfo, not the tools
+    status: accepted
+    release: v0.4.0
+    description: >
+      The layer identity (name + manifest digest) enters build provenance via
+      two optional fields on wsc-attestation's ToolInfo (toolchain,
+      toolchain-manifest-digest), populated at dispatch time from what the
+      shim already knows. Individual tools stay layer-unaware. The field
+      addition lives in the sigil repo and is filed there now so it lands
+      upstream before varve v0.4.0 consumes it.
+    links:
+      - type: satisfies
+        target: REQ-PROV-001
+    fields:
+      rationale: >
+        wsc-attestation already records per-transformation ToolInfo inside the
+        signed artifact (custom sections are covered by the signature), so one
+        field addition makes every meld/loom/synth hop carry the qualified-set
+        identity — catching the mixed-toolchain hazard a qualification review
+        must exclude. Stamping at the shim keeps the change in one place
+        instead of ten tools.
+    tags: [architecture, traceability]
+
+  - id: DD-008
+    type: design-decision
+    title: Line-status documents — signed, updatable evidence beside immutable layers
+    status: accepted
+    release: v0.5.0
+    description: >
+      Known-problems entries, the support window, and yank markers for a
+      release line live in ONE per-line "line status" document — a DSSE
+      envelope (payload type …varve.line-status.v1+json) signed with the
+      PulseEngine root, carrying its own monotonic counter + issued-at so
+      freshness is checkable with the same high-water-mark machinery as
+      layers. It is distributed beside layers (a blob in archives, a
+      referrer on registries) precisely because it must be updatable after
+      deposit without changing any layer digest. varve caches the newest
+      verified document per line at install and `varve status` reports from
+      the cache offline. A yanked layer warns loudly but remains
+      installable — the consumer owns the freeze decision.
+    links:
+      - type: satisfies
+        target: REQ-KP-001
+    fields:
+      rationale: >
+        The Ferrocene known-problems schema (description, scope, workaround,
+        detection, mitigation, affected releases) is the audit-accepted
+        no-patch mitigation path; criticalup designed support-expiry and
+        yank metadata in its v2 schema and never shipped it. Making the
+        document per-line and separately signed keeps layers immutable
+        (their digest IS their identity) while evidence stays current —
+        the referrer property (see the OCI distribution decision), applied to advisories.
+    tags: [architecture, qualification]
+
+  - id: DD-009
+    type: design-decision
+    title: Self-verification dogfoods the varve trust root, not cosign-in-library
+    status: accepted
+    release: v0.5.0
+    description: >
+      varve's own releases gain a varve-native signature: a DSSE envelope
+      over SHA256SUMS.txt (payload type …varve.release-sums.v1+json) signed
+      with the same root key deposit already requires in CI. `varve
+      self-verify` checks a candidate archive against the envelope + sums
+      with the pinned root, fully offline — failing closed, including when
+      the envelope asset is absent. cosign/SLSA signing remains (Track A);
+      this is additive. Production signing of the release asset activates
+      when the root ceremony provisions the key (v1.0 gate); the machinery,
+      tests, and workflow wiring land now.
+    links:
+      - type: satisfies
+        target: REQ-SELF-001
+    fields:
+      rationale: >
+        sigil's wsc cannot verify Sigstore bundles in-library today
+        (sigil#219) and shelling out to a cosign binary would put an
+        unpinned external tool in varve's own trust path. The root key is
+        already a CI secret by REQ-DEPOSIT-001's design, so signing the sums
+        adds no new trust exposure — and varve verifying varve with varve's
+        own machinery is the strongest end-to-end exercise of the DSSE chain
+        we can run (the dogfooding argument from pulseengine.eu#157).
+    tags: [architecture, security]
+
+  # ─────────────────────────────────────────────────────────────────────
+  # v0.6.0 — the adoption arc: shims, the platform dimension, and the
+  # public-registry source. Scoped 2026-08-07 after the v0.1..v0.5 plan
+  # completed; the driving act is the first real deposit (dogfood).
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-SHIM-001
+    type: requirement
+    title: Shims on PATH resolve the pin per invocation and exec, never fall back
+    status: verified
+    release: v0.6.0
+    description: >
+      varve shim install shall write, into a dedicated shim directory, one
+      executable per tool of the pinned layer; each shim resolves the pin by
+      walking up from the invocation's working directory, execs the resolved
+      binary with the provenance environment set, and fails closed with the
+      corrective command when the pin is missing or the layer absent —
+      identical semantics to varve run, minus the typing. Switching projects
+      is cd. Completes DD-006's ergonomics half.
+    tags: [core, ergonomics]
+    links:
+      - type: traces-to
+        target: DD-006
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-PLATFORM-001
+    type: requirement
+    title: Layers carry a platform dimension; resolution is host-filtered
+    status: verified
+    release: v0.6.0
+    description: >
+      Deposit shall record a platform annotation (target triple) on every
+      manifest entry, and install shall select only entries matching the
+      host platform (with an explicit override flag for cross-platform
+      workflows). A layer carrying no entry for the host platform fails
+      closed at install — never a wrong-architecture binary on disk. The
+      index's own per-platform mechanism, per DD-001, not a substitution
+      language.
+    tags: [core]
+    links:
+      - type: traces-to
+        target: DD-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-REGISTRY-001
+    type: requirement
+    title: A layer installs by pin from a public OCI registry, verification unchanged
+    status: verified
+    release: v0.6.0
+    description: >
+      varve shall install a pinned layer from an anonymous public OCI
+      registry (GHCR) through the LayerSource seam: manifest and blobs
+      fetched over the OCI distribution API, then the same pipeline — DSSE
+      signature against the trust root, digest checks, anti-rollback —
+      decides acceptance. The kill-criterion extends to this path: identical
+      bytes through registry, archive, and directory sources yield identical
+      verdicts. Publishing is not client scope: CI pushes the standard
+      oci-layout with standard tooling, which never joins the trust path.
+    tags: [core, security]
+    links:
+      - type: satisfies
+        target: SC-002
+      - type: traces-to
+        target: DD-003
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-ENV-001
+    type: requirement
+    title: varve sets up its own environment; users source it, never hand-edit
+    status: verified
+    release: v0.7.0
+    description: >
+      varve env shall emit idempotent shell code that puts the shim directory
+      on PATH (evaluable via eval "$(varve env)" and written as a sourceable
+      $VARVE_ROOT/env file at shim install, the rustup pattern), and varve
+      completions <shell> shall emit completion scripts for zsh, bash and
+      fish. Setup is one sourced line; instructing users to hand-edit PATH
+      is the anti-pattern this requirement retires. Evaluating the
+      environment twice must not stack duplicate PATH entries.
+    tags: [ergonomics]
+    links:
+      - type: traces-to
+        target: DD-006
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-UPDATE-001
+    type: requirement
+    title: varve updates itself only as an explicit, verified, fail-closed act
+    status: verified
+    release: v0.8.0
+    description: >
+      varve self-update shall check the latest release, download the host
+      platform's archive plus its varve-native signed sums envelope, verify
+      the archive with the RUNNING binary against the pinned trust root
+      (old-verifies-new — the update chain), and replace the binary
+      atomically, reporting old -> new. Any verification failure refuses,
+      never warns. varve self-update --check reports without changing
+      anything. No passive network calls ever: varve makes no request the
+      user did not explicitly command (no phone-home staleness beacon); the
+      explicit --check is the staleness answer. Until the root ceremony,
+      release sums are signed with the PROVISIONAL rolling key, explicitly
+      labeled; the ceremony release will be dual-signed so the
+      old-verifies-new chain migrates without a flag day.
+    tags: [security, ergonomics]
+    links:
+      - type: traces-to
+        target: DD-009
+    fields:
+      priority: should
+      category: non-functional
+
+  - id: REQ-BAZEL-001
+    type: requirement
+    title: Bazel checksum registries compile from signed layers, never from TOFU
+    status: verified
+    release: v0.9.0
+    description: >
+      Deposits shall record, inside the signed payload, each tool's source
+      provenance — upstream repo, release tag, asset name, and the sha256 of
+      the asset AS DOWNLOADED (the bytes Bazel will hash) — and varve
+      export-bazel shall compile, from a verified layer, the
+      rules_wasm_component checksum-registry JSON (tool/version/platform ->
+      url_suffix + sha256, their platform-key vocabulary). Bazel's fetch
+      path stays pure sha256-pinned download; what changes is who authors
+      the hashes: transcribed from a signed, counter-protected manifest
+      instead of hashed off whatever a release page served. Tools without
+      source provenance are skipped loudly, never silently. The consuming
+      CI gate lives in rules_wasm_component and is tracked there.
+    tags: [security, integration]
+    links:
+      - type: satisfies
+        target: SC-002
+      - type: traces-to
+        target: DD-001
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-REALM-001
+    type: requirement
+    title: A pin names its trust universe; realms are isolated by construction
+    status: verified
+    release: v0.10.0
+    description: >
+      varve.toml may name a realm; a committed varve-realms.toml (discovered
+      by the same walk-up as the pin, so trust travels with the code) defines
+      each realm's registry and trust root (inline hex key or a file relative
+      to the realms file). When a realm is named it is AUTHORITATIVE — the
+      ambient environment cannot substitute a different trust root — and all
+      per-realm state (core, high-water marks, status cache) lives under an
+      effective root namespaced by the trust-root fingerprint, so two realms
+      cannot cross-talk even with identical layer names and counters. One
+      shim directory serves every realm: resolution is per-invocation, so cd
+      between projects of different realms switches tool universes. A pin
+      naming an undefined realm fails closed with the corrective guidance.
+    tags: [core, security]
+    links:
+      - type: satisfies
+        target: SC-002
+      - type: traces-to
+        target: DD-003
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-RUNNER-001
+    type: requirement
+    title: Portable wasm entries execute through a runner from the same layer
+    status: verified
+    release: v0.11.0
+    description: >
+      A layer entry whose platform is a wasm32 target is PORTABLE — it
+      matches every host — and may carry, inside the signed payload, a
+      runner contract: the name of another tool in the same layer that
+      executes it, prefix arguments, and an optional per-argument flag
+      (kilnd's --wasi-arg shape). varve run and the shims dispatch such
+      entries through their runner, resolved from the same verified layer —
+      never from PATH. A runnered entry whose runner is absent from the
+      layer fails closed. This is how wasm-only tools (scry, once kiln#480
+      resolves) join layers with zero per-platform gaps.
+    tags: [core]
+    links:
+      - type: traces-to
+        target: DD-006
+    fields:
+      priority: should
+      category: functional
+
+  # ─────────────────────────────────────────────────────────────────────
+  # v0.12.0 debt payment: the eight decisions v0.6..v0.11 shipped without
+  # DD artifacts, reconstructed from their actual in-session rationale.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: DD-010
+    type: design-decision
+    title: Shims are per-invocation dispatchers generated from the pinned layer
+    status: accepted
+    release: v0.12.0
+    description: >
+      A shim is a two-line exec wrapper around `varve run` written into one
+      global shim directory; every invocation re-resolves the pin (and its
+      realm) from the working directory. Names are entry points only —
+      resolution decides reality — so one directory serves every project
+      and every realm, and stale shims cannot pin stale layers.
+    links:
+      - type: satisfies
+        target: REQ-SHIM-001
+    fields:
+      rationale: >
+        rustup and criticalup both converge on shims; generating them from
+        the resolved layer keeps varve out of the dispatch path (exec, not
+        wrap), and per-invocation resolution makes cd the universe switch —
+        no activation state to forget or leak between projects.
+    tags: [architecture, ergonomics]
+
+  - id: DD-011
+    type: design-decision
+    title: Platform is a per-entry annotation filtered at install, not a store dimension
+    status: accepted
+    release: v0.12.0
+    description: >
+      Entries carry a target triple; install filters BEFORE any blob fetch;
+      unstamped entries are platform-independent for backward compatibility;
+      a fully-stamped layer with nothing for the host fails closed. The
+      store stays single-platform per machine — the manifest, not the
+      store, is multi-platform.
+    links:
+      - type: satisfies
+        target: REQ-PLATFORM-001
+      - type: traces-to
+        target: DD-001
+    fields:
+      rationale: >
+        The OCI index's own per-platform mechanism (DD-001) extended to
+        varve entries: filtering at install keeps foreign binaries from
+        ever landing (wrong-arch cannot look installed), while unstamped
+        compatibility avoided a flag-day for layers deposited before the
+        dimension existed.
+    tags: [architecture]
+
+  - id: DD-012
+    type: design-decision
+    title: Registry client is pull-only, native, and out of the publish path
+    status: accepted
+    release: v0.12.0
+    description: >
+      A minimal OCI-distribution client (anonymous token dance, manifest by
+      tag, blobs by digest, transport-level digest fail-fast) implements
+      LayerSource; publishing uses standard tooling (oras) in CI only. Tags
+      are discovery; trust remains digest + signature + counter.
+    links:
+      - type: satisfies
+        target: REQ-REGISTRY-001
+    fields:
+      rationale: >
+        Pull-only keeps the client's trusted base small and auditable; the
+        publish side never joins the client trust path, so its tooling can
+        be swapped freely. The kill-criterion extends across transports,
+        which is the property that matters — not the HTTP library.
+    tags: [architecture, security]
+
+  - id: DD-013
+    type: design-decision
+    title: Environment setup is emitted by varve and sourced, never hand-edited
+    status: accepted
+    release: v0.12.0
+    description: >
+      varve env emits idempotent shell code; shim install writes a
+      sourceable env file (rustup pattern); completions ship from the tool.
+      Double evaluation cannot stack PATH entries.
+    links:
+      - type: satisfies
+        target: REQ-ENV-001
+    fields:
+      rationale: >
+        Instructing users to edit PATH is ambient state by another name —
+        the class of manual step varve exists to remove. One sourced line
+        is reviewable, idempotent, and uninstallable.
+    tags: [ergonomics]
+
+  - id: DD-014
+    type: design-decision
+    title: Self-update rides the old-verifies-new chain under the deposit root
+    status: accepted
+    release: v0.12.0
+    description: >
+      The running binary verifies its successor against the pinned trust
+      root before an atomic replace; unsigned, impostor-signed, and
+      unparseable candidates refuse and leave the current binary untouched.
+      No passive network calls — --check is the staleness answer. Release
+      sums are signed with the provisional rolling key until the ceremony;
+      the ceremony release will be dual-signed.
+    links:
+      - type: satisfies
+        target: REQ-UPDATE-001
+    fields:
+      rationale: >
+        The TUF-rotation shape without TUF's re-signing treadmill: the only
+        TOFU moment is the first install, established out-of-band via
+        cosign + provenance. Reusing the deposit signing key adds no new
+        trust exposure — the secret already lives in CI by REQ-DEPOSIT-001's
+        design.
+    tags: [architecture, security]
+
+  - id: DD-015
+    type: design-decision
+    title: Bazel consumes varve; registries compile from signed layers as fallback
+    status: accepted
+    release: v0.12.0
+    description: >
+      Primary: a module extension bootstraps a sha256-pinned varve and lets
+      it verify-and-install the pinned layer into a hermetic repo-local
+      root (rules_wasm_component#606). Fallback for consumers without
+      varve: export-bazel compiles checksum registries from a verified
+      layer, anchoring every hash in the signature chain. Deposits record
+      source-asset provenance inside the signed payload to make that
+      compilation possible.
+    links:
+      - type: satisfies
+        target: REQ-BAZEL-001
+    fields:
+      rationale: >
+        Neither system reimplements the other: Bazel contributes
+        hermeticity, caching and toolchain wiring; varve remains the single
+        verifier. The extension can change availability, never acceptance.
+        The one TOFU root (the varve binary pin) is transcribed from
+        cosign-verified sums and lives in one reviewed file.
+    tags: [architecture, integration]
+
+  - id: DD-016
+    type: design-decision
+    title: Realms bind trust universes to names; isolation is by root fingerprint
+    status: accepted
+    release: v0.12.0
+    description: >
+      A committed varve-realms.toml maps realm names to (registry, trust
+      root); the pin names the realm; per-realm state lives under
+      realms/<trust-root-fingerprint>/. A named realm is authoritative over
+      ambient environment. Realmless pins keep the legacy layout.
+    links:
+      - type: satisfies
+        target: REQ-REALM-001
+    fields:
+      rationale: >
+        Namespacing by the trust root's own fingerprint makes cross-realm
+        collision impossible by construction rather than by convention, and
+        committing realm definitions means trust travels with the code —
+        the same reasoning as the pin itself.
+    tags: [architecture, security]
+
+  - id: DD-017
+    type: design-decision
+    title: Wasm entries are portable and execute via signed runner contracts
+    status: accepted
+    release: v0.12.0
+    description: >
+      wasm32-platform entries match every host; a runner contract in the
+      signed payload (tool from the same layer, prefix args, optional
+      per-argument flag) tells dispatch how to execute them. A runnered
+      entry without its runner fails closed. First payload: scry via kilnd,
+      pending kiln#480.
+    links:
+      - type: satisfies
+        target: REQ-RUNNER-001
+    fields:
+      rationale: >
+        Portability eliminates the per-platform gap class entirely for
+        wasm tools; putting the invocation contract inside the signed
+        payload keeps "how this tool runs" as tamper-evident as "what this
+        tool is"; requiring the runner from the same layer keeps PATH out
+        of the dispatch trust path.
+    tags: [architecture]
+
+  # ─────────────────────────────────────────────────────────────────────
+  # v0.12.0 / v0.13.0 — the hardening plan from the 2026-08-08 audit:
+  # bring varve's proof surface to the org bar (relay/witness/rivet/sigil
+  # practice), technique by technique.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-VGATE-001
+    type: requirement
+    title: The requirement-to-test graph is closed and mechanically audited
+    status: verified
+    release: v0.12.0
+    description: >
+      Every requirement shall carry a verification artifact with a
+      `verifies` link naming its concrete test functions, and CI shall run
+      `rivet check verification-evidence` so a renamed or deleted test goes
+      red instead of leaving a requirement silently "verified". Source
+      markers remain the per-test map; the graph is what release gates and
+      dashboards count.
+    tags: [process]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-MUTATE-001
+    type: requirement
+    title: Mutation testing is a reproducible gate, not a session anecdote
+    status: verified
+    release: v0.12.0
+    description: >
+      cargo-mutants shall run as a per-PR gate over the trust-critical
+      modules (verify, rollback, layer, pin, platform, realm) with zero
+      surviving mutants, and nightly over the full workspace (advisory,
+      org template). Every "mutation-checked" claim in the docs must be
+      reproducible from these runs.
+    tags: [process, security]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-CLAIM-001
+    type: requirement
+    title: Load-bearing documentation claims are gated against evidence
+    status: verified
+    release: v0.12.0
+    description: >
+      A committed claims file shall bind each load-bearing claim in the
+      README/CHANGELOG ("fail-closed", "mutation-checked", "cryptographically
+      impossible", "old-verifies-new") to checkable evidence (named tests,
+      config files, workflow steps), and CI shall fail when a claim's
+      evidence disappears — the witness claim-check discipline.
+    tags: [process]
+    fields:
+      priority: should
+      category: non-functional
+
+  - id: REQ-FUZZ-001
+    type: requirement
+    title: Untrusted-input parsers are fuzzed continuously
+    status: verified
+    release: v0.13.0
+    description: >
+      cargo-fuzz targets shall cover the DSSE envelope path, layer-manifest
+      JSON, layer-identifier grammar, oci-layout index handling, and
+      pin/realms TOML parsing — a PR smoke pass and a nightly campaign,
+      following sigil's target list for the shared input classes.
+    tags: [security]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-PROP-001
+    type: requirement
+    title: Core invariants hold under property-based and model-checked exploration
+    status: verified
+    release: v0.13.0
+    description: >
+      proptest properties shall cover grammar round-trips, rollback verdict
+      monotonicity (accept iff counter >= mark), advance-never-lowers, and
+      platform-match totality — the laws that must hold across the whole
+      input space, not just chosen examples. (Machine-checked Kani proofs of
+      the same laws are tracked separately as REQ-KANI-001.)
+    tags: [security]
+    fields:
+      priority: should
+      category: non-functional
+
+  - id: REQ-MATRIX-001
+    type: requirement
+    title: Tests run where releases run
+    status: verified
+    release: v0.13.0
+    description: >
+      The CI test matrix shall cover linux and macos (the released
+      platforms), pin an MSRV job, and publish coverage evidence
+      (cargo-llvm-cov, advisory) — varve releases four platforms and must
+      not test only one.
+    tags: [process]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: DD-018
+    type: design-decision
+    title: Adopt the org verification stack — graph, mutation, claims
+    status: accepted
+    release: v0.12.0
+    description: >
+      varve adopts the three org-signature verification disciplines it
+      lacked (2026-08-08 audit): relay/witness-style verification artifacts
+      with `verifies` links audited by `rivet check verification-evidence`;
+      rivet's cargo-mutants two-tier profile (per-PR zero-survivor gate on
+      the six trust-critical modules, nightly full-workspace advisory);
+      witness-style claim-check binding load-bearing doc claims to
+      checkable evidence. Fuzzing/proptest/Kani follow in v0.13.0.
+    links:
+      - type: satisfies
+        target: REQ-VGATE-001
+      - type: satisfies
+        target: REQ-MUTATE-001
+      - type: satisfies
+        target: REQ-CLAIM-001
+    fields:
+      rationale: >
+        The audit's decisive finding: varve's REQ-to-test link was prose
+        and its "mutation-checked" claims were session anecdotes. The very
+        first gated mutation run proved the point — 31 surviving mutants
+        in modules claimed mutation-checked, including the entire
+        civil-date arithmetic of the staleness check. All killed; the gate
+        keeps it that way.
+    tags: [process]
+
+  # ═════════════════════════════════════════════════════════════════════
+  # The full forward roadmap (planned 2026-08-08 from the two independent
+  # audits + backlog). "Plan for all we can do, as independent as possible."
+  # v0.13 adversarial inputs · v0.14 assessable graph + independence ·
+  # v0.15 durable evidence + ops · v1.0 the qualification gate.
+  # ═════════════════════════════════════════════════════════════════════
+
+  # ── v0.14.0 — make the graph assessable, and make verification independent
+  - id: REQ-INDEP-001
+    type: requirement
+    title: No requirement is verified on the author's word alone
+    status: verified
+    release: v0.14.0
+    description: >
+      A requirement shall not reach `verified` on the authoring agent's
+      assertion. Each release's scope shall undergo an INDEPENDENT clean-room
+      verification — a fresh-context reviewer with no inherited framing that
+      re-derives every claimed verdict from evidence (runs the named tests,
+      re-checks the oracles, attempts to refute) — and the reviewer identity,
+      date, and outcome shall be recorded on the artifacts (a `review`-method
+      verification linked to each requirement) and surfaced in the release
+      notes. At v0.x the recorded verdict is advisory: a missing or dissenting
+      review is visible but non-blocking — the auditable trail is the
+      deliverable, not a hard gate. The refute-and-block release gate (no
+      verdict, no tag) is deferred to v1.0, where it lands with the root
+      ceremony and dossier. This directly answers the audits' one structural
+      finding — self-assigned `verified` status — by making every verdict
+      trace to a named independent reviewer, without falsely claiming the
+      gate is enforced before it is.
+    tags: [process, independence]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-ASPICE-001
+    type: requirement
+    title: The ASPICE V is populated so its trace rules bite non-vacuously
+    status: approved
+    release: v0.19.0
+    description: >
+      The enabled aspice schema's V-types shall carry real artifacts —
+      system requirements deriving from the STPA-Sec losses, software
+      requirements deriving from them, architecture components over the
+      actual module structure, and unit/software verification separated by
+      level — so the SWE.1↔SWE.6 / SWE.2↔SWE.5 / SWE.3↔SWE.4 rules measure a
+      non-empty set instead of passing 0/0 (the vacuous-gate finding).
+    tags: [process]
+    fields:
+      priority: should
+      category: non-functional
+
+  - id: REQ-TARA-001
+    type: requirement
+    title: The threat analysis is a full TARA, not a seed
+    status: approved
+    release: v0.19.0
+    description: >
+      The cybersecurity schema shall be enabled and populated: assets,
+      threat-scenarios with attack-vector and attack-feasibility, risk
+      assessments with explicit risk-treatment (incl. the accept decisions
+      currently implicit in prose), and cybersecurity goals with CALs. The
+      STPA-Sec back-half (control structure, sec-UCAs, loss scenarios) shall
+      be completed — the overdue v0.1.0 work item — surfacing SH-005/006 as
+      first-class analysis, not retrofitted hazards.
+    tags: [security]
+    fields:
+      priority: should
+      category: non-functional
+
+  # ── v0.15.0 — durable evidence and operational integrity
+  - id: REQ-ARCHIVE-002
+    type: requirement
+    title: The archive of record is durable, not a 90-day CI artifact
+    status: approved
+    release: v0.20.0
+    description: >
+      A deposited layer's oci-layout archive shall be published to durable,
+      verifiable storage kept independently of any registry or CI retention
+      policy (SL-002: a qualified line must stay reconstructible for the
+      safety-case lifetime). The current retention-90-days workflow artifact
+      contradicts varve's own loss and must be replaced.
+    tags: [core, safety]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-AUDITLOG-001
+    type: requirement
+    title: Client-side append-only log of installs, verifications, refusals
+    status: approved
+    release: v0.20.0
+    description: >
+      varve shall write an append-only local record of update events —
+      installs, re-verifications, refusals, staleness warnings, self-updates
+      — so the update history is auditable (R156 record-keeping, IEC 62443
+      CR 2.8), not merely the resulting state. Tamper-evidence via a hash
+      chain is preferred.
+    tags: [security]
+    fields:
+      priority: should
+      category: non-functional
+
+  - id: REQ-FIRSTCONTACT-001
+    type: requirement
+    title: A fresh consumer cannot be handed an arbitrarily old signed layer
+    status: approved
+    release: v0.20.0
+    description: >
+      The first-contact rollback window (empty high-water mark accepts any
+      counter) shall be closed: a signed per-line floor (carried in the
+      line-status document, which already has counters and the right
+      distribution channel) shall establish a minimum acceptable counter for
+      a consumer with no prior mark, so SH-001 does not depend on the
+      consumer having pinned a digest.
+    tags: [security]
+    links:
+      - type: satisfies
+        target: SC-001
+    fields:
+      priority: should
+      category: functional
+
+  # ── v1.0.0 — the qualification gate
+  - id: REQ-CEREMONY-001
+    type: requirement
+    title: A real trust-root ceremony replaces the provisional key
+    status: approved
+    release: v1.0.0
+    description: >
+      The qualified-channel root shall be generated in a documented ceremony
+      with custody, rotation, revocation, and expiry defined (discharging
+      SH-005/SC-005); one release shall be dual-signed to migrate the
+      old-verifies-new chain without a flag day; and a transparency
+      mechanism (e.g. Rekor-logging the DSSE envelopes, or tuf-on-ci) shall
+      make key compromise detectable.
+    tags: [security]
+    links:
+      - type: satisfies
+        target: SC-005
+    fields:
+      priority: must
+      category: security
+
+  - id: REQ-DOSSIER-001
+    type: requirement
+    title: The ISO 26262-8 §11 qualification dossier exists
+    status: approved
+    release: v1.0.0
+    description: >
+      A tool classification analysis (use cases, malfunction catalogue from
+      SH-*, TI/TD determination, TCL statement), a tool qualification plan,
+      a safety/user manual with numbered usage constraints, and a validation
+      report executed across all released platforms shall be authored — the
+      documents the audits found absent behind otherwise-present technical
+      substance. varve shall also run its own known-problems line-status for
+      its releases (dogfooding REQ-KP-001).
+    tags: [qualification]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: DD-019
+    type: design-decision
+    title: Independence via adversarial clean-room review, recorded per release
+    status: accepted
+    release: v0.14.0
+    description: >
+      Since a second human is not always available, independence is supplied
+      by an adversarial clean-room reviewer (a fresh-context agent, no
+      inherited framing) that re-derives every claimed verdict from evidence
+      and tries to refute it, per release scope. Its verdict — reviewer id,
+      date, outcome, evidence — is recorded as a `review`-method verification
+      linked to the reviewed requirements and surfaced in the release notes.
+      At v0.x the record is advisory (a dissent is visible, not blocking); the
+      refute-and-block gate is deferred to v1.0. Recording first, then gating,
+      keeps the claim honest at each stage: "independent review is recorded"
+      now, "independence is enforced" at v1.0. Automation is the independent
+      party the single author cannot be.
+    links:
+      - type: satisfies
+        target: REQ-INDEP-001
+    fields:
+      rationale: >
+        The audits' one finding no gate closes is self-assigned `verified`
+        status. The mutation gate already proved automation can be the
+        independent party — it killed 33 survivors behind a human's
+        "mutation-checked" claim, and blocked its own installing PR until a
+        security fix was complete. A clean-room reviewer generalizes that:
+        the reviewer inherits none of the author's assumptions, so its
+        agreement is evidence, not an echo. Recorded verdicts make the
+        independence auditable now; the v1.0 gate will make it non-optional.
+        Fork resolved 2026-08-11: recorded/advisory at v0.x over an immediate
+        hard gate, so the mechanism ships and proves itself before it blocks.
+    tags: [process, independence]
+
+  - id: REQ-KANI-001
+    type: requirement
+    title: Core trust invariants are machine-checked by bounded model checking
+    status: approved
+    release: v1.0.0
+    description: >
+      Kani harnesses shall prove, over the bounded input space, the
+      invariants proptest exercises by sampling: the high-water mark never
+      decreases across advance, the rollback verdict is Accept iff the
+      presented counter is >= the mark, and the layer grammar rejects every
+      two-part identifier. Advisory when introduced, a required gate at the
+      v1.0 qualification (the scry pattern: proofs advisory pre-1.0).
+    tags: [security]
+    fields:
+      priority: should
+      category: non-functional
+
+  - id: REQ-ONBOARD-001
+    type: requirement
+    title: A cold-start consumer can reach a verified install from the tarball alone
+    status: verified
+    release: v0.13.1
+    description: >
+      A new consumer with only a release binary shall be able to get to a
+      verified install: the trust root (rolling.pub) and the canonical
+      varve-realms.toml ship as release assets and are documented in a README
+      Getting-started section; the no-trust-root error names the zero-config
+      realm path and where the key is published (not just "set the env var");
+      and `varve install` auto-caches a line-status carried in the installed
+      layout so `varve status` works with no extra step. Found by an external
+      cold-start (pulseengine/varve#34): the error steered to the weaker
+      mechanism and the strong one was documented nowhere user-facing.
+    tags: [ergonomics]
+    links:
+      - type: satisfies
+        target: REQ-REALM-001
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-STATUS-DIST-001
+    type: requirement
+    title: Line-status is distributed with the layer over the registry
+    status: verified
+    release: v0.14.0
+    description: >
+      The deposit pipeline shall sign and attach a baseline line-status to
+      each layer, and the registry source shall fetch it, so `varve status`
+      works for a registry (oci://) install without a local layout — closing
+      the second half of pulseengine/varve#34 (v0.13.1 auto-caches only a
+      locally-carried layout's status).
+    tags: [core]
+    links:
+      - type: satisfies
+        target: REQ-KP-001
+      - type: traces-to
+        target: DD-020
+    fields:
+      priority: should
+      category: functional
+
+  - id: DD-020
+    type: design-decision
+    title: The baseline line-status rides beside the layer, never inside its signed payload
+    status: accepted
+    release: v0.14.0
+    description: >
+      A layer's signed payload is its immutable identity — the digest a pin
+      freezes against. Line-status is updatable evidence with its own
+      monotonic counter and its own DSSE envelope. So the baseline distributed
+      with a layer is attached as a SEPARATE role-annotated artifact: a
+      `line-status` referrer in the oci-layout index (offline path,
+      `OciLayoutSource`) and a `eu.pulseengine.varve.role: line-status` layer
+      in the registry artifact manifest (`RegistrySource`). It is fetched by a
+      new `LayerSource::fetch_line_status`, re-verified against the trust root,
+      and cached monotonically at install — the source is never trusted to
+      have checked it. Putting the baseline inside the signed payload was
+      rejected: it would couple mutable status to immutable identity and change
+      the layer digest whenever an advisory changed.
+    links:
+      - type: satisfies
+        target: REQ-STATUS-DIST-001
+    fields:
+      rationale: >
+        The install pipeline already re-verifies every fetched byte against
+        the root (DD-003); line-status reuses that seam rather than inventing a
+        second trust path. The baseline's counter tracks the deposit counter so
+        re-installs cache cleanly and later advisories (higher counters) always
+        win.
+    tags: [core, security]
+
+  # ─────────────────────────────────────────────────────────────────────
+  # v0.15.0+ — varve as a general VERIFIED-ARTIFACT distributor. A tool
+  # binary is just bytes with an exec bit; source-shaped artifacts (crates,
+  # WIT, Zephyr modules, SDKs, wasm components) are also just bytes. The
+  # signed store already distributes any bytes; the work is per-consumer
+  # export adapters that wire the VERIFIED store path into each build
+  # system's native mechanism. No git server (mutable, unsigned) — the
+  # content-addressed, signed, anti-rollback path is the feature.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-KIND-001
+    type: requirement
+    title: A layer entry declares its payload kind; verification is unchanged
+    status: verified
+    release: v0.15.0
+    description: >
+      Each layer entry shall carry a payload `kind`
+      (`tool | crate | wit | zephyr-module | sdk | wasm-component`) in its
+      signed annotations, defaulting to `tool` when unstamped (back-compat
+      with pre-kind layers, as the platform stamp does). The kind selects
+      which export adapter and store layout apply; it shall NOT change how
+      bytes are verified — every kind is a signed digest over bytes, checked
+      against the trust root exactly as a tool binary is. An UNKNOWN kind is
+      refused at the boundaries that act on kind — authoring (`deposit`) and
+      each kind-consuming export — so varve never mis-handles a payload it
+      does not understand. Install is deliberately kind-AGNOSTIC: it lays down
+      the (signed) bytes uniformly without interpreting kind, so an older varve
+      still installs the entries it can handle from a layer that also carries a
+      future kind (forward-compat). Resolution and `which` filter by kind.
+    tags: [core, distribution]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-CRATE-001
+    type: requirement
+    title: A verified crate builds offline through Cargo with no git server
+    status: verified
+    release: v0.15.0
+    description: >
+      varve shall distribute Rust crates as `crate`-kind entries carrying the
+      `.crate` tarball, and `varve export-cargo` shall materialise a Cargo
+      LOCAL REGISTRY (the `.crate` files plus an index) from the verified
+      store and emit a `.cargo/config.toml` source-replacement
+      (`[source.crates-io] replace-with`), so a consumer builds fully offline
+      (`--offline`) against crates whose bytes varve signed. The out-of-band
+      trust anchor is varve's existing DSSE over the layer manifest (a
+      `.crate` is signed like any blob); Cargo's own checksum-vs-`Cargo.lock`
+      is the second integrity check. `[patch]` is explicitly NOT used — it
+      changes the dependency graph; source replacement is transparent.
+    tags: [core, distribution]
+    links:
+      - type: traces-to
+        target: REQ-KIND-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-RELVER-001
+    type: requirement
+    title: A released binary reports the version it is tagged as
+    status: verified
+    release: v0.15.0
+    description: >
+      The release pipeline shall refuse to build unless the git tag matches
+      the workspace `Cargo.toml` version. v0.14.0 shipped binaries reporting
+      0.13.1 because the version bump was a manual step that was missed; a
+      released artifact that lies about its own version is exactly the failure
+      varve exists to prevent. The guard makes the agreement mechanical: tag
+      != version → the release fails before any binary is built.
+    tags: [release, integrity]
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-CORROSION-001
+    type: requirement
+    title: A varve-exported crate builds under Corrosion (CMake -> Cargo)
+    status: verified
+    release: v0.16.0
+    description: >
+      The Cargo local-registry export (REQ-CRATE-001) shall build offline under
+      Corrosion with NO new export: since Corrosion 0.3.0 the cargo invocation
+      runs from the manifest directory specifically so `.cargo/config.toml` in
+      the source tree is discovered, so varve's source-replacement is honoured.
+      This shall be proven by a real Corrosion/CMake build against an exported
+      registry (built with `FROZEN` / `CARGO_NET_OFFLINE=true`), not asserted.
+      This is the Zephyr-Rust path; a Zephyr spike is a follow-up.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-CRATE-001
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-VENDOR-001
+    type: requirement
+    title: A verified crate is exported as a cargo-vendor tree, consumed offline by Cargo and Corrosion
+    status: verified
+    release: v0.16.0
+    description: >
+      varve shall add `export-crates-vendor`, emitting a `cargo vendor`-shaped
+      directory (unpacked crate trees + a `.cargo-checksum.json` whose `package`
+      field is the sha256 of the `.crate` — the digest varve already signs —
+      with `files: {}`) plus the `[source.vendored-sources]` config. This tree
+      shall build fully offline under bare Cargo AND under Corrosion (CMake ->
+      Cargo, the Zephyr-Rust path), proven by real builds. NOTE (Bazel spike,
+      2026-08-12): rules_rust's `crate.from_cargo` splice requires a registry
+      INDEX, and fails ("Failed to get crate index config") against a vendored
+      directory source — so the vendor tree ALONE is not consumable by
+      rules_rust. Full rules_rust support needs varve to also emit
+      crates_vendor-style BUILD files; that is REQ-VENDOR-002 (v0.17.0). This
+      requirement is scoped to what the spike PROVED: Cargo + Corrosion.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-KIND-001
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-VENDOR-002
+    type: requirement
+    title: varve emits the verified Bazel distdir that is rules_rust's offline byte source
+    status: verified
+    release: v0.17.0
+    description: >
+      Two spikes established the recipe. v0.16.0: `crate.from_cargo` fails on a
+      bare vendored directory ("Failed to get crate index config"). v0.17.0:
+      `crates_vendor(mode=local)` also fails offline reading the crates.io
+      SPARSE-INDEX cache — so the vendored source is never sufficient; the
+      crate INDEX metadata is needed independently. The working air-gap path is
+      Bazel's `--distdir`: crate_universe generates `http_archive(url,sha256)`
+      per crate, and `--distdir=<dir>` resolves each from a local file whose
+      sha256 matches, with NO network and NO URL rewrite. Because varve's signed
+      `.crate` digest IS the crate_universe pin (== the crates.io checksum),
+      varve emits a distdir of its verified `.crate` tarballs and a consumer that
+      pre-generates its crate_universe output once (so no build-time repin/index
+      lookup) builds fully offline with `bazel build --distdir=<varve distdir>`.
+      varve emits the bytes (`export-bazel-distdir`); the join key is the sha256.
+      A `from_specs` MODULE.bazel snippet is a secondary, SCORE-aligned interop
+      path (but networked, like the org's own repos). varve does NOT reimplement
+      crate_universe's BUILD-file generation; it relocates the byte source to
+      its verified store while preserving the exact pins.
+
+      VERIFICATION SCOPE (honest): the distdir artifact — the verified `.crate`
+      bytes with sha256 == the crate_universe pin — is UNIT-verified, and a real
+      `crate_universe` build consuming a varve distdir via `--distdir` was
+      MANUALLY confirmed to succeed (2026-08-12). An AIRTIGHT automated
+      zero-network oracle proved impractical and is NOT claimed: Bazel's action
+      cache makes "toolchain-present-but-crate-absent" hard to force locally,
+      and `crate_universe`'s repin reads the crates.io sparse index over its OWN
+      HTTP (not Bazel's downloader, so `--downloader_config block *` doesn't stop
+      it) — so the offline property rests on Bazel's documented `--distdir`
+      behavior plus the unit-proven byte/sha256 correctness, not a varve-run
+      network-isolated build. An automated gated CI proof (Linux `unshare -n` +
+      a pre-generated crate_universe output) is a tracked follow-up.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-VENDOR-001
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-UPDATE-002
+    type: requirement
+    title: Self-update converges on artifact identity, not self-reported version
+    status: verified
+    release: v0.15.1
+    description: >
+      `varve self-update` (and `--check`) shall decide whether an update is
+      needed by comparing the VERIFIED latest binary's bytes against what is
+      already on disk, not by self-reported version strings alone. A binary
+      that mis-reports its own version (as v0.14.0 did — reporting 0.13.1) must
+      NOT loop forever: version-string comparison stays "newer" and every run
+      re-installs identical bytes (varve#38). Deciding on digest identity makes
+      a stale version string degrade to a no-op. `--check` fetches and verifies
+      the candidate (needing the trust root) so it reports a genuinely-verified
+      update, not a phantom one.
+    tags: [core, integrity]
+    links:
+      - type: traces-to
+        target: REQ-UPDATE-001
+    fields:
+      priority: must
+      category: functional
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Research-driven (2026-08-12 competitive sweep, see the campaign memory;
+  # framing corrected 2026-08-13). Offline verification against a pinned
+  # root is necessary but NOT a differentiator — Zarf embeds a Sigstore
+  # trusted root, Iron Bank runs cosign with the transparency log ignored,
+  # Guix ships authenticated channels, criticalup compiles its root into
+  # the binary. varve's defensible ground is what those do not do:
+  # per-line client-enforced anti-rollback, qualification evidence carried
+  # as data, and heterogeneous artifact kinds (tools/crates/WIT/Zephyr/
+  # SDK/wasm) behind one verifier — for regulated domains where a live
+  # transparency log is unavailable (the space warg vacated when it
+  # archived for OCI+cosign+Rekor). These three close the gaps that sweep
+  # surfaced.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: REQ-BRIDGE-001
+    type: requirement
+    title: Export adapters preserve upstream provenance, they do not clobber it
+    status: verified
+    release: v0.16.0
+    description: >
+      When varve re-distributes an artifact, its export adapters shall PRESERVE
+      the artifact's own upstream integrity anchor rather than discard it. For a
+      `.crate`, that anchor is the tarball sha256 — which is BOTH the crates.io
+      registry cksum AND the digest varve signs — so the vendored tree's
+      `.cargo-checksum.json` `package` field carries it forward unchanged: a
+      consumer verifies both varve's pinned-root signature and Cargo's own
+      checksum against the same value. SCOPE (v0.16.0): this is proven for the
+      `.crate` sha256 anchor. Richer upstream provenance is carried when
+      present; verifying those fuller chains is future work, tracked with the
+      referrer-carried attestations of REQ-ATTEST-001. Status of the sources
+      (checked 2026-08-13): BCR in-toto attestation bundles exist today but
+      their attestation URLs assume github.com is reachable — carrying them
+      across the mirror boundary is exactly varve's job. crates.io signing has
+      NOT landed: RFC 3724 is still open with no accepted design, TUF TAP-16
+      (a Version-0 draft untouched since 2021) has been abandoned for it, and
+      the 2026 crates.io scope narrowed to verifiable mirroring; the accepted
+      multi-repository bridging primitive to study is TAP-4, not TAP-16.
+    tags: [distribution, integrity]
+    links:
+      - type: traces-to
+        target: REQ-CRATE-001
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-BOOTSTRAP-001
+    type: requirement
+    title: varve has a documented, verified way to obtain varve
+    status: verified
+    release: v0.26.0
+    description: >
+      A tool for verified toolchain distribution shipped with no verified
+      install path for ITSELF. The README's "Getting started" opened with
+      `varve install` — a command that needs a varve the reader does not have.
+      There was no install script, no crates.io presence, and no topic
+      describing the first hop. `varve self-update` covers every hop after the
+      first, and nothing at all covered the first.
+      Clauses:
+      (1) The repository shall carry a POSIX-sh install script (`install.sh`,
+      not bash) that runs on macOS and Linux, and the release workflow shall
+      stage it as a release asset BEFORE the checksums are computed, so its
+      own sha256 is a line in SHA256SUMS.txt and is therefore covered by the
+      cosign signature over that file. A bootstrap script published outside
+      the signed sums can only ever be trusted on transport, which is the
+      thing varve exists to refuse.
+      (2) The script shall map `uname -s` / `uname -m` onto one of the four
+      published triples and REFUSE, naming them, on anything else. It shall
+      never guess a triple: a guessed triple yields a binary that segfaults or
+      silently runs under emulation.
+      (3) The script shall download the archive and SHA256SUMS.txt and compare
+      the archive's sha256 against that file BEFORE anything is extracted or
+      written, matching the whole filename field rather than a substring so one
+      asset name cannot stand in for another; on mismatch it shall write
+      nothing. Where neither `sha256sum` nor `shasum` exists it shall refuse
+      outright rather than proceed unverified — an unverified install of a
+      verification tool is worse than no install.
+      (4) Where `cosign` is present the script shall additionally verify
+      SHA256SUMS.txt against the release's cosign bundle, pinned to this
+      repository's release workflow identity and the GitHub OIDC issuer, and
+      refuse on failure. Where cosign is absent it shall state plainly that the
+      SIGNATURE was not checked and print the command that checks it. Silence
+      about an unchecked signature is the failure mode this clause exists for:
+      a user who believes an integrity check was an authorship check has been
+      misled by the tool that exists to prevent exactly that.
+      (5) The script shall refuse to run as root unless VARVE_ALLOW_ROOT=1,
+      install to ${VARVE_INSTALL_DIR:-$HOME/.varve/bin}, print the PATH line,
+      and direct the user to `varve self-update` for every subsequent update
+      rather than reimplementing update. It shall contain no piped-to-shell
+      invocation of its own.
+      (6) Both crates shall carry the metadata crates.io requires (description,
+      license, repository, readme, keywords, categories), `varve` shall depend
+      on `varve-core` by version as well as by path (a path-only dependency
+      cannot be published at all), and a workflow shall publish the two in
+      dependency order, idempotently, guarded by an assertion that the tag, the
+      workspace version and the internal dependency version all agree. Every
+      check that can precede the first upload does, because crates.io versions
+      are immutable and a half-published pair cannot be withdrawn.
+      (7) The README and an embedded `bootstrap` topic shall document all three
+      routes — script, one-liner, and the manual path with no script at all —
+      and shall show the VERIFY-THEN-RUN form BEFORE the piped one-liner. The
+      one-liner may appear, marked as the convenience path and named for what
+      it is weaker at. varve's whole argument is that strings should not reach
+      interpreters unverified; leading with a naked pipe into a shell would
+      undercut the product in its own README.
+      (8) The docs shall state what the first hop CANNOT prove — it is trust on
+      first use and no route on the page removes that — and that
+      `cargo install varve` is a SOURCE build covered by neither the release
+      signature nor the DSSE envelope.
+      (9) The bootstrap shall be exercised mechanically against the release it
+      ships with: the release workflow shall run `install.sh` on both published
+      OS families against the just-published tag, assert the installed binary
+      reports that tag, and assert the script REFUSES both a checksum mismatch
+      and an unsupported platform. A verifier that cannot be made to refuse is
+      not a verifier, and a shell script talking to a real release is not
+      reachable by a unit test.
+    tags: [distribution, ergonomics, security]
+    links:
+      - type: traces-to
+        target: REQ-UPDATE-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-SHADOW-001
+    type: requirement
+    title: varve notices when PATH runs a different binary than the one it pins
+    status: verified
+    release: v0.26.0
+    description: >
+      Reported from use and reproduced (varve#66). With a different `rivet`
+      earlier on PATH than varve's shims, `varve which rivet` prints the store
+      path, `varve verify` reports the layer perfect, and the shell runs
+      something else entirely. Each command is individually correct and the
+      composite answer is wrong.
+      The README's own words are `varve which synth  # which binary runs here`.
+      A user reads that and believes it. A developer with a distro-packaged
+      tool, a `cargo install`ed one, or a stale shim directory later in PATH
+      gets a confident, signed-looking, FALSE answer — and `verify` agrees with
+      it, because the layer really is intact. The gap is between what is signed
+      and what will actually execute, which is the precise gap varve exists to
+      close; a tool that cannot see it is asserting its headline claim without
+      checking it.
+      Clauses:
+      (1) varve shall resolve, for a tool it dispatches, what the current PATH
+      would execute for that name, using the same rules a shell uses
+      (PATH order, executable bit, no shell builtins or aliases).
+      (2) `varve which <tool>` shall keep printing the dispatched path on
+      STDOUT unchanged, so existing scripts keep working, and shall report a
+      disagreement on STDERR naming the binary that actually wins.
+      (3) `varve verify` shall FAIL on a disagreement, since verify is the
+      "is my setup sound" gate and REQ-EXPORT-SYNC-001 already set the
+      precedent that environment drift belongs there.
+      (4) The report shall carry its fix — `varve shim install`, or which PATH
+      entry precedes the shims — because an error a user cannot act on is not
+      a check.
+      (5) A tool absent from PATH entirely shall NOT be reported as shadowed.
+      Not having installed the shims is a different condition from having them
+      overridden, and conflating them would make the check cry wolf on every
+      fresh install.
+    tags: [core, ergonomics]
+    links:
+      - type: traces-to
+        target: REQ-EXPORT-SYNC-001
+    fields:
+      priority: must
+      category: functional
+
+  # Stays `implemented`. Clause 1 is genuinely green (both Cargo adapters
+  # self-host in CI with negative controls red), but clause 2 is partial —
+  # the Bazel --distdir transport has no gate (varve#27) — and clause 4 is
+  # policy with no mechanical enforcement, which REQ-SYSTEST-002 addresses
+  # for the producer pipeline. Its evidence is shell-based, so it carries no
+  # cargo-test markers and `rivet verify` would refuse anyway; that refusal
+  # is correct rather than an obstacle to work around.
+  - id: REQ-SYSTEST-001
+    type: requirement
+    title: varve is exercised as a system, at real scale, not only as units
+    # `implemented`, not `verified`, and not `draft` either. It sat at `draft`
+    # while VER-SYSTEST-001 read `verified` — an inconsistency a clean-room
+    # review caught, and at the time `verified` was the wrong half: clause 1's
+    # gate could not pass on the code it gates. That is now fixed and both
+    # adapters run green, so the requirement moves up. It stops short of
+    # `verified` because clause 2 is genuinely partial (the OCI round trip is a
+    # real gate; the Bazel --distdir transport is still uncovered — varve#27)
+    # and clause 4 is policy with no mechanical enforcement.
+    status: implemented
+    release: v0.27.0
+    description: >
+      Every significant defect found in the week of 2026-08-13..19 came from
+      exercising varve as a SYSTEM, and none came from its unit tests or its
+      mutation gates: a layer could not hold two versions of one crate
+      (varve#69), `varve which` reported a binary the shell would not run
+      (varve#66), an `oci://` install carried no attestations, the registry
+      client spoke only GHCR's dialect, there was no documented way to obtain
+      varve at all, and `export-cargo` cannot build a real dependency graph
+      (varve#73).
+      The unit tests are good and the mutation gates are real — 261 lib tests,
+      `cargo mutants` clean on the trust-critical files. That is the point.
+      Coverage answers "does the code do what the test says". Mutation testing
+      answers "would the test notice if the code stopped doing it". NEITHER
+      answers "is the test a realistic case", and no amount of either can tell
+      you that the fixture is a toy.
+      The evidence is exact. `cargo_offline` — the oracle cited as proof that
+      consumers build offline against varve-signed crates — builds a consumer
+      against ONE synthetic crate with no dependencies and no features.
+      `corrosion_offline` uses one crate entry. Those tests pass, kill their
+      mutants, and are honest about what they assert; they simply cannot
+      exercise index resolution, feature resolution, or two versions of one
+      name, because a one-crate graph has none of those things. varve#73 was
+      invisible to them by construction.
+      Clauses:
+      (1) varve shall be SELF-HOSTING under test: a gate shall deposit varve's
+      own `Cargo.lock` as a layer — 250 packages, 14 names at more than one
+      version — install it, verify it, and build the workspace OFFLINE from it
+      with an isolated CARGO_HOME, through EVERY adapter that claims to support
+      a Cargo build. An adapter that cannot build varve shall not claim it can
+      build anything.
+      (2) A system gate shall exist for each transport and consumer varve
+      claims: a real OCI registry round trip (varve#62), a zero-network Bazel
+      `--distdir` build (varve#27), and the ten-persona documentation audit,
+      which is system testing under another name and shall be recognised as
+      such rather than treated as a docs chore.
+      (3) Where a fixture is deliberately small, the test shall SAY what it
+      therefore cannot prove, so a one-crate oracle is never again cited as
+      evidence for a real build. A test's scope is part of its evidence.
+      (4) A new export adapter shall not ship without a system test at
+      realistic scale. Two adapters shipped this week; the one exercised only
+      by unit tests is the one that turned out not to work.
+    tags: [verification, methodology]
+    links:
+      - type: traces-to
+        target: REQ-INDEP-001
+    fields:
+      priority: must
+      category: process
+
+  # Stays `implemented`, not `verified`: clause 3's gate cannot catch a
+  # second-granularity timestamp (two exports in one test land in the same
+  # second), so a clock injected into an adapter survives it — varve#93. The
+  # clauses that ARE discharged are discharged; the gate samples rather than
+  # proves, and saying so is the honest form.
+  - id: REQ-REPRO-001
+    type: requirement
+    title: What varve emits is a function of the layer, not of the machine or the clock
+    status: implemented
+    release: v0.27.0
+    description: >
+      varve's whole argument is that an artifact's identity is its bytes. That
+      argument is weakened every time varve itself emits something that varies
+      between two runs over the same input, because a consumer then cannot tell
+      drift from noise — and an export diff is how REQ-EXPORT-SYNC-001 staleness
+      gets noticed by a human rather than by CI.
+      Audited 2026-08-19, and most of this already holds: the SBOM has stable
+      ordering, no clock of its own, `metadata.timestamp` from the signed
+      `issued-at`, and a serial derived from the manifest digest; the export
+      stamp carries no timestamp; the signed deposit payload is order-
+      independent. The only `SystemTime::now()` outside tests feeds a staleness
+      WARNING and is never written into an artifact.
+      One thing is not: `.cargo/config.toml` embeds an ABSOLUTE path, so the
+      same layer exported twice differs, and a committed export shows a diff on
+      every machine (varve#72). varve made it absolute deliberately in
+      REQ-PRODUCE-002, because a relative `--out` was embedded verbatim and
+      resolved against the invoking cwd, so a copied config pointed at nothing.
+      Clauses:
+      (1) Exporting one layer twice, to two destinations, shall produce
+      byte-identical output apart from the destination path itself — and where
+      a path must appear, it shall be expressed so that copying the export does
+      not break it. Whether cargo resolves a relative `local-registry` against
+      the CONFIG FILE's directory rather than the cwd shall be settled
+      EMPIRICALLY against the `cargo_offline` oracle before anything changes;
+      the v0.25.0 fix reacted to a cwd-relative path, which is a different
+      thing, and reverting it blindly would restore a real bug.
+      (2) Where a machine-specific file cannot be avoided, varve shall separate
+      it from the reproducible part, so a project can commit the bytes that are
+      a function of the layer and generate the rest at use time.
+      (3) varve shall gain a test that EXPORTS THE SAME LAYER TWICE and
+      compares, for every adapter — the check that found varve#72, made
+      permanent, since a new adapter is exactly where a stray timestamp or an
+      unordered map iteration will next appear.
+      (4) varve shall NOT claim its own builds are reproducible until they are.
+      `varve docs threat-model` states plainly today that varve signs what its
+      build produced and does not prove the build was deterministic. That
+      sentence is honest and shall stand until a reproducible-build pipeline
+      makes it false — a claim of determinism is exactly the kind of thing an
+      assessor checks and an attacker relies on nobody checking.
+      SETTLED 2026-08-19, empirically, against cargo 1.97.0, before any code
+      changed: Cargo resolves a relative `local-registry` (and a relative
+      `directory`) against the directory that HOLDS `.cargo/` — NOT against the
+      invoking cwd. With the config at `<root>/.cargo/config.toml` naming
+      `reg`, and the build run from `<root>/sub`, the registry at `<root>/reg`
+      resolves and builds; moving it to `<root>/sub/reg` (the cwd-relative
+      candidate) or to `<root>/.cargo/reg` (beside the config) fails with
+      "local registry path is not a directory: <root>/reg". Both negative
+      controls were run. Clause 1's first branch therefore applies and clause 2
+      does NOT: there is no machine-specific file left to separate out, because
+      varve emits the bare subdirectory constants `registry` and `vendor`.
+      CORRECTION TO REQ-PRODUCE-002's shipped evidence. Its test
+      `a_relative_out_still_yields_an_absolute_path_in_the_generated_config`
+      asserted the WRONG property. The defect that fix reacted to was real — a
+      relative `--out` embedded VERBATIM, and so resolved against whatever cwd
+      the build later ran in — but "absolute" was the wrong remedy: it made the
+      export unreproducible (varve#72) and broke the moment the export moved.
+      The test is renamed `a_relative_out_is_resolved_not_embedded_verbatim`
+      and now pins BOTH halves — the emitted string is not the user's argument,
+      and it names the registry where Cargo actually resolves it from. The
+      REQ-PRODUCE-002 clause text about absolute paths should be read through
+      this correction.
+    tags: [core, supply-chain]
+    links:
+      - type: traces-to
+        target: REQ-EXPORT-SYNC-001
+    fields:
+      priority: should
+      category: non-functional
+
+  - id: REQ-CRATEIDX-001
+    type: requirement
+    title: An exported Cargo registry index describes the crates it contains
+    status: verified
+    release: v0.27.0
+    description: >
+      varve#73. `export-cargo` writes `"deps":[]` and `"features":{}` for every
+      crate while Cargo resolves the dependency graph FROM the index, so the
+      registry can only satisfy a crate that has neither. Measured against
+      varve's own 250-package lockfile, 228 of 250 crates declare a dependency
+      or a feature — the index line is factually wrong for 91% of the layer.
+      (226/90% appeared here and in the unit-test comment as an earlier
+      estimate; 228 is the count measured through the real export path, and
+      the two numbers disagreeing in one file was found by clean-room review.)
+      Three outcomes were observed, in increasing order of harm: a hard
+      resolution error (clap); a rustc error after Cargo resolved happily
+      (sha2); and a build that EXITS 0 with a crate silently compiled with no
+      features at all, not even `default` (aho-corasick). The third is why
+      "it fails" is the wrong description and why this is not merely a missing
+      feature: a failure announces itself and this does not.
+      Clauses:
+      (1) Each index entry shall carry the crate's real `deps` and `features`,
+      read from the `Cargo.toml` inside the `.crate` tarball varve signed —
+      the same tarball `export-crates-vendor` already opens.
+      (2) The transcription shall be faithful or refuse: a dependency or
+      feature varve cannot express shall be an error naming the crate, never a
+      silently dropped entry, because a dropped feature is the failure mode
+      that exits 0.
+      (3) The proof shall be a REAL offline build of a graph with transitive
+      dependencies, features and two versions of one name — not a
+      single-crate fixture. `cargo_offline` passes today precisely because its
+      fixture has none of those.
+      Measured again 2026-08-19 through the real export path: 228 of 250 index
+      entries for varve's own lockfile declare a dependency or a feature.
+      Clause 2 is implemented as a CLOSED allow-list of dependency keys, so a
+      construct varve has never seen is refused rather than ignored — an
+      ignored key is a changed meaning. All 250 of varve's own crates pass it.
+      The proof of clause 3 RUNS the consumer rather than building it: the
+      worst outcome of the stub compiled cleanly, and the mutation that drops
+      `default-features = false` is caught only by the program's behaviour
+      (17164 instead of 11564), never by the exit code.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-CRATE-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-COMPOSEEXPORT-001
+    type: requirement
+    title: An export follows the composition, or says it did not
+    status: verified
+    release: v0.27.0
+    description: >
+      varve#79. `resolve()` unions composed TOOLS so `which` and `run` see
+      them, and `verify` checks each included layer against its own realm's
+      root — but every export adapter reads a single `layer.json`. An extender
+      composing pulseengine's layer runs `export-cargo` and gets only their own
+      crates, with no error; the build then fails with a missing-crate message
+      pointing nowhere near the cause.
+      This is the topology varve is FOR: bytecodealliance's layer,
+      pulseengine's composing it, a third party composing ours.
+      Clauses:
+      (1) An export shall include the payloads of every layer in the
+      composition, each still verified against ITS OWN realm's trust root.
+      (2) The collision rule is NOT the tool rule and shall be stated as such:
+      the same tool name in two layers is ambiguous and already refused; the
+      same crate name at DIFFERENT versions is legal and both shall export;
+      the same name AND version with DIFFERENT digests shall be an error naming
+      both realms, because two realms then disagree about what those bytes are.
+      (3) Where an export cannot follow the composition it shall SAY SO in its
+      output rather than produce a quietly incomplete directory.
+      Clause 1 extends to `verify --lockfile`, found blind in the same way
+      while implementing this: a lockfile checked against the root layer alone
+      silently asserts nothing about the crates the INCLUDED layers pin.
+      Clause 3 has a reachable failure path that `install` and `resolve` do not
+      cover — an export named with `--layer` takes neither of their guards, so
+      a composed layer removed from the store AFTER installation would have
+      produced a directory missing an entire layer's crates. That path is the
+      one the clause-3 test exercises; without it the "silently skip a missing
+      include" mutation SURVIVED.
+    tags: [distribution, core]
+    links:
+      - type: traces-to
+        target: REQ-COMPOSE-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-SDK-001
+    type: requirement
+    title: A tree-shaped payload can be distributed, and relocated as an export
+    status: verified
+    release: v0.27.0
+    description: >
+      varve#67. `sdk`, `wit` and `zephyr-module` parse and verify but nothing
+      consumes them, and the store cannot hold a tree at all: every payload is
+      written to a single file path. A Yocto SDK is thousands of files.
+      Yocto's installer also runs `relocate_sdk.py`, which byte-patches the
+      ELF interpreter and the loader's SYSDIRS in place, `sed -i`s every text
+      file, and re-points every symlink — so after installation the bytes no
+      longer hash to the signed digest.
+      Read from the script rather than assumed: the new interpreter path must
+      FIT the old one's field (`if len(new_dl_path) >= p_filesz: ERROR`), so
+      relocation can only ever move an SDK to a path no longer than the one it
+      was built with. varve's store path is ~90 characters before any content,
+      which means relocating INTO the store would frequently be impossible.
+      Clauses:
+      (1) The store shall hold a tree-shaped payload, addressed by
+      (name, version, platform) like any other held payload — as the single
+      archive its producer SIGNED, not unpacked. CORRECTED during
+      implementation; the original clause said the store "cannot hold a tree at
+      all" and implied unpacking one there. Unpacking in the store is not
+      merely unnecessary, it CONTRADICTS clause 2 and clause 4 of this same
+      requirement: `verify` and `archive` re-hash ONE file at
+      `Store::entry_path` against ONE signed digest, so an unpacked store entry
+      would be neither verifiable nor archivable; and relocation can only ever
+      shorten a path, while the store path is ~90 characters before any
+      content, so an SDK could not be relocated INTO the store even if it were
+      unpacked there. The premise was also already out of date: REQ-STORE-002
+      gave every non-dispatchable payload a `payloads/<name>/<version>` place,
+      so an `sdk` entry is held by (name, version, platform) today and two
+      Yocto releases coexist. The tree is materialised where it is USED — in
+      the export — which is what clause 3 asks for.
+      (2) The signed tree shall remain immutable and verifiable; varve shall
+      verify only what the producer signed, never what relocation produced.
+      Nothing on the relocation path writes back into the store.
+      (3) `varve export-sdk --out D` shall unpack and relocate into D and write
+      the `.varve-export.json` stamp, so `verify --export` catches drift.
+      Rejected: recording a post-relocation digest, which would put the
+      relocator inside the trust path.
+      Relocation covers both halves the Yocto installer performs: the
+      in-place, NUL-padded, length-preserving field patch of `relocate_sdk.py`
+      and the free-length text substitution of `toolchain-shar-relocate.sh`,
+      plus re-pointing the SDK's own absolute symlinks.
+      (4) It shall refuse EARLY and by name when the destination path is too
+      long for the SDK's interpreter field, rather than after relocating
+      thousands of files. The check is complete as a single comparison — every
+      patched field holds `<prefix><suffix>` and only the prefix changes — so
+      it runs before the archive is opened. The producer's build-time prefix is
+      carried in the SIGNED annotation `eu.pulseengine.varve.sdk.prefix`, so
+      the relocation budget is attributable rather than guessed.
+      (5) Laying a tree out shall hold the same invariants
+      `Store::lay_down_payloads` holds for a single payload, over the tree's
+      far larger attack surface: every component of every member validated,
+      all destinations resolved before any byte is written, colliding members
+      refused, and — the escape a per-component check cannot see — a symlink
+      that leaves the export, or a member written THROUGH one, refused as well.
+    tags: [distribution]
+    links:
+      - type: traces-to
+        target: REQ-KIND-001
+      - type: traces-to
+        target: REQ-STORE-002
+    fields:
+      priority: should
+      category: functional
+
+  # Stays `approved` deliberately. Clause 2's `select` is parsed and
+  # validated and consumed by NOTHING: `varve export-vsix --out D` writes
+  # every extension whether or not the declaration names a subset. Clean-room
+  # review confirmed it is the only unreachable clause. Advancing this would
+  # claim a capability the code does not have.
+  - id: REQ-EXPORTDECL-001
+    type: requirement
+    title: A project declares its exports, and verify checks every one of them
+    status: approved
+    release: v0.27.0
+    description: >
+      `varve verify --export <DIR>` is repeatable and MANUAL, so
+      REQ-EXPORT-SYNC-001 catches a stale export only for a directory someone
+      remembered to name. An export nobody names is an export that never goes
+      stale, because nothing looks at it — the set of exports lives in a CI
+      script or a shell history rather than in the repository. That is the same
+      failure shape as a gate that only checks what it is told about, and it
+      got worse as the adapter count went from four to five with a sixth
+      (export-sdk, varve#67) coming.
+      Clauses:
+      (1) A project shall declare its exports as `[[export]]` entries in
+      `varve.toml` — the pin already says which layer the project consumes, and
+      these say how it consumes it. One file, and `verify` already reads it, so
+      there is no second discovery path to get wrong.
+      (2) An entry shall name the adapter and the destination, and shall be
+      able to select a SUBSET of the layer rather than all of it — a project
+      exporting one extension or three crates into a dedicated area is the
+      ordinary case, not a special one.
+      The adapter name shall be one this varve can actually produce, spelled
+      exactly as the adapters already stamp it in `.varve-export.json`, so a
+      declaration and the stamp it is checked against compare without a
+      translation table. The destination shall be RELATIVE to the directory
+      holding `varve.toml`, so a declaration checked into a repository means
+      the same thing on every machine and cannot address anything outside the
+      checkout. Two entries shall not share one destination: each adapter
+      writes one stamp, so the second would overwrite the first's and `verify`
+      would then check one export twice and the other never.
+      (3) `varve verify` shall check every declared export WITHOUT being told
+      to. Declared means checked. A declared directory that is absent shall
+      fail, not warn: "I forgot to generate it" and "it is stale" are the same
+      severity to anyone relying on the export, and distinguishing them mainly
+      helps the person who made the mistake. A directory whose stamp names a
+      DIFFERENT adapter shall fail too — freshness there says nothing, because
+      the declared export was never produced at all.
+      (4) For a payload whose consumption requires entering an environment
+      rather than pointing at a path — a Yocto SDK is sourced, setting CC,
+      SYSROOT, CFLAGS and prepending its own bin to PATH — the entry shall
+      record how the environment is entered, and `varve env` shall be able to
+      emit that sourcing so one command sets up the whole environment.
+      Only an export that IS entered as an environment may carry that record.
+      On one that is pointed at — a local Cargo registry, a distdir — the block
+      would be accepted, ignored, and believed, which is the same failure shape
+      as an export nobody names.
+      The emitted order INVERTS the declared order, and must: sourcing a script
+      prepends its bin to PATH, so what is sourced last ends up first on PATH.
+      An environment declared to sit before the shims is therefore sourced
+      AFTER them.
+      (5) The entry shall declare where such an environment sits RELATIVE TO
+      varve's shims on PATH. An SDK environment script prepending its bin
+      shadows the shims, which is exactly the condition REQ-SHADOW-001 detects:
+      undeclared, `varve verify` will either catch a genuine hijack — the SDK's
+      compiler silently winning over the pinned one — or fire spuriously on a
+      legitimate setup. Both are damaging, and the spurious one is worse,
+      because a check that cries wolf is a check people switch off.
+      The declaration shall be REQUIRED rather than defaulted — a default is a
+      guess about PATH order made on the project's behalf, and being wrong in
+      either direction is what this clause exists to prevent. It yields three
+      distinct verdicts, not two: a binary inside an export declared to sit
+      before the shims is EXPECTED; one inside an export declared to sit after
+      them CONTRADICTS the declaration and is a real fault with its own fix;
+      anything else is the ordinary hijack.
+    tags: [distribution, ergonomics]
+    links:
+      - type: traces-to
+        target: REQ-EXPORT-SYNC-001
+      - type: traces-to
+        target: REQ-SHADOW-001
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-STORE-002
+    type: requirement
+    title: A layer can hold many payloads, including several versions of one name
+    status: verified
+    release: v0.26.0
+    description: >
+      Raised from use and reproduced (varve#69): a layer CANNOT hold two
+      versions of the same crate. `deposit` dedups on (name, platform),
+      ignoring `version` and `kind`, so `serde@1.0.200` plus `serde@1.0.210` is
+      refused as "duplicate tool name 'serde'".
+      For a `tool` that key is correct — one `synth` per platform, and install
+      platform-filters so exactly one lands. For versioned payloads it is
+      wrong, and not at the margin: multiple versions of one crate is the
+      ordinary shape of a dependency graph. varve's OWN Cargo.lock has 252
+      packages and 14 names at more than one version, `getrandom` at three. So
+      varve cannot express its own dependency graph as a layer, `export-cargo`
+      can never satisfy a real lockfile, and REQ-LOCKPIN-001's agreement gate
+      is capped at lockfiles with no duplicate names.
+      There is a second, latent half that makes the first load-bearing:
+      `Store::lay_down` writes every payload to `bin/<name>`. Relaxing the
+      deposit check ALONE would turn a clean error into a SILENT OVERWRITE —
+      the second entry's bytes land under the first's name, and verification
+      then fails on the other entry with nothing explaining why. The two shall
+      be fixed together.
+      Clauses:
+      (1) Payload identity shall be (name, version, platform) for kinds that
+      are not dispatched by name, and (name, platform) for `tool`, which is
+      dispatched by name and must therefore resolve uniquely.
+      (2) The store shall lay a non-dispatchable payload down under a path that
+      includes its version, so two versions of one name coexist and neither
+      overwrites the other.
+      (3) `deposit` shall refuse only true duplicates under the identity of
+      clause 1, and its error shall name the version as well as the name.
+      (4) `archive` and re-verification shall round-trip a layer holding
+      several versions of one name without loss — a payload that cannot be
+      archived cannot cross an air gap, which is the whole point.
+      (5) A layer holding several versions of one crate shall export a Cargo
+      registry offering all of them, since a lockfile that names two majors
+      needs both present to build offline.
+    tags: [core, distribution]
+    links:
+      - type: traces-to
+        target: REQ-KIND-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-VSIX-001
+    type: requirement
+    title: VS Code extensions are a payload kind, pinned and verified like anything else
+    status: verified
+    release: v0.26.0
+    description: >
+      Requested (varve#68). A reproducible development environment pins its
+      compiler, its linker and its test runner, and then installs editor
+      extensions from a marketplace with no verification at all — the one part
+      of the toolchain nobody checks. A `.vsix` is a single zip file, so unlike
+      an SDK it needs no tree-shaped store (varve#67) and can ship now.
+      Clauses:
+      (1) `kind = "vsix"` shall be depositable, signed and verified exactly as
+      any other payload — the digest check is kind-agnostic (DD-003) and shall
+      stay so.
+      (2) A `.vsix` shall NOT be laid down with the execute bit. Every payload
+      today gets 0o755 because every payload used to be a tool; an extension
+      archive is not executable and marking it so is wrong.
+      (3) `varve export-vsix --out D` shall lay the extensions out so that
+      `code --install-extension <file>` consumes them directly, and shall write
+      the `.varve-export.json` stamp every other adapter writes, so
+      `varve verify --exports` catches the export going stale when the pin
+      moves.
+      (4) Several extensions, and several versions of one extension, shall
+      coexist in a layer — the same identity rule as REQ-STORE-002, on which
+      this depends.
+      (5) `varve docs` shall carry a topic with a worked example, since the
+      coverage gate requires one per subcommand and a topic without a fenced
+      example fails the strict gate.
+    tags: [distribution, ergonomics]
+    links:
+      - type: traces-to
+        target: REQ-STORE-002
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-REGISTRY-002
+    type: requirement
+    title: varve speaks the OCI distribution spec, not one registry's dialect
+    status: verified
+    release: v0.26.0
+    description: >
+      varve's registry client works against GHCR and would fail elsewhere, and
+      the failures are quiet. Decision 2026-08-18: support potentially ANY
+      registry by being SPEC-COMPLIANT rather than by adding per-registry code
+      paths, and obtain credentials without executing anything.
+      What is wrong today, all verified by reading the shipped client:
+      (1) The token endpoint is GUESSED — hardcoded `/token?service=…`. The
+      spec says an unauthenticated request returns 401 with
+      `WWW-Authenticate: Bearer realm=…,service=…,scope=…` and the client uses
+      THAT realm. varve shall parse the challenge. This is a correctness bug
+      for third-party registries even when they are PUBLIC, not only an auth
+      bug — Artifactory, Harbor, ECR and GitLab all use different realms.
+      (2) No credentials are ever sent. varve shall read `auths` from the
+      docker/podman config and an explicit environment variable, in a
+      documented precedence, and send Basic to the token endpoint — and only
+      to the token endpoint, never to the registry API. A registry names its
+      own token realm, and the realm is legitimately on a DIFFERENT host
+      (auth.docker.io for registry-1.docker.io), so the realm host cannot be
+      constrained; its SCHEME can, and shall be: an https registry may not
+      point varve's credential at a cleartext realm.
+      varve shall NOT execute docker credential helpers. Sourcing a secret by
+      exec'ing a PATH-resolved binary is the exact class of trust
+      REQ-SHADOW-001 was written because PATH does not deserve. Cloud
+      registries (ECR, GCP Artifact Registry, ACR) are therefore supported by
+      the user supplying the credential — `aws ecr get-login-password` into the
+      environment variable — which is friction, and is the accepted price of
+      running no external binary.
+      (3) `/tags/list` is never paginated (varve#70). The spec paginates it
+      with `?n=` and a `Link: rel="next"` header. Three digest-pin paths
+      enumerate tags, so a truncated page makes a digest pin, a status baseline
+      and carried attestations all come back EMPTY — wrong answers that look
+      like legitimate absence. varve shall follow the pages, with a bound so a
+      hostile registry cannot make the client loop.
+      (4) One `Accept` media type is offered. varve shall accept the Docker
+      manifest media type as well as the OCI one, or registries serving only
+      the former are unreachable.
+      (5) Failures are swallowed — the token chain is `.ok().and_then(…)`, so a
+      401 becomes `None` and the user sees a confusing downstream error.
+      varve shall distinguish "no credentials offered" from "credentials
+      rejected", and say which.
+      (6) varve shall NOT send an Authorization header across a redirect.
+      Blob fetches redirect to CDNs; a client that retains the header leaks
+      the credential cross-origin. Harmless while the token is anonymous and
+      pull-scoped, real the moment (2) lands — so it lands WITH (2), not
+      after. CORRECTION 2026-08-18, from measuring the HTTP client rather
+      than reading its documentation: this clause originally said "to a
+      different host", and ureq's `SameHost` setting — which reads as the
+      literal implementation of that phrasing — compares the host NAME and
+      IGNORES THE PORT, so it forwards the credential from `host:5000` to
+      `host:8080`. "Different host" is therefore not a safe boundary with
+      this client; varve drops the header on EVERY redirect. The same leak by
+      another route is a `Link: rel="next"` on `/tags/list` pointing off the
+      registry's origin, which varve shall refuse to follow.
+    tags: [distribution, security]
+    links:
+      - type: traces-to
+        target: REQ-REGISTRY-001
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-INDEXAUTH-001
+    type: requirement
+    title: The realm authenticates the line index, not only each artifact
+    status: verified
+    release: v0.26.0
+    description: >
+      varve signs individual layer manifests and realms, but the LISTING of
+      which layers exist for a line is the registry's raw `/tags/list` —
+      unauthenticated. A compromised or merely stale index host can HIDE a
+      layer, and every artifact it does serve still verifies, so nothing
+      detects it. Hiding also breaks digest-pinned resolution, because
+      `LayerRef::Digest` is resolved by enumerating tags. Guix authenticates
+      its index git-history via signed commits; this is varve's equivalent, and
+      it is the Uptane insight that rollback protection must survive a
+      Director/registry compromise rather than only artifact tampering.
+      Stated as discrete clauses, because prose requirements here have four
+      times been marked verified while half-implemented:
+      (1) varve shall define a line-index document — the line, a counter, an
+      issue time, and every layer of that line with its payload digest and
+      channel — carried as a DSSE envelope under its own payload type and
+      verified against the realm's trust root, so a signed something-else
+      cannot be replayed as an index.
+      (2) The index shall carry a monotonic per-line counter, and a presented
+      index whose counter is lower than the cached one shall be REFUSED,
+      naming both counters — the same rule line-status already enforces, for
+      the same reason.
+      (3) When a verified index is available, varve shall refuse an enumeration
+      that OMITS a layer the index names, and shall name the omitted layer and
+      its digest. This is the detection the whole requirement exists for.
+      (4) The verified index's greatest counter shall be REPORTED alongside the
+      installed layer's, so a consumer learns what the realm says the line
+      contains even when the source did not offer it.
+      Corrected during implementation, and the correction matters more than the
+      original text. This clause first read "the high-water mark shall be
+      advanceable from the verified index". An integration test through
+      `install` refuted it immediately: raising the ENFORCEMENT mark to the
+      line's newest counter makes a legitimately-pinned older layer
+      uninstallable the moment the realm publishes a newer one — it fails with
+      "rollback refused" on a layer the consumer deliberately chose. That
+      breaks frozen toolchains, which is varve's entire purpose, and it does so
+      to defend against an attack varve's model does not have: Uptane's
+      freshness attack presumes a client that wants the LATEST, while a varve
+      consumer names an exact layer, so withholding a newer one cannot trick
+      them into anything. The real exposure is that they cannot SEE it, which
+      is what clause 3 catches and what reporting addresses. The high-water
+      mark tracks what this machine has ACCEPTED; it is not a statement about
+      what exists, and conflating the two turns a security control into an
+      availability failure.
+      (5) A realm shall be able to DECLARE that it publishes an index. Where it
+      does, a missing index is an error naming the realm; where it does not,
+      absence stays silent, so existing realms keep working. Failing closed by
+      default would break every realm in existence; failing open with no way to
+      opt in would let an attacker simply delete the index. The pin's realm is
+      what decides, which is the same place every other trust question is
+      settled.
+    tags: [core, security]
+    links:
+      - type: traces-to
+        target: REQ-ROLLBACK-001
+    fields:
+      priority: must
+      category: non-functional
+
+  - id: REQ-ATTEST-001
+    type: requirement
+    title: An attestation is bound to its layer and its bytes, without being re-attested
+    status: verified
+    release: v0.22.0
+    description: >
+      SCOPE NOTE, written after clean-room review caught the earlier text
+      claiming more than shipped: this requirement covers BINDING only. The
+      transport half — carrying attestations as OCI referrer artifacts and
+      having `varve verify` report them — is REQ-ATTEST-002, targeted at
+      v0.23.0. The original text asserted both and was marked verified with
+      half of it unimplemented, which is precisely the defect varve's
+      claim-check discipline exists to prevent.
+      A layer's bytes are authentic and current; varve's signature and counter
+      say so. They say nothing about whether the code was reviewed, how it was
+      built, or what it contains. Others produce those claims — cargo-vet /
+      cargo-crev audits, SLSA in-toto provenance, CycloneDX SBOMs, VEX, and
+      vendor attestations (AdaCore has shipped DSSE-signed in-toto provenance
+      since wave 26.1).
+      varve shall NOT re-attest any of it. Re-signing another party's judgement
+      under this root would launder it into ours, and an assessor reading the
+      chain could no longer tell who asserted what. varve shall instead sign a
+      STATEMENT ABOUT the attestation — this digest, of this kind, from this
+      producer, accompanies this layer — and carry the bytes verbatim, so a
+      consumer verifies two separable things: varve's vouching for the
+      association and the bytes' integrity, offline against the pinned root;
+      and, with the producer's own key, whatever the producer claimed. That
+      split is what lets a disconnected site check a vendor attestation whose
+      issuer it cannot reach — the case AdaCore's own online signature service
+      does not serve.
+      Fail-closed rules, each of which shall hold: an unknown attestation kind
+      is refused, never guessed; bytes that do not hash to the signed digest
+      are not the attested bytes; a statement naming ANOTHER layer is refused
+      as evidence about this one (the confused-deputy case); a statement whose
+      own two identities — layer name and layer digest — disagree is refused,
+      the same rule `resolve` applies to pins; the statement carries its own
+      DSSE payload type so a signed layer manifest or line-status cannot pose
+      as one; and the checking command shall RE-VERIFY THE LAYER, not merely
+      the statement, since the installed layer's name and digest are local
+      labels until its retained envelope is re-checked.
+    tags: [distribution, traceability, security]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-ATTEST-002
+    type: requirement
+    title: A layer transports its attestations as OCI referrers, and verify reports them
+    status: verified
+    release: v0.26.0
+    description: >
+      The transport half split out of REQ-ATTEST-001 when review found that
+      requirement marked verified while this half was unimplemented. Binding
+      shipped in v0.22.0 (`sign-attestation` / `check-attestation`); carriage is
+      what makes a bound attestation reach anyone.
+      (1) An attestation shall be ATTACHABLE to a deposit layout as referrer
+      artifacts — the signed statement and the attested bytes verbatim, keyed by
+      the statement's own digest so a layer can carry several
+      (`sign-attestation --attach-to`).
+      (2) It shall TRAVEL: an install shall persist whatever attestations its
+      source carries into the installed layer, and `archive` shall re-emit them,
+      so the evidence survives an offline round trip into a core that shares
+      nothing with the producer's but the pinned root.
+      (3) `varve verify` shall REPORT which attestations a layer carries — kind,
+      producer — and whether each still binds, after re-verifying the layer
+      itself.
+      Reporting, not refusal, and deliberately so: an attestation that no longer
+      binds is evidence about the evidence, but a layer whose own signature and
+      digests are good is still a good layer, and failing on a third party's
+      stale audit would make varve's verdict depend on someone else's release
+      cadence. For the same reason a source that drops attestations does not
+      make a correctly-signed layer uninstallable — the loss is reported, never
+      silent.
+      Registry carriage landed after the rest: `RegistrySource::fetch_attestations`
+      surfaces `attestation-statement` / `attestation-bytes` referrers, paired
+      by the `eu.pulseengine.varve.attests` annotation rather than by position,
+      for both a named and a digest pin. Until it existed an `oci://` install
+      carried nothing — varve's most-used transport reproducing the exact
+      mirror-boundary loss this requirement exists to close.
+
+      Corrected during implementation. The original text also required
+      attestations "attached to ... an OCI registry as referrer artifacts". varve
+      attaches nothing to a registry and shall not: it runs no server and pushes
+      nothing (README, "No server of our own"; REQ-REGISTRY-001 is pull-only, so
+      that publishing tooling never joins the client trust path). What actually
+      crosses to a registry is the LAYOUT — `oras cp --from-oci-layout` copies
+      the index this requirement writes, referrer entries included — so clause 1
+      is the producing act, and the registry obligation is a READING one:
+      `RegistrySource` shall surface the attestations a registry carries beside
+      a layer, exactly as it already does for line-status. That pull half is NOT
+      yet implemented and this requirement is not satisfied until it is.
+      This is the half that closes the mirror-boundary gap the research
+      identified: registries do publish this evidence, and mirroring tools drop
+      it — bandersnatch and Verdaccio carry no attestations, and every BCR
+      attestation URL points at github.com — so an air-gapped consumer receives
+      bytes without the evidence about them. Reuse the line-status referrer
+      machinery (REQ-STATUS-DIST-001) rather than inventing a second shape.
+    tags: [distribution, traceability]
+    fields:
+      priority: should
+      category: functional
+
+  - id: DD-021
+    type: design-decision
+    title: varve signs a statement ABOUT an attestation, never a restatement OF it
+    status: accepted
+    release: v0.22.0
+    description: >
+      When varve carries someone else's attestation, it could re-sign the
+      content under its own root — making one signature the consumer checks.
+      It deliberately does not. Re-signing another party's judgement collapses
+      two different assertions into one: an assessor reading the chain could no
+      longer tell whether varve merely transported a cargo-vet audit or endorsed
+      its conclusion, and varve has no basis for the latter. It would also make
+      varve's root a laundering point — the strongest reason a regulated
+      consumer would refuse to pin it.
+      So the signed object is a STATEMENT ABOUT the bytes: {layer,
+      layer_manifest_digest, kind, digest, producer}. varve asserts association
+      and integrity, which it can actually check; `producer` is copied verbatim
+      and never interpreted. The carried document is untouched, so the
+      producer's own signature over it still verifies with the producer's key.
+      Consequence, accepted knowingly: a consumer must perform TWO
+      verifications, and varve's `check-attestation` says so in its output
+      rather than implying one verdict covers both. The alternative — one
+      signature, ambiguous meaning — is worse for exactly the assessors varve
+      is built for.
+    links:
+      - type: satisfies
+        target: REQ-ATTEST-001
+    fields:
+      rationale: >
+        One signature with an ambiguous meaning is worse than two signatures
+        with clear ones. Collapsing "varve transported this" and "the producer
+        asserts this" into a single varve signature would leave an assessor
+        unable to tell which varve actually vouched for, and would make varve's
+        root a laundering point for third-party judgements it cannot check —
+        the strongest reason a regulated consumer would refuse to pin it. The
+        cost, two verification steps for the consumer, is paid once and is
+        stated in the tool's own output.
+
+  - id: DD-022
+    type: design-decision
+    title: An archive carries ONE platform, and says so, rather than pretending to carry all
+    status: accepted
+    release: v0.26.0
+    description: >
+      `varve archive` exports an INSTALLED layer, and `varve install` fetches
+      only the payloads of the platform it installed for, so the bytes for any
+      other triple are not on the machine doing the archiving. Two options were
+      on the table (varve#80): treat the archive as host-platform-only by
+      definition, or let `varve archive --platform` produce a cross-platform
+      artifact for a heterogeneous air-gapped site.
+      Host-platform-only is chosen. Producing a cross-platform archive would
+      mean fetching the other platforms' blobs from a registry at archive time —
+      a network operation, in the one command whose entire purpose is to work
+      without one, and one that would make `archive` a second, partial
+      implementation of `install` + `deposit`. A site with mixed architectures
+      makes one archive per platform, each on (or installed for) that platform;
+      a producer who wants a single all-platform layout already has `varve
+      deposit`, which is built from the producer's own bytes for every platform
+      at once.
+      What the decision COSTS is paid explicitly rather than discovered on the
+      far side of an air gap: `archive` platform-filters exactly as `install`
+      and `verify` do, prints the payload count it carried and the entries it
+      omitted per platform, refuses outright to write a layout that would carry
+      no payload at all, stamps `eu.pulseengine.varve.archived-for` in the
+      layout index, and a consumer on another platform is told "this archive
+      carries no payload for <triple> — it was archived for <other>" instead of
+      a digest mismatch. `--platform` on `archive` selects which platform's
+      payloads to take FROM THIS CORE (for a core laid down with `varve install
+      --platform`); it never fetches.
+    links:
+      - type: satisfies
+        target: REQ-OFFLINE-001
+    fields:
+      rationale: >
+        The defect this decision closes was silent corruption, not a missing
+        feature: `archive` located payloads by NAME, so a tool name repeating
+        across four triples wrote one host binary under four digests and exited
+        0. Fixing the location bug alone would have left the archive quietly
+        single-platform, which is the same class of failure one step later — an
+        operator learns what their media does not contain after carrying it
+        across the gap. A limit that is stated, printed, stamped in the artifact
+        and enforced at both ends is honest; an unstated one is a second defect
+        waiting for a mixed site.
+
+  - id: REQ-TRACEPACK-001
+    type: requirement
+    title: A release carries its rivet traceability as queryable, assessor-importable evidence
+    status: verified
+    release: v0.17.0
+    description: >
+      A varve release already ships the supply-chain layer (signed sums, SLSA
+      provenance, SBOM, trust root, realms). It shall ALSO carry its safety-case
+      traceability as first-class release assets, so a consumer or assessor can
+      query it directly from the release — offline, with no repo checkout:
+        - a ReqIF export (`rivet export --format reqif`), the OMG interchange
+          format assessor tools (DOORS/Polarion/…) import directly;
+        - a browsable HTML report (`rivet export --format html --offline`) —
+          artifacts, coverage matrix, trace graph;
+        - the rivet source artifacts themselves, so `rivet trace-results`,
+          `rivet coverage`, and `rivet docs --grep --format json` run against
+          the packed evidence.
+      The traceability assets shall be covered by the same signed
+      `SHA256SUMS.txt` as the binaries (the cosign signature transitively
+      covers them), so the safety case is as tamper-evident as the code. This
+      makes rivet's embedded, queryable-docs model the release's own: the
+      release IS a queryable safety case. Composes with REQ-ATTEST-001 and the
+      Eclipse-SCORE release-manifest shape.
+    tags: [release, traceability]
+    links:
+      - type: traces-to
+        target: REQ-CLAIM-001
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-DOCS-001
+    type: requirement
+    title: Documentation is embedded, queryable, and a checked invariant
+    status: verified
+    release: v0.17.1
+    description: >
+      varve shall ship its own documentation EMBEDDED in the binary (no files,
+      no network — works air-gapped) and queryable, modelled on `rivet docs`:
+      `varve docs` lists topics, `varve docs <topic>` shows one, `--grep`
+      searches, `--format json` is machine-readable. Crucially, coverage is a
+      MECHANICAL INVARIANT, not review discipline: `varve docs check --coverage`
+      enumerates the CLI's top-level subcommands and reports any one lacking a
+      documented topic; `--strict` exits non-zero (a CI gate like review-check /
+      claim-check), so a new subcommand cannot ship undocumented. Topics cover
+      every CLI subcommand plus the core concepts (pins, realms, layers, trust
+      roots, payload kinds, air-gap). Documentation-as-invariant is the same
+      "mechanical, not prose" spine as the rest of varve.
+    tags: [docs, ergonomics]
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-EXPORT-SYNC-001
+    type: requirement
+    title: Exports are pinned to their producing layer; verify fails loud on drift
+    status: verified
+    release: v0.18.0
+    description: >
+      The export adapters (export-cargo, export-crates-vendor,
+      export-bazel-distdir) materialise offline byte sources from a verified
+      layer. A consumer commits that vendored directory and builds against it —
+      but when the project's pin later moves to a new layer, the committed
+      export silently keeps serving the OLD crates, and toolchain-vs-source-set
+      diverge with nothing said. That is exactly the "stale silently" failure
+      varve exists to make loud, applied to exported artifacts instead of the
+      toolchain binaries. varve shall close it three ways: (1) the export
+      commands DEFAULT `--layer` to the resolved project pin (like install /
+      verify), so re-exporting after a bump naturally produces the new layer's
+      crates; (2) every export writes a `.varve-export.json` stamp into its
+      output directory recording {layer, manifest_digest, kind}, binding those
+      bytes to the layer that produced them (manifest_digest is the sha256 of
+      the DSSE-signed layer manifest — the same join key everything else uses);
+      (3) `varve verify --export <DIR>` (repeatable) re-derives the current
+      pin's manifest digest and HARD-FAILS (non-zero exit) when a stamped
+      export's manifest_digest diverges from it — a mechanical CI gate, not a
+      warning. An absent stamp in a named export dir is itself a failure (an
+      unstamped or hand-assembled tree is not a verified export); a malformed
+      stamp is a failure. Verify without --export is unchanged (backward
+      compatible). This makes an out-of-sync export impossible to miss: the same
+      command that proves the pinned layer intact also proves the exports still
+      belong to it.
+    tags: [distribution]
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-CRATENAME-001
+    type: requirement
+    title: An unrepresentable crate name fails closed, never panics or corrupts the index
+    status: verified
+    release: v0.18.1
+    description: >
+      `index_path` matched on `chars().count()` and then sliced BYTES, so any
+      non-ASCII crate name panicked mid-codepoint — a client CRASH on the
+      offline-vendoring path, in a tool whose contract is to fail closed with an
+      error that carries its fix. Reproduced for `café-utils`, `日本語`, `ααα`.
+      Separately, `index_line` interpolates the name and version into the index
+      JSON with no escaping, so a name containing a quote or backslash would
+      emit a corrupt registry line. Both stem from trusting an unvalidated,
+      depositor-controlled annotation. varve shall (a) refuse a crate name or
+      version outside Cargo's own alphabet (name: ASCII alphanumeric, `-`, `_`;
+      version: alphanumeric, `.`, `-`, `+`) at EVERY export adapter, before any
+      bytes are written, and (b) keep `index_path` total by construction —
+      character-based slicing — so a layout helper can never crash a client even
+      if called directly. Fail closed, with the reason named.
+    tags: [distribution, security]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-SHIM-002
+    type: requirement
+    title: The shim is varve itself, not a shell script
+    status: verified
+    release: v0.19.0
+    description: >
+      `varve shim install` wrote a `/bin/sh` script per tool
+      (`exec "<varve>" run -- <tool> "$@"`). Three defects follow. (1) TRUST: an
+      unverified shell interpreter sits on the dispatch path of every tool
+      invocation, in a tool whose premise is a short verified path from pin to
+      binary — and the shell is the one component varve neither signs nor
+      checks. (2) INJECTION: the tool name was interpolated UNQUOTED, and the
+      varve path was interpolated inside sh double quotes where `"`, `$` and
+      backticks remain live; a name or install path carrying a shell
+      metacharacter breaks or injects. (3) COST: the extra process costs ~2.4 ms
+      per dispatch (measured), on the interactive hot path of every compiler
+      invocation, and the design is Unix-only.
+      varve shall instead dispatch on `argv[0]`, the rustup pattern: a shim is a
+      symlink to the varve binary (a copy on Windows), and varve invoked under
+      any name other than its own resolves the pin and execs that tool. This
+      deletes the shell, removes the injection class BY CONSTRUCTION (no string
+      ever reaches a parser), halves the process spawns, and makes Windows a
+      copy rather than a special case, and arguments pass through as raw bytes
+      (a unix argument is an arbitrary byte string; rewriting one lossily would
+      corrupt data silently). Two consequences shall be documented rather than
+      implied: the binary must be named `varve` to offer the CLI, and a Windows
+      shim is a copy, so it does not follow `self-update` until reinstalled.
+      The name derived from `argv[0]` is caller-controlled, so it shall be
+      validated (no path separators, no `..`, non-empty) and may only ever
+      select among tools the pinned layer already exposes — fail closed, as
+      everywhere else.
+    tags: [core, security, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-PERF-001
+    type: requirement
+    title: Dispatch cost is measured and budgeted, not folklore
+    status: verified
+    release: v0.19.0
+    description: >
+      varve had no benchmarks at all, while shim dispatch — the only genuinely
+      hot path it has, on every `cargo`/`rivet`/`synth` invocation — was
+      unmeasured. Measurement (2026-08-13, release build) found ~6.4 ms of varve
+      overhead per dispatch, of which ~2.4 ms was a `/bin/sh` process that
+      REQ-SHIM-002 removes outright, and a resolve cost that grows LINEARLY with
+      installed layers for a NAME-ONLY pin (3.8 ms at 3 layers, 8.6 ms at 201)
+      because `Store::list` parses every installed `layer.json` to recover its
+      identity. A pin carrying `digest` is already O(1) (`Store::get` reads one
+      entry), and layers coexist by design (REQ-COEXIST-001), so the linear case
+      is the one a long-lived machine lands in.
+      varve shall carry a criterion benchmark for resolve/dispatch so this cost
+      is a tracked number rather than folklore, and shall DOCUMENT the
+      complexity honestly: digest-pinned resolve is constant-time, name-only
+      resolve is linear in installed layers. Making the name-only path constant
+      needs a store-side identity index with its own invalidation and trust
+      questions; it is deliberately NOT claimed here, and is tracked separately.
+      The trust property this protects: a verified dispatch path must not be so
+      slow that users are tempted to bypass it — and its cost must be visible
+      before it regresses, not after a user complains.
+    tags: [core, ergonomics]
+    fields:
+      priority: should
+      category: performance
+
+  - id: REQ-PIN-002
+    type: requirement
+    title: A pinned tool name is a name, never a path out of the layer
+    status: verified
+    release: v0.19.0
+    description: >
+      A pin may restrict itself to a subset of the layer's tools
+      (`tools = ["rivet"]`). That name is joined onto the verified layer's
+      `bin/` directory — and `Path::join` with an ABSOLUTE path REPLACES the
+      base, while `..` walks out of it. So `tools = ["/usr/bin/id"]` resolved
+      and ran a binary from outside the verified layer, directly contradicting
+      the guarantee varve documents and sells: "varve never falls back to
+      another layer or to binaries on PATH — a pin resolves exactly or the
+      command fails." Found by clean-room review of v0.19.0 (pre-existing, not
+      introduced by the shim change, and not reachable through a shim because an
+      argv[0]-derived name cannot contain a separator). varve shall refuse, at
+      pin-parse time, any tool name that is not a plain name — empty, `.`, `..`,
+      or containing `/`, `\`, or NUL — with an error naming the offending entry.
+      Fail closed at the boundary, rather than trusting a checked-in file.
+    tags: [core, security]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-PROOF-001
+    type: requirement
+    title: Trust obligations are discharged by certificate, and the gate proves it can go red
+    status: verified
+    release: v0.20.0
+    description: >
+      varve's anti-rollback decisions were checked only by example tests and by
+      proptest SAMPLING a bounded range. That gap is not theoretical: on
+      2026-08-08 cargo-mutants left three survivors in `epoch_days`, all
+      "replace || with && " in the Gregorian leap predicate — an arm proptest
+      never generated. varve shall carry SMT obligations, discharged by ordeal
+      (the certificate-checked QF_BV solver varve itself distributes), so the
+      statements hold over the whole input space rather than over samples. An
+      `unsat` from ordeal is returned only after its checker has validated an
+      LRAT certificate, so the artifact is evidence a third party can re-check,
+      not an exit code.
+      Crucially, every proof file declares the verdict it expects, and the suite
+      MUST contain negative controls — the same obligation against a
+      deliberately wrong predicate, which must still be refutable. A suite in
+      which everything is expected-unsat cannot distinguish "proved" from "the
+      solver stopped deciding anything"; `tools/proof-check.py` fails if no
+      negative control is present. A gate nobody has watched go red is not a
+      gate.
+      Where a solver finds a model, that model is a test case: the leap
+      obligation returned y = 8192, which is now the `8192-02-29` regression
+      test that kills the surviving mutants.
+    tags: [core, security, traceability]
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-MUTATE-002
+    type: requirement
+    title: The mutation gate covers the trust decisions, not a subset of them
+    status: verified
+    release: v0.20.0
+    description: >
+      The required mutation gate covered six files (177 mutants) while the
+      modules holding the actual trust decisions were EXCLUDED: `resolve.rs`
+      (the no-fallback law), `install.rs` (verify -> digest -> lay-down),
+      `selfverify.rs` (the self-update trust anchor), `reverify.rs` (`varve
+      verify` itself) and `exportstamp.rs`. A mutant deleting a digest check in
+      any of them merged green. varve shall include them in the required gate.
+      Adding them immediately paid: two survivors were found and killed, the
+      same defect in both — a `NotFound` match guard that could be replaced with
+      `true`, collapsing "this file cannot be read" into "this file is absent".
+      In `reverify.rs` that meant a permissions fault on a retained envelope
+      would be reported as "no retained envelope"; in `exportstamp.rs` it told
+      the user to re-run an export that was not the problem. A verification tool
+      must name the fault it actually hit.
+    tags: [core, security]
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-SBOM-001
+    type: requirement
+    title: The SBOM is a transcription of the signed manifest, not a scan
+    status: verified
+    release: v0.21.0
+    description: >
+      varve carried no SBOM at all, while holding — inside the DSSE-signed layer
+      manifest — precisely the data an SBOM answers with: every component's
+      name, version, sha256 digest, payload kind and upstream source
+      provenance. varve shall emit a CycloneDX 1.6 document for a VERIFIED
+      layer, transcribed from that signed manifest rather than scanned from a
+      filesystem or a lockfile. The distinction is the point: a scanner reports
+      what it believes it found and can miss a component or invent one, while a
+      transcription is exactly as trustworthy as the layer — a question
+      `varve verify` already decides. An SBOM for a layer that cannot be
+      verified is worse than none, because it looks authoritative; the command
+      shall therefore fail closed, as the export adapters do.
+      The document shall be DETERMINISTIC — components ordered by digest, a
+      serial number derived from the manifest digest, and the layer's own
+      issued-at rather than the wall clock — so re-emitting a layer is
+      byte-identical and any diff means the layer changed. It shall BIND ITSELF
+      to what it describes by recording the manifest digest, channel and
+      anti-rollback counter in its metadata, so a document can be checked
+      against the artifact it claims to cover. Per-platform entries shall carry
+      their platform, since a layer holds one distinct binary per platform and
+      they would otherwise read as duplicates.
+      Regulatory context, not the justification: EU CRA Article 13(5) requires
+      due diligence over third-party components, Article 14 reporting bites
+      2026-09-11 with a 24-hour clock that presumes you can say which
+      components are in a shipped product, and Annex I Part II(1) requires an
+      SBOM in a commonly used machine-readable format covering at least
+      top-level dependencies.
+    tags: [distribution, traceability, security]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-COMPOSE-001
+    type: requirement
+    title: A layer may compose another layer, so one pin can span two trust universes
+    status: verified
+    release: v0.23.0
+    description: >
+      Raised by a consumer (varve#52, relay). A pin names exactly ONE realm and
+      ONE layer, so a project cannot draw on two trust universes at once. relay
+      needs the PulseEngine tools that CHECK its work (rivet, meld, synth,
+      witness) and the upstream BytecodeAlliance tools that BUILD it
+      (wasm-tools, cargo-component, wkg, wac) — and today the question "which
+      layer produced this artifact" is answerable for the checkers and not for
+      the producers. Two defects reached a downstream consumer through exactly
+      that unpinned half.
+      Putting upstream tools in the same layer would place unqualified releases
+      we do not control under a qualification claim that covers tools we do —
+      the consumer flagged this and is right. varve shall therefore let a layer
+      COMPOSE another: a signed manifest entry of payload kind `layer` whose
+      digest is the included layer's manifest digest and whose annotations name
+      its realm. The pin stays singular; resolution walks the graph; each layer
+      keeps its own realm, trust root, cadence and qualification claim; and
+      because the include lives in the signed payload, the composition itself
+      is signed.
+      Rules, all fail-closed, and holding on BOTH walkers — resolution and
+      verification. (Re-verification found verify recursing unbounded and
+      stack-overflowing on a self-referencing store entry, which is not what
+      "refused" means, least of all in the command whose job is to inspect
+      adversarial store state.) An included layer is verified against ITS OWN
+      realm's trust root, not the including layer's; a cycle — a layer
+      reappearing on its own path — is refused, while a DIAMOND, where two
+      layers share a base, is walked once and is legal; depth is bounded at 8;
+      and a tool name exposed by more than one
+      layer in the graph is an ERROR naming both layers, never a silent choice
+      — varve does not pick a winner, exactly as a pin that does not resolve
+      uniquely is an error rather than a fallback.
+      SCOPE, and what an earlier version of this text got wrong. It claimed
+      "EXPRESSES, RESOLVES and VERIFIES" while only resolution existed: deposit
+      could not emit an include, install REJECTED one, and verify checked only
+      the root layer — so an entirely UNSIGNED included layer dispatched its
+      tools while `varve verify` exited 0. Clean-room review found all three.
+      They are now built: `deposit` emits includes from `[[include]]` tables in
+      a spec file (the flags deliberately do not grow a way to say it), install
+      skips layer-kind entries rather than treating them as blobs, and `verify`
+      walks the composition, verifying each included layer against its own
+      realm's trust root and recursing.
+      Still deliberately OUT: transitively FETCHING an included layer that is
+      not installed. Resolution and verification both fail naming the missing
+      layer and its corrective `varve install`, which is the behaviour a missing
+      pinned layer already has.
+    tags: [core, distribution]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-LOCKPIN-001
+    type: requirement
+    title: A pinned crate that is compiled into an artifact is checkable, not merely shippable
+    status: verified
+    release: v0.23.0
+    description: >
+      Also from varve#52. varve pins what it DISPATCHES, but a code-generating
+      dependency reaches the artifact as a Cargo dependency compiled INTO it —
+      `wit-bindgen-rt` is baked into every component relay publishes, and
+      supplies `cabi_realloc`, the symbol whose absence shipped a raw core
+      module to a downstream consumer. There is no binary to shim, so `varve
+      which` has nothing to point at, and the consumer reported running THREE
+      versions of one generator at once (0.41.0 in published components, 0.60.0
+      at the workspace root, 0.58.0 in our fork) with nothing recording which
+      produced a given artifact.
+      varve already carries the crate payload kind, so it can DISTRIBUTE such a
+      dependency; what is missing is AGREEMENT. varve shall check a project's
+      resolved lockfile against the pinned layer's `crate` entries: `varve
+      verify --lockfile <FILE>` shall fail when a package the layer pins
+      resolves to a different version in the lockfile, or resolves to the same
+      version with a different checksum. Packages the layer does not pin are
+      not varve's business and are ignored — the layer does not claim to cover
+      every dependency, and pretending otherwise would make the check noise.
+      THE BOUNDARY, deliberate and to be documented: varve cannot intercept a
+      Cargo build and cannot guarantee the compiler used the bytes it pins.
+      Provenance for a compiled-in dependency is by ASSERTED AGREEMENT — the
+      lockfile and the layer must say the same thing, mechanically, or CI goes
+      red — not by dispatch. A consumer is entitled to know that boundary is
+      chosen rather than overlooked.
+    tags: [distribution, core]
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-KEYGEN-001
+    type: requirement
+    title: varve can mint a signing key and print its public half
+    status: verified
+    release: v0.24.0
+    description: >
+      A ten-persona documentation audit (2026-08-14) found the extender path is
+      not merely undocumented but CLOSED: nothing in varve emits the public half
+      of a signing key, so the 64-hex `trust-root` that varve-realms.toml
+      demands is unobtainable. One persona held a working key, signed a layer
+      with it, and tried six derivations plus offline DSSE-PAE verification
+      across six message encodings; none matched. Four of the five blocked
+      personas were blocked by exactly this. Verbatim: "everything needed to run
+      a second realm exists in the code except the one function that prints a
+      public key."
+      Compounding it, the `--key` help text is ACTIVELY WRONG — it says
+      "hex-encoded ed25519 root SECRET key" while the tool requires 128 hex
+      characters (a 32-byte seed followed by its 32-byte public key) and refuses
+      a 32-byte secret. The resulting error, "manifest signature verification
+      failed: invalid signing key: Ed25519 signature function error", is wrong
+      on all three counts: nothing was verified (the key failed to LOAD), the
+      tail is a leaked library string, and it carries no fix.
+      varve shall provide `varve keygen`, writing a signing key and its public
+      half, and `varve pubkey <keyfile>` printing the public half of an existing
+      key in exactly the form `trust-root` accepts. The key error shall name the
+      length it got, the length it needs, and the command that mints one. A new
+      `signing-keys` topic shall document the format and the key's lifecycle.
+      This is the gate on an organisation running its own realm at all, and
+      therefore on splitting layer maintenance into per-realm repositories.
+    tags: [core, security, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-PRODUCER-001
+    type: requirement
+    title: The produce side fails closed, like the consume side already does
+    status: verified
+    release: v0.24.0
+    description: >
+      The same audit found what it called the deepest inversion in the tool: the
+      consumer half is strict while the producer half validates nothing, so
+      varve emits permanently-broken signed artifacts and reports success. Each
+      of these exited 0 (verified 2026-08-14):
+      64 bytes of random entropy accepted as a signing key, producing a layer no
+      trust root on earth can verify; `--channel stable` signed into the
+      manifest, making the layer un-nameable by any pin, which only accepts
+      `qualified` or `rolling`; `--issued-at 2026-10-01` (a flag documented
+      `<RFC3339>`) signed verbatim, yielding an invalid CycloneDX
+      `metadata.timestamp` in a CRA-facing artifact and uncorrectable after
+      signing; `--out oci://ghcr.io/acme/layers` reporting "deposited ... at
+      oci://..." while writing a local directory literally named
+      `./oci:/ghcr.io/acme/layers`; and `attach-status` binding a line 2099.01
+      status to a 2026.08 layout, for the consumer to discover.
+      For a project whose thesis is "fail closed, never a fallback", signing an
+      artifact that can never be verified and printing OK is the inversion that
+      matters most. varve shall validate producer input BEFORE signing: the
+      channel against the same enum the pin parser accepts, the issued-at as RFC
+      3339, the signing key as a well-formed keypair whose public half matches
+      its seed, a registry-shaped `--out` refused with the command that would
+      actually publish, and a status document's line against the layout it is
+      attached to. `deposit` shall additionally verify the envelope it just
+      wrote before returning 0 — the cheapest possible guard against emitting an
+      unverifiable release artifact.
+    tags: [core, security]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-STORE-001
+    type: requirement
+    title: Every command finds the layer the project's realm actually installed
+    status: verified
+    release: v0.24.0
+    description: >
+      `crates/varve/src/main.rs` builds its store from the top-level core
+      (`Store::at(store_root()?)`) while the project path builds it from the
+      realm partition (`Store::at(realm.effective_root(base.root()))`). Realms
+      partition the core by trust-root fingerprint, so that single divergence
+      makes realm-installed layers invisible to every command that takes the
+      first path. Three personas reported it as three unrelated bugs:
+      `varve list` printing "no layers installed" with exit 0 immediately after
+      a successful realm install, contradicted a second later by verify, which,
+      run and sbom — and it is the path the README calls the recommended
+      zero-config one; `--layer` failing on `export-*` and `sbom` for a
+      realm-pinned project with either "no trust root configured" (when it is
+      configured) or "layer X is not installed" (when it is), which is the
+      README's headline example; and a cross-realm composition reporting an
+      installed include as missing, whose corrective advice then hits the
+      per-line rollback guard and locks the user out with no documented
+      recovery — two errors forming a loop with no exit.
+      varve shall resolve the store through the project's realm wherever a
+      command operates on the project's layers, so that a layer which `which`
+      resolves is a layer `list`, `--layer` and composition can all see.
+    tags: [core]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-CHANNEL-001
+    type: requirement
+    title: The pin's channel is enforced at resolution, not only at install
+    status: verified
+    release: v0.24.0
+    description: >
+      Found by the ten-persona audit re-run, independently by two personas, and
+      it is the most serious defect the audit has produced. `install` refuses a
+      fetched manifest whose channel disagrees with the pin, but NOTHING
+      re-checked an already-installed layer. So editing a pin from `rolling` to
+      `qualified` — or installing under one pin and later tightening it — left
+      `which`, `verify` and `run` resolving the rolling layer and reporting
+      success. `varve which` printed "(rolling)" directly beside a pin that said
+      qualified, exit 0.
+      Qualified-versus-rolling is THE distinction varve exists to make: a
+      qualified line carries a support window and qualification evidence, a
+      rolling one carries neither and may move. A safety-critical consumer
+      pinning `qualified` silently received an unqualified toolchain while
+      `verify` reported OK — destroying exactly the evidence the product exists
+      to preserve, and directly contradicting what the docs promise ("varve
+      never falls back … a pin resolves exactly or the command fails").
+      varve shall compare the installed layer's channel against the pin's at
+      RESOLUTION, refusing a mismatch with an error naming both channels and
+      what each means. A layer with no channel annotation (pre-channel layers)
+      is not refused on this ground.
+    tags: [core, security]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-DEPLOY-001
+    type: requirement
+    title: The publish step is documented, and deposit stops claiming to do it
+    status: verified
+    release: v0.24.0
+    description: >
+      Two personas — both producer-side — could not finish because NOTHING
+      publishes. `deposit --help` said "Assemble, sign and publish a layer"; it
+      writes a local OCI layout directory and stops. No push/publish/upload
+      command exists, and `docs --grep push|oras|deploy` returned nothing, while
+      every realm definition REQUIRES a `registry`. The gap was a false claim
+      plus a missing page, not missing code: varve deliberately runs no server
+      and pushes nothing (README, "No server of our own"), and registry.rs says
+      publishing is `oras push`, which "never joins the client trust path".
+      varve shall stop claiming to publish, and shall document the actual
+      sequence — the one varve's own release pipeline runs — together with what
+      a consumer needs (registry reference + trust root), how they bootstrap
+      trust the first time, and the air-gapped alternative where no registry
+      exists at all.
+    tags: [ergonomics, distribution]
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-PRODUCE-002
+    type: requirement
+    title: Three produce-side paths that failed open
+    status: verified
+    release: v0.24.0
+    description: >
+      Three further defects the audit re-run surfaced, each a case where varve
+      reported success over a state that could not work.
+      (1) `attach-status` accepted a LOWER counter and silently downgraded a
+      layout's baseline — the one place monotonicity was not enforced, while
+      `status --from-file` and `install` both refuse it. A re-run CI step could
+      ship a layout whose fresh consumers cache a pre-yank document and are told
+      "not yanked" about a YANKED layer.
+      (2) `install` exited 0 on a composition whose includes are not installed,
+      so `run` then executed a tool from an unverified layer; and the error the
+      user eventually hit named `varve install`, which takes no layer or digest,
+      making the advice a no-op loop. install shall refuse, naming every missing
+      include and its realm, and shall say how to install each.
+      (3) `export-cargo` and `export-crates-vendor` embedded `--out` VERBATIM in
+      the `.cargo/config.toml` they generate. That file is meant to be copied
+      into a project, so a relative `--out` produced a config resolving against
+      the wrong directory and a build that fails — while the tool printed
+      instructions saying it would work, and the README calls this path "proven
+      end to end". Export directories shall be absolute in generated config.
+    tags: [core, distribution]
+    fields:
+      priority: should
+      category: functional
+
+  - id: REQ-LAYOUT-001
+    type: requirement
+    title: A deposited layout is addressable by tag, not only by digest
+    status: verified
+    release: v0.25.0
+    description: >
+      A ten-persona documentation audit graded the platform engineer's entire
+      job BLOCKED on one line. `varve docs deploy` offered
+      `oras cp --from-oci-layout ./layout:2026.08.0 "$REPO:2026.08.0"` as the
+      short publish form, and it cannot resolve: the index varve writes carries
+      no `org.opencontainers.image.ref.name`, which is the annotation every OCI
+      client uses as the tag. The layout was addressable by digest alone, so
+      the documented one-liner failed for a reason no error explained.
+      varve shall annotate the layer manifest in the emitted `index.json` with
+      the standard `org.opencontainers.image.ref.name` set to the layer id, so
+      `<layout>:<layer>` resolves in any OCI client. This is a purely additive
+      annotation: it changes no digest, no signature and no verification, since
+      the index is not signed and the payload is unchanged.
+    tags: [distribution, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-DOCS-004
+    type: requirement
+    title: The docs answer recovery and adapter selection
+    status: verified
+    release: v0.25.0
+    description: >
+      Two paths survived the audit that added the workflow chapters. The
+      hostile tester was BLOCKED: a store that fails to read had no documented
+      way out, no `uninstall`/`repair`/`gc` exists, and the fix every message
+      suggested was `varve install` — which they believed anti-rollback would
+      refuse. Running it proves otherwise: an EQUAL counter is not a
+      regression, so re-installing repairs in place, and the genuinely refused
+      case is going BACKWARDS. The docs stated neither.
+      Separately, `concept-payload-kinds.md` asserted "the kind selects which
+      export adapter applies", which is false in both directions:
+      `export-bazel` ignores kind entirely and keys on `platform` plus
+      `[tool.source]`, both set at deposit time and named in no topic, while
+      three adapters share `kind = "crate"`. A build engineer whose whole brief
+      is choosing an adapter was misdirected by the one topic that addresses it.
+      varve shall carry a `recovery` topic — repair, deliberate rollback and
+      its cost, removal, re-keying, and reset — and shall replace the false
+      selection sentence with a consumer-to-adapter table naming each adapter's
+      output and the entries it takes.
+    tags: [docs, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-DOCS-002
+    type: requirement
+    title: The docs teach the FILES a user writes and the TASKS they perform
+    status: verified
+    release: v0.25.0
+    description: >
+      Two ten-persona audits reached the same verdict: "varve documents its
+      CONCEPTS and its COMMANDS, and documents neither its FILES nor its TASKS."
+      All 26 subcommands have a topic and the coverage gate reports green, while
+      10 of 10 personas reverse-engineered at least one file format by feeding
+      deliberately-bogus input to serde and reading `expected one of …`. Several
+      said the parse errors are the best documentation in the product.
+      Every file a user must author by hand — `varve.toml`, `varve-realms.toml`,
+      the deposit `--spec` TOML, the line-status JSON — has its schema in ZERO
+      topics. `manifest-version` is required and appears in no topic at all, so
+      a pin written strictly from the docs is rejected. `kind = "crate"` on a
+      `[[tool]]` table is how a crate is deposited and is documented nowhere,
+      which makes three of four export adapters unexercisable by anyone outside
+      the project. `VARVE_ROOT` returns "no topic matches".
+      There is no task-shaped topic anywhere: no getting-started, no own-realm
+      walkthrough, no composition chapter. The three flagship features of the
+      last releases therefore ship with no entry point.
+      varve shall add topics covering the files (`config-reference`), the
+      environment (`environment`), the first five minutes (`getting-started`),
+      standing up your own realm end to end (`own-realm`), composition, and what
+      verification does NOT prove (`threat-model` — the README defers twice to
+      SECURITY.md, which is outside the air-gap-safe embedded docs, so the
+      reviewer who most needs it is the one who cannot read it). Each shall
+      contain a literal, copy-pasteable example rather than prose description.
+    tags: [docs, ergonomics]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-DOCS-003
+    type: requirement
+    title: The docs gate checks what the docs must teach, not that a file exists
+    status: verified
+    release: v0.25.0
+    description: >
+      `varve docs check --coverage` asserts one topic per subcommand. It
+      reported GREEN through every finding of both audits, because the gaps are
+      not subcommand-shaped: four required file formats are not subcommands, a
+      task is not a subcommand, and an environment variable is not a subcommand.
+      The audit's words: "the gate is not merely weak; it actively certifies the
+      hole."
+      A topic can also exist and teach nothing — eight topic files are under 30
+      words. varve shall therefore extend its own gate: the workflow topics
+      REQ-DOCS-002 names must exist, and the topics a user must ACT on
+      (`getting-started`, `config-reference`, `own-realm`, `deploy`, `deposit`,
+      `realms`, `pins`, `air-gap`) must each carry a fenced code example. Both
+      checks run under `--strict` in CI, so a topic that stops teaching fails
+      the build exactly as an undocumented subcommand already does.
+    tags: [docs, traceability]
+    fields:
+      priority: must
+      category: functional
+
+  - id: REQ-VERIFYALL-001
+    type: requirement
+    title: The store-wide integrity check actually covers the store
+    status: verified
+    release: v0.28.0
+    description: >
+      `varve verify --all --help` says "Verify every installed layer instead of
+      only the pinned one". It walks only the PINNED project's realm partition.
+      A security auditor in the ten-persona audit planted a backdoored binary in
+      a second realm's installed layer, ran `verify --all`, got exit 0, and then
+      executed the backdoor (varve#84). `varve docs recovery` directs readers to
+      this command as THE store-wide integrity check, so the docs, the help text
+      and the operator's expectation agree with each other and only the code
+      dissents. Clauses: (1) `--all` shall walk EVERY realm partition in the
+      store, each layer against ITS OWN realm's trust root — the realm
+      separation is preserved in which key verifies what, not in what gets
+      looked at. (2) It shall report EVERY failing layer rather than stopping at
+      the first: it is fail-fast today, and in one observed run the only layer id
+      on screen belonged to a different, healthy layer. (3) Each failure shall
+      name the layer id AND its store path, because "which one" is the first
+      question an operator asks. (4) It shall print the scope it covered
+      (`checked N of N layers across M realms`), so a future scoping regression
+      is visible in the output rather than silent. (5) A layer whose realm is no
+      longer defined in varve-realms.toml shall be reported, not skipped — an
+      unverifiable layer in the store is exactly what this command is for.
+
+  - id: REQ-NODESTROY-001
+    type: requirement
+    title: A producer command does not destroy signed work while reporting success
+    status: verified
+    release: v0.28.0
+    description: >
+      `varve deposit --out DIR` into a directory that already carries referrers
+      — line-status, line-index, attestations — drops all of them, exits 0, and
+      prints a success message byte-identical to a clean run (varve#82,
+      varve#85). Three of ten personas hit this independently and the own-realm
+      operator hit it by accident. It is warned about in THREE separate docs
+      topics and guarded by ZERO code, which is documentation doing the tool's
+      safety job. For a realm declaring `signed-index = true` the blast radius is
+      total: every consumer install then fails closed. Clauses: (1) `deposit`
+      shall refuse to write into an `--out` that already carries referrers,
+      naming what it found. (2) `--force` shall override, because re-depositing
+      deliberately is a real workflow. (3) The refusal shall carry the re-attach
+      sequence (`sign-status`/`attach-status`, and `sign-index`/`attach-index`
+      where the realm declares one), so the operator recovers from the message
+      rather than from the docs. (4) The same guard shall apply to any other
+      command that writes a layout in place. (5) A layout the tool refuses to
+      touch shall be left byte-identical — a partial write is worse than both
+      outcomes.
+
+  # Stops at `implemented` because of CLAUSE 6, not clause 2. An earlier note
+  # here said the gap was clause 2's "registry half" — that became false when
+  # DD-023 rewrote clause 2 to say "is GIVEN a listing" (no registry, on
+  # purpose) and `--layouts` implemented it. Clean-room review caught the
+  # comment still pointing at the wrong gap, two commits stale. The real gap:
+  # clause 6's separate KEYLESS command for checking a signed advisory against
+  # a live source does not exist yet.
+  - id: REQ-ADVISORY-002
+    type: requirement
+    title: An advisory that can never fire is refused when it is signed
+    status: implemented
+    release: v0.30.0
+    description: >
+      A typo in an advisory's `affected` layer id signs cleanly and the advisory
+      then never fires for anyone (varve#61). The producer sees success; the
+      consumer sees nothing; the yank silently does not exist. This is the
+      failure mode the entire status mechanism exists to prevent, reachable by
+      one wrong character. Clauses: (1) `sign-status` shall validate every
+      `affected` entry as a well-formed layer identifier and refuse the document
+      otherwise. (2) Where the signer is GIVEN a listing of the line's layers,
+      it shall refuse an `affected` id that names no known layer, naming the
+      ids that do exist — the same shape as the
+      "it exposes:" list varve already prints for tools. (3) Where it cannot see
+      them, it shall say which check it could NOT perform rather than implying a
+      complete one. (4) `--force` shall allow signing an advisory for a layer not
+      yet deposited, because pre-signing is legitimate; silence shall not.
+      (5) A listing shall be obtainable WITHOUT the network: the producer holds
+      their own layouts, and that is both the most trustworthy source available
+      and the only one that works for a realm publishing no index at all
+      (`signed-index` is false by default, so an index-only check would rarely
+      run — and opt-in safety is how this defect survived). (6) Checking a
+      signed advisory against a LIVE source shall be a separate, KEYLESS
+      command; a signing command shall not require the network. See DD-023:
+      validating against the registry would let a hiding registry block the
+      yank of the very layer it hides, on the same unauthenticated listing
+      REQ-INDEXAUTH-001 exists to distrust, and would put the root key and the
+      network in one command.
+
+  - id: REQ-NOSILENT-001
+    type: requirement
+    title: A command that cannot do what was asked says so
+    status: verified
+    release: v0.28.0
+    description: >
+      Three commands report success over a broken outcome (varve#88), and the
+      ten-persona audit found they caused as much downstream pain as any red
+      text. Clauses: (1) `varve archive` shall not silently omit the baseline
+      line-status: where the installing core cached none, it shall warn loudly,
+      or refuse without an explicit `--allow-no-status`. It is already verbose
+      about omitted PLATFORM payloads and silent about the advisory, which is the
+      inconsistency that hides it. An archive without a baseline hands every
+      air-gapped consumer a permanently broken `varve status`. (2)
+      `varve export-cargo` shall warn on every run where the index it can derive
+      is weaker than the crates deserve, naming `export-crates-vendor`, rather
+      than closing with an instruction to run the very `cargo build --offline`
+      that can exit 0 having compiled everything featureless. (3) `varve install`
+      of an incomplete composition shall not print "installed layer X" and THEN
+      error, leaving a layer in `varve list` that no other command will touch.
+      (4) The composition include check at install shall be TRANSITIVE, so
+      install and verify reach the same verdict — `docs verify` promises "the CI
+      gate and the install agree" and today install exits 0 on a graph verify
+      rejects at depth 2.
+
+  - id: REQ-CIGATE-001
+    type: requirement
+    title: varve is something a pipeline can gate on, not only something a human can read
+    status: verified
+    release: v0.28.0
+    description: >
+      `varve status` exits 0 while printing YANKED, so a pipeline must grep
+      stdout to fail on a yanked toolchain (varve#90). No `(CI)`-marked command
+      offers `--json`, so a pipeline scrapes a layer digest out of a prose
+      sentence. `varve docs --grep "exit code"` returns nothing across all fifty
+      topics. Two personas independently could not write the consumer-side gate
+      that three separate topics tell them to write. Clauses: (1) `varve status`
+      shall exit NON-ZERO when the resolved layer is yanked. This is a BREAKING
+      change to a documented-by-absence behaviour and shall be stated as one:
+      the point of signing a yank is to stop a build, and an exit 0 is precisely
+      the failure varve exists to prevent. (2) Every command marked (CI) shall
+      offer `--json` with a stable shape. (3) An exit-code contract shall exist
+      as a documented table, and shall be mechanically checked so it cannot
+      drift from the binary. (4) `docs ci` shall gain a consumer-gate section
+      showing `verify --export`, `verify --lockfile` and declared exports —
+      today it is producer-only while three topics ask for the consumer job.
+      (5) `varve docs --grep` shall search titles and summaries as well as
+      bodies, and shall exit non-zero on no match, so it too can gate.
+
+  - id: REQ-INSPECT-001
+    type: requirement
+    title: A consumer can see what is inside a layer
+    status: verified
+    release: v0.28.0
+    description: >
+      No command reports a layer's payload names, versions, kinds or platforms
+      (varve#92). `varve list` prints layer ids only; `varve sbom` collapses
+      every non-tool kind to CycloneDX `library`. In the audit the build
+      engineer chose an export adapter by running all four and reading which
+      errored; the newcomer learned the tool set by typo-ing a name into
+      `varve which` and reading the "it exposes:" list. Clauses: (1) A command
+      shall report, for the resolved or a named layer, each payload's name,
+      version, kind and platform. (2) It shall offer `--json` (see
+      REQ-CIGATE-001). (3) It shall distinguish DISPATCHED payloads from HELD
+      ones, because "not part of layer" is currently what a held `wit` payload
+      reports and that is false. (4) It shall report the composition — a
+      composed layer's payloads are part of what the pin delivers, and
+      `varve sbom` being composition-blind is a known limitation this should not
+      repeat. (5) It shall not require network access: the store already holds
+      the answer.
+
+  # `implemented`, not `verified`: its evidence is prose and the docs coverage
+  # gate, and it carries no test markers, so `rivet verify` refuses — correctly.
+  # Every clause looks discharged, but "looks discharged" is the judgement
+  # `verified` is supposed to encode mechanically, and here nothing mechanical
+  # can. Clean-room review flagged that this was the only held-back requirement
+  # on the branch with no reason recorded.
+  - id: REQ-CUSTODY-001
+    type: requirement
+    title: An organisation can run its own realm as a real trust operation, not a demo
+    status: implemented
+    release: v0.28.0
+    description: >
+      The ten-persona audit found the producer story works — five personas stood
+      up a realm end to end from the docs alone, first try — and is incomplete in
+      ways that stop a serious adopter (varve#89). `docs signing-keys` says a
+      real root is "generated in a ceremony, not on a build machine" and stops
+      there. This requirement is the DOCS-and-procedure half; the key material
+      half stays REQ-CEREMONY-001 at v1.0.0. Clauses: (1) A `root-ceremony`
+      topic shall describe air-gapped generation, split custody, paper backup and
+      long-term storage, and shall state plainly what varve does NOT do —
+      there is no rotation and no revocation, and saying so is the honest form.
+      (2) It shall state whether HSM/PKCS#11/KMS is out of scope permanently or
+      merely absent, because an adopter needs to know which. (3) `docs own-realm`
+      shall continue past the operator's first consumer: `sign-status` +
+      `attach-status`, then `sign-index` + `attach-index` where the realm
+      declares one. Following it verbatim today ships a realm that verifies
+      perfectly and can NEVER deliver a yank. (4) It shall teach the correct
+      ORDERING — it currently teaches install-immediately-after-deposit, which is
+      what walks an operator into REQ-NOSILENT-001 clause 1. (5) README shall
+      state that running your own trust universe is possible at all: it contains
+      zero occurrences of `keygen` or `own-realm`, and addresses the reader only
+      as a PulseEngine consumer. (6) `[tool.source].sha256` is signed and NEVER
+      verified, while `export-bazel` emits it as the checksum Bazel will enforce
+      under a header saying digests were transcribed from the signed manifest.
+      That shall be stated in `config-reference` and `payload-kinds`, and the
+      export header shall stop implying varve vouched for it.
+
+  # `implemented`, NOT `verified`, and this is the correction clean-room review
+  # asked for. Clauses 1-4 are discharged (VER-SYSTEST-002). Clause 5 said "no
+  # adapter ships without a system test" and NOTHING enforced it: six export
+  # adapters ship, three have one. The requirement read `verified` anyway —
+  # exactly the overclaim this release exists to remove, sitting inside the
+  # release. Enforcement now exists as a RATCHET
+  # (`no_new_export_adapter_ships_without_a_system_test`): the known-uncovered
+  # set is written down, a NEW uncovered adapter fails, and an adapter that
+  # gains coverage while still listed also fails. A hard wall would have turned
+  # CI red for three adapters' worth of unrelated work, and a gate people
+  # switch off protects nothing. Advances to `verified` when the list is empty
+  # — tracked as varve#99.
+  - id: REQ-SYSTEST-002
+    type: requirement
+    title: The producer pipeline is exercised, not only the consumer path
+    status: implemented
+    release: v0.30.0
+    description: >
+      REQ-SYSTEST-001 gave the CONSUMER half a system gate: deposit, install,
+      verify, export, offline build, at real scale. The PRODUCER half — the
+      workflow that assembles the official layer — has none, and is exercised
+      only by dispatching it against the real registry. That is where the
+      2026.08.3 deposit failed, on a bug a seventeen-check CI gate including a
+      twenty-nine-minute mutation run could not have caught, because nothing in
+      CI executes that workflow (varve#95). Clauses: (1) The layer-assembly path
+      shall run in CI without publishing, driven by fixture or recorded release
+      metadata rather than live GitHub. (2) It shall cover the shapes that have
+      actually broken: one repo appearing in two lists, a per-platform payload, a
+      platform with no asset, and one repo requested at two different versions
+      (which must be refused, because otherwise one release's assets are checked
+      against another's sums). (3) It shall assert the generated spec parses and
+      deposits, and stop before the registry push. (4) A pre-flight that stubs
+      the component under test shall not count as coverage — the dry-run that
+      preceded the failed deposit stubbed exactly the function that broke, and
+      reported success. (5) REQ-SYSTEST-001 clause 4 (no adapter without a system
+      test) shall gain mechanical enforcement, or shall be restated honestly as
+      review policy.
+
+  - id: DD-023
+    type: design-decision
+    title: A key-bearing command never needs the network; a network-bearing command never needs the key
+    status: accepted
+    release: v0.28.0
+    description: >
+      REQ-ADVISORY-002 clause 2 said an advisory's `affected` ids should be
+      checked for EXISTENCE "where the signer can see the line's layers (a
+      layout or a registry is reachable)". The registry half was left
+      unimplemented, and on examination it should stay that way.
+      .
+      Checking `affected` ids against the registry would import the exact
+      weakness REQ-INDEXAUTH-001 was written to remove. That requirement
+      exists because the listing of which layers a line has is the registry's
+      raw `/tags/list`, unauthenticated: "a compromised or merely stale index
+      host can HIDE a layer, and every artifact it does serve still verifies,
+      so nothing detects it." A `sign-status` that refuses an `affected` id
+      the registry does not list would therefore hand an adversary a
+      DENIAL-OF-YANK primitive — hide the layer, and the advisory about that
+      very layer cannot be signed. The attack is cheapest exactly when the
+      yank matters most.
+      .
+      It also contradicts the custody model. `docs root-ceremony` says to use
+      the root key as rarely as possible and ideally on an air-gapped host. A
+      signing command that requires the network cannot run where the key
+      ought to live, so the guidance and the tool would disagree and the
+      guidance would lose.
+      .
+      DECISION, two parts:
+      .
+      (1) SPLIT the concerns. `sign-status` stays offline: shape validation
+      always, existence against a listing it is GIVEN. A separate KEYLESS
+      command checks a signed advisory against a live source, and may use the
+      registry precisely BECAUSE it holds no key and its verdict is advisory
+      — a hiding registry makes that check fail loudly instead of silently
+      blocking a signature. The key-bearing command never needs the network;
+      the network-bearing command never needs the key.
+      .
+      (2) CLOSE THE REACH GAP LOCALLY. `signed-index = false` is the default,
+      so most realms publish no index and the existence check would rarely
+      have anything to check against — opt-in safety, which is how this
+      defect survived in the first place. The producer already HOLDS the
+      layers on disk; deriving the line's listing from their own layouts is
+      both the most trustworthy source available and the one that works for a
+      realm that never publishes an index at all.
+      .
+      Rejected alternative: `sign-status --against oci://…` behind a flag.
+      Convenient for a CI-only producer who already has registry credentials,
+      and wrong for both reasons above.
+    links:
+      - type: satisfies
+        target: REQ-ADVISORY-002
+    fields:
+      rationale: >
+        Validating an advisory against the registry would let a compromised or
+        stale registry BLOCK the signing of a yank by hiding the layer being
+        yanked — a denial-of-yank primitive, built on the same unauthenticated
+        `/tags/list` that REQ-INDEXAUTH-001 exists to distrust, and cheapest to
+        mount exactly when the yank matters most. It would also put the root key
+        and the network in one command, contradicting a custody model that says
+        to sign on an air-gapped host. Splitting them costs one extra command
+        and buys an offline signer plus a check that fails loudly instead of
+        silently. Deriving the listing from the producer's own layouts closes
+        the reach gap without either cost, and works for a realm that publishes
+        no index at all.
+    tags: [architecture, security]
+
+  - id: REQ-INGEST-001
+    type: requirement
+    title: varve ingests what upstream actually publishes, and records which mechanism vouched
+    status: draft
+    release: v0.29.0
+    description: >
+      The layer assembler accepts exactly ONE proof that an upstream artifact
+      is what it claims: a cosign-signed `SHA256SUMS.txt`. Every PulseEngine
+      repo publishes that, so the constraint was invisible until a second realm
+      was attempted. It does not generalise. Measured 2026-08-21:
+      `bytecodealliance/wasm-tools` publishes NO sums and NO cosign bundle —
+      but DOES publish GitHub build provenance, which verifies
+      (`gh attestation verify` accepts the real artifact and rejects a bogus
+      one, confirmed with a negative control). `bytecodealliance/wit-bindgen`
+      publishes neither. `bytecodealliance/cargo-component` ships no release
+      assets at all.
+      .
+      Build provenance is not a weaker substitute for a sums file — it is
+      STRONGER. A sums file says "these bytes hash to this". An attestation
+      binds the artifact to a workflow, a repository and a source commit
+      (observed: `publish.yml@refs/heads/main`, commit `3ef3cefc…`), which is
+      what `[tool.source]` has always wanted to record and could not.
+      .
+      Clauses: (1) The assembler shall accept build provenance as a
+      first-class ingestion proof alongside cosign-signed sums. (2) It shall
+      record INSIDE the signed layer payload WHICH mechanism vouched for each
+      tool, and what that mechanism asserted — a consumer must be able to tell
+      a cosign-signed tool from an attested one from an unverifiable one
+      without leaving the layer. (3) A tool with NEITHER mechanism shall be
+      refused by default, so "we could not verify this" can never be the
+      silent path; shipping one anyway shall require an explicit, recorded
+      decision. (4) The refusal shall name the alternative that exists — a
+      fork release through this org's signed pipeline — because for
+      `wit-bindgen` that is the actual answer and the operator should not have
+      to infer it. (5) The choice of mechanism shall be visible in
+      `varve inspect`, since a layer mixing both is now the ordinary case.
+
+  - id: REQ-LAYERREPO-001
+    type: requirement
+    title: A realm's layers are assembled outside varve, in that realm's own repository
+    status: draft
+    release: v0.29.0
+    description: >
+      `deposit-layer.yml` lives inside varve and hard-codes one realm's tool
+      list, so bumping a tool version is a commit to the tool that installs
+      tools, and a second realm's signing key would live in varve's repository
+      settings. That couples varve's release cadence to every tool bump and
+      puts two realms' custody in one place — which `docs root-ceremony`
+      argues against in the same breath as it argues for split custody.
+      .
+      Clauses: (1) Layer assembly shall live in a repository per realm, each
+      holding its own tool manifest and its own signing secret. (2) The
+      assembler itself shall stay in varve and be CONSUMED by those repos as a
+      released artifact — it is system-tested here (REQ-SYSTEST-002) and a
+      copy per realm is a copy that drifts, which is the same defect as a gate
+      testing a re-implementation. (3) A layers repo shall need no varve
+      source checkout: it takes a released varve and a released assembler.
+      (4) The pulseengine realm shall migrate first and keep publishing without
+      a gap, so the split is proven by the realm that already has consumers
+      rather than by the new one. (5) varve's own repository shall stop
+      carrying any realm's signing secret once the migration completes.
+
+  - id: REQ-REALM2-001
+    type: requirement
+    title: A second realm exists end to end, and composition stops being a fixture
+    status: draft
+    release: v0.29.0
+    description: >
+      Layer composition (REQ-COMPOSE-001, v0.23.0) has always been exercised
+      by fixtures. Every defect it has had — a diamond refused as a cycle,
+      cross-realm verification that was dead code under test, an export that
+      followed only the root, an install check that was direct-only — was
+      found by review or by a persona, never by use. The topology this project
+      exists for (PulseEngine tools that CHECK, bytecodealliance tools that
+      BUILD, someone else's layer extending both) has never actually been run.
+      .
+      Clauses: (1) A `bytecodealliance` realm shall exist with its own root,
+      its own layers repo, and its own published layers. (2) A consumer pin
+      shall compose across both realms and resolve tools from each, verified
+      each against ITS OWN realm's root. (3) The system gate shall exercise
+      that composition, not a fixture of it. (4) varve#91 shall be settled by
+      the attempt: a tool-name collision between two real realms currently has
+      NO escape — the error's own suggested fix ("restrict the pin's `tools`")
+      does not work, and the other ("remove the duplicate") is unavailable to
+      a consumer composing a realm they do not control. Two realms shipping
+      `wasm-tools` is not hypothetical. (5) `docs composition` shall document
+      the real two-realm setup (varve#57) with commands verified against the
+      real binary, replacing the fixture-shaped example.
+
+  - id: REQ-ROLLING-001
+    type: requirement
+    title: Upstream movement is noticed automatically; publishing it stays a deliberate act
+    status: draft
+    release: v0.29.0
+    description: >
+      A manually-cut layer cannot keep up. Measured 2026-08-21, days after
+      `2026.08.3` was published: rivet had moved v0.33.1 to v0.34.0, spar
+      v0.36.0 to v0.40.0 (FOUR minors), synth v0.55.0 to v0.58.0, witness
+      v0.39.0 to v0.43.0, ordeal v0.18.0 to v0.19.0. A consumer on `rolling`
+      is not getting a rolling toolchain; they are getting whatever was
+      current the last time a human remembered.
+      .
+      Clauses: (1) A scheduled job shall detect upstream releases for every
+      tool a realm carries and open a PULL REQUEST carrying the version diff,
+      not a published layer. (2) That PR shall run the full assembly gate
+      (REQ-SYSTEST-002) so the proposal is known-assemblable before anyone
+      looks at it. (3) The signed deposit shall be triggered by the MERGE, so
+      every signature remains an act a person took — see DD-024. (4) The PR
+      shall show what actually changed: which tools moved, by how much, and
+      which ingestion mechanism vouched for each new artifact
+      (REQ-INGEST-001 clause 2). (5) A tool whose new release cannot be
+      verified shall block that tool, not the whole proposal — one
+      unattested upstream must not freeze the other seven. (6) The job shall
+      be silent when nothing moved; a scheduled task that reports every hour
+      is one people filter out of their inbox.
+
+  - id: DD-024
+    type: design-decision
+    title: Automate noticing, not signing
+    status: accepted
+    release: v0.29.0
+    description: >
+      Automating the whole rolling pipeline — scan, assemble, sign, publish,
+      hourly — was the obvious reading of "make it automatic", and it is
+      wrong for varve specifically.
+      .
+      In varve, `channel = "rolling"` is NOT a trust boundary. It is an
+      annotation inside a layer signed by the same realm root as `qualified`.
+      The REALM is the trust boundary. So "automate the rolling channel"
+      means the root key signs unattended, dozens of times a week.
+      .
+      That contradicts the custody model shipped in v0.28.0 one release
+      earlier. `docs root-ceremony` says to use the root as rarely as
+      possible, ideally on an air-gapped host, with a two-person rule and
+      every use recorded as a ceremony entry. A key used by a cron job is a
+      CI credential, whatever the ceremony document calls it.
+      .
+      It is also unrecoverable. varve has no revocation and no rotation — both
+      stated in `threat-model` and `root-ceremony`. A layer published in error
+      cannot be withdrawn; the only remedy is a yank, which needs the same
+      key. And an upstream compromise would propagate to every rolling
+      consumer within the hour, with no window in which a human could notice.
+      .
+      DECISION: automate the TOIL, not the JUDGEMENT. The scanner notices,
+      diffs, assembles and gates; a person merges; the merge signs. Every
+      signature stays something someone chose to make.
+      .
+      Rejected for now, but the right shape if unattended publishing is ever
+      wanted: a SEPARATE realm with its own root for machine-signed layers.
+      That is what realms are for, and it would let consumers opt into
+      lower-assurance artifacts knowingly rather than by not reading. It costs
+      a second root, second custody and second layers repo, and it should not
+      be built until someone actually wants the fast lane.
+    links:
+      - type: satisfies
+        target: REQ-ROLLING-001
+    fields:
+      rationale: >
+        The rolling CHANNEL is not a trust boundary; the realm is. Automating
+        signing on it turns the realm root into a cron credential in a system
+        with no revocation and no rotation, one release after publishing a
+        ceremony document that says the opposite. Automating detection and
+        assembly removes all the toil and none of the assurance: the human
+        step that remains is the one that carries meaning.
+      tags: [architecture, security, process]
+

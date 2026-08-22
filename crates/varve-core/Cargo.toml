@@ -5,3 +5,30 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
+homepage = "https://github.com/pulseengine/varve"
+documentation = "https://docs.rs/varve-core"
+rust-version = "1.89"
+keywords = ["toolchain", "supply-chain", "signing", "verification", "oci"]
+categories = ["development-tools", "development-tools::build-utils", "cryptography"]
+
+[dependencies]
+flate2 = "1.1.9"
+hex = "0.4.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+tar = "0.4.46"
+thiserror = "2.0.19"
+toml = "1.1.4"
+ureq = "3"
+wsc = "0.10.0"
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+proptest = "1.11.0"
+tempfile = "3.27.0"
+
+[[bench]]
+name = "resolve"
+harness = false

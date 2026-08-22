@@ -1,0 +1,186 @@
+artifacts:
+  # ─────────────────────────────────────────────────────────────────────
+  # Research evidence behind DD-004 / DD-005 and the v0.5.0 scope.
+  # Gathered 2026-08-07 (criticalup source read at HEAD 3a13dec plus a
+  # distribution-security literature pass). Each entry links to the
+  # decisions and requirements it informs, so the trace answers "why did
+  # we decide this" with sources instead of memory.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - id: CA-CRITICALUP
+    type: competitive-analysis
+    title: criticalup — Ferrocene's qualified-toolchain manager
+    status: approved
+    description: >
+      Closest prior art, read at source level (HEAD 3a13dec, 2026-08-03).
+      Model to keep: per-project manifest pinning an opaque release, install
+      exactly the pin, criticalup verify re-checks the installed tree
+      (sha256 + mode per file), archive for cold storage, release identifiers
+      YY.MM.P with the patch digit reserved from day one. criticaltrust is
+      architecturally the same trusted base as varve — root compiled into the
+      binary, offline signature checks — and its key model is richer than
+      varve's single key (Root/Packages/Redirects/Revocation roles, each with
+      expiry). The gaps are specific, not breadth: no version-level
+      anti-rollback or freshness metadata of any kind; cryptographic
+      revocation removed in v1.5.0 in
+      favour of an online liveness check that silently disappears offline; no
+      digest pinning or lockfile in criticalup.toml; a v2 manifest schema with
+      yanked/support-expires/release-date exists as dead code and never
+      shipped; trust-bootstrap errors silently swallowed; release channels and
+      known-problems auth-gated so a pinned identifier is not publicly
+      auditable.
+    links:
+      - type: motivates
+        target: REQ-ROLLBACK-001
+      - type: motivates
+        target: REQ-KP-001
+      - type: motivates
+        target: REQ-SELF-001
+      - type: motivates
+        target: REQ-PATCH-001
+    fields:
+      tool-name: criticalup
+      tool-url: https://github.com/ferrocene/criticalup
+      vendor: Ferrous Systems (Ferrocene)
+      tool-status: active
+      approach: >
+        Pin-by-name manifest, server-resolved releases, signed package
+        manifests with install-time integrity verification, archive/offline
+        install, entitlement via customer tokens.
+      limitations: >
+        No rollback/freeze protection; revocation abandoned for online
+        liveness (absent under --offline); no digest pin/lockfile; yank and
+        support-window metadata designed (v2) but unused; MD5 still present in
+        cache validation; opaque governance (empty public tracker, no
+        SECURITY.md).
+      differentiation: >
+        Convergence, not distance: criticaltrust and varve share the same
+        architectural trusted base (pinned root, offline signature checks),
+        so the honest comparison is what each ships on top. varve: digest
+        pinning in the pin, monotonic per-line counters + issued-at in signed
+        metadata (anti-rollback criticalup lacks entirely),
+        known-problems/support-window/yank advisories that actually ship and
+        stay checkable offline (criticalup's v1.5.0 liveness replacement
+        silently disappears there), and source-artifact distribution
+        (crates/WIT/Zephyr/SDK/wasm) as a library and CLI.
+
+  - id: AR-SUIT
+    type: academic-reference
+    title: IETF SUIT manifest / RFC 9019 — sequence numbers as mandatory anti-rollback
+    status: approved
+    description: >
+      The SUIT manifest format makes a monotonically increasing sequence
+      number a REQUIRED field: each recipient MUST reject a manifest whose
+      number is below its stored one, and RFC 9019 states the firmware
+      anti-rollback requirement in plain terms. Standardised for constrained
+      and offline verifiers — exactly varve's install-time position.
+    links:
+      - type: traces-to
+        target: DD-005
+      - type: traces-to
+        target: REQ-ROLLBACK-001
+    fields:
+      authors: Moran, Tschofenig, Birkholz, Zandberg (IETF SUIT WG)
+      year: 2021
+      venue: IETF (RFC 9019; draft-ietf-suit-manifest)
+      url: https://datatracker.ietf.org/doc/html/rfc9019
+      key-finding: >
+        A signed, monotonic sequence number with a MUST-reject rule at the
+        verifier is the standardised anti-rollback primitive for offline
+        update systems; a UTC timestamp may serve as the number.
+      relevance: >
+        Direct blueprint for the varve layer counter: signed payload, client
+        high-water mark, hard rejection — no server, no metadata treadmill.
+
+  - id: AR-UPTANE
+    type: academic-reference
+    title: Uptane (IEEE-ISTO 6100) — release counters surviving repository compromise
+    status: approved
+    description: >
+      Uptane extends TUF for vehicles with per-image release counters carried
+      in offline-signed targets metadata; ECUs persist the last-seen counter
+      and reject anything lower, so rollback protection survives compromise of
+      the online director. Also the tiered full/partial verification pattern:
+      one full verifier at the boundary, cheaper checks against the verified
+      local store inside.
+    links:
+      - type: traces-to
+        target: DD-005
+    fields:
+      authors: Uptane Alliance / IEEE-ISTO
+      year: 2023
+      venue: IEEE-ISTO 6100 standard
+      url: https://uptane.org/docs/2.0.0/standard/uptane-standard
+      key-finding: >
+        Anti-rollback enforced from offline-signed metadata plus persisted
+        client state survives online-infrastructure compromise — the property
+        varve needs from static hosting.
+      relevance: >
+        Per-line counter scoping mirrors Uptane's per-image counters: a
+        consumer frozen on one line keeps rollback protection inside it
+        without pressure toward a newer line.
+
+  - id: AR-TUF
+    type: academic-reference
+    title: TUF snapshot/timestamp roles and tuf-on-ci — the recorded upgrade path
+    status: approved
+    description: >
+      TUF's snapshot + timestamp roles deliver rollback AND freeze protection
+      for connected clients, at the cost of short-expiry online-signed
+      metadata (Sigstore re-signs on a two-week cadence via scheduled CI).
+      tuf-on-ci produces a static-file TUF repo with Yubikey/Sigstore offline
+      keys and KMS online keys — production-proven by Sigstore's root and
+      GitHub's attestation TUF repo, and targeted at low-change-frequency
+      streams. The spec gives no offline-client guidance: an air-gapped
+      client with expired timestamp metadata is formally in freeze-attack
+      territory, which is why TUF is the upgrade path, not the v0.2 core.
+    links:
+      - type: traces-to
+        target: DD-005
+    fields:
+      authors: Samuel, Mathewson, Cappos, Dingledine (design); TUF community (spec)
+      year: 2010
+      venue: ACM CCS 2010 (Survivable Key Compromise); TUF specification
+      url: https://theupdateframework.github.io/specification/latest/
+      key-finding: >
+        Full freshness guarantees require online-signed short-expiry metadata
+        and a re-signing operational cadence; static-file deployment exists
+        (tuf-on-ci) but the air-gap story requires policy work TUF does not
+        supply.
+      relevance: >
+        Recorded in DD-005 as the upgrade path if a connected freshness
+        channel emerges; not adopted now because the counter scheme covers
+        varve's threat model without the treadmill.
+
+  - id: AR-330
+    type: academic-reference
+    title: DO-330 change impact analysis and qualified-vendor frozen-line practice
+    status: approved
+    description: >
+      DO-330 explicitly permits reuse of a previously qualified tool when a
+      change impact analysis demonstrates continued compliance — the sanctioned
+      "qualification delta". Vendor practice is uniform: Ferrocene publishes
+      per-release known-problems with workarounds/detection/mitigation and
+      reserves YY.MM.P; AdaCore sustained branches take only critical fixes
+      with vendor-supported impact analysis (plus GNATkp, mechanical detection
+      of affected constructs); IAR freezes certified versions and ships
+      validated service packs; Wind River maintains long-lived certified
+      legacy branches.
+    links:
+      - type: traces-to
+        target: DD-004
+      - type: traces-to
+        target: REQ-KP-001
+    fields:
+      authors: RTCA SC-205 / EUROCAE WG-71 (DO-330); vendor practice survey
+      year: 2011
+      venue: RTCA DO-330, Software Tool Qualification Considerations
+      url: https://ldra.com/do-330/
+      key-finding: >
+        Freeze a line, publish known problems continuously, ship rare minimal
+        patches with an impact-analysis delta, never force a line jump — the
+        audit-accepted pattern across every qualified-tool vendor surveyed.
+      relevance: >
+        DD-004's patch model is this pattern made mechanical: three-part
+        identifiers, KP referrers (REQ-KP-001), and a signed
+        qualification-delta attestation per patch.

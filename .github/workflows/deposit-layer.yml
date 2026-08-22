@@ -1,0 +1,211 @@
+name: Deposit layer
+
+# The bundle assembler (REQ-DEPOSIT-001, the produce half of the #157
+# architecture): download the pinned per-tool releases, VERIFY each one
+# against its own repo's cosign identity, deposit them as one signed layer,
+# and publish — registry (GHCR) + the oci-layout as the artifact of record.
+#
+# Rolling channel only until the root ceremony: signs with the PROVISIONAL
+# rolling root (trust-roots/rolling.pub / secret VARVE_ROLLING_KEY).
+
+on:
+  workflow_dispatch:
+    inputs:
+      layer:
+        description: "Layer identifier (YYYY.MM.P), e.g. 2026.08.0"
+        required: true
+        type: string
+      counter:
+        description: "Monotonic per-line release counter"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # The layer's contents: bump deliberately, in a reviewed diff.
+  # <tool>:<version> triples; all follow <tool>-<ver>-<triple>.tar.gz with
+  # a cosign-signed SHA256SUMS.txt except wsc (raw per-platform binaries).
+  # ordeal is EXCLUDED until its releases carry cosign-signed sums
+  # ordeal rejoined at v0.18.0 — its first cosign-signed release (ordeal#116).
+  # Entry shape: repo_tool:version[:binary] — binary defaults to the tool
+  # name; kiln ships its CLI as `kilnd`.
+  TARBALL_TOOLS: "rivet:v0.33.1 synth:v0.55.0 loom:v1.2.0 meld:v0.42.0 spar:v0.36.0 witness:v0.39.0 ordeal:v0.18.0 kiln:v0.4.4:kilnd"
+  WSC_VERSION: v0.10.0
+  # VS Code extensions carried as kind="vsix" payloads (REQ-VSIX-001).
+  # Entry shape: repo:version:extension-name:asset-template, where the
+  # template spells the release asset with %V for the bare version and, when
+  # the extension is per-platform, %P for the VSIX platform tag. An entry
+  # WITHOUT %P is one platform-independent package.
+  #
+  # rivet ships a single portable .vsix; spar ships one per platform, so its
+  # payloads carry varve `platform` values and a consumer resolves only their
+  # own — the same rule the tool payloads follow.
+  VSIX_PACKAGES: "rivet:v0.33.1:rivet-sdlc:rivet-sdlc-%V.vsix spar:v0.36.0:spar-aadl:spar-aadl-%P-%V.vsix"
+
+jobs:
+  deposit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable as of 2026-08-07
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2 as of 2026-08-07
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3 as of 2026-08-07
+      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1 as of 2026-08-07
+
+      - name: Build varve
+        run: cargo build --release -p varve
+
+      - name: Fetch and verify the tools, build the deposit spec
+        # The logic is NOT inline any more. It lives in tools/build-deposit-spec.sh
+        # so the REQ-SYSTEST-002 gate (tools/systest/deposit-layer.sh, run by
+        # systest.yml on every PR) can execute THIS code rather than a copy of
+        # it. The 2026.08.3 deposit failed here on a bug that only a real
+        # execution could find; a workflow whose only test is dispatching it is
+        # a workflow with no test.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LAYER: ${{ inputs.layer }}
+          COUNTER: ${{ inputs.counter }}
+        run: tools/build-deposit-spec.sh "$GITHUB_WORKSPACE/deposit-stage"
+
+      - name: Deposit the layer
+        env:
+          VARVE_ROLLING_KEY: ${{ secrets.VARVE_ROLLING_KEY }}
+          LAYER: ${{ inputs.layer }}
+          COUNTER: ${{ inputs.counter }}
+        run: |
+          set -euo pipefail
+          test -n "$VARVE_ROLLING_KEY" || { echo "::error::VARVE_ROLLING_KEY not provisioned"; exit 1; }
+          printf '%s' "$VARVE_ROLLING_KEY" > /tmp/rolling.key
+          ISSUED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # The spec and the payload bytes it points at live together under
+          # deposit-stage/ — a payload `path` resolves relative to the SPEC
+          # FILE's directory, so the staging area moves as one tree.
+          ./target/release/varve deposit \
+            --spec deposit-stage/deposit-spec.toml \
+            --issued-at "$ISSUED_AT" \
+            --key /tmp/rolling.key --key-id varve-rolling-1 \
+            --out layer-layout
+          # Sign and attach a BASELINE line-status (REQ-STATUS-DIST-001) so
+          # `varve status` works after an offline OR registry install with no
+          # --from-file. Line derived from the layer; the baseline's monotonic
+          # counter tracks the deposit counter (advisories issued later carry
+          # higher counters). Empty problems/yanked — a clean starting record.
+          LINE="${LAYER%.*}"
+          printf '{"line":"%s","counter":%s,"issued-at":"%s"}\n' \
+            "$LINE" "$COUNTER" "$ISSUED_AT" > baseline-status.json
+          ./target/release/varve sign-status \
+            --file baseline-status.json \
+            --key /tmp/rolling.key --key-id varve-rolling-1 \
+            --out baseline-status.dsse.json
+          ./target/release/varve attach-status \
+            --layout layer-layout --status baseline-status.dsse.json
+          rm -f /tmp/rolling.key
+          # Sanity: the deposit installs and verifies on THIS runner before
+          # anything is published.
+          mkdir -p sanity-project
+          printf 'manifest-version = 1\n[toolchain]\nchannel = "rolling"\nlayer = "%s"\n' "$LAYER" > sanity-project/varve.toml
+          ( cd sanity-project && \
+            VARVE_ROOT="$RUNNER_TEMP/sanity-root" \
+            VARVE_TRUST_ROOT="$GITHUB_WORKSPACE/trust-roots/rolling.pub" \
+            "$GITHUB_WORKSPACE/target/release/varve" install --from "$GITHUB_WORKSPACE/layer-layout" && \
+            VARVE_ROOT="$RUNNER_TEMP/sanity-root" \
+            VARVE_TRUST_ROOT="$GITHUB_WORKSPACE/trust-roots/rolling.pub" \
+            "$GITHUB_WORKSPACE/target/release/varve" verify )
+
+      - name: Publish to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LAYER: ${{ inputs.layer }}
+        run: |
+          set -euo pipefail
+          oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+          # Explicit publish: stream every blob with `oras blob push` (no
+          # metadata size limits), then push a hand-built artifact manifest —
+          # the exact shape RegistrySource consumes (envelope/payload role
+          # annotations on layers[]).
+          REPO="ghcr.io/pulseengine/varve/layers"
+          SIG_TYPE='application/vnd.pulseengine.varve.signature.v1+json'
+          STATUS_TYPE='application/vnd.pulseengine.varve.line-status.v1+json'
+          mkdir -p push && cd push
+          PAYLOAD_DIGEST=$(jq -r --arg t "$SIG_TYPE" --arg s "$STATUS_TYPE" \
+            '[.manifests[] | select(.artifactType != $t and .artifactType != $s)][0].digest' ../layer-layout/index.json)
+          ENVELOPE_DIGEST=$(jq -r --arg t "$SIG_TYPE" \
+            '[.manifests[] | select(.artifactType == $t)][0].digest' ../layer-layout/index.json)
+          # The baseline line-status referrer (REQ-STATUS-DIST-001).
+          STATUS_DIGEST=$(jq -r --arg s "$STATUS_TYPE" \
+            '[.manifests[] | select(.artifactType == $s)][0].digest // empty' ../layer-layout/index.json)
+          PAYLOAD_FILE="../layer-layout/blobs/sha256/${PAYLOAD_DIGEST#sha256:}"
+          ENVELOPE_FILE="../layer-layout/blobs/sha256/${ENVELOPE_DIGEST#sha256:}"
+          STATUS_FILE="../layer-layout/blobs/sha256/${STATUS_DIGEST#sha256:}"
+
+          # 1. Push every blob: config, envelope, payload, tools, line-status.
+          printf '{}' > empty-config.json
+          oras blob push "$REPO" empty-config.json
+          oras blob push "$REPO" "$ENVELOPE_FILE"
+          oras blob push "$REPO" "$PAYLOAD_FILE"
+          for digest in $(jq -r '.manifests[].digest' "$PAYLOAD_FILE"); do
+            oras blob push "$REPO" "../layer-layout/blobs/sha256/${digest#sha256:}"
+          done
+          test -n "$STATUS_DIGEST" || { echo "::error::baseline line-status missing from layout"; exit 1; }
+          oras blob push "$REPO" "$STATUS_FILE"
+
+          # 2. Build the artifact manifest — envelope + payload + tools, plus
+          #    the baseline line-status as a role-annotated layer so
+          #    RegistrySource.fetch_line_status finds it.
+          jq -n \
+            --arg env_digest "$ENVELOPE_DIGEST" \
+            --argjson env_size "$(stat -c%s "$ENVELOPE_FILE")" \
+            --arg payload_digest "$PAYLOAD_DIGEST" \
+            --argjson payload_size "$(stat -c%s "$PAYLOAD_FILE")" \
+            --arg status_digest "$STATUS_DIGEST" \
+            --argjson status_size "$(stat -c%s "$STATUS_FILE")" \
+            --slurpfile payload "$PAYLOAD_FILE" \
+            '{
+              schemaVersion: 2,
+              mediaType: "application/vnd.oci.image.manifest.v1+json",
+              artifactType: "application/vnd.pulseengine.varve.layer.v1+json",
+              config: {
+                mediaType: "application/vnd.oci.empty.v1+json",
+                digest: "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                size: 2
+              },
+              layers: ([
+                {
+                  mediaType: "application/json",
+                  digest: $env_digest,
+                  size: $env_size,
+                  annotations: {"eu.pulseengine.varve.role": "envelope"}
+                },
+                {
+                  mediaType: "application/vnd.oci.image.index.v1+json",
+                  digest: $payload_digest,
+                  size: $payload_size,
+                  annotations: {"eu.pulseengine.varve.role": "payload"}
+                },
+                {
+                  mediaType: "application/json",
+                  digest: $status_digest,
+                  size: $status_size,
+                  annotations: {"eu.pulseengine.varve.role": "line-status"}
+                }
+              ] + [ $payload[0].manifests[] |
+                    { mediaType: "application/octet-stream",
+                      digest: .digest,
+                      size: .size } ])
+            }' > artifact-manifest.json
+          head -c 1500 artifact-manifest.json; echo
+
+          # 3. Push the manifest under the layer tag.
+          oras manifest push "$REPO:$LAYER" artifact-manifest.json
+
+      - name: Upload the oci-layout (artifact of record)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: layer-${{ inputs.layer }}-oci-layout
+          path: layer-layout
+          retention-days: 90
