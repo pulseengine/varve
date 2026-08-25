@@ -3066,3 +3066,64 @@ artifacts:
     links:
       - type: verifies
         target: REQ-INSPECT-001
+
+  - id: VER-ROLLING-001
+    type: verification
+    title: The scanner proposes; a person signs
+    status: verified
+    release: v0.29.0
+    method: test
+    fields:
+      description: >
+        REQ-ROLLING-001 and DD-024. A manually-cut layer demonstrably cannot
+        keep up: days after 2026.08.3 was published, spar had moved FOUR
+        minors and seven other tools had moved at least one. A consumer on
+        `rolling` was getting whatever was current the last time a human
+        remembered.
+        .
+        The design constraint is the part worth recording. `channel =
+        "rolling"` is NOT a trust boundary in varve — it is an annotation
+        inside a layer signed by the SAME realm root as `qualified`. So
+        automating the rolling channel end to end would mean the root key
+        signing unattended, dozens of times a week, one release after
+        `docs root-ceremony` said to use it as rarely as possible and varve
+        still has no revocation and no rotation. The scanner therefore stops
+        at a PULL REQUEST; the merge is what signs.
+        .
+        Verified against the LIVE GitHub API rather than a fixture, in both
+        directions: with 8 of 9 tools moved it wrote a proposal naming each
+        bump and the mechanism that vouched for it; re-scanned against the
+        proposed pins it printed "nothing moved — no proposal, no PR, no
+        notification" and exited without opening anything.
+        .
+        Clause 5 was proven with real bytecodealliance data: with provenance
+        disabled, `wasm-tools` was held back while the other eight still
+        moved, and the title read "8 tool(s) moved upstream, 1 held back" —
+        one unattested upstream does not freeze the rest. Where the blocked
+        tool is the ONLY mover, it emits a notice and no PR, so an upstream
+        that never attests cannot produce a nagging proposal forever.
+        .
+        The cadence is measured, not guessed: 56 non-draft releases across
+        the 9 repos in 30 days, on 15 distinct days, arriving in bursts.
+        Hourly would cost 24x the API calls for the same answer and, on a
+        burst day, force-push the same proposal up to nine times — each
+        rewrite invalidating the assembly gate that had just run on it.
+        Daily, off the hour.
+        .
+        One clause is met in substance and not in letter, stated here rather
+        than hidden: a PR opened with GITHUB_TOKEN does not trigger
+        `pull_request` workflows, so clause 2's gate runs BEFORE the PR is
+        opened and its verdict goes in the body with a run link. A failed
+        gate still opens the PR, marked do-not-merge. Provisioning a PAT
+        would restore checks-on-the-PR.
+      steps:
+        - run: bash tools/systest/scan-upstream.sh
+        - run: bash -n tools/scan-upstream.sh
+        - run: bash -n tools/upstream-mechanism.sh
+        - run: bash -n tools/next-layer-id.sh
+        # The decision is enforceable only if the workflow does not sign.
+        - run: grep -q "deposit-on-merge" .github/workflows/scan-upstream.yml
+    links:
+      - type: verifies
+        target: REQ-ROLLING-001
+

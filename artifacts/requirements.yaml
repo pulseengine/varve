@@ -3456,7 +3456,7 @@ artifacts:
   - id: REQ-INGEST-001
     type: requirement
     title: varve ingests what upstream actually publishes, and records which mechanism vouched
-    status: draft
+    status: verified
     release: v0.29.0
     description: >
       The layer assembler accepts exactly ONE proof that an upstream artifact
@@ -3493,8 +3493,8 @@ artifacts:
   - id: REQ-LAYERREPO-001
     type: requirement
     title: A realm's layers are assembled outside varve, in that realm's own repository
-    status: draft
-    release: v0.29.0
+    status: approved
+    release: v0.30.0
     description: >
       `deposit-layer.yml` lives inside varve and hard-codes one realm's tool
       list, so bumping a tool version is a commit to the tool that installs
@@ -3510,15 +3510,75 @@ artifacts:
       copy per realm is a copy that drifts, which is the same defect as a gate
       testing a re-implementation. (3) A layers repo shall need no varve
       source checkout: it takes a released varve and a released assembler.
-      (4) The pulseengine realm shall migrate first and keep publishing without
-      a gap, so the split is proven by the realm that already has consumers
-      rather than by the new one. (5) varve's own repository shall stop
+      (4) EXACTLY ONE layers repo shall be stood up first — `pulseengine-layers`,
+      the realm that already has consumers and an existing key — and it shall
+      publish a layer successfully before a second repo is created. The
+      two-realm topology is proven in the gate (REQ-REALM2-001 clause 1)
+      rather than by standing up two repos at once, so a migration failure
+      lands on the realm we can fix rather than on a new realm's first
+      impression. A single repo holding BOTH realms was rejected: it puts two
+      roots' secrets in one repo's settings, and unpicking that later means
+      rotating keys varve cannot rotate. (5) varve's own repository shall stop
       carrying any realm's signing secret once the migration completes.
+      .
+      Moved v0.29.0 -> v0.30.0 deliberately. The ADAPTER this depends on
+      shipped in v0.29.0 and is verified separately (REQ-LAYERADAPT-001), but
+      clauses 4 and 5 are not code: clause 4 requires `pulseengine-layers` to
+      publish a real layer, which needs `VARVE_ROLLING_KEY` provisioned in
+      that repository by its custodian, and clause 5 requires removing the
+      secret from varve only AFTER that publish succeeds. Neither can be
+      discharged by the party writing the code, and marking this verified on
+      the strength of the adapter alone would claim a migration that has not
+      happened. The layers repository's deposit workflow therefore still
+      refuses to run rather than pretending, and the ordering is deliberate:
+      varve keeps the secret until the new repository has proven it can
+      publish without it.
+
+  - id: REQ-LAYERADAPT-001
+    type: requirement
+    title: A realm's manifest is translated into assembler inputs by varve, exactly or not at all
+    status: verified
+    release: v0.29.0
+    description: >
+      REQ-LAYERREPO-001 moves a realm's tool list into that realm's own
+      repository. Something must then translate that manifest into the inputs
+      the assembler reads, and the translation is where a whole class of
+      silent corruption lives: the assembler takes space-separated entries of
+      colon-separated fields, an encoding that cannot represent a value
+      containing a space or a colon and whose shell will not complain. A
+      mangled list does not fail — it deposits, signs and verifies, carrying
+      the wrong bytes under a good signature. That is the defect class this
+      project keeps finding (REQ-NOSILENT-001, REQ-ADVISORY-002): a check that
+      cannot see the thing it checks is worse than no check, because it is
+      believed.
+      .
+      Clauses: (1) The adapter shall live in varve, beside the assembler it
+      feeds, and not in each realm's repository — the assembler is
+      system-tested here (REQ-SYSTEST-002) and a per-realm copy inherits none
+      of that testing (REQ-LAYERREPO-001 clause 2). (2) Any value that the
+      assembler's encoding cannot carry intact shall be REFUSED, naming the
+      offending field and value; approximating it is forbidden. (3) An
+      unrecognised key in the manifest shall be refused rather than ignored,
+      because an ignored `verison =` leaves the real version stale and ships
+      the wrong release. (4) A declaration the assembler cannot express shall
+      be refused rather than dropped: a second `raw-per-platform` tool (the
+      assembler holds exactly one, as WSC_VERSION), an extension under a
+      foreign owner (the assembler resolves `pulseengine/<name>` itself, so
+      dropping the owner fetches a different repository's release of the same
+      name), an unknown layout, a duplicate name, or a manifest with no
+      payloads at all. (5) The output shall be `KEY=value` lines appended to
+      the environment directly, never a shell fragment to be evaluated, so no
+      value in a manifest can execute. (6) The adapter shall reach no network,
+      write no file and read no key: it is a translation, and the step after
+      it is what verifies and signs. (7) Translating the manifest
+      `pulseengine-layers` actually carries shall reproduce the tool list the
+      pre-migration workflow carried by hand, so the migration is provably a
+      move rather than a change.
 
   - id: REQ-REALM2-001
     type: requirement
     title: A second realm exists end to end, and composition stops being a fixture
-    status: draft
+    status: verified
     release: v0.29.0
     description: >
       Layer composition (REQ-COMPOSE-001, v0.23.0) has always been exercised
@@ -3529,23 +3589,45 @@ artifacts:
       exists for (PulseEngine tools that CHECK, bytecodealliance tools that
       BUILD, someone else's layer extending both) has never actually been run.
       .
-      Clauses: (1) A `bytecodealliance` realm shall exist with its own root,
-      its own layers repo, and its own published layers. (2) A consumer pin
+      Clauses: (1) A `bytecodealliance` realm shall be constructible and
+      COMPOSABLE end to end, proven by a system gate that builds both realms
+      from real upstream artifacts and real roots. PUBLISHING that realm is an
+      operational step, deliberately NOT a condition of this requirement:
+      generating a realm root is a ceremony `docs root-ceremony` says should
+      be air-gapped, two-person and unhurried, and blocking a code release on
+      it would either delay the release or rush the ceremony. Tracked
+      separately; the gate is what this requirement verifies. (2) A consumer pin
       shall compose across both realms and resolve tools from each, verified
       each against ITS OWN realm's root. (3) The system gate shall exercise
       that composition, not a fixture of it. (4) varve#91 shall be settled by
-      the attempt: a tool-name collision between two real realms currently has
-      NO escape — the error's own suggested fix ("restrict the pin's `tools`")
-      does not work, and the other ("remove the duplicate") is unavailable to
-      a consumer composing a realm they do not control. Two realms shipping
-      `wasm-tools` is not hypothetical. (5) `docs composition` shall document
+      the attempt. Two realms shipping `wasm-tools` is not hypothetical — it
+      is the ORDINARY case the moment a fork exists alongside its upstream,
+      which is exactly the topology this release builds. The error's own
+      suggested fix, "restrict the pin's `tools`", is not merely unimplemented
+      but STRUCTURALLY INCAPABLE: `tools` filters by NAME, and the collision is
+      two layers exposing the SAME name, so no value of it has ever been able
+      to disambiguate. The other suggestion, "remove the duplicate from one
+      layer", is unavailable to a consumer composing a realm they do not
+      control. (4a) `tools` shall accept an optional REALM QUALIFIER —
+      `tools = ["bytecodealliance/wasm-tools", "rivet"]` — so the filter can
+      express the choice its own error message tells people to make; a bare
+      name shall keep working where nothing collides. (4b) The unselected
+      layer shall stay installed and verified, and remain addressable
+      qualified (`varve run bytecodealliance/wasm-tools`), because "compare
+      our fork against upstream" is a real workflow and losing the other
+      binary entirely is a worse answer than refusing. (4c) Exactly ONE shim
+      per name shall remain, so what a bare name dispatches is decided by the
+      pin and never by install order. (4d) The refusal, where the pin has not
+      chosen, shall name both providers WITH their realms and show the
+      qualified form — the current message names the layers and then gives
+      advice that cannot work. (5) `docs composition` shall document
       the real two-realm setup (varve#57) with commands verified against the
       real binary, replacing the fixture-shaped example.
 
   - id: REQ-ROLLING-001
     type: requirement
     title: Upstream movement is noticed automatically; publishing it stays a deliberate act
-    status: draft
+    status: verified
     release: v0.29.0
     description: >
       A manually-cut layer cannot keep up. Measured 2026-08-21, days after
@@ -3618,4 +3700,217 @@ artifacts:
         assembly removes all the toil and none of the assurance: the human
         step that remains is the one that carries meaning.
       tags: [architecture, security, process]
+
+  - id: DD-025
+    type: design-decision
+    title: A realm is an identity, not a secret — adopt keyless signing
+    status: rejected
+    release: v0.30.0
+    description: >
+      REJECTED 2026-08-21 on evidence, hours after being recorded. The
+      maintainer's DIRECTION was sound and their reason — unease with holding
+      a long-lived signing secret — remains correct. The MECHANISM described
+      below does not deliver it, and three of the premises I wrote into this
+      decision were false. See DD-026 for what the spike actually found. Kept
+      rather than deleted, because how it was wrong is more useful than that
+      it was wrong: every false premise came from reading module names, file
+      sizes and a `grep -c todo!` instead of the code.
+      .
+      Today a realm is a long-lived ed25519 secret whose public half consumers
+      pin. `docs threat-model` and `docs root-ceremony` both state the
+      consequences as permanent limits: no rotation, no revocation, no expiry,
+      no transparency log. A leaked root stays valid until every consumer
+      hand-edits their own varve-realms.toml. That is not a gap in the
+      implementation — it is what a pinned raw public key means.
+      .
+      Keyless removes the ASSET rather than mitigating the risk. Signing
+      happens in CI against an OIDC workflow identity through Fulcio, recorded
+      in Rekor; there is no long-lived secret to generate, split, paper-back,
+      store, rotate or lose. The maintainer's stated reason is the right one:
+      unease with holding this class of secret at all.
+      .
+      What made this credible rather than aspirational is that sigil's `wsc`
+      — which varve already depends on — has the pieces. Verified by reading
+      wsc 0.10.0: `signature/keyless/` carries Fulcio, Rekor, OIDC, cert
+      pinning and Merkle proofs; `airgapped/` does OFFLINE verification of
+      keyless signatures against a provisioned Trust Bundle, with a real
+      `tuf.rs` (471 lines, no stubs) for updating it. So the air-gap story
+      survives, which was the objection that nearly killed this.
+      .
+      Two findings that decide feasibility. `airgapped::verify_signature`
+      takes a 32-BYTE HASH, not a WASM module — a layer manifest digest is
+      exactly that, so offline verification is already general enough.
+      Signing is not: `sign_module` is WASM-shaped, so wsc needs a
+      sign-an-arbitrary-digest entry point. That is a small addition to
+      sigil, not a new subsystem.
+      .
+      The bundle verifier handles expiry with a grace period AND an explicit
+      unreliable-time-source fallback for devices with no clock — the exact
+      case varve's air-gapped consumer is. Fulcio's short cert lifetime does
+      not rot old layers: the Rekor entry is the durable evidence that the
+      signature existed while the cert was valid.
+      .
+      OPEN, and to be settled by a spike before any requirement is written:
+      (1) how a Trust Bundle is provisioned to a consumer, and whether that
+      is meaningfully easier than pinning a 64-hex root — a consumer still
+      pins ONE thing either way, and if bundle distribution is harder we have
+      moved the problem rather than solved it. (2) Whether Rekor inclusion
+      proofs genuinely verify offline from the cached proof, or need a
+      lookup. (3) What a realm's IDENTITY becomes in varve-realms.toml, and
+      how a consumer expresses "only accept layers signed by this workflow in
+      this repository". (4) Whether both mechanisms must coexist — a realm
+      that cannot reach Fulcio at signing time still needs to publish. (5)
+      Rekor makes every signature a public record; that is a benefit for an
+      open toolchain and a disclosure for a private one, and a realm may need
+      to choose.
+      .
+      NOT decided: whether the existing ed25519 path is removed. It probably
+      is not — an org signing offline, or one unwilling to publish to a
+      transparency log, still needs it.
+    links:
+      - type: satisfies
+        target: REQ-CEREMONY-001
+    fields:
+      rationale: >
+        A long-lived signing secret is a liability that only grows: varve
+        cannot rotate it, cannot revoke it, and it must survive a decade of
+        custody while every use is a chance to leak it. Keyless deletes the
+        asset instead of guarding it, and sigil already ships the offline
+        verification that would otherwise make this incompatible with varve's
+        air-gap requirement. The hardware alternative was investigated and
+        rejected on evidence: the available token is a YubiKey NEO (firmware
+        3.0.0) whose PIV and OpenPGP applets cap at RSA 2048 and cannot sign
+        ed25519 at all.
+      tags: [architecture, security]
+
+  - id: DD-026
+    type: design-decision
+    title: Keyless does not remove the long-lived secret — it relocates it
+    status: accepted
+    release: v0.30.0
+    description: >
+      Supersedes DD-025, which was rejected on evidence from a spike that read
+      the source rather than the module names.
+      .
+      THE DECIDING FACT. `wsc`'s air-gapped trust bundle is itself signed with
+      a LONG-LIVED OFFLINE KEY, and the consumer must pin that key to use the
+      bundle at all (`airgapped/bundle.rs:306`, `verifier.rs:44`). So keyless
+      does not delete the asset — it moves it from "the realm root" to
+      "whoever signs the trust bundle", and charges a 4.5 KB expiring artifact
+      for the move. If varve signs its own bundles, varve still holds a
+      long-lived ed25519 secret it can neither rotate nor revoke. DD-025's
+      entire motivation is unresolved by DD-025's own mechanism.
+      .
+      For an air-gapped consumer the properties get WORSE, not better. Today's
+      pinned root has no expiry and no update obligation. A trust bundle hard-
+      fails at day 396 (365 + 30 grace), and a device with no clock fails
+      immediately — `verify_signature` refuses without a reliable time source.
+      Per-layer overhead goes from a 64-byte signature to roughly 7.8 KB
+      (Fulcio leaf PEM + Rekor entry + signature).
+      .
+      THREE PREMISES IN DD-025 WERE FALSE, all three from reading names
+      instead of code: (1) wsc 0.10.0 — the version varve pins — does NOT do
+      offline keyless verification; `verify_crypto` says "in a full
+      implementation we would" and does neither, and it parses an SPKI DER as
+      an ed25519 key while Fulcio issues ECDSA P-256, so it cannot succeed on
+      a real certificate. The fix (sigil#219) is closed but UNPUBLISHED; the
+      newest crates.io wsc is 0.10.0. (2) `tuf.rs` performs no TUF — it is an
+      HTTP GET against a hardcoded raw.githubusercontent.com URL plus a JSON
+      converter. No root.json, no role signatures, no thresholds, no rollback
+      checks. "471 lines, zero todo!" was not evidence of completeness, and I
+      cited it as if it were. (3) The clockless fallback exists only in
+      `check_bundle_health()`, a diagnostic; the verification path fails
+      closed. varve's air-gapped consumer is precisely the case I claimed it
+      covered.
+      .
+      Rekor inclusion proofs are not verified on either path, and do not
+      travel: varve's own v0.28.0 cosign bundle carries a SET but no inclusion
+      proof or checkpoint. What is verifiable offline is the SET — a
+      countersignature proving "Rekor saw this at time T". That is
+      TIMESTAMPING, not inclusion, and it does not detect an equivocating log.
+      Any doc change implying otherwise would be a new false claim.
+      .
+      WHAT KEYLESS DOES BUY, and it is real: the realm operator stops holding
+      a signing secret ON A MACHINE. Compromise of a CI workflow yields a
+      ten-minute certificate window instead of a decade-long key. That is a
+      genuine reduction in CUSTODY risk. It is not the reduction in PINNING
+      risk DD-025 claimed, and it delivers neither rotation nor revocation to
+      the consumer — revocation is a hand-maintained fingerprint list inside
+      the bundle, refreshed through the same manual channel that would have
+      replaced a pinned root.
+      .
+      DECISION: varve keeps its ed25519 realm root for now. Keyless is not
+      rejected forever — it is blocked on three things, and the choice becomes
+      decidable when they clear: (a) wsc 0.11.0 published to crates.io with a
+      working airgapped verifier, plus sigil#256 (`sign_digest`) and a
+      cosign-bundle adapter; (b) the payload-type binding question settled —
+      signing a bare 32-byte digest would LOSE a property varve has and tests
+      (`verify.rs:5`: a signed something-else cannot be replayed as a layer
+      manifest), so the answer is to sign SHA256(DSSE PAE(type, payload)) and
+      keep one verify path; (c) sigil#137, since the offline path documents
+      `inclusion_verified: false` permanently.
+      .
+      NEXT MOVE, and it is deliberately not a realm-model change: adopt the
+      trust bundle as an ADDITIONAL accepted verifier for varve's OWN release
+      artifacts (`selfverify`), leaving varve-realms.toml untouched. That
+      exercises bundle provisioning against a real consumer on a path where a
+      hard expiry failure is recoverable, before betting the realm model on
+      it.
+    links:
+      - type: satisfies
+        target: REQ-CEREMONY-001
+    fields:
+      rationale: >
+        The mechanism does not serve the motivation. The consumer pins a
+        long-lived ed25519 public key either way; keyless adds an expiring
+        4.5 KB artifact, a 120x per-layer size increase, a hard failure at day
+        396, and an immediate failure on a clockless device — while leaving
+        rotation and revocation exactly as absent as before. The custody gain
+        is real and can be had later, once the upstream pieces exist and the
+        type-binding regression is designed out.
+      tags: [architecture, security]
+
+  - id: REQ-BUNDLEVERIFY-001
+    type: requirement
+    title: Prove trust-bundle provisioning on varve's own release, not on the realm model
+    status: draft
+    release: v0.30.0
+    description: >
+      DD-026's next move. Keyless is deferred because the trust bundle is
+      itself signed with a long-lived key the consumer must pin — so it
+      relocates varve's secret rather than removing it, and makes an
+      air-gapped consumer's position worse (hard expiry at day 396, immediate
+      failure with no clock). But the CUSTODY gain is real, and the question
+      that decides whether it is ever worth taking is empirical: can a
+      consumer actually keep a trust bundle fresh?
+      .
+      That question is answered on the cheapest surface, not the most
+      expensive one. `varve self-verify` already verifies varve's OWN release
+      sums out of band, against a key the user obtains separately (DD-009).
+      Adding the trust bundle as an ADDITIONAL accepted verifier there
+      exercises provisioning, expiry and refresh against a real consumer on a
+      path where a hard failure is RECOVERABLE — the user downloads varve
+      again. Betting the realm model on it first would put the same failure
+      on a path where recovery means re-pinning a realm.
+      .
+      Clauses: (1) `self-verify` shall accept a trust-bundle-verified release
+      signature IN ADDITION to the existing path, never instead of it — the
+      current mechanism keeps working untouched. (2) The bundle's expiry state
+      shall be REPORTED at use, including days remaining, because "it hard-
+      fails at day 396" is only survivable if the operator was told at day
+      300. (3) A device with no reliable clock shall get a message naming that
+      as the cause; wsc's verification path fails closed there and a bare
+      failure would be unactionable. (4) varve shall not claim inclusion
+      proof. What is verified offline is the Rekor SET — a countersignature
+      proving the log saw the entry at a time — which is TIMESTAMPING, not
+      inclusion, and does not detect an equivocating log. `docs threat-model`
+      shall keep saying so. (5) This requirement shall NOT change
+      varve-realms.toml, `Realm::fingerprint()`, or any realm's trust root.
+      Whether a realm can ever be keyless is DD-026's open question and is
+      decided by what this teaches, not by this.
+      .
+      BLOCKED until wsc 0.11.0 is published to crates.io (sigil#257). varve
+      pins 0.10.0, whose airgapped verifier is a stub that fails OPEN —
+      building against it would produce a gate that verifies nothing, which is
+      the defect class this project exists to remove.
 

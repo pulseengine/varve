@@ -221,6 +221,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "cmd-pubkey.md"
     ),
     topic!(
+        "layer-spec",
+        "layer-spec — a realm's contents, from the realm's own repository (CI)",
+        "cmd-layer-spec.md"
+    ),
+    topic!(
         "deposit",
         "deposit — assemble and sign a layer (CI)",
         "cmd-deposit.md"
@@ -1270,6 +1275,20 @@ mod tests {
                     let first = names.first().expect("it must define a realm").clone();
                     varve_core::realm::resolve_realm(&tmp, &first)
                         .expect("the documented realm must RESOLVE, not merely parse");
+                    checked += 1;
+                }
+                // BEFORE the deposit-spec arm: a realm's layer.toml also has
+                // `[[tool]]`, and would otherwise be parsed as a deposit spec
+                // and fail on `[realm]`. `[varve]` is what makes a block A
+                // LAYER MANIFEST — same reasoning as the pin arm above.
+                // `assembler_env`, not merely `parse`: a documented manifest
+                // that parses but cannot be TRANSLATED is a broken example,
+                // and translation is the whole job.
+                "toml" if block.contains("[varve]") => {
+                    let m = varve_core::layerspec::parse_layer_manifest(&block)
+                        .expect("the documented layer.toml must parse as a layer manifest");
+                    varve_core::layerspec::assembler_env(&m)
+                        .expect("the documented layer.toml must TRANSLATE, not merely parse");
                     checked += 1;
                 }
                 "toml" if block.contains("[[tool]]") || block.contains("[tool.runner]") => {

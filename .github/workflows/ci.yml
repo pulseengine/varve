@@ -161,7 +161,11 @@ jobs:
   mutants:
     name: cargo mutants (trust-critical gate)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 60, not 45: the v0.29.0 run finished in ~40 minutes with twelve files, and
+    # layerspec.rs made it thirteen. A gate that times out is indistinguishable
+    # from a gate that fails, and the wrong lesson to draw from a red timeout is
+    # "drop a file from the list".
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -174,6 +178,20 @@ jobs:
         # The org gate (REQ-MUTATE-001, rivet's mutants-cli pattern): the
         # modules that hold the trust decisions must kill every mutant.
         # The nightly workflow covers the full workspace, advisory.
+        #
+        # compose.rs joined the list in v0.29.0: `select_tools` decides which
+        # binary a bare tool name dispatches to across two realms
+        # (REQ-REALM2-001 clause 4c), which is a trust decision by any reading.
+        # It was at three survivors when it was advisory-only — two off-by-ones
+        # in the depth bound and one refusal branch — all killed before it was
+        # promoted, since a gate admitted with known survivors is not a gate.
+        #
+        # layerspec.rs joined on the same terms: it decides which upstream
+        # release becomes which payload in a signed layer, and a mistranslation
+        # there deposits the wrong bytes under a good signature. It arrived at
+        # two survivors, both real — an untested `layout = "tarball"`, and a
+        # tool whose repo basename disagreed with its name being silently
+        # deposited under the basename. Both fixed before promotion.
         run: |
           cargo mutants --no-shuffle \
             -f crates/varve-core/src/rollback.rs \
@@ -183,10 +201,12 @@ jobs:
             -f crates/varve-core/src/pin.rs \
             -f crates/varve-core/src/realm.rs \
             -f crates/varve-core/src/resolve.rs \
+            -f crates/varve-core/src/compose.rs \
             -f crates/varve-core/src/install.rs \
             -f crates/varve-core/src/selfverify.rs \
             -f crates/varve-core/src/reverify.rs \
-            -f crates/varve-core/src/exportstamp.rs
+            -f crates/varve-core/src/exportstamp.rs \
+            -f crates/varve-core/src/layerspec.rs
 
   proofs:
     name: SMT obligations (ordeal, certificate-checked)

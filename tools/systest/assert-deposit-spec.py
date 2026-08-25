@@ -15,7 +15,11 @@ inventory in fixtures/deposit-layer/releases.tsv:
   * a portable extension lands exactly once, with no platform at all;
   * `path` resolves relative to the spec file, as varve resolves it;
   * for payloads deposited as downloaded (raw binaries, .vsix), the recorded
-    source sha256 is the sha256 of the staged bytes.
+    source sha256 is the sha256 of the staged bytes;
+  * every payload names the mechanism that vouched for its bytes, and names the
+    RIGHT one (REQ-INGEST-001 clause 2): the PulseEngine releases carry a
+    cosign-signed sums file, the bytecodealliance one carries build provenance,
+    and no payload may reach the spec with the question unanswered.
 
 Usage: assert-deposit-spec.py <deposit-spec.toml>
 """
@@ -36,6 +40,14 @@ VSIX_TAG = {
     "x86_64-apple-darwin": "darwin-x64",
     "aarch64-unknown-linux-gnu": "linux-arm64",
     "x86_64-unknown-linux-gnu": "linux-x64",
+}
+# bytecodealliance's short platform tags, recorded from the live v1.257.1
+# asset list on 2026-08-21 — not Rust target triples.
+UPSTREAM_TAG = {
+    "aarch64-apple-darwin": "aarch64-macos",
+    "x86_64-apple-darwin": "x86_64-macos",
+    "aarch64-unknown-linux-gnu": "aarch64-linux",
+    "x86_64-unknown-linux-gnu": "x86_64-linux",
 }
 WSC_ASSET = {
     "aarch64-apple-darwin": "wsc-macos-aarch64",
@@ -81,7 +93,7 @@ def main() -> int:
 
     # ── tools: one entry per platform the release actually ships ────────────
     def expect_tool(name: str, version: str, repo: str, release: str,
-                    asset_of, platforms: list[str]) -> None:
+                    asset_of, platforms: list[str], proof: str = "cosign-sums") -> None:
         got = by_name.get(name, [])
         check(len(got) == len(platforms),
               f"{name}: {len(got)} entries, expected {len(platforms)} ({', '.join(platforms)})")
@@ -96,6 +108,8 @@ def main() -> int:
             check(src["asset"] == asset_of(plat),
                   f"{name}/{plat}: asset {src['asset']}, expected {asset_of(plat)}")
             check(len(src["sha256"]) == 64, f"{name}/{plat}: sha256 {src['sha256']!r} is not a bare hex digest")
+            check(src.get("proof") == proof,
+                  f"{name}/{plat}: ingestion proof {src.get('proof')!r}, expected {proof!r}")
 
     expect_tool("rivet", "0.33.1", "pulseengine/rivet", "v0.33.1",
                 lambda p: f"rivet-v0.33.1-{p}.tar.gz", PLATFORMS)
@@ -114,6 +128,12 @@ def main() -> int:
     check("kiln" not in by_name, "a payload is named 'kiln'; the dispatched binary is 'kilnd'")
     expect_tool("wsc", "0.10.0", "pulseengine/sigil", "v0.10.0",
                 lambda p: WSC_ASSET[p], PLATFORMS)
+    # The second realm (REQ-INGEST-001): a foreign owner, upstream asset naming,
+    # and BUILD PROVENANCE rather than a signed sums file. It is an ordinary
+    # member of the layer — that is what "first-class" means.
+    expect_tool("wasm-tools", "1.257.1", "bytecodealliance/wasm-tools", "v1.257.1",
+                lambda p: f"wasm-tools-1.257.1-{UPSTREAM_TAG[p]}.tar.gz", PLATFORMS,
+                proof="build-provenance")
 
     # ── vsix: one repo, two roles ───────────────────────────────────────────
     check(len(by_name.get("rivet", [])) == 4 and len(by_name.get("rivet-sdlc", [])) == 1,
@@ -158,7 +178,36 @@ def main() -> int:
               f"{t['name']}/{t.get('platform')}: staged bytes hash to {digest} but the spec records "
               f"{t['source']['sha256']} — the spec would sign a sum for bytes it is not depositing")
 
-    total = 4 + 4 + 3 + 4 + 4 + 1 + 4
+    # ── nothing reaches the spec with its ingestion unaccounted for ─────────
+    # The per-tool checks above name the mechanism they expect; this is the
+    # blanket one, so a payload added later cannot slip in with the question
+    # unanswered. Clause 3's shape at the spec level: silence is not an option.
+    for t in tools:
+        src = t.get("source")
+        check(src is not None, f"{t['name']}: no [tool.source] at all")
+        if src is None:
+            continue
+        check(src.get("proof") in ("cosign-sums", "build-provenance", "unverified"),
+              f"{t['name']}/{t.get('platform')}: proof {src.get('proof')!r} is not a mechanism "
+              "varve knows — every payload must say what vouched for its bytes")
+        check(bool(src.get("proof-asserts")),
+              f"{t['name']}/{t.get('platform')}: the mechanism is named but not what it asserted")
+        if src.get("proof") == "unverified":
+            check("proof-signer" not in src,
+                  f"{t['name']}: nothing vouched for it, yet a signer is named")
+        else:
+            check(bool(src.get("proof-signer")),
+                  f"{t['name']}/{t.get('platform')}: {src.get('proof')} names no signer")
+
+    # A cosign-signed payload and an attested one must be TELLABLE APART from
+    # the record alone — the point of clause 2. If every entry said the same
+    # thing the checks above would still pass and the distinction would be
+    # worthless.
+    mechanisms = {t["source"].get("proof") for t in tools if t.get("source")}
+    check(mechanisms == {"cosign-sums", "build-provenance"},
+          f"this layer should mix both accepted mechanisms, got {sorted(m or '<none>' for m in mechanisms)}")
+
+    total = 4 + 4 + 3 + 4 + 4 + 1 + 4 + 4
     check(len(tools) == total, f"{len(tools)} payloads in the spec, expected {total}")
 
     if failures:

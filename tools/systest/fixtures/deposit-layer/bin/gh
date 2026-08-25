@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# A fixture-backed `gh` for the REQ-SYSTEST-002 producer gate. Only
-# `gh release download` exists, because that is all the assembler calls.
+# A fixture-backed `gh` for the REQ-SYSTEST-002 producer gate. Two subcommands
+# exist — `release download` and `attestation verify` — because those are the
+# two the assembler calls.
 #
 # This replaces the SERVICE (GitHub), not the component under test: every line
 # of tools/build-deposit-spec.sh runs for real against it. The one behaviour it
@@ -19,8 +20,90 @@ set -uo pipefail
 : "${VARVE_FIXTURE_RELEASES:?fake gh: VARVE_FIXTURE_RELEASES is not set — the real gh must never be reached from this gate}"
 printf 'gh %s\n' "$*" >> "${VARVE_FIXTURE_GH_LOG:-/dev/null}"
 
+# ── attestation verify (REQ-INGEST-001) ──────────────────────────────────────
+# SCOPE (REQ-SYSTEST-001 clause 3), the same boundary the cosign double draws:
+# this does NOT check a sigstore signature, a Fulcio certificate chain or a
+# Rekor inclusion proof, and proves nothing about whether GitHub's attestations
+# are sound. What it reproduces is the behaviour the assembler depends on, as
+# MEASURED against the live API on 2026-08-21:
+#
+#   * lookup is BY ARTIFACT DIGEST, not by name — `gh attestation verify` hashes
+#     the local file and asks for attestations of that digest, so a file whose
+#     bytes are not a subject gets HTTP 404 and exit 1 (confirmed with a
+#     negative control: a file containing "bogus" against wasm-tools);
+#   * a repo that publishes none gets the same 404 (confirmed against
+#     bytecodealliance/wit-bindgen v0.60.0);
+#   * `--format json` prints the verification result, whose statement carries
+#     the sha256 of EVERY asset in the release.
+if [ "${1:-}" = "attestation" ] && [ "${2:-}" = "verify" ]; then
+  shift 2
+  artifact=""; att_repo=""; att_format=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo)   att_repo="$2"; shift 2 ;;
+      --format) att_format="$2"; shift 2 ;;
+      -*) echo "fake gh: unmodelled attestation flag '$1'" >&2; exit 64 ;;
+      *)  artifact="$1"; shift ;;
+    esac
+  done
+  [ -n "$artifact" ] && [ -n "$att_repo" ] || {
+    echo "fake gh: attestation verify needs an artifact and --repo" >&2; exit 64; }
+  [ -f "$artifact" ] || { echo "failed to open artifact $artifact" >&2; exit 1; }
+  exec python3 - "$VARVE_FIXTURE_RELEASES" "$att_repo" "$artifact" "$att_format" <<'PY'
+import hashlib, json, pathlib, sys
+
+root, repo, artifact, fmt = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3]), sys.argv[4]
+digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+for att in sorted(pathlib.Path(root, repo).glob("*.attestation.json")):
+    doc = json.loads(att.read_text())
+    subjects = doc[0]["verificationResult"]["statement"]["subject"]
+    if any(s["digest"]["sha256"] == digest for s in subjects):
+        if fmt == "json":
+            print(json.dumps(doc, indent=1))
+        else:
+            print(f"Verification succeeded!\n\nsha256:{digest} was attested by:")
+        sys.exit(0)
+# gh's real wording for the miss, so a failing gate reads like the failing run.
+print(f"Error: HTTP 404: Not Found (https://api.github.com/repos/{repo}/attestations/"
+      f"sha256:{digest}?per_page=30&predicate_type=https%3A%2F%2Fslsa.dev%2Fprovenance%2Fv1)",
+      file=sys.stderr)
+sys.exit(1)
+PY
+fi
+
+# ── release view (REQ-INGEST-001) ────────────────────────────────────────────
+# The assembler asks WHAT a release publishes before deciding which ingestion
+# proof applies, rather than inferring "no sums here" from a download that
+# failed — which is what keeps a REJECTED cosign signature distinct from an
+# ABSENT one. Only the `assets` field is modelled, because it is the only one
+# asked for.
+if [ "${1:-}" = "release" ] && [ "${2:-}" = "view" ]; then
+  shift 2
+  view_version="${1:?fake gh: no release tag}"; shift
+  view_repo=""; view_jq=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) view_repo="$2"; shift 2 ;;
+      --json) shift 2 ;;
+      --jq)   view_jq="$2"; shift 2 ;;
+      *) echo "fake gh: unmodelled release view flag '$1'" >&2; exit 64 ;;
+    esac
+  done
+  [ "$view_jq" = '.assets[].name' ] || {
+    echo "fake gh: only --jq '.assets[].name' is modelled; got '$view_jq'" >&2; exit 64; }
+  view_src="$VARVE_FIXTURE_RELEASES/$view_repo/$view_version"
+  if [ ! -d "$view_src" ]; then
+    echo "release not found: $view_repo@$view_version" >&2
+    exit 1
+  fi
+  for f in "$view_src"/*; do
+    [ -f "$f" ] && printf '%s\n' "${f##*/}"
+  done
+  exit 0
+fi
+
 if [ "${1:-}" != "release" ] || [ "${2:-}" != "download" ]; then
-  echo "fake gh: only 'release download' is modelled; got: $*" >&2
+  echo "fake gh: only 'release view', 'release download' and 'attestation verify' are modelled; got: $*" >&2
   exit 64
 fi
 version="${3:?fake gh: no release tag}"

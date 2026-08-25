@@ -36,7 +36,9 @@ struct Cli {
 enum Cmd {
     /// Which binary would actually run here — and which layer it comes from.
     Which {
-        /// Tool name, e.g. `synth`.
+        /// Tool name, e.g. `synth` — or realm-qualified, e.g.
+        /// `bytecodealliance/wasm-tools`, to ask about one specific provider
+        /// where two realms of the composition ship the same name.
         tool: String,
     },
     /// Layers present in the local core.
@@ -136,9 +138,12 @@ enum Cmd {
         /// touching the checked-in pin.
         #[arg(long, value_name = "LAYER")]
         varve: Option<String>,
-        /// Tool and its arguments, after `--`. `OsString`, so an argument
-        /// that is not valid UTF-8 reaches the tool byte-for-byte instead of
-        /// being lossily rewritten (unix arguments are arbitrary bytes).
+        /// Tool and its arguments, after `--`. The tool may be realm-qualified
+        /// (`bytecodealliance/wasm-tools`) to reach one specific provider where
+        /// two realms of the composition ship the same name. `OsString`, so an
+        /// argument that is not valid UTF-8 reaches the tool byte-for-byte
+        /// instead of being lossily rewritten (unix arguments are arbitrary
+        /// bytes).
         #[arg(trailing_var_arg = true, required = true)]
         tool_and_args: Vec<std::ffi::OsString>,
     },
@@ -159,6 +164,21 @@ enum Cmd {
     Pubkey {
         /// The signing key file.
         key: PathBuf,
+    },
+    /// (CI) Translate a realm's `layer.toml` into the environment the layer
+    /// assembler reads (REQ-LAYERREPO-001). This is what lets a realm's
+    /// contents live in the realm's OWN repository — bumping a tool becomes a
+    /// one-line reviewed diff there, not a commit to the tool that signs it.
+    ///
+    /// Prints `KEY=value` lines for `$GITHUB_ENV`. It reads no network, writes
+    /// no files, and touches no key.
+    LayerSpec {
+        /// The realm's layer manifest.
+        #[arg(long, value_name = "FILE", default_value = "layer.toml")]
+        manifest: PathBuf,
+        /// Machine-readable output (see `varve docs layer-spec`).
+        #[arg(long)]
+        json: bool,
     },
     /// (CI) Assemble and SIGN a layer — the only way a layer comes into being.
     /// Writes an OCI image layout directory, the same shape `archive` produces.
@@ -701,6 +721,7 @@ fn run() -> anyhow::Result<Outcome> {
         ),
         Cmd::Keygen { out, public } => keygen(&out, public.as_deref()),
         Cmd::Pubkey { key } => pubkey(&key),
+        Cmd::LayerSpec { manifest, json } => layer_spec(&manifest, json),
         Cmd::SignAttestation {
             layer,
             kind,
@@ -1495,6 +1516,57 @@ fn self_verify(archive: &std::path::Path, envelope: &std::path::Path) -> anyhow:
     Ok(())
 }
 
+/// Resolve a `run`/`which` argument to (bare tool name, binary path).
+///
+/// A BARE argument dispatches through the pin's one choice per name — exactly
+/// one entry exists, whatever the composition holds (REQ-REALM2-001 clause 4c).
+/// A `realm/tool` argument reaches one specific provider, INCLUDING the one the
+/// pin did not choose (clause 4b): "compare our fork against upstream" is a
+/// real workflow, and losing the other binary entirely would be a worse answer
+/// than the refusal this feature replaces.
+fn dispatch_target<'a>(
+    resolved: &'a varve_core::Resolved,
+    arg: &str,
+) -> Option<(&'a str, &'a std::path::Path)> {
+    if arg.contains('/') {
+        return resolved
+            .qualified
+            .iter()
+            .find(|(provider, _)| provider.qualified().as_deref() == Some(arg))
+            .map(|(provider, path)| (provider.tool.as_str(), path.as_path()));
+    }
+    resolved
+        .tools
+        .iter()
+        .find(|(name, _)| name == arg)
+        .map(|(name, path)| (name.as_str(), path.as_path()))
+}
+
+/// Every address this pin answers to: the bare names, plus the realm-qualified
+/// form of any name more than one layer of the composition provides. An error
+/// listing only bare names would hide the very binary clause 4b keeps alive.
+fn addressable(resolved: &varve_core::Resolved) -> String {
+    let mut names: Vec<String> = resolved.tools.iter().map(|(n, _)| n.clone()).collect();
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (provider, _) in &resolved.qualified {
+        *counts.entry(provider.tool.as_str()).or_default() += 1;
+    }
+    for (provider, _) in &resolved.qualified {
+        if counts.get(provider.tool.as_str()).copied().unwrap_or(0) > 1
+            && let Some(q) = provider.qualified()
+        {
+            names.push(q);
+        }
+    }
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        "(nothing)".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
 fn run_tool(
     store: &Store,
     override_layer: Option<&str>,
@@ -1510,7 +1582,7 @@ fn run_tool(
         pin.digest = None;
     }
     let resolved = resolve(&pin, &ctx.store)?;
-    let Some((_, path)) = resolved.tools.iter().find(|(name, _)| name == tool) else {
+    let Some((tool, path)) = dispatch_target(&resolved, tool) else {
         // The same correction `which` carries: the layer HOLDS a `wit`, `crate`
         // or `vsix` payload, it just does not dispatch one (REQ-INSPECT-001
         // clause 3). "not part of layer" sends the reader to re-deposit
@@ -1531,12 +1603,7 @@ fn run_tool(
             "tool '{tool}' is not part of layer {} — it exposes: {}. `varve inspect` lists \
              every payload, dispatched and held.",
             resolved.layer.layer,
-            resolved
-                .tools
-                .iter()
-                .map(|(n, _)| n.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            addressable(&resolved)
         );
     };
     // Runnered entries (portable wasm) execute through their runner — from
@@ -2118,6 +2185,49 @@ fn pubkey(key: &std::path::Path) -> anyhow::Result<()> {
     let public = varve_core::keys::public_from_secret(&text, &key.display().to_string())?;
     // Bare on stdout, so it composes: trust-root = "$(varve pubkey root.key)"
     println!("{public}");
+    Ok(())
+}
+
+/// `layer.toml` → the assembler's environment (REQ-LAYERREPO-001).
+///
+/// Nothing here is trusted work: the output is consumed by the assembler, which
+/// verifies every byte it downloads regardless of what named it. What this must
+/// not do is translate a manifest INEXACTLY — a dropped tool or a truncated
+/// version produces a layer that signs and verifies while carrying the wrong
+/// contents, so `layerspec` refuses rather than approximates.
+fn layer_spec(manifest: &std::path::Path, json: bool) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(manifest).with_context(|| {
+        format!(
+            "cannot read layer manifest {}. This is the realm's own \
+             `layer.toml` — see `varve docs layer-repo`.",
+            manifest.display()
+        )
+    })?;
+    let parsed = varve_core::layerspec::parse_layer_manifest(&text)
+        .with_context(|| format!("in {}", manifest.display()))?;
+    let env = varve_core::layerspec::assembler_env(&parsed)
+        .with_context(|| format!("in {}", manifest.display()))?;
+    if json {
+        // The same values, as an object. `layer-spec` is tagged (CI), and a
+        // pipeline must never have to scrape prose to drive one
+        // (REQ-CIGATE-001 clause 2) — even when the prose is already
+        // KEY=value, since that shape exists for `$GITHUB_ENV`, not for
+        // programs.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "tarball_tools": env.layer_tools,
+                "wsc_version": env.wsc_version,
+                "vsix_packages": env.vsix_packages,
+                "realm": env.realm,
+                "channel": env.channel,
+                "registry": env.registry,
+                "varve_version": env.varve_version,
+            }))?
+        );
+    } else {
+        print!("{}", env.render());
+    }
     Ok(())
 }
 
@@ -3818,7 +3928,8 @@ fn load_pin() -> anyhow::Result<(Pin, PathBuf)> {
 fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
     let resolved = resolve(&ctx.pin, &ctx.store)?;
-    let Some((_, path)) = resolved.tools.iter().find(|(name, _)| name == tool) else {
+    let asked = tool.to_string();
+    let Some((tool, path)) = dispatch_target(&resolved, tool) else {
         // "is not part of layer" was FALSE for a held payload: the layer holds
         // it, verifies it, and hands it to an export adapter — it is simply not
         // DISPATCHED by name (REQ-INSPECT-001 clause 3). Saying a `wit` package
@@ -3840,12 +3951,7 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
             "tool '{tool}' is not part of layer {} as pinned here — the pin exposes: {}. \
              `varve inspect` lists every payload, dispatched and held.",
             resolved.layer.layer,
-            resolved
-                .tools
-                .iter()
-                .map(|(n, _)| n.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            addressable(&resolved)
         );
     };
     // STDOUT is the dispatched path, unchanged, so scripts that capture it
@@ -3855,6 +3961,21 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
         "layer {} ({}) {}",
         resolved.layer.layer, resolved.layer.channel, resolved.layer.digest
     );
+    // The line above names the layer the PIN resolves to, which for a composed
+    // tool is not the layer that owns the binary (`docs composition` says so).
+    // Someone who ASKED qualified is asking precisely about a provider, so name
+    // it — a third line, because the first two are what scripts capture.
+    if asked.contains('/')
+        && let Some((provider, _)) = resolved
+            .qualified
+            .iter()
+            .find(|(p, _)| p.qualified().as_deref() == Some(asked.as_str()))
+    {
+        println!(
+            "provided by realm '{}' layer {} {}",
+            provider.realm, provider.layer, provider.digest
+        );
+    }
     // …but the answer to "which binary runs here" is false if PATH disagrees,
     // and that is the README's own words for this command (varve#66).
     let me = std::env::current_exe().ok();

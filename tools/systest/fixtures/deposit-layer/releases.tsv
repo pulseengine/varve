@@ -14,21 +14,32 @@
 # is refused, and that the resulting spec is one `varve deposit` accepts.
 #
 # Columns:  repo <TAB> version <TAB> asset <TAB> shape
-#   tar:<binary>:nested  a .tar.gz holding <repo>-<version>/bin/<binary>
-#   tar:<binary>:flat    a .tar.gz holding <binary> at the root
-#   tar:none             a .tar.gz holding no binary at all
-#   raw                  a bare downloadable file (sigil's wsc binaries)
-#   blob                 an opaque package file (a .vsix)
+#   tar:<binary>:nested    a .tar.gz holding <repo>-<version>/bin/<binary>
+#   tar:<binary>:flat      a .tar.gz holding <binary> at the root
+#   tar:<binary>:upstream  a .tar.gz holding <asset-without-.tar.gz>/<binary> —
+#                          the layout bytecodealliance ships (verified by
+#                          untarring the real wasm-tools 1.257.1 macos asset)
+#   tar:none               a .tar.gz holding no binary at all
+#   raw                    a bare downloadable file (sigil's wsc binaries)
+#   blob                   an opaque package file (a .vsix)
 #
 # `!sums-style` sets how a repo writes SHA256SUMS.txt. Both forms are real and
 # both must parse — hence the `[ /]` in the assembler's grep and the `s# \./# #`
 # before sha256sum -c.
+#
+# `!proof` sets WHICH ingestion proof a repo publishes (REQ-INGEST-001):
+#   sums        a cosign-signed SHA256SUMS.txt — every pulseengine repo
+#   provenance  no sums at all, but a GitHub build attestation over the assets
+#   none        neither: tarballs and nothing else
+# Default is `sums`. The two non-default repos below are RECORDED, not
+# invented — see the scope note beside them.
 !sums-style	pulseengine/rivet	dotslash
 !sums-style	pulseengine/spar	bare
 !sums-style	pulseengine/loom	bare
 !sums-style	pulseengine/kiln	dotslash
 !sums-style	pulseengine/sigil	bare
 !sums-style	pulseengine/hollow	bare
+!sums-style	pulseengine/wasm-tools	bare
 
 # rivet — appears in BOTH lists: a CLI and a VS Code extension from one
 # release. This is the pair that killed the 2026.08.3 deposit.
@@ -83,3 +94,62 @@ pulseengine/hollow	v0.1.0	hollow-v0.1.0-aarch64-apple-darwin.tar.gz	tar:none
 pulseengine/hollow	v0.1.0	hollow-v0.1.0-x86_64-apple-darwin.tar.gz	tar:none
 pulseengine/hollow	v0.1.0	hollow-v0.1.0-aarch64-unknown-linux-gnu.tar.gz	tar:none
 pulseengine/hollow	v0.1.0	hollow-v0.1.0-x86_64-unknown-linux-gnu.tar.gz	tar:none
+
+# ── the second realm (REQ-INGEST-001) ────────────────────────────────────────
+# SCOPE, stated because a fixture that overstates what it recorded is worse
+# than no fixture. The asset NAMES, the tarball LAYOUT, the absence of
+# SHA256SUMS, and the presence or absence of a build attestation below were all
+# MEASURED on 2026-08-21 against the live releases:
+#
+#   gh release view v1.257.1 --repo bytecodealliance/wasm-tools --json assets
+#     -> ten tarballs/zips, no SHA256SUMS.txt, no .cosign.bundle
+#   gh attestation verify <asset> --repo bytecodealliance/wasm-tools
+#     -> exit 0; buildSignerURI .../publish.yml@refs/heads/main,
+#        sourceRepositoryDigest 3ef3cefcdc958c859a1dca79d677327e9453859d,
+#        and an in-toto statement whose subject[] carries the sha256 of every
+#        asset in the release
+#   the same command against a file of the bytes "bogus" -> exit 1 (HTTP 404)
+#   gh attestation verify <asset> --repo bytecodealliance/wit-bindgen
+#     -> exit 1 (HTTP 404): NEITHER mechanism
+#
+# What is NOT recorded: the payload BYTES (stand-ins, as everywhere in this
+# fixture), the sigstore cryptography (the `gh` double checks the binding, not
+# the signature — same scope as the cosign double), and the transparency-log
+# inclusion proof. So this fixture proves what the ASSEMBLER decides about an
+# ingestion proof, and nothing about sigstore being sound.
+
+# wasm-tools — build provenance and nothing else. The layer must take it.
+!proof	bytecodealliance/wasm-tools	provenance
+bytecodealliance/wasm-tools	v1.257.1	wasm-tools-1.257.1-aarch64-macos.tar.gz	tar:wasm-tools:upstream
+bytecodealliance/wasm-tools	v1.257.1	wasm-tools-1.257.1-x86_64-macos.tar.gz	tar:wasm-tools:upstream
+bytecodealliance/wasm-tools	v1.257.1	wasm-tools-1.257.1-aarch64-linux.tar.gz	tar:wasm-tools:upstream
+bytecodealliance/wasm-tools	v1.257.1	wasm-tools-1.257.1-x86_64-linux.tar.gz	tar:wasm-tools:upstream
+# Assets the layer does NOT take, kept because the provenance path harvests the
+# whole release: the attested subject list is wider than the layer, and that
+# must not confuse the selection.
+bytecodealliance/wasm-tools	v1.257.1	wasm-tools-1.257.1-riscv64-linux.tar.gz	tar:wasm-tools:upstream
+bytecodealliance/wasm-tools	v1.257.1	wasm-tools-1.257.1-x86_64-windows.zip	blob
+
+# pulseengine/wasm-tools — THE FORK, and the reason REQ-REALM2-001 exists.
+#
+# SCOPE: this fork is not published today; the row records the SHAPE such a
+# release has, not a measurement of one. What it is here to exercise is not
+# hypothetical — a fork exists precisely where upstream does not attest every
+# tool, so two realms shipping a tool called `wasm-tools` is the ORDINARY case
+# the moment one is cut. It is released through this org's own signed pipeline,
+# so it publishes a cosign-signed SHA256SUMS.txt (the default `!proof`) while
+# its upstream publishes build provenance and no sums — the two realms differ
+# in the mechanism that vouches for them as well as in the key that signs them.
+# Its asset naming is this org's (by Rust target triple), which is itself the
+# point: the same tool NAME arrives through two entirely different shapes.
+pulseengine/wasm-tools	v1.257.1-pulseengine.1	wasm-tools-v1.257.1-pulseengine.1-aarch64-apple-darwin.tar.gz	tar:wasm-tools:nested
+pulseengine/wasm-tools	v1.257.1-pulseengine.1	wasm-tools-v1.257.1-pulseengine.1-x86_64-apple-darwin.tar.gz	tar:wasm-tools:nested
+pulseengine/wasm-tools	v1.257.1-pulseengine.1	wasm-tools-v1.257.1-pulseengine.1-aarch64-unknown-linux-gnu.tar.gz	tar:wasm-tools:nested
+pulseengine/wasm-tools	v1.257.1-pulseengine.1	wasm-tools-v1.257.1-pulseengine.1-x86_64-unknown-linux-gnu.tar.gz	tar:wasm-tools:nested
+
+# wit-bindgen — NEITHER. The refusal case, and the one whose answer is a fork.
+!proof	bytecodealliance/wit-bindgen	none
+bytecodealliance/wit-bindgen	v0.60.0	wit-bindgen-0.60.0-aarch64-macos.tar.gz	tar:wit-bindgen:upstream
+bytecodealliance/wit-bindgen	v0.60.0	wit-bindgen-0.60.0-x86_64-macos.tar.gz	tar:wit-bindgen:upstream
+bytecodealliance/wit-bindgen	v0.60.0	wit-bindgen-0.60.0-aarch64-linux.tar.gz	tar:wit-bindgen:upstream
+bytecodealliance/wit-bindgen	v0.60.0	wit-bindgen-0.60.0-x86_64-linux.tar.gz	tar:wit-bindgen:upstream
