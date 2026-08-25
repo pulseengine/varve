@@ -1,5 +1,113 @@
 # Changelog
 
+## v0.29.0 — 2026-08-25
+
+Multi-realm distribution, and an ingestion premise I got wrong twice.
+
+varve has always described a world of several realms — PulseEngine tools that
+CHECK, bytecodealliance tools that BUILD — while every test of that world ran
+against fixtures varve itself wrote. This release makes the second realm real,
+moves a realm's contents out of varve's own repository, and corrects two
+research claims that were wrong because I read names instead of source.
+
+| | before | now |
+|---|---|---|
+| a second realm | a fixture varve wrote | `bytecodealliance/wasm-tools`, ingested by build attestation |
+| upstream releases | checked when someone remembered | scanned hourly, a cut proposed from the diff |
+| a realm's tool list | hard-coded in varve's deposit workflow | `layer.toml` in the realm's own repository |
+| a name in two realms | advice the error message could not carry out | `tools = ["bytecodealliance/wasm-tools"]`, the pin decides |
+
+### Added
+
+- **`varve layer-spec`** translates a realm's `layer.toml` into the environment
+  the layer assembler reads, so a realm's contents live in **that realm's**
+  repository and bumping `rivet` stops being a commit to the tool that signs
+  the layer. It refuses far more than it accepts: the assembler's inputs are
+  space-separated entries of colon-separated fields, an encoding that cannot
+  carry a value containing either, and a shell does not complain — it splits or
+  truncates, and the layer **signs and verifies while carrying the wrong
+  bytes**. A mistyped key, a second `raw-per-platform` tool, an extension under
+  a foreign owner, an unknown layout, a duplicate name, and a payload-less
+  manifest are all refused rather than approximated. (REQ-LAYERADAPT-001)
+- **Build attestations as a second ingestion mechanism.** A GitHub build
+  attestation binds an artifact to the workflow, repository and commit that
+  produced it — strictly stronger than a sums file, which only says "these
+  bytes hash to this". The mechanism that vouched for each payload is recorded
+  **inside the signed layer** and shown by `varve inspect`, so a consumer can
+  see how each tool was ingested rather than inferring it. A release offering
+  neither mechanism is refused; ingesting it anyway requires an explicit opt-in
+  that signs the operator's stated reason into the layer. (REQ-INGEST-001)
+- **Hourly upstream scanning.** Pinned upstreams are polled on a schedule and a
+  layer cut is proposed from the diff, so a rolling channel stops depending on
+  someone remembering to look. (REQ-ROLLING-001)
+- **Realm-qualified tool names in a pin** — `tools = ["bytecodealliance/wasm-tools"]`.
+  The old collision advice (*"restrict the pin's `tools`"*) was not merely
+  unimplemented, it was **structurally incapable**: `tools` filtered by name,
+  and the collision is two realms exposing the same name. The unchosen layer
+  stays installed and reachable when qualified, and exactly one shim per name
+  means the **pin** decides dispatch — never install order. Realm precedence
+  was rejected for that reason. (REQ-REALM2-001, #91)
+
+### Corrected — two claims that were wrong
+
+- **bytecodealliance publishes nothing verifiable.** Wrong. I had listed
+  release *assets* and filtered for cosign/sums filenames; GitHub build
+  attestations are not release assets. The correction produced a better design
+  than either option originally offered, because provenance binds
+  artifact → workflow → repository → commit.
+- **Keyless signing removes the long-lived secret** (`DD-025`). Wrong, and
+  recorded on premises drawn from module names and a `grep -c todo!`. Reading
+  the source: wsc 0.10.0's airgapped verifier is a **stub that fails open**,
+  `tuf.rs` performs no TUF, and the clockless fallback is diagnostic-only.
+  Most decisively, the trust bundle is itself signed with a long-lived key the
+  consumer must pin — so keyless **relocates** the secret rather than removing
+  it. `DD-026` supersedes `DD-025`; varve keeps ed25519. Five issues filed
+  upstream (sigil#256–#260).
+
+### Fixed
+
+- The layer assembler could only build a **pulseengine-shaped** layer, so "a
+  second realm is constructible" was a claim nothing could execute. It also
+  could not produce a **composing** layer at all.
+- A tarball tool whose asset template matched nothing was **silently omitted**
+  from the layer — this dropped the fork and the run went green. It now fails,
+  naming the template.
+- A tool whose repository basename disagreed with its manifest name would have
+  been deposited under the **basename**: `name = "wsc"` with
+  `repo = "pulseengine/sigil"` produced a payload called `sigil`, invisible to
+  anyone asking for `wsc`, in a layer that deposited, signed and verified
+  cleanly. Found by `cargo mutants`, not by review.
+
+### Verification
+
+`compose.rs` and `layerspec.rs` joined the trust-critical mutation gate, each
+at **zero survivors** — `compose.rs` arrived with three (two off-by-ones in the
+depth bound, one refusal branch), `layerspec.rs` with two, all killed before
+promotion. A gate admitted with known survivors is not a gate. That job's
+timeout moved 45 → 60 minutes: a gate that times out is indistinguishable from
+one that fails.
+
+`tools/systest/compose-realms.sh` builds both realms with the **production**
+assembler, signs each under its own root, and composes them through a signed
+include; its negative control rebuilds varve with the pin's choice ignored.
+Three of this release's defects came from that gate rather than from review.
+
+### Known limitations
+
+- **`REQ-LAYERREPO-001` is not verified and moved to v0.30.0.** The adapter it
+  needs shipped here, but its remaining clauses are not code: they require
+  `pulseengine-layers` to publish a real layer with a key its custodian must
+  provision, and varve to drop that secret only *after* that publish succeeds.
+  Neither can be discharged by the party writing the code. The layers
+  repository's deposit workflow **refuses to run rather than pretending**, and
+  it pins varve v0.28.0 — so it cannot call `layer-spec` until this release is
+  out.
+- **`REQ-BUNDLEVERIFY-001` remains blocked** on sigil#257 (wsc 0.11.0
+  unpublished).
+- The published rolling root is still a **provisional** key: no rotation, no
+  revocation, no threshold. `varve docs root-ceremony` states this in full, and
+  it is why varve's qualified channel is not open. (REQ-CEREMONY-001, v1.0.0)
+
 ## v0.28.0 — 2026-08-21
 
 The release that makes varve safe to operate. **Two exit codes changed — read
