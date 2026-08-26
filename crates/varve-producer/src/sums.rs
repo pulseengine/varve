@@ -131,6 +131,43 @@ impl Sums {
         Ok(Sums { entries })
     }
 
+    /// Build from `(name, digest)` pairs — the shape a build attestation's
+    /// subject list arrives in.
+    ///
+    /// Deliberately the same door as [`Sums::parse`]: an attestation-derived
+    /// digest gets the identical checks a sums-file digest gets, so
+    /// "which mechanism vouched" never changes how carefully the number is
+    /// handled.
+    pub fn from_pairs<I, N, D>(pairs: I) -> Result<Sums, SumsError>
+    where
+        I: IntoIterator<Item = (N, D)>,
+        N: AsRef<str>,
+        D: AsRef<str>,
+    {
+        let mut entries: BTreeMap<String, String> = BTreeMap::new();
+        for (line_no, (name, digest)) in pairs.into_iter().enumerate() {
+            let name = normalise(name.as_ref().trim());
+            let digest = digest.as_ref().trim().to_ascii_lowercase();
+            if name.is_empty() || !is_hex64(&digest) {
+                return Err(SumsError::Malformed {
+                    line_no: line_no + 1,
+                    line: format!("{digest}  {name}"),
+                });
+            }
+            if let Some(prev) = entries.get(name)
+                && *prev != digest
+            {
+                return Err(SumsError::Conflicting {
+                    name: name.to_string(),
+                    first: prev.clone(),
+                    second: digest,
+                });
+            }
+            entries.insert(name.to_string(), digest);
+        }
+        Ok(Sums { entries })
+    }
+
     /// The digest for exactly this name. `None` when the release does not
     /// publish it — an expected answer, since not every tool builds for every
     /// platform.
@@ -343,6 +380,38 @@ mod tests {
         let s = Sums::parse(REAL).expect("parses");
         assert_eq!(s.digest_of("nothing-like-this.tar.gz"), None);
         assert!(!s.is_empty());
+    }
+
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn pairs_get_the_same_checks_a_parsed_file_gets() {
+        let ok = Sums::from_pairs([(
+            "a.tar.gz",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        )])
+        .expect("accepts");
+        assert_eq!(
+            ok.digest_of("a.tar.gz"),
+            Some("1111111111111111111111111111111111111111111111111111111111111111")
+        );
+        // A short or non-hex digest is refused, exactly as in a parsed file.
+        assert!(Sums::from_pairs([("a", "abc")]).is_err());
+        assert!(Sums::from_pairs([("", "1".repeat(64))]).is_err());
+        // Reported at its own 1-based position, and checked at a position past
+        // the first: at index 0 every plausible arithmetic looks alike.
+        let err = Sums::from_pairs([
+            ("a".to_string(), "1".repeat(64)),
+            ("b".into(), "nope".into()),
+        ])
+        .expect_err("refuses");
+        assert!(
+            matches!(err, SumsError::Malformed { line_no: 2, .. }),
+            "{err:?}"
+        );
+        // And the same name at two digests is still a coin flip.
+        let err =
+            Sums::from_pairs([("a", "1".repeat(64)), ("a", "2".repeat(64))]).expect_err("refuses");
+        assert!(matches!(err, SumsError::Conflicting { .. }), "{err:?}");
     }
 
     // rivet: verifies REQ-PRODUCER-002
