@@ -32,8 +32,8 @@ env:
   # ordeal rejoined at v0.18.0 — its first cosign-signed release (ordeal#116).
   # Entry shape: repo_tool:version[:binary] — binary defaults to the tool
   # name; kiln ships its CLI as `kilnd`.
-  TARBALL_TOOLS: "rivet:v0.33.1 synth:v0.55.0 loom:v1.2.0 meld:v0.42.0 spar:v0.36.0 witness:v0.39.0 ordeal:v0.18.0 kiln:v0.4.4:kilnd"
-  WSC_VERSION: v0.10.0
+  TARBALL_TOOLS: "rivet:v0.34.0 spar:v0.40.0 synth:v0.58.0 witness:v0.43.0 ordeal:v0.19.0 loom:v1.4.0 meld:v0.52.0 kiln:v0.4.4:kilnd"
+  WSC_VERSION: v0.11.0
   # VS Code extensions carried as kind="vsix" payloads (REQ-VSIX-001).
   # Entry shape: repo:version:extension-name:asset-template, where the
   # template spells the release asset with %V for the bare version and, when
@@ -43,7 +43,7 @@ env:
   # rivet ships a single portable .vsix; spar ships one per platform, so its
   # payloads carry varve `platform` values and a consumer resolves only their
   # own — the same rule the tool payloads follow.
-  VSIX_PACKAGES: "rivet:v0.33.1:rivet-sdlc:rivet-sdlc-%V.vsix spar:v0.36.0:spar-aadl:spar-aadl-%P-%V.vsix"
+  VSIX_PACKAGES: "rivet:v0.34.0:rivet-sdlc:rivet-sdlc-%V.vsix spar:v0.40.0:spar-aadl:spar-aadl-%P-%V.vsix"
 
 jobs:
   deposit:
