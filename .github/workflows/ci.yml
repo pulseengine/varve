@@ -186,6 +186,14 @@ jobs:
         # in the depth bound and one refusal branch — all killed before it was
         # promoted, since a gate admitted with known survivors is not a gate.
         #
+        # The varve-producer modules joined together (REQ-PRODUCER-002 clause
+        # 4). They decide which upstream release becomes which payload, which
+        # mechanism vouched for it, and which digest is transcribed into the
+        # signed layer -- the same class of decision the varve-core entries
+        # hold. A clean-room review pointed out that they were at zero
+        # survivors with NOTHING keeping them there: the nightly full-workspace
+        # run is `|| true`, so a snapshot is not a gate.
+        #
         # layerspec.rs joined on the same terms: it decides which upstream
         # release becomes which payload in a signed layer, and a mistranslation
         # there deposits the wrong bytes under a good signature. It arrived at
@@ -206,7 +214,13 @@ jobs:
             -f crates/varve-core/src/selfverify.rs \
             -f crates/varve-core/src/reverify.rs \
             -f crates/varve-core/src/exportstamp.rs \
-            -f crates/varve-core/src/layerspec.rs
+            -f crates/varve-core/src/layerspec.rs \
+            -f crates/varve-producer/src/asset.rs \
+            -f crates/varve-producer/src/attestation.rs \
+            -f crates/varve-producer/src/forge.rs \
+            -f crates/varve-producer/src/ingest.rs \
+            -f crates/varve-producer/src/spec.rs \
+            -f crates/varve-producer/src/sums.rs
 
   proofs:
     name: SMT obligations (ordeal, certificate-checked)

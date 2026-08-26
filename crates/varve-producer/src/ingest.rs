@@ -79,8 +79,30 @@ pub struct ReleaseProbe {
     /// `cosign verify-blob` was run and its outcome. `None` when it was not
     /// run because the assets were absent.
     pub cosign: Option<Result<(), String>>,
-    /// A build attestation verified for some asset: (signer, source commit).
-    pub attestation: Option<(String, String)>,
+    /// What `gh attestation verify` established. THREE states, for the same
+    /// reason [`Rung`] has three: `Option` cannot distinguish "this release
+    /// has no attestation" from "this release HAS one and it did not verify",
+    /// and collapsing those is how a rejected proof becomes a silent
+    /// downgrade. A clean-room review found the first version of this field
+    /// was an `Option<(String, String)>`, which made
+    /// [`Rung::Failed`] unreachable from rung 2 — the module prevented the
+    /// conflation on rung 1 and reproduced it one rung down.
+    ///
+    /// The shell has the same hole: `if gh attestation verify … 2>/dev/null`
+    /// reads a verification FAILURE as "not attested" and carries on.
+    pub attestation: AttestationProbe,
+}
+
+/// What was observed about a release's build attestation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AttestationProbe {
+    /// No attestation exists for any asset of this release.
+    #[default]
+    NotAttested,
+    /// An attestation verified: (signer, source commit).
+    Verified { signer: String, commit: String },
+    /// An attestation EXISTS and did not verify. Not the same as absent.
+    Rejected(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,8 +207,9 @@ pub fn rung_cosign_sums(forge: &Forge, repo: &str, probe: &ReleaseProbe) -> Rung
 /// Rung 2 — a GitHub build attestation.
 pub fn rung_build_provenance(probe: &ReleaseProbe) -> Rung {
     match &probe.attestation {
-        None => Rung::NotOffered,
-        Some((signer, commit)) => Rung::Accepted {
+        AttestationProbe::NotAttested => Rung::NotOffered,
+        AttestationProbe::Rejected(detail) => Rung::Failed(detail.clone()),
+        AttestationProbe::Verified { signer, commit } => Rung::Accepted {
             signer: signer.clone(),
             asserts: format!(
                 "built by {signer} from source commit {commit}; this payload's \
@@ -334,7 +357,7 @@ mod tests {
             has_sums: true,
             has_cosign_bundle: true,
             cosign: Some(Ok(())),
-            attestation: None,
+            attestation: AttestationProbe::NotAttested,
         }
     }
 
@@ -389,7 +412,10 @@ mod tests {
             cosign: Some(Err("certificate identity mismatch".into())),
             // An attestation IS available: if the ladder downgraded, this is
             // the weaker rung it would silently land on.
-            attestation: Some(("https://github.com/evil/wf".into(), "deadbeef".into())),
+            attestation: AttestationProbe::Verified {
+                signer: "https://github.com/evil/wf".into(),
+                commit: "deadbeef".into(),
+            },
             ..sums_ok()
         };
         let err = choose(
@@ -433,16 +459,48 @@ mod tests {
         assert!(matches!(err, IngestError::ProofRejected { .. }), "{err:?}");
     }
 
+    /// The hole a clean-room review found: rung 2 could not express failure at
+    /// all, so an attestation that EXISTS and fails to verify was
+    /// indistinguishable from a release having none — and would have fallen
+    /// through to the no-mechanism path, where an opt-in could wave it in.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_rejected_attestation_aborts_rather_than_reading_as_unattested() {
+        let probe = ReleaseProbe {
+            attestation: AttestationProbe::Rejected("no attestation matches the subject".into()),
+            ..Default::default()
+        };
+        // Even with an opt-in that WOULD have rescued a release offering
+        // nothing, a failed proof must not be rescued.
+        let mut optins = BTreeMap::new();
+        optins.insert("acme/tool".to_string(), "we need it".to_string());
+        let err = choose(&Forge::github_com(), "acme/tool", "v1.0.0", &probe, &optins)
+            .expect_err("aborts");
+        assert!(
+            matches!(&err, IngestError::ProofRejected { detail, .. }
+                     if detail.contains("no attestation matches")),
+            "{err:?}"
+        );
+    }
+
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_absent_attestation_is_still_merely_not_offered() {
+        let probe = ReleaseProbe::default();
+        assert_eq!(rung_build_provenance(&probe), Rung::NotOffered);
+    }
+
     /// bytecodealliance publishes no sums and no bundle, and IS attested.
     // rivet: verifies REQ-INGEST-001
     #[test]
     fn build_provenance_carries_a_release_that_publishes_no_sums() {
         let probe = ReleaseProbe {
-            attestation: Some((
-                "https://github.com/bytecodealliance/wasm-tools/.github/workflows/release.yml"
-                    .into(),
-                "abc123".into(),
-            )),
+            attestation: AttestationProbe::Verified {
+                signer:
+                    "https://github.com/bytecodealliance/wasm-tools/.github/workflows/release.yml"
+                        .into(),
+                commit: "abc123".into(),
+            },
             ..Default::default()
         };
         let a = choose(
@@ -481,7 +539,7 @@ mod tests {
             has_sums: true,
             has_cosign_bundle: false,
             cosign: Some(Ok(())),
-            attestation: None,
+            attestation: AttestationProbe::NotAttested,
         };
         assert_eq!(
             rung_cosign_sums(&Forge::github_com(), "r", &probe),

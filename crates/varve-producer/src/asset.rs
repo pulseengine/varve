@@ -40,6 +40,22 @@ pub fn upstream_platform_tag(triple: &str) -> Option<&'static str> {
     }
 }
 
+/// The platform tags VS Code uses for a per-platform extension package.
+///
+/// A different vocabulary again from both the Rust triple and the short
+/// upstream tag, for the same four machines. Recorded rather than derived,
+/// because a guessed spelling produces a template that matches nothing — and
+/// this pipeline has already shipped a layer missing a payload that way.
+pub fn vscode_platform_tag(triple: &str) -> Option<&'static str> {
+    match triple {
+        "aarch64-apple-darwin" => Some("darwin-arm64"),
+        "x86_64-apple-darwin" => Some("darwin-x64"),
+        "aarch64-unknown-linux-gnu" => Some("linux-arm64"),
+        "x86_64-unknown-linux-gnu" => Some("linux-x64"),
+        _ => None,
+    }
+}
+
 /// A placeholder an asset template may carry.
 ///
 /// Kept as an enum rather than a set of `str::replace` calls so that adding a
@@ -83,6 +99,16 @@ pub enum TemplateError {
     UnknownPlaceholder { template: String, found: String },
     /// `%U` was used for a triple that has no recorded upstream tag.
     NoUpstreamTag { template: String, triple: String },
+    /// `%P` was used for a triple that has no recorded VS Code tag.
+    NoVsCodeTag { template: String, triple: String },
+    /// The template asks for a platform token and no platform was supplied.
+    ///
+    /// Returning the token unexpanded instead — as the first version of this
+    /// function did — produces a name like `spar-aadl-%P-0.34.0.vsix`, which
+    /// matches no asset. The payload then vanishes from a layer that still
+    /// assembles, signs and publishes. That is the precise defect this module
+    /// exists to prevent, so the half-expanded string must not be reachable.
+    MissingPlatform { template: String, token: String },
 }
 
 impl fmt::Display for TemplateError {
@@ -95,6 +121,20 @@ impl fmt::Display for TemplateError {
                  target triple), %U (short upstream tag), %P (VS Code platform). \
                  An unexpanded placeholder matches no release asset, and the \
                  payload would be dropped from a layer that still signs."
+            ),
+            TemplateError::NoVsCodeTag { template, triple } => write!(
+                f,
+                "asset template {template:?} uses %P, but {triple:?} has no \
+                 recorded VS Code platform tag. Add it to `vscode_platform_tag` \
+                 from the marketplace's real package names rather than guessing \
+                 the spelling."
+            ),
+            TemplateError::MissingPlatform { template, token } => write!(
+                f,
+                "asset template {template:?} asks for {token}, but no platform \
+                 was supplied for this expansion. Leaving {token} in the name \
+                 would produce an asset that matches nothing, and the payload \
+                 would be dropped from a layer that still signs."
             ),
             TemplateError::NoUpstreamTag { template, triple } => write!(
                 f,
@@ -154,9 +194,40 @@ pub fn expand(
                 })?;
             out = out.replace(Placeholder::UpstreamTag.token(), tag);
         }
-    }
-    if let Some(p) = vscode_platform {
+        if out.contains(Placeholder::VsCodePlatform.token()) {
+            // Derived from the triple unless the caller named one explicitly:
+            // a per-platform extension is selected over the SAME four machines
+            // as everything else, and requiring the caller to remember a third
+            // vocabulary is exactly how %P went unexpanded in the first place.
+            let tag = match vscode_platform {
+                Some(p) => p.to_string(),
+                None => vscode_platform_tag(triple)
+                    .ok_or_else(|| TemplateError::NoVsCodeTag {
+                        template: template.to_string(),
+                        triple: triple.to_string(),
+                    })?
+                    .to_string(),
+            };
+            out = out.replace(Placeholder::VsCodePlatform.token(), &tag);
+        }
+    } else if let Some(p) = vscode_platform {
         out = out.replace(Placeholder::VsCodePlatform.token(), p);
+    }
+
+    // Anything still unexpanded would match no asset. Refusing here is what
+    // makes this function's contract true rather than aspirational: the first
+    // version documented this behaviour and returned Ok with the literal token.
+    for ph in [
+        Placeholder::Triple,
+        Placeholder::UpstreamTag,
+        Placeholder::VsCodePlatform,
+    ] {
+        if out.contains(ph.token()) {
+            return Err(TemplateError::MissingPlatform {
+                template: template.to_string(),
+                token: ph.token().to_string(),
+            });
+        }
     }
     Ok(out)
 }
@@ -324,6 +395,106 @@ mod tests {
                 "no upstream tag for {p}"
             );
         }
+    }
+
+    /// The defect a clean-room review found in this very module: `%P` was
+    /// never substituted, so a real VSIX template expanded to a literal
+    /// `spar-aadl-%P-0.34.0.vsix`, matched nothing on every platform, and the
+    /// extension would have vanished from a layer that still signs. `select`
+    /// passed `vscode_platform: None` and `expand` returned Ok with the token
+    /// still in it.
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn a_per_platform_vsix_template_selects_the_real_marketplace_names() {
+        let sel = select(
+            "spar-aadl-%P-%V.vsix",
+            "v0.34.0",
+            DEFAULT_PLATFORMS,
+            &avail(&[
+                "spar-aadl-darwin-arm64-0.34.0.vsix",
+                "spar-aadl-linux-x64-0.34.0.vsix",
+            ]),
+        )
+        .expect("selects");
+        let names: Vec<&str> = sel.matched.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "spar-aadl-darwin-arm64-0.34.0.vsix",
+                "spar-aadl-linux-x64-0.34.0.vsix"
+            ],
+            "matched={:?} missing={:?}",
+            sel.matched,
+            sel.missing
+        );
+        // And nothing may still carry the token.
+        assert!(
+            sel.matched.iter().all(|(_, n)| !n.contains('%'))
+                && sel.missing.iter().all(|n| !n.contains('%')),
+            "{sel:?}"
+        );
+    }
+
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn every_default_platform_has_a_vscode_tag() {
+        assert_eq!(
+            vscode_platform_tag("aarch64-apple-darwin"),
+            Some("darwin-arm64")
+        );
+        assert_eq!(
+            vscode_platform_tag("x86_64-apple-darwin"),
+            Some("darwin-x64")
+        );
+        assert_eq!(
+            vscode_platform_tag("aarch64-unknown-linux-gnu"),
+            Some("linux-arm64")
+        );
+        assert_eq!(
+            vscode_platform_tag("x86_64-unknown-linux-gnu"),
+            Some("linux-x64")
+        );
+        assert_eq!(vscode_platform_tag("riscv64-unknown-linux-gnu"), None);
+        for p in DEFAULT_PLATFORMS {
+            assert!(vscode_platform_tag(p).is_some(), "no VS Code tag for {p}");
+        }
+    }
+
+    /// The doc comment used to say this was an error and it was not: expand
+    /// returned Ok with the literal token, which is the enabling mechanism for
+    /// the bug above. A half-expanded name must be unreachable.
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn a_platform_token_with_no_platform_is_refused_not_left_in_the_name() {
+        for (template, token) in [
+            ("t-%T.tar.gz", "%T"),
+            ("t-%U.tar.gz", "%U"),
+            ("t-%P.vsix", "%P"),
+        ] {
+            let err = expand(template, "v1.0.0", None, None).expect_err("must refuse");
+            assert_eq!(
+                err,
+                TemplateError::MissingPlatform {
+                    template: template.into(),
+                    token: token.into()
+                },
+                "{template}"
+            );
+            assert!(err.to_string().contains("matches nothing"), "{err}");
+        }
+    }
+
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn an_unknown_triple_for_a_vscode_template_is_refused_rather_than_guessed() {
+        let err = expand(
+            "t-%P.vsix",
+            "v1.0.0",
+            Some("riscv64-unknown-linux-gnu"),
+            None,
+        )
+        .expect_err("must refuse");
+        assert!(matches!(err, TemplateError::NoVsCodeTag { .. }), "{err:?}");
     }
 
     /// A template is a string from a manifest, so it can contain anything.
