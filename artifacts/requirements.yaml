@@ -3580,6 +3580,21 @@ artifacts:
       and the gate stays hermetic. (6) No shell producer kit shall be
       published as a release artifact: an interim tarball would be a public
       artifact consumers could pin, that we would then have to withdraw.
+      (7) The forge shall be DATA, not a string literal. The pipeline this
+      replaces hardcoded `github.com` and
+      `token.actions.githubusercontent.com` in five places, which works right
+      up until an organisation runs varve against GitHub Enterprise Server —
+      and an organisation that wants a signed, pinned toolchain is
+      disproportionately likely to be exactly that organisation. The host and
+      its OIDC issuer shall be selectable (`GH_HOST`, as `gh` itself uses,
+      plus an issuer override for an instance that does not follow the default
+      scheme), the recorded signer and asserted claim shall follow the
+      instance, and no value from the public host shall appear in a record
+      produced against another. Honest limit: build-provenance availability
+      differs by GHES version and has not been exercised against a real
+      instance from this repository, so it shall be reported as a caveat
+      rather than assumed — a release publishing a cosign-signed
+      SHA256SUMS.txt uses rung 1 and does not depend on it.
 
   - id: REQ-LAYERADAPT-001
     type: requirement

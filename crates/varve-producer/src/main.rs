@@ -6,7 +6,7 @@
 //! and pushes to a registry. Keeping them apart keeps that claim true.
 
 use clap::{Parser, Subcommand};
-use varve_producer::asset;
+use varve_producer::{asset, forge::Forge};
 
 #[derive(Parser)]
 #[command(name = "varve-producer", version, about, long_about = None)]
@@ -17,6 +17,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Report which forge this run would ingest from, and which authority
+    /// would be expected to have signed it. Printed before anything is
+    /// fetched, because a wrong issuer fails closed but confusingly.
+    Forge,
+
     /// Show which release assets a template selects, without downloading
     /// anything. The template language is the part of this pipeline that has
     /// silently dropped a tool from a published layer, so it is inspectable on
@@ -37,8 +42,30 @@ enum Cmd {
     },
 }
 
+/// `GH_HOST` is what `gh` itself uses to target an instance, so varve reads
+/// the same variable rather than inventing a second one.
+fn forge_from_env() -> Forge {
+    Forge::from_env(
+        std::env::var("GH_HOST").ok().as_deref(),
+        std::env::var("VARVE_OIDC_ISSUER").ok().as_deref(),
+    )
+}
+
 fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
+        Cmd::Forge => {
+            let f = forge_from_env();
+            println!("host        {}", f.host);
+            println!("oidc issuer {}", f.oidc_issuer);
+            if !f.is_public_github() {
+                println!(
+                    "note        build-provenance availability differs by GitHub \
+                     Enterprise Server version; a release publishing a \
+                     cosign-signed SHA256SUMS.txt does not depend on it."
+                );
+            }
+            Ok(())
+        }
         Cmd::Assets {
             template,
             version,

@@ -11,3 +11,5 @@
 //! (`gh`, `cosign`, `oras`) are invoked.
 
 pub mod asset;
+pub mod forge;
+pub mod ingest;
