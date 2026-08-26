@@ -13,7 +13,7 @@ research claims that were wrong because I read names instead of source.
 | | before | now |
 |---|---|---|
 | a second realm | a fixture varve wrote | `bytecodealliance/wasm-tools`, ingested by build attestation |
-| upstream releases | checked when someone remembered | scanned hourly, a cut proposed from the diff |
+| upstream releases | checked when someone remembered | scanned daily, a cut proposed from the diff |
 | a realm's tool list | hard-coded in varve's deposit workflow | `layer.toml` in the realm's own repository |
 | a name in two realms | advice the error message could not carry out | `tools = ["bytecodealliance/wasm-tools"]`, the pin decides |
 
@@ -37,9 +37,17 @@ research claims that were wrong because I read names instead of source.
   see how each tool was ingested rather than inferring it. A release offering
   neither mechanism is refused; ingesting it anyway requires an explicit opt-in
   that signs the operator's stated reason into the layer. (REQ-INGEST-001)
-- **Hourly upstream scanning.** Pinned upstreams are polled on a schedule and a
-  layer cut is proposed from the diff, so a rolling channel stops depending on
-  someone remembering to look. (REQ-ROLLING-001)
+- **Daily upstream scanning.** Pinned upstreams are polled at 06:17 UTC and a
+  layer cut is **proposed** as a pull request — the workflow automates the toil
+  and stops at the judgement, because `channel = "rolling"` is not a trust
+  boundary: a rolling layer is signed by the same realm root as a qualified
+  one, and signing unattended contradicts `varve docs root-ceremony`. Daily
+  rather than hourly is measured, not arbitrary: over the 30 days to
+  2026-08-21 the nine repos in this layer published 56 releases across 15
+  distinct days, so hourly would scan 24x to learn the same thing and, on a
+  burst day, rewrite one proposal up to nine times — each rewrite invalidating
+  the assembly gate that had just run on it. `workflow_dispatch` covers the
+  case where waiting for tomorrow is too slow. (REQ-ROLLING-001, DD-024)
 - **Realm-qualified tool names in a pin** — `tools = ["bytecodealliance/wasm-tools"]`.
   The old collision advice (*"restrict the pin's `tools`"*) was not merely
   unimplemented, it was **structurally incapable**: `tools` filtered by name,
