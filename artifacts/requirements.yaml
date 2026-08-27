@@ -3534,6 +3534,68 @@ artifacts:
       varve keeps the secret until the new repository has proven it can
       publish without it.
 
+  - id: REQ-PRODUCER-002
+    type: requirement
+    title: The producer pipeline is a tested Rust program, not a shell script shipped as a tarball
+    status: draft
+    release: v0.30.0
+    description: >
+      The pipeline that assembles, signs and publishes a layer is ~3.5k lines
+      of bash. Every defect it has had came from that choice, and none of them
+      were caught by review: `gh release download` refusing to overwrite a
+      sums file it had already fetched (which killed the 2026.08.3 deposit
+      mid-run), a mistyped %V in an asset template that omitted a tool from a
+      layer that still published, an apostrophe inside ${VAR?message} that
+      opened an unterminated quote, `stat -c%s` and `timeout` that exist only
+      on GNU userlands. Testing it requires building fake `gh` and `cosign`
+      binaries as fixtures, because there is no way to test shell that shells
+      out.
+      .
+      The decisive argument is not aesthetics, it is distribution. A realm
+      assembles its own layers in its own repository (REQ-LAYERREPO-001
+      clause 3: no varve source checkout), so a shell pipeline must be SHIPPED
+      — which means a tarball of scripts, a gate proving the tarball is
+      closed under sourcing, a release step to sign it, and a version of it
+      pinned in every realm. All of that scaffolding exists only because the
+      pipeline is shell. A binary is already a released, signed artifact, and
+      the realm repository already downloads one.
+      .
+      Clauses: (1) The pipeline shall be a Rust program in this workspace,
+      released through the same signed pipeline as `varve` (cosign-signed
+      SHA256SUMS, build provenance, SBOM). (2) It shall be a SEPARATE binary
+      from `varve`, not a subcommand of it: `varve` touches no network and
+      that claim is load-bearing in `docs air-gap` and the threat model,
+      while the producer fetches releases, verifies signatures over the
+      network and pushes to a registry. (3) It shall call varve-core as a
+      LIBRARY for deposit, sign-status and attach-status rather than
+      subprocessing the `varve` binary, so those paths are typed and tested
+      in-process. (4) The logic that has historically failed — asset template
+      expansion, per-platform asset selection, idempotent download,
+      version comparison, ingestion-mechanism selection — shall be pure
+      functions with unit tests, and shall join the trust-critical mutation
+      gate at zero survivors: it decides which upstream bytes become which
+      payload in a signed layer. (5) External services that genuinely need
+      to stay external — `gh`, `cosign`, `oras` — shall remain subprocess
+      calls at a single seam, so the existing fixture doubles keep working
+      and the gate stays hermetic. (6) No shell producer kit shall be
+      published as a release artifact: an interim tarball would be a public
+      artifact consumers could pin, that we would then have to withdraw.
+      (7) The forge shall be DATA, not a string literal. The pipeline this
+      replaces hardcoded `github.com` and
+      `token.actions.githubusercontent.com` in five places, which works right
+      up until an organisation runs varve against GitHub Enterprise Server —
+      and an organisation that wants a signed, pinned toolchain is
+      disproportionately likely to be exactly that organisation. The host and
+      its OIDC issuer shall be selectable (`GH_HOST`, as `gh` itself uses,
+      plus an issuer override for an instance that does not follow the default
+      scheme), the recorded signer and asserted claim shall follow the
+      instance, and no value from the public host shall appear in a record
+      produced against another. Honest limit: build-provenance availability
+      differs by GHES version and has not been exercised against a real
+      instance from this repository, so it shall be reported as a caveat
+      rather than assumed — a release publishing a cosign-signed
+      SHA256SUMS.txt uses rung 1 and does not depend on it.
+
   - id: REQ-LAYERADAPT-001
     type: requirement
     title: A realm's manifest is translated into assembler inputs by varve, exactly or not at all
