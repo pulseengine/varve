@@ -3724,11 +3724,26 @@ artifacts:
       into a file — the check must fail on the pattern, not rely on review.
       (3) The gate shall carry a negative control proving it goes red, since a
       lint that cannot fail is the defect class this project exists to close.
-      (4) The signing job shall additionally be gated by a deployment
-      environment with required reviewers, so the two-person rule is enforced
-      by the platform rather than asserted in prose — `docs ci` and the custody
-      concept both currently describe a convention as though it were a control.
-      (5) `docs ci` shall stop presenting the file fallback as acceptable for a
+      (4) The signing job shall be gated by whatever control the operating
+      organisation can actually staff, and the documentation shall claim
+      exactly that and no more. For a SINGLE-OPERATOR realm — which this one
+      is, at 105 commits by one person — a required-reviewer gate is
+      unstaffable, and configuring one would produce either a self-approval
+      (a control in name only) or a permanently blocked pipeline. Neither is
+      better than saying so. What such an operator can have instead is
+      DETECTION rather than prevention: a wait timer that opens a cancel
+      window, an environment restricted to the ref the deposit may run from,
+      and above all a durable record of what was signed and when, so an
+      unauthorised signature is discoverable after the fact. Prevention needs
+      a second person; detection does not.
+      (5) No varve document shall prescribe a two-person rule for varve's own
+      realm while varve's own realm has one person. The rule stays in
+      `docs root-ceremony` as advice to organisations that HAVE two people,
+      explicitly marked as such, and varve's own posture is stated plainly
+      beside it. A procedure the publisher cannot follow is the finding that
+      invalidates every other procedural claim by induction, and this project
+      has already collected that finding once.
+      (6) `docs ci` shall stop presenting the file fallback as acceptable for a
       realm root: it is acceptable for a throwaway key and nothing else.
 
   - id: REQ-LAYERADAPT-001

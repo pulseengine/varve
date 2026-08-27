@@ -21,8 +21,10 @@ will own.
 Every command here is offline; none of them contacts a registry, an API, or a
 transparency log (`varve docs air-gap`). So generate on a machine that has
 never been and never will be connected — a wiped laptop, a live USB image, an
-existing air-gapped build host. Two people present, and the transcript recorded
-on paper.
+existing air-gapped build host. Two people present where you have two people,
+and the transcript recorded on paper. If you are one person, see
+"When you are one person" below before you read the rest as a checklist you
+have failed.
 
 ```sh
 varve keygen --out root.key --pub root.pub
@@ -106,9 +108,10 @@ The key is offline media plus paper, and nothing else:
 
 * Two or more geographically separate safes, each holding one share (or one
   full copy under a different control, if you accepted single custody).
-* An access log with two-person rule. Every use of the key is a ceremony
-  entry, because there is no revocation to fall back on if a use was not
-  authorised.
+* An access log. Every use of the key is a ceremony entry, because there is no
+  revocation to fall back on if a use was not authorised. Add a two-person
+  rule if you have two people; if you do not, the log is what you have, and it
+  is worth more when it is written by the machine than by the operator.
 * A **read test on a schedule** — annually is a reasonable floor. Restore from
   the medium onto an air-gapped machine and run `varve pubkey`; the failure
   mode you are looking for is a safe full of unreadable USB sticks, discovered
@@ -117,6 +120,40 @@ The key is offline media plus paper, and nothing else:
   In CI the key lives in the secret store and reaches varve through a file
   descriptor, never a workspace file — `varve docs ci`, "Getting the key into
   CI", has the two patterns that avoid writing it to disk at all.
+
+## When you are one person
+
+Most of this topic assumes an organisation with several people who owe each
+other a duty of care. Plenty of realms will not have that, and **varve's own
+does not**: the `pulseengine` realm is operated by one person. Saying so is not
+a disclaimer, it is the point — a document that prescribes controls its own
+author cannot staff is a document an assessor will use to discount everything
+else in it.
+
+So, honestly, for a single operator:
+
+* **The two-person rule is unavailable, and a fake one is worse than none.**
+  A required-reviewer gate you approve yourself is a control in name only, and
+  it will read as an attempt to appear compliant. Do not configure one. State
+  that the realm is single-operator instead.
+* **Trade prevention for detection.** Prevention is what a second person buys.
+  Detection you can have alone: a wait timer before a signing job runs so there
+  is a window to cancel it, an environment restricted to the one ref a deposit
+  may run from, and a durable record of what was signed and when — written by
+  the pipeline, not by you. An unauthorised signature you can discover
+  afterwards is enormously better than one you cannot.
+* **Split custody is still available, and matters more, not less.** M-of-N
+  shares do not need colleagues; they need parties with continuity. Prefer at
+  least one holder that is an institution — a bank deposit box, a notary —
+  because an institution survives you moving house, changing jobs, or dying,
+  and a friend's desk drawer does not.
+* **Write down what happens if you stop.** The likeliest end of a
+  single-operator realm is not compromise, it is the operator stopping. A
+  realm whose root is unreachable while consumers still pin it is a
+  supply-chain hazard that decays quietly. Decide now, in writing, what
+  happens: who inherits, and failing that, that a final layer is published
+  declaring end-of-life so consumers know to unpin. That decision costs
+  nothing today and is unmakeable later.
 
 ## 5. Use it as rarely as possible
 
