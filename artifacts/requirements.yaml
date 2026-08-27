@@ -3596,6 +3596,70 @@ artifacts:
       rather than assumed — a release publishing a cosign-signed
       SHA256SUMS.txt uses rung 1 and does not depend on it.
 
+  - id: REQ-WHICHSTDOUT-001
+    type: requirement
+    title: A resolver's answer is its stdout, and nothing else is
+    status: draft
+    release: v0.30.0
+    description: >
+      `varve which <tool>` prints the resolved path AND a provenance line to
+      stdout, so `M=$(varve which meld)` yields a two-line string that is not
+      an executable path. A caller doing the obvious thing gets a broken value
+      from the command whose entire purpose is answering "which binary runs
+      here".
+      .
+      This is not hypothetical and it is not cosmetic. It is what made a
+      consumer's build script fall through to an ambient `meld 0.41.3` and die
+      with an `unexpected argument` error naming the wrong version (#102) —
+      the mixed-toolchain hazard varve exists to close, produced by varve, and
+      still reproducing on v0.29.0 against a layer published the same day.
+      .
+      Clauses: (1) `varve which` shall print the resolved path on stdout and
+      nothing else on stdout. (2) Provenance — the layer id, channel and
+      manifest digest — shall go to stderr, where it stays visible to a human
+      at a terminal and invisible to command substitution. (3) `--json` shall
+      remain a single JSON document on stdout. (4) The gate shall be the shell
+      contract itself: a test asserting `[ -x "$(varve which <tool>)" ]`, run
+      against a real installed layer rather than a fixture, because a fixture
+      that never runs the shell cannot see this class of defect. (5) Every
+      other command whose output a script would capture shall be audited for
+      the same shape, since the defect is one of habit rather than of this one
+      call site.
+
+  - id: REQ-NOKEYDISK-001
+    type: requirement
+    title: The realm's signing key does not touch disk, in varve's own pipelines first
+    status: draft
+    release: v0.30.0
+    description: >
+      `varve docs ci` tells adopters that "every adopter therefore invents
+      `echo "$SECRET" > key.tmp`, which leaves the realm's one secret on disk",
+      and documents two forms that avoid the file entirely — a pipe through
+      `/dev/stdin`, and process substitution. `docs root-ceremony` states the
+      rule outright: in CI the key "reaches varve through a file descriptor,
+      never a workspace file".
+      .
+      varve's own deposit workflow writes it to `/tmp/rolling.key` on a shared
+      cloud runner. Not to a `mktemp` path, not mode 0600 — a predictable name,
+      the pattern the documentation names as the thing adopters wrongly invent.
+      An independent assessor found this by reading the repository rather than
+      the documentation, and correctly called it the finding that invalidates
+      every other procedural claim by induction: a published procedure the
+      publisher does not follow cannot be evidence of anything.
+      .
+      Clauses: (1) No varve-operated workflow shall write key material to a
+      filesystem path; the documented file-descriptor forms shall be used.
+      (2) A mechanical gate shall refuse a workflow that redirects a secret
+      into a file — the check must fail on the pattern, not rely on review.
+      (3) The gate shall carry a negative control proving it goes red, since a
+      lint that cannot fail is the defect class this project exists to close.
+      (4) The signing job shall additionally be gated by a deployment
+      environment with required reviewers, so the two-person rule is enforced
+      by the platform rather than asserted in prose — `docs ci` and the custody
+      concept both currently describe a convention as though it were a control.
+      (5) `docs ci` shall stop presenting the file fallback as acceptable for a
+      realm root: it is acceptable for a throwaway key and nothing else.
+
   - id: REQ-LAYERADAPT-001
     type: requirement
     title: A realm's manifest is translated into assembler inputs by varve, exactly or not at all

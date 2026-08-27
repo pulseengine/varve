@@ -3954,24 +3954,36 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
             addressable(&resolved)
         );
     };
-    // STDOUT is the dispatched path, unchanged, so scripts that capture it
-    // keep working (REQ-SHADOW-001 clause 2).
+    // STDOUT is the path and NOTHING else, because that is what a caller
+    // captures: `M=$(varve which synth)` must yield something executable
+    // (REQ-WHICHSTDOUT-001).
+    //
+    // This used to print the provenance to stdout too, under a comment
+    // claiming scripts kept working and another saying "the first two lines
+    // are what scripts capture". A script captures ALL of them. A consumer's
+    // build script took the two-line value, found it was not a binary, fell
+    // through to whatever was on PATH, and died naming a version nobody had
+    // pinned (#102) — the mixed-toolchain failure varve exists to close,
+    // caused by the command whose job is closing it.
+    //
+    // Provenance moves to stderr: still in front of a human at a terminal,
+    // out of the way of command substitution.
     println!("{}", path.display());
-    println!(
+    eprintln!(
         "layer {} ({}) {}",
         resolved.layer.layer, resolved.layer.channel, resolved.layer.digest
     );
     // The line above names the layer the PIN resolves to, which for a composed
     // tool is not the layer that owns the binary (`docs composition` says so).
     // Someone who ASKED qualified is asking precisely about a provider, so name
-    // it — a third line, because the first two are what scripts capture.
+    // it — also on stderr, for the same reason.
     if asked.contains('/')
         && let Some((provider, _)) = resolved
             .qualified
             .iter()
             .find(|(p, _)| p.qualified().as_deref() == Some(asked.as_str()))
     {
-        println!(
+        eprintln!(
             "provided by realm '{}' layer {} {}",
             provider.realm, provider.layer, provider.digest
         );

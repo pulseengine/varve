@@ -148,7 +148,56 @@ fn verify_fails_when_path_runs_a_different_binary_than_the_pin() {
         .success();
 }
 
+/// The shell contract, which is the whole point of the command: what a caller
+/// captures must BE the path. `predicate::str::contains` cannot see this — it
+/// passes just as happily on a two-line stdout, which is how the defect
+/// survived a test named for the behaviour it broke. A consumer's build script
+/// captured this value, got a non-executable string, fell through to an ambient
+/// binary, and died naming the wrong version (#102).
+// rivet: verifies REQ-WHICHSTDOUT-001
+#[test]
+fn what_a_script_captures_from_which_is_exactly_the_path() {
+    let fx = fixture(Some(PIN_JULY), &[(MANIFEST_JULY, &[("synth", b"s")])]);
+    let out = varve(&fx).args(["which", "synth"]).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+
+    // Exactly what `M=$(varve which synth)` yields, after the shell strips
+    // trailing newlines.
+    let captured = stdout.trim_end_matches('\n');
+    assert!(
+        !captured.contains('\n'),
+        "stdout is {} lines; a script capturing it gets a string that is not a \
+         path:\n{stdout}",
+        captured.lines().count()
+    );
+    assert!(
+        std::path::Path::new(captured).is_absolute(),
+        "captured value is not an absolute path: {captured:?}"
+    );
+    assert!(
+        captured.ends_with("bin/synth"),
+        "captured value is not the tool's path: {captured:?}"
+    );
+
+    // The provenance is not lost — it moves to stderr, where a human at a
+    // terminal still reads it and command substitution does not.
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("2026.07.0"),
+        "layer id missing from stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("sha256:"),
+        "digest missing from stderr: {stderr}"
+    );
+}
+
+/// The human still gets everything — the path to act on and the layer it came
+/// from — but on the two streams that mean different things. This test used to
+/// assert BOTH on stdout, which is how it passed while the command returned a
+/// value no script could use.
 // rivet: verifies REQ-PIN-001
+// rivet: verifies REQ-WHICHSTDOUT-001
 #[test]
 fn which_prints_the_resolved_binary_and_its_layer() {
     let fx = fixture(Some(PIN_JULY), &[(MANIFEST_JULY, &[("synth", b"s")])]);
@@ -156,11 +205,9 @@ fn which_prints_the_resolved_binary_and_its_layer() {
         .args(["which", "synth"])
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("bin/synth")
-                .and(predicate::str::contains("2026.07.0"))
-                .and(predicate::str::contains("sha256:")),
-        );
+        .stdout(predicate::str::contains("bin/synth"))
+        .stdout(predicate::str::contains("2026.07.0").not())
+        .stderr(predicate::str::contains("2026.07.0").and(predicate::str::contains("sha256:")));
 }
 
 // rivet: verifies REQ-PIN-001
@@ -6776,15 +6823,13 @@ fn the_unselected_layer_stays_installed_verified_and_addressable() {
         .args(["which", "pulseengine/wasm-tools"])
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("/bin/wasm-tools")
-                .and(predicate::str::contains("provided by realm 'pulseengine'")),
-        );
+        .stdout(predicate::str::contains("/bin/wasm-tools"))
+        .stderr(predicate::str::contains("provided by realm 'pulseengine'"));
     in_realm_project(&fx, &project)
         .args(["which", "bytecodealliance/wasm-tools"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
+        .stderr(predicate::str::contains(
             "provided by realm 'bytecodealliance' layer 2026.08.0",
         ));
 }

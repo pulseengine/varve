@@ -327,6 +327,9 @@ jobs:
         env:
           VARVE_ROOT_KEY: ${{ secrets.VARVE_ROOT_KEY }}
           VARVE_ROLLING_KEY: ${{ secrets.VARVE_ROLLING_KEY }}
+        # Explicit, because the key reaches varve by process substitution and
+        # that is a bash feature, not a POSIX one.
+        shell: bash
         run: |
           set -euo pipefail
           if [ -n "${VARVE_ROOT_KEY:-}" ]; then
@@ -344,16 +347,16 @@ jobs:
             exit 0
           fi
           cargo build --release -p varve
-          printf '%s' "$SIGNING_KEY" > /tmp/varve-root.key
+          # File descriptor, never a file (REQ-NOKEYDISK-001) -- see the same
+          # correction in deposit-layer.yml.
           cd release-assets
           # The signing code is the same sign_release_sums the verifier
           # tests against — producer and consumer cannot drift.
           ../target/release/varve sign-sums \
             --sums SHA256SUMS.txt \
-            --key /tmp/varve-root.key \
+            --key <(printf '%s' "$SIGNING_KEY") \
             --key-id "$KEY_ID" \
             --out SHA256SUMS.txt.dsse.json
-          rm -f /tmp/varve-root.key
           ls -la SHA256SUMS.txt.dsse.json
 
       - name: Capture build environment
