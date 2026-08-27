@@ -91,6 +91,16 @@ pub struct ManifestTool {
     /// than a boolean.
     #[serde(rename = "unverified-reason", default)]
     pub unverified_reason: Option<String>,
+    /// Asset name for one target triple, when no template can derive it.
+    ///
+    /// Some upstreams ship a musl binary as their only Linux build —
+    /// `wac-cli-x86_64-unknown-linux-musl` — and a static musl binary is the
+    /// right payload for a gnu platform even though nothing in the platform
+    /// name says so. Inventing a `%MUSL` placeholder would guess at a
+    /// convention; naming the file is exact, and wrong-by-typo rather than
+    /// wrong-by-inference.
+    #[serde(rename = "asset-for", default)]
+    pub asset_for: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
