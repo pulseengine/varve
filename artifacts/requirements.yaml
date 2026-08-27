@@ -3596,6 +3596,47 @@ artifacts:
       rather than assumed — a release publishing a cosign-signed
       SHA256SUMS.txt uses rung 1 and does not depend on it.
 
+  - id: REQ-INSTALLSHADOW-001
+    type: requirement
+    title: The installer says what it replaced, and which varve will actually run
+    status: draft
+    release: v0.30.0
+    description: >
+      `install.sh` writes the binary with `mv` over whatever was at
+      `$INSTALL_DIR/varve` and reports "Installed varve X". It never says a
+      previous version was there, and never checks whether a DIFFERENT varve
+      earlier on PATH will win the lookup. Its PATH message makes the second
+      worse: it prints "$INSTALL_DIR is already on PATH", which is true and
+      misleading — on PATH is not the same as first on PATH.
+      .
+      Reproduced on a maintainer's machine: `~/.varve/bin/varve` at 0.25.0 from
+      the installer, `~/.cargo/bin/varve` at 0.29.0 from cargo, and plain
+      `varve` resolving to the cargo one. A user follows the documented install,
+      is told it succeeded, and then runs a binary the installer did not put
+      there. They have no way to know from the output.
+      .
+      This is REQ-SHADOW-001's hazard turned on varve itself. varve REFUSES to
+      claim success when a pinned tool is shadowed by PATH — "your shell will
+      run the first one; varve dispatches the second" — and its own installer
+      does not apply that reasoning to the binary it just installed. A
+      bootstrap that can leave the user running a different build than the one
+      it verified is a bootstrap that has not bootstrapped anything.
+      .
+      Clauses: (1) When a binary already exists at the destination, the
+      installer shall report the version it replaced alongside the version it
+      installed; an unchanged reinstall shall say so rather than implying
+      change. (2) After installing, the installer shall resolve `varve` the way
+      the user's shell will and, if the winner is not the binary it just
+      installed, shall say so prominently — naming the winning path, its
+      version, and how to make the intended one win. (3) The check shall use
+      the same resolution order the shell uses, not an assumption about where
+      things live. (4) It shall not silently succeed: the difference between
+      "installed" and "installed and this is what you will run" is the whole
+      value of the message. (5) A negative control shall prove the warning
+      fires — an installer that only ever prints the happy path has not been
+      tested, and this defect survived because nothing exercised the shadowed
+      case.
+
   - id: REQ-WHICHSTDOUT-001
     type: requirement
     title: A resolver's answer is its stdout, and nothing else is

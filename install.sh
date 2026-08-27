@@ -222,13 +222,25 @@ tar -xzf "${WORK}/${ARCHIVE}" -C "${WORK}/unpack"
 [ -f "${WORK}/unpack/varve" ] || die "the archive does not contain a 'varve' binary."
 
 mkdir -p "$INSTALL_DIR"
+# What was here before, so the install can say what it REPLACED rather than
+# implying the destination was empty (REQ-INSTALLSHADOW-001 clause 1).
+previous=""
+if [ -x "${INSTALL_DIR}/varve" ]; then
+	previous="$("${INSTALL_DIR}/varve" --version 2>/dev/null || echo "an unreadable binary")"
+fi
 cp "${WORK}/unpack/varve" "${INSTALL_DIR}/varve.new"
 chmod 0755 "${INSTALL_DIR}/varve.new"
 mv "${INSTALL_DIR}/varve.new" "${INSTALL_DIR}/varve"
 
 installed="$("${INSTALL_DIR}/varve" --version)" \
 	|| die "the installed binary does not run: ${INSTALL_DIR}/varve"
-step "Installed ${installed} to ${INSTALL_DIR}/varve"
+if [ -n "$previous" ] && [ "$previous" != "$installed" ]; then
+	step "Installed ${installed} to ${INSTALL_DIR}/varve (replaced ${previous})"
+elif [ -n "$previous" ]; then
+	step "Reinstalled ${installed} to ${INSTALL_DIR}/varve (unchanged)"
+else
+	step "Installed ${installed} to ${INSTALL_DIR}/varve"
+fi
 
 # ── What the user has, and what they do not ───────────────────────────────
 say ""
@@ -247,9 +259,37 @@ if [ "$SIGNATURE_CHECKED" = no ]; then
 	say ""
 fi
 
+# Which varve will the user's shell ACTUALLY run? Being on PATH is not the
+# same as being first on it, and "already on PATH" was a reassuring way to say
+# nothing. varve refuses to claim success when PATH shadows a pinned tool
+# (REQ-SHADOW-001); the same reasoning has to apply to varve itself, or a
+# bootstrap can leave you running a build it did not install
+# (REQ-INSTALLSHADOW-001 clause 2).
+#
+# Resolved the way the shell resolves it, rather than by guessing at locations.
+winner="$(command -v varve 2>/dev/null || true)"
+if [ -n "$winner" ] && [ "$winner" != "${INSTALL_DIR}/varve" ]; then
+	winner_version="$("$winner" --version 2>/dev/null || echo "unknown version")"
+	say ""
+	say "WARNING: \`varve\` on your PATH is NOT the binary just installed."
+	say ""
+	say "    your shell runs   ${winner}  (${winner_version})"
+	say "    this installed    ${INSTALL_DIR}/varve  (${installed})"
+	say ""
+	say "Everything below, and every command in the docs, will use the first one."
+	say "To make this install win, put its directory FIRST on PATH:"
+	say ""
+	say "    export PATH=\"${INSTALL_DIR}:\$PATH\""
+	say ""
+	say "…or remove the other one. If it came from cargo: cargo uninstall varve"
+	say ""
+fi
+
 case ":${PATH}:" in
 	*":${INSTALL_DIR}:"*)
-		say "${INSTALL_DIR} is already on PATH."
+		if [ -z "$winner" ] || [ "$winner" = "${INSTALL_DIR}/varve" ]; then
+			say "${INSTALL_DIR} is on PATH, and is what \`varve\` runs."
+		fi
 		;;
 	*)
 		say "Add it to PATH:"
