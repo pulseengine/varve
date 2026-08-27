@@ -1574,6 +1574,10 @@ fn run_tool(
     args: &[std::ffi::OsString],
 ) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
+    // Kept before the move: a refusal below names the pin that caused it, and
+    // the realm is what makes that sentence answer the user's real question.
+    let pin_file = ctx.root.join("varve.toml");
+    let pinned_realm = ctx.pin.realm.clone();
     let mut pin = ctx.pin;
     if let Some(layer) = override_layer {
         // A one-off: resolve another layer for this invocation only. The
@@ -1599,11 +1603,26 @@ fn run_tool(
                 },
             );
         }
+        // Name the PIN, not just the layer. A shim directory serves every
+        // realm (one `cd` switches toolchains), so the honest question when a
+        // familiar tool stops working is not "what is in this layer" but "why
+        // is this directory pinned to that layer" — and the answer is a file
+        // the user can open. Reported from a real session: a `rivet` shim
+        // refused inside a project pinned to an unrelated realm, and the
+        // message named neither the realm nor the varve.toml that chose it.
         bail!(
-            "tool '{tool}' is not part of layer {} — it exposes: {}. `varve inspect` lists \
-             every payload, dispatched and held.",
+            "tool '{tool}' is not part of layer {} — it exposes: {}.\n\
+             This directory is pinned by {}{}, which is why '{tool}' does not \
+             resolve here even though a shim for it exists (one shim directory \
+             serves every realm). `varve inspect` lists every payload in the \
+             pinned layer; `varve docs pins` explains switching.",
             resolved.layer.layer,
-            addressable(&resolved)
+            addressable(&resolved),
+            pin_file.display(),
+            match pinned_realm.as_deref() {
+                Some(r) => format!(" to realm '{r}'"),
+                None => String::new(),
+            }
         );
     };
     // Runnered entries (portable wasm) execute through their runner — from

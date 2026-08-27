@@ -3596,6 +3596,36 @@ artifacts:
       rather than assumed — a release publishing a cosign-signed
       SHA256SUMS.txt uses rung 1 and does not depend on it.
 
+  - id: REQ-NAMETHEREALM-001
+    type: requirement
+    title: Output that identifies a layer names the realm, because a layer id alone does not
+    status: draft
+    release: v0.30.0
+    description: >
+      A layer identifier is `YYYY.MM.P` and is unique only WITHIN a realm. Two
+      realms can each publish `2026.08.26`, and varve is built for exactly that
+      world — REQ-REALM2-001 stood up a second realm and a pin qualifier to
+      settle name collisions between them.
+      .
+      `varve inspect` never printed the realm. Not in the header, not in
+      `--json`, which had no `realm` key at all. It appeared only inside the
+      `composition` block, which is skipped when a layer composes nothing — the
+      ordinary case. A user read that output beside a `realm = "linc"` pin and
+      observed, correctly, that the word realm appeared nowhere in it.
+      .
+      The refusal path had the same gap from the other side: a shim declining a
+      tool named the layer and the tools it exposes, but not which `varve.toml`
+      chose that layer or which realm it named. With one shim directory serving
+      every realm and `cd` switching toolchains, "why did this tool stop
+      working HERE" is the question, and the answer is a file the user can
+      open.
+      .
+      Clauses: (1) `varve inspect` shall name the realm in its header and carry
+      a top-level `realm` in `--json`. (2) A dispatch refusal shall name the
+      pin file and the realm it selects, not merely the layer. (3) Any output
+      that identifies a layer to a human shall be unambiguous about which realm
+      it belongs to, since the identifier alone is not.
+
   - id: REQ-INSTALLSHADOW-001
     type: requirement
     title: The installer says what it replaced, and which varve will actually run
