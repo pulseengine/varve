@@ -3453,6 +3453,55 @@ artifacts:
         no index at all.
     tags: [architecture, security]
 
+  - id: DD-027
+    type: design-decision
+    title: Succession first — make the custody choice reversible before making it
+    status: proposed
+    release: v1.0.0
+    description: >
+      Concept under review; see `docs/root-custody-concept.md` for the full
+      argument, the options and the questions we cannot answer ourselves.
+      .
+      The `pulseengine` realm root exists only as a write-only CI secret: it
+      cannot be backed up, moved, recovered, rotated or revoked. Fixing that at
+      v1.0 means deciding four things at once — whether a long-lived secret
+      exists in CI at all, where it lives, how a root is succeeded, and how it
+      is backed up.
+      .
+      This decision proposes the ORDER rather than the answers. Succession
+      (REQ-SUCCESSION-001) is built first, because it is what makes every other
+      choice reversible: with it, the hardware, the validation level and even
+      the algorithm stop being permanent, and the v1.0 custody decision can be
+      made on its merits instead of on fear of being stuck. The signing seam
+      (REQ-SIGNERSEAM-001) is built alongside it, because a hardware key and a
+      keyless identity both need it and neither can be evaluated without it.
+      .
+      Only after both does the keys-versus-keyless question get decided. DD-026
+      rejected keyless partly because the upstream air-gapped verifier was a
+      stub that failed open; that premise has since expired, so the question is
+      reopened rather than reversed — the structural half of DD-026 (a keyless
+      consumer still pins a long-lived bundle key) still stands, and what
+      changes is that relocating the long-lived key to something used rarely is
+      most of the value.
+    links:
+      - type: satisfies
+        target: REQ-CEREMONY-001
+      - type: traces-to
+        target: REQ-SUCCESSION-001
+      - type: traces-to
+        target: REQ-SIGNERSEAM-001
+      - type: traces-to
+        target: DD-026
+    fields:
+      rationale: >
+        Every custody argument we made collapsed into "the first choice is
+        forever", and each time it pushed toward spending more to avoid being
+        stuck. Succession dissolves that: it is cheap, it is entirely ours to
+        build, it needs no hardware and no upstream decision, and it converts
+        an irreversible bet into a revisable one. Deciding hardware or keyless
+        before it is deciding under a constraint we can simply remove.
+      tags: [architecture, security, process]
+
   - id: REQ-INGEST-001
     type: requirement
     title: varve ingests what upstream actually publishes, and records which mechanism vouched
@@ -3595,6 +3644,77 @@ artifacts:
       instance from this repository, so it shall be reported as a caveat
       rather than assumed — a release publishing a cosign-signed
       SHA256SUMS.txt uses rung 1 and does not depend on it.
+
+  - id: REQ-SIGNERSEAM-001
+    type: requirement
+    title: Signing goes through a seam, so the key can live somewhere other than a file
+    status: draft
+    release: v0.31.0
+    description: >
+      `--key <FILE>` is varve's entire key input. There is no PKCS#11 provider,
+      no KMS backend, no hardware path — at some moment the raw 128 characters
+      exist in a file or on a pipe. That is what `docs root-ceremony` designs
+      around, and it is why the realm root currently lives in CI as a secret
+      that cannot be backed up, moved or recovered (DD-027).
+      .
+      The seam already exists upstream and varve does not use it:
+      `wsc-dsse` exposes `trait DsseSigner { fn sign(&self, pae: &[u8]); fn
+      key_id(&self); }` and `DsseEnvelope::sign(payload, type, &dyn
+      DsseSigner)`, taking arbitrary PAE bytes. `verify.rs` bypasses it by
+      hardcoding `Ed25519DsseSigner::from_bytes`, so key material is raw bytes
+      all the way down.
+      .
+      Clauses: (1) `sign_layer_manifest` and every other signing entry point
+      shall take a `&dyn DsseSigner` rather than key bytes. (2) The existing
+      file-backed behaviour shall be preserved exactly, as a `DsseSigner`
+      implementation — the current signing tests are the oracle, and a
+      behaviour change means the refactor is wrong. (3) A hardware-backed
+      implementation shall be possible with no change to varve's signing call
+      sites and no upstream dependency. (4) The refactor shall not widen what
+      reads the secret: exactly the implementations that need key material get
+      it, and `varve verify`, `install`, `status` and every export continue to
+      need only the public half.
+      .
+      This is the gate for both v1.0 custody paths — a hardware-held key and a
+      keyless identity both need it — so it lands before either is chosen.
+    links:
+      - type: traces-to
+        target: DD-027
+
+  - id: REQ-SUCCESSION-001
+    type: requirement
+    title: A realm root can be succeeded without stranding the consumers pinned to it
+    status: draft
+    release: v1.0.0
+    description: >
+      varve has no key rotation. There is one root per realm and no mechanism
+      to succeed it: nothing signs "this new root replaces the old one", and no
+      consumer would check such a statement if it were produced. The documented
+      compromise plan is manual — publish a new realm and reach every consumer
+      through the channel that bootstrapped them.
+      .
+      That is honest but it has two costs. It does not scale, and a legitimate
+      rotation is indistinguishable from an attacker telling consumers to
+      re-pin. It also makes every other custody decision permanent, which
+      inflates them: "buy the validated device because validation cannot be
+      retrofitted" is only decisive if the root is forever.
+      .
+      Clauses: (1) A succession statement shall carry the new root's public key
+      and be signed by BOTH the old root and the new one — the old proving
+      authority, the new proving possession, so a mistyped key cannot enthrone
+      a root nobody holds. (2) It shall carry a monotonic counter, and an older
+      statement shall be refused, or a retired root can be replayed. (3)
+      Verification shall be offline and clockless, like the anti-rollback
+      counter it mirrors — a consumer must not need a network or a correct
+      clock to learn its realm has a new root. (4) Applying a succession shall
+      be an explicit, logged action that rewrites the pinned `trust-root`,
+      never a silent update: a consumer's trust anchor changing without their
+      knowledge is the attack this mechanism could otherwise become. (5) The
+      root shall support a THRESHOLD of keys, and the threshold shall be
+      recorded at mint time — with a single root key, whoever holds it can
+      redirect the realm durably, and a threshold cannot be added afterwards.
+      (6) A realm that has never succeeded shall behave exactly as today, so
+      the mechanism costs nothing until it is used.
 
   - id: REQ-LAYERADAPT-001
     type: requirement
