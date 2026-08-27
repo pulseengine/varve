@@ -6,7 +6,7 @@
 //! and pushes to a registry. Keeping them apart keeps that claim true.
 
 use clap::{Parser, Subcommand};
-use varve_producer::{asset, forge::Forge};
+use varve_producer::{asset, binfmt, forge::Forge};
 
 #[derive(Parser)]
 #[command(name = "varve-producer", version, about, long_about = None)]
@@ -22,6 +22,16 @@ enum Cmd {
     /// fetched, because a wrong issuer fails closed but confusingly.
     Forge,
 
+    /// Check a staged payload's architecture against the platform it would be
+    /// deposited under, without executing it.
+    Arch {
+        /// The file to inspect.
+        #[arg(long)]
+        file: std::path::PathBuf,
+        /// The target triple it would be filed under.
+        #[arg(long)]
+        platform: String,
+    },
     /// Show which release assets a template selects, without downloading
     /// anything. The template language is the part of this pipeline that has
     /// silently dropped a tool from a published layer, so it is inspectable on
@@ -53,6 +63,13 @@ fn forge_from_env() -> Forge {
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
+        Cmd::Arch { file, platform } => {
+            let bytes = std::fs::read(&file)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", file.display()))?;
+            let format = binfmt::check_platform(&file.display().to_string(), &bytes, &platform)?;
+            println!("{:<28} {format:?}", platform);
+            Ok(())
+        }
         Cmd::Forge => {
             let f = forge_from_env();
             println!("host        {}", f.host);

@@ -3667,6 +3667,47 @@ artifacts:
       tested, and this defect survived because nothing exercised the shadowed
       case.
 
+  - id: REQ-PAYLOADSMOKE-001
+    type: requirement
+    title: A deposited payload is checked for being usable, not merely for being the bytes upstream published
+    status: draft
+    release: v0.30.0
+    description: >
+      Everything the producer verifies today answers one question: are these
+      the bytes upstream published? A cosign-signed sums file or a build
+      attestation establishes that, and the digest recorded in the layer
+      transcribes it. Nothing establishes that the bytes are a WORKING TOOL for
+      the platform they are deposited under.
+      .
+      The deposit's own "sanity" step installs the layer and runs `varve
+      verify`, which checks signatures and digests — the same property again,
+      more carefully. No deposited binary is ever executed, and no systest runs
+      one. A layer can therefore be assembled, signed, published and installed
+      while carrying an x86_64 binary under `aarch64-unknown-linux-gnu`, a
+      shell script where a binary was expected, or a file upstream truncated
+      before publishing. Each of those is faithfully hashed and correctly
+      signed, and fails for the first time on a consumer's machine.
+      .
+      An architecture mismatch is the sharp case because it is a real upstream
+      packaging mistake, it is invisible to every check varve currently runs,
+      and the consumer who finds it is the one who can do least about it.
+      .
+      Clauses: (1) Before a payload is staged, its executable format shall be
+      parsed and its architecture compared with the platform it is being
+      deposited under; a mismatch shall abort the deposit naming both. (2) The
+      check shall work for EVERY platform in the layer, not only the runner's,
+      so it shall read the file's header rather than execute it — a deposit
+      runs on one machine and ships four platforms. (3) A payload whose format
+      is not recognised shall be reported, not silently accepted: "this is not
+      an executable varve can identify" is a fact the operator should see
+      before signing, since a wrapper script is a legitimate payload and a
+      truncated download is not. (4) Where the host CAN run a payload, the
+      producer shall additionally smoke it — execute it with a harmless
+      argument and require a clean exit — because a correct architecture is
+      still not a working binary. (5) These checks shall run before the
+      irreversible step; a published layer tag is spent and varve has no
+      revocation.
+
   - id: REQ-WHICHSTDOUT-001
     type: requirement
     title: A resolver's answer is its stdout, and nothing else is

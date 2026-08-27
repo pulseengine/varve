@@ -236,6 +236,7 @@ jobs:
             -f crates/varve-core/src/layerspec.rs \
             -f crates/varve-producer/src/asset.rs \
             -f crates/varve-producer/src/attestation.rs \
+            -f crates/varve-producer/src/binfmt.rs \
             -f crates/varve-producer/src/extract.rs \
             -f crates/varve-producer/src/forge.rs \
             -f crates/varve-producer/src/ingest.rs \
