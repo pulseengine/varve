@@ -3667,6 +3667,47 @@ artifacts:
       tested, and this defect survived because nothing exercised the shadowed
       case.
 
+  - id: REQ-CARRYFORWARD-001
+    type: requirement
+    title: A deposit does the work that changed, and re-proves the work that did not
+    status: draft
+    release: v0.30.0
+    description: >
+      Every deposit downloads all four platforms of every tool the layer
+      carries — 421 MiB for layer 2026.08.4 — re-hashes them and re-pushes
+      them, even when a single tool moved. Consumers are unaffected: install
+      filters by platform before fetching, so a machine pulls 99 MiB. The cost
+      is the producer's, and daily scanning (DD-024) multiplies it by the
+      cadence.
+      .
+      The previous layer's SIGNED manifest already records each payload's
+      upstream repo, release, asset name and sha256. When `layer.toml` still
+      pins the same release, that work is already done and proven.
+      .
+      The trap is that reusing it naively would REGRESS a security property.
+      A release asset can be deleted and re-uploaded under the same tag, so
+      "rivet v0.34.0" today is not necessarily the bytes it was yesterday.
+      Carrying a digest forward on the strength of a version string would make
+      varve blind to exactly the substitution it exists to catch.
+      .
+      So the saving must come from skipping the DOWNLOAD, never from skipping
+      the PROOF. Re-verifying a release costs a sums file — kilobytes — while
+      the binary it describes is tens of megabytes.
+      .
+      Clauses: (1) The ingestion proof shall be re-established every deposit,
+      unconditionally; carry-forward shall never skip it. (2) The digest
+      recorded upstream NOW shall be compared against the digest the previous
+      layer recorded; only when they agree may the payload bytes go
+      un-downloaded. (3) A disagreement shall ABORT and name both digests: an
+      upstream that re-published a release under the same version is a fact an
+      operator must see, and it is not varve's to resolve silently in either
+      direction. (4) Reuse shall additionally require that the blob is still
+      present in the destination registry, since a manifest entry is not a
+      guarantee of storage. (5) A payload with no previous entry — a new tool,
+      a new platform, a changed version — shall be fetched normally. (6) The
+      gate shall be that depositing an unchanged `layer.toml` twice fetches no
+      payload bytes the second time.
+
   - id: REQ-PAYLOADSMOKE-001
     type: requirement
     title: A deposited payload is checked for being usable, not merely for being the bytes upstream published
