@@ -12,6 +12,7 @@
 
 pub mod asset;
 pub mod attestation;
+pub mod extract;
 pub mod forge;
 pub mod ingest;
 pub mod spec;
