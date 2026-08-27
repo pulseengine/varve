@@ -3667,6 +3667,50 @@ artifacts:
       tested, and this defect survived because nothing exercised the shadowed
       case.
 
+  - id: REQ-REALM2-002
+    type: requirement
+    title: The bytecodealliance realm gets its own root, and is the first real ceremony
+    status: draft
+    release: v1.0.0
+    description: >
+      The second realm exists only inside `tools/systest/compose-realms.sh`.
+      The shipped `varve-realms.toml` defines exactly one realm and all
+      published tags are pulseengine's, so "varve composes two realms" is true
+      in the gate and untrue in the registry.
+      .
+      Carrying `wasm-tools` inside the pulseengine realm was proposed and
+      REJECTED. It is buildable today — all four platforms resolve through the
+      %U upstream tag, `gh attestation verify` succeeds on the real release and
+      fails on tampered bytes — and it needs no new key. It was rejected
+      because it defeats what a realm is. A realm is a trust universe defined
+      by one root; letting that root sign bytes the organisation did not build
+      makes the boundary decorative. Recording an ingestion proof documents
+      whose bytes they are, it does not change who vouched for them. The
+      shortcut's whole appeal was avoiding the key problem, which is an
+      argument for solving the key problem.
+      .
+      Clauses: (1) `bytecodealliance` shall be a realm with its OWN root, its
+      own entry in `varve-realms.toml`, and its own layer line. (2) That root
+      shall be produced by the ceremony REQ-CEREMONY-001 defines — not
+      generated into CI, which is how the pulseengine root came to be
+      unbackupable and unmovable (#110). (3) A rehearsal with a genuinely
+      throwaway key shall precede it, and the rehearsal's transcript is the
+      runbook the real ceremony is executed from; the two shall not happen on
+      the same day, because a real ceremony run at hour eight of a rehearsal is
+      where custody defects are born. (4) The pulseengine realm shall not carry
+      payloads from outside the organisation in the meantime; a name collision
+      between the two realms is settled by the pin's realm qualifier
+      (REQ-REALM2-001 clause 4c), which is what that mechanism was built for.
+      .
+      Why this realm first: it is the only realm whose ceremony can go wrong
+      cheaply. It has no consumers, no published root anyone pins, and nothing
+      frozen if it must be redone — the exact opposite of the pulseengine
+      realm, where a mistake is unrecoverable because varve has neither
+      rotation nor revocation. An assessor's first recommendation was to stop
+      writing about the ceremony and run one; this gives that run a real
+      deliverable instead of a discarded key, and gives the ceremony a deadline
+      that "at v1.0" never supplied.
+
   - id: REQ-CARRYFORWARD-001
     type: requirement
     title: A deposit does the work that changed, and re-proves the work that did not
