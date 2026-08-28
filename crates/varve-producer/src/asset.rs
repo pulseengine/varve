@@ -70,6 +70,12 @@ pub enum Placeholder {
     UpstreamTag,
     /// `%P` — the VS Code platform tag.
     VsCodePlatform,
+    /// `%R` — the release tag exactly as the manifest writes it, leading `v`
+    /// included. `%V` strips that `v`, and several upstreams keep it:
+    /// `wasmtime-v48.0.1-aarch64-macos.tar.xz`. Without this a manifest has to
+    /// hardcode the version inside the template, so a version bump edits two
+    /// places and one of them eventually gets missed.
+    ReleaseTag,
 }
 
 impl Placeholder {
@@ -79,6 +85,7 @@ impl Placeholder {
             Placeholder::Triple => "%T",
             Placeholder::UpstreamTag => "%U",
             Placeholder::VsCodePlatform => "%P",
+            Placeholder::ReleaseTag => "%R",
         }
     }
 
@@ -87,6 +94,7 @@ impl Placeholder {
         Placeholder::Triple,
         Placeholder::UpstreamTag,
         Placeholder::VsCodePlatform,
+        Placeholder::ReleaseTag,
     ];
 }
 
@@ -183,7 +191,11 @@ pub fn expand(
         }
     }
 
-    let mut out = template.replace(Placeholder::BareVersion.token(), bare_version(version));
+    // %R before %V: both mention the version, and expanding the bare form
+    // first would leave a stray `v` in front of it.
+    let mut out = template
+        .replace(Placeholder::ReleaseTag.token(), version)
+        .replace(Placeholder::BareVersion.token(), bare_version(version));
     if let Some(triple) = platform {
         out = out.replace(Placeholder::Triple.token(), triple);
         if out.contains(Placeholder::UpstreamTag.token()) {
@@ -395,6 +407,41 @@ mod tests {
                 "no upstream tag for {p}"
             );
         }
+    }
+
+    /// Several upstreams keep the `v` in their asset names —
+    /// `wasmtime-v48.0.1-aarch64-macos.tar.xz`. Found by planning a real
+    /// bytecodealliance manifest and checking every name against the release:
+    /// four of twelve did not exist, and two of those were this.
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn the_release_tag_is_available_as_written_not_only_bare() {
+        assert_eq!(
+            expand(
+                "wasmtime-%R-%U.tar.xz",
+                "v48.0.1",
+                Some("aarch64-apple-darwin"),
+                None
+            )
+            .expect("expands"),
+            "wasmtime-v48.0.1-aarch64-macos.tar.xz"
+        );
+        // And the bare form still strips it.
+        assert_eq!(
+            expand("t-%V.tar.gz", "v48.0.1", None, None).expect("expands"),
+            "t-48.0.1.tar.gz"
+        );
+    }
+
+    /// A template using both must not leave a stray `v`: expanding %V first
+    /// would turn "%R" into "v" + the already-substituted bare version.
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn a_template_using_both_version_forms_expands_each_correctly() {
+        assert_eq!(
+            expand("x-%R-y-%V.tar.gz", "v1.2.3", None, None).expect("expands"),
+            "x-v1.2.3-y-1.2.3.tar.gz"
+        );
     }
 
     /// The defect a clean-room review found in this very module: `%P` was

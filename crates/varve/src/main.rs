@@ -1574,6 +1574,10 @@ fn run_tool(
     args: &[std::ffi::OsString],
 ) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
+    // Kept before the move: a refusal below names the pin that caused it, and
+    // the realm is what makes that sentence answer the user's real question.
+    let pin_file = ctx.root.join("varve.toml");
+    let pinned_realm = ctx.pin.realm.clone();
     let mut pin = ctx.pin;
     if let Some(layer) = override_layer {
         // A one-off: resolve another layer for this invocation only. The
@@ -1599,11 +1603,26 @@ fn run_tool(
                 },
             );
         }
+        // Name the PIN, not just the layer. A shim directory serves every
+        // realm (one `cd` switches toolchains), so the honest question when a
+        // familiar tool stops working is not "what is in this layer" but "why
+        // is this directory pinned to that layer" — and the answer is a file
+        // the user can open. Reported from a real session: a `rivet` shim
+        // refused inside a project pinned to an unrelated realm, and the
+        // message named neither the realm nor the varve.toml that chose it.
         bail!(
-            "tool '{tool}' is not part of layer {} — it exposes: {}. `varve inspect` lists \
-             every payload, dispatched and held.",
+            "tool '{tool}' is not part of layer {} — it exposes: {}.\n\
+             This directory is pinned by {}{}, which is why '{tool}' does not \
+             resolve here even though a shim for it exists (one shim directory \
+             serves every realm). `varve inspect` lists every payload in the \
+             pinned layer; `varve docs pins` explains switching.",
             resolved.layer.layer,
-            addressable(&resolved)
+            addressable(&resolved),
+            pin_file.display(),
+            match pinned_realm.as_deref() {
+                Some(r) => format!(" to realm '{r}'"),
+                None => String::new(),
+            }
         );
     };
     // Runnered entries (portable wasm) execute through their runner — from
@@ -3954,24 +3973,36 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
             addressable(&resolved)
         );
     };
-    // STDOUT is the dispatched path, unchanged, so scripts that capture it
-    // keep working (REQ-SHADOW-001 clause 2).
+    // STDOUT is the path and NOTHING else, because that is what a caller
+    // captures: `M=$(varve which synth)` must yield something executable
+    // (REQ-WHICHSTDOUT-001).
+    //
+    // This used to print the provenance to stdout too, under a comment
+    // claiming scripts kept working and another saying "the first two lines
+    // are what scripts capture". A script captures ALL of them. A consumer's
+    // build script took the two-line value, found it was not a binary, fell
+    // through to whatever was on PATH, and died naming a version nobody had
+    // pinned (#102) — the mixed-toolchain failure varve exists to close,
+    // caused by the command whose job is closing it.
+    //
+    // Provenance moves to stderr: still in front of a human at a terminal,
+    // out of the way of command substitution.
     println!("{}", path.display());
-    println!(
+    eprintln!(
         "layer {} ({}) {}",
         resolved.layer.layer, resolved.layer.channel, resolved.layer.digest
     );
     // The line above names the layer the PIN resolves to, which for a composed
     // tool is not the layer that owns the binary (`docs composition` says so).
     // Someone who ASKED qualified is asking precisely about a provider, so name
-    // it — a third line, because the first two are what scripts capture.
+    // it — also on stderr, for the same reason.
     if asked.contains('/')
         && let Some((provider, _)) = resolved
             .qualified
             .iter()
             .find(|(p, _)| p.qualified().as_deref() == Some(asked.as_str()))
     {
-        println!(
+        eprintln!(
             "provided by realm '{}' layer {} {}",
             provider.realm, provider.layer, provider.digest
         );

@@ -80,6 +80,27 @@ pub struct ManifestTool {
     /// Absent = `tarball`.
     #[serde(default)]
     pub layout: Option<String>,
+    /// Why this tool is ingested with NO proof of origin (REQ-INGEST-001
+    /// clause 3). Present only for a release that offers neither a
+    /// cosign-signed sums file nor a build attestation.
+    ///
+    /// The reason is not paperwork: it is signed into the layer and shown by
+    /// `varve inspect`, so every consumer reads the operator's words next to
+    /// the bytes they were written about. "We could not verify this" must
+    /// never be the silent path, which is why the field carries prose rather
+    /// than a boolean.
+    #[serde(rename = "unverified-reason", default)]
+    pub unverified_reason: Option<String>,
+    /// Asset name for one target triple, when no template can derive it.
+    ///
+    /// Some upstreams ship a musl binary as their only Linux build —
+    /// `wac-cli-x86_64-unknown-linux-musl` — and a static musl binary is the
+    /// right payload for a gnu platform even though nothing in the platform
+    /// name says so. Inventing a `%MUSL` placeholder would guess at a
+    /// convention; naming the file is exact, and wrong-by-typo rather than
+    /// wrong-by-inference.
+    #[serde(rename = "asset-for", default)]
+    pub asset_for: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -124,6 +145,10 @@ pub enum LayerSpecError {
     /// The assembler carries exactly one raw-per-platform tool, as
     /// `WSC_VERSION`. A second one has nowhere to go.
     ManyRawPerPlatform { first: String, second: String },
+    /// The assembler's single raw-per-platform slot is not generic: it fetches
+    /// `wsc` from `pulseengine/sigil`. Any other tool put in it becomes a
+    /// request for the wrong tool from the wrong repository.
+    RawPerPlatformNotWsc { tool: String, repo: String },
     /// The assembler hardcodes `pulseengine/` for extension repositories.
     VsixForeignOwner { name: String, repo: String },
     /// The assembler derives a tarball tool's identity from its REPOSITORY
@@ -135,6 +160,14 @@ pub enum LayerSpecError {
     },
     /// Two entries would land under one name.
     Duplicate { kind: &'static str, name: String },
+    /// An opt-in that states no reason.
+    UnverifiedWithoutReason { tool: String },
+    /// Two tools from one repository disagree about why it is unverified.
+    ConflictingReason {
+        repo: String,
+        first: String,
+        second: String,
+    },
     /// The manifest describes nothing to deposit.
     Empty,
 }
@@ -164,6 +197,17 @@ impl fmt::Display for LayerSpecError {
                  them. Teach the assembler a general raw-per-platform list \
                  before adding the second."
             ),
+            LayerSpecError::RawPerPlatformNotWsc { tool, repo } => write!(
+                f,
+                "tool {tool:?} from {repo:?} declares \
+                 layout = \"raw-per-platform\", but the assembler's only slot \
+                 for that layout is hardcoded to fetch `wsc` from \
+                 `pulseengine/sigil` — it would emit WSC_VERSION and download \
+                 the wrong tool, from the wrong repository, at this tool's \
+                 version, and deposit it under the wrong name. Teach the \
+                 assembler a general raw-per-platform list before carrying \
+                 this."
+            ),
             LayerSpecError::VsixForeignOwner { name, repo } => write!(
                 f,
                 "vsix {name:?} names repo {repo:?}, but the assembler resolves \
@@ -188,6 +232,25 @@ impl fmt::Display for LayerSpecError {
             LayerSpecError::Duplicate { kind, name } => {
                 write!(f, "two {kind} entries are both named {name:?}")
             }
+            LayerSpecError::UnverifiedWithoutReason { tool } => write!(
+                f,
+                "tool {tool:?} sets an empty `unverified-reason`. \"We could \
+                 not verify this\" must never be the silent path: the reason \
+                 is what travels with the bytes into the signed layer, where \
+                 every consumer reads it. Say why this is acceptable and what \
+                 removes the need, or do not carry the tool."
+            ),
+            LayerSpecError::ConflictingReason {
+                repo,
+                first,
+                second,
+            } => write!(
+                f,
+                "two tools from {repo:?} give different reasons for ingesting \
+                 it unverified:\n  {first:?}\n  {second:?}\nThe opt-in is per \
+                 RELEASE, not per tool, so one of these would be recorded and \
+                 the other silently discarded. Give the repository one reason."
+            ),
             LayerSpecError::Empty => write!(
                 f,
                 "layer.toml declares no [[tool]] and no [[vsix]]: there is \
@@ -214,6 +277,8 @@ pub struct AssemblerEnv {
     pub channel: String,
     pub registry: String,
     pub varve_version: String,
+    /// `owner/repo=reason` lines for releases ingested with no proof.
+    pub unverified_ingest: Vec<(String, String)>,
 }
 
 impl AssemblerEnv {
@@ -230,6 +295,27 @@ impl AssemblerEnv {
         out.push_str(&format!("VARVE_CHANNEL={}\n", self.channel));
         out.push_str(&format!("VARVE_REGISTRY={}\n", self.registry));
         out.push_str(&format!("VARVE_VERSION={}\n", self.varve_version));
+        // UNVERIFIED_INGEST is LINE-separated, because a reason is prose and
+        // any punctuation separator can occur inside it — the assembler
+        // documents that choice and the reason it made it. A `KEY=value` line
+        // cannot carry newlines, so this uses $GITHUB_ENV's heredoc form.
+        //
+        // The delimiter is checked against the content rather than assumed: an
+        // operator's reason that happened to contain the delimiter would end
+        // the block early and inject whatever followed as further environment,
+        // which is the shape of an actual injection rather than a typo.
+        if !self.unverified_ingest.is_empty() {
+            let body: String = self
+                .unverified_ingest
+                .iter()
+                .map(|(repo, why)| format!("{repo}={why}\n"))
+                .collect();
+            let mut delim = String::from("VARVE_UNVERIFIED_EOF");
+            while body.contains(&delim) {
+                delim.push('_');
+            }
+            out.push_str(&format!("UNVERIFIED_INGEST<<{delim}\n{body}{delim}\n"));
+        }
         out
     }
 }
@@ -279,6 +365,7 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
     encodable("realm.channel", &m.realm.channel)?;
     encodable("varve.version", &m.varve.version)?;
 
+    let mut unverified: Vec<(String, String)> = Vec::new();
     let mut tarballs: Vec<String> = Vec::new();
     let mut wsc_version: Option<String> = None;
     let mut raw_owner: Option<String> = None;
@@ -300,6 +387,32 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
                 layout: s.to_string(),
             })?,
         };
+        // The opt-in is per RELEASE, so it is keyed by repository; two tools
+        // from one repo must agree about why it is unverified, or one reason
+        // would be recorded and the other silently dropped.
+        if let Some(why) = &t.unverified_reason {
+            let why = why.trim();
+            if why.is_empty() {
+                return Err(LayerSpecError::UnverifiedWithoutReason {
+                    tool: t.name.clone(),
+                });
+            }
+            let full = match &t.repo {
+                Some(r) => r.clone(),
+                None => format!("pulseengine/{}", t.name),
+            };
+            if let Some((_, prev)) = unverified.iter().find(|(r, _)| *r == full) {
+                if prev != why {
+                    return Err(LayerSpecError::ConflictingReason {
+                        repo: full,
+                        first: prev.clone(),
+                        second: why.to_string(),
+                    });
+                }
+            } else {
+                unverified.push((full, why.to_string()));
+            }
+        }
         let (owner, repo_name) = match &t.repo {
             Some(r) => {
                 encodable("tool.repo", r)?;
@@ -313,6 +426,15 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
                 return Err(LayerSpecError::ManyRawPerPlatform {
                     first: first.clone(),
                     second: t.name.clone(),
+                });
+            }
+            // The slot is not generic. `wsc` is what the assembler fetches,
+            // from `pulseengine/sigil`; anything else silently becomes a
+            // request for that tool at this tool's version.
+            if t.name != "wsc" || owner != "pulseengine" || repo_name != "sigil" {
+                return Err(LayerSpecError::RawPerPlatformNotWsc {
+                    tool: t.name.clone(),
+                    repo: format!("{owner}/{repo_name}"),
                 });
             }
             raw_owner = Some(t.name.clone());
@@ -408,6 +530,7 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
         channel: m.realm.channel.clone(),
         registry: m.realm.registry.clone(),
         varve_version: m.varve.version.clone(),
+        unverified_ingest: unverified,
     })
 }
 
@@ -536,6 +659,68 @@ asset   = "spar-aadl-%P-%V.vsix"
         );
     }
 
+    /// Found by actually trying to assemble a bytecodealliance manifest: the
+    /// assembler's one raw-per-platform slot fetches `wsc` from
+    /// `pulseengine/sigil`, so putting any other tool in it emitted
+    /// WSC_VERSION = that tool's version and would have downloaded wsc at
+    /// v0.10.1 — wrong tool, wrong repo, wrong version, deposited under the
+    /// wrong name, silently.
+    // rivet: verifies REQ-LAYERADAPT-001
+    #[test]
+    fn a_raw_per_platform_tool_that_is_not_wsc_is_refused() {
+        let text = format!(
+            "{REAL}\n[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\n\
+             version = \"v0.10.1\"\nlayout = \"raw-per-platform\"\n"
+        );
+        // The FIRST raw tool in REAL is wsc, so this trips the many-slot rule;
+        // remove wsc to isolate the identity rule.
+        let only = text.replace(
+            "[[tool]]\nname    = \"wsc\"\nrepo    = \"pulseengine/sigil\"\nversion = \"v0.11.0\"\nlayout  = \"raw-per-platform\"\n",
+            "",
+        );
+        assert!(!only.contains("wsc"), "the wsc block must be gone: {only}");
+        let err = assembler_env(&parse_layer_manifest(&only).unwrap()).unwrap_err();
+        assert_eq!(
+            err,
+            LayerSpecError::RawPerPlatformNotWsc {
+                tool: "wac".into(),
+                repo: "bytecodealliance/wac".into()
+            },
+            "{err}"
+        );
+        assert!(err.to_string().contains("wrong repository"), "{err}");
+    }
+
+    /// One wrong field is enough. The slot fetches `wsc` from
+    /// `pulseengine/sigil`, so a tool that matches two of those three and
+    /// misses the third still becomes a request for something else — and a
+    /// test that only varies all three at once cannot tell the guard from a
+    /// much weaker one. cargo-mutants proved that by narrowing it.
+    // rivet: verifies REQ-LAYERADAPT-001
+    #[test]
+    fn the_wsc_slot_rejects_a_tool_that_differs_in_any_single_field() {
+        let base = REAL.replace(
+            "[[tool]]\nname    = \"wsc\"\nrepo    = \"pulseengine/sigil\"\nversion = \"v0.11.0\"\nlayout  = \"raw-per-platform\"\n",
+            "",
+        );
+        for (name, repo, what) in [
+            ("wsc", "acme/sigil", "a different OWNER"),
+            ("wsc", "pulseengine/other", "a different REPOSITORY"),
+            ("other", "pulseengine/sigil", "a different TOOL NAME"),
+        ] {
+            let text = format!(
+                "{base}\n[[tool]]\nname = \"{name}\"\nrepo = \"{repo}\"\n\
+                 version = \"v1.0.0\"\nlayout = \"raw-per-platform\"\n"
+            );
+            let err = assembler_env(&parse_layer_manifest(&text).unwrap()).expect_err(what);
+            assert!(
+                matches!(err, LayerSpecError::RawPerPlatformNotWsc { .. }),
+                "{what} ({name} from {repo}) was not refused as a wsc-slot \
+                 mismatch: {err:?}"
+            );
+        }
+    }
+
     /// Dropping the owner would fetch pulseengine's release of the same name —
     /// a different repository's bytes, deposited under a good signature.
     // rivet: verifies REQ-LAYERADAPT-001
@@ -636,6 +821,110 @@ asset   = "spar-aadl-%P-%V.vsix"
                 name: "rivet".into()
             }
         );
+    }
+
+    /// A release offering neither mechanism can be carried only with a stated
+    /// reason, and the reason is signed into the layer where every consumer
+    /// reads it. It belongs in the manifest beside the tool it excuses, not in
+    /// a workflow variable — split definitions are how versions drift (#106).
+    // rivet: verifies REQ-LAYERADAPT-001
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_unverified_reason_reaches_the_assembler_intact() {
+        let text = format!(
+            "{REAL}\n[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\n\
+             version = \"v0.10.1\"\nunverified-reason = \"publishes no sums, no cosign \
+             bundle and no attestation; tracked upstream, re-check each cut\"\n"
+        );
+        let env = env_of(&text);
+        assert_eq!(env.unverified_ingest.len(), 1);
+        assert_eq!(env.unverified_ingest[0].0, "bytecodealliance/wac");
+        assert!(env.unverified_ingest[0].1.contains("re-check each cut"));
+
+        // Rendered in $GITHUB_ENV's heredoc form, because the value is
+        // line-separated and a KEY=value line cannot carry newlines.
+        let r = env.render();
+        assert!(r.contains("UNVERIFIED_INGEST<<"), "{r}");
+        assert!(r.contains("bytecodealliance/wac=publishes no sums"), "{r}");
+    }
+
+    /// A reason containing the delimiter would end the heredoc early and let
+    /// whatever followed be read as further environment. That is an injection,
+    /// not a typo, so the delimiter is chosen against the content.
+    // rivet: verifies REQ-LAYERADAPT-001
+    #[test]
+    fn a_reason_containing_the_delimiter_cannot_close_the_block_early() {
+        let text = format!(
+            "{REAL}\n[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\n\
+             version = \"v0.10.1\"\nunverified-reason = \"VARVE_UNVERIFIED_EOF\\nPATH=/evil\"\n"
+        );
+        let r = env_of(&text).render();
+        let opened = r
+            .lines()
+            .find(|l| l.starts_with("UNVERIFIED_INGEST<<"))
+            .expect("heredoc opened");
+        let delim = opened.trim_start_matches("UNVERIFIED_INGEST<<");
+        // The delimiter must not appear inside the body it delimits.
+        let body = r.split(&format!("<<{delim}\n")).nth(1).expect("body");
+        let body = body.split(&format!("\n{delim}")).next().expect("closes");
+        assert!(
+            !body.contains(delim),
+            "delimiter occurs inside its own body"
+        );
+        assert!(
+            body.contains("PATH=/evil"),
+            "the reason must survive verbatim"
+        );
+    }
+
+    /// "We could not verify this" must never be the silent path.
+    // rivet: verifies REQ-LAYERADAPT-001
+    #[test]
+    fn an_empty_unverified_reason_is_refused() {
+        for bad in ["\"\"", "\"   \""] {
+            let text = format!(
+                "{REAL}\n[[tool]]\nname = \"wac\"\nversion = \"v1\"\nunverified-reason = {bad}\n"
+            );
+            let err = assembler_env(&parse_layer_manifest(&text).unwrap()).unwrap_err();
+            assert_eq!(
+                err,
+                LayerSpecError::UnverifiedWithoutReason { tool: "wac".into() },
+                "{bad}"
+            );
+        }
+    }
+
+    /// The opt-in is per RELEASE. Two tools from one repository giving
+    /// different reasons would record one and drop the other.
+    // rivet: verifies REQ-LAYERADAPT-001
+    #[test]
+    fn two_tools_from_one_repo_must_agree_on_the_reason() {
+        // `wsc` already comes from pulseengine/sigil as a raw-per-platform
+        // tool, which is exempt from the basename rule; a tarball tool named
+        // `sigil` from the same repo is the reachable way two payloads share
+        // one release. Two tarball tools cannot, by construction.
+        let text = REAL.replace(
+            "layout  = \"raw-per-platform\"",
+            "layout  = \"raw-per-platform\"\nunverified-reason = \"first\"",
+        ) + "\n[[tool]]\nname = \"sigil\"\nrepo = \"pulseengine/sigil\"\nversion = \"v0.11.0\"\n\
+             unverified-reason = \"second\"\n";
+        let err = assembler_env(&parse_layer_manifest(&text).unwrap()).unwrap_err();
+        assert!(
+            matches!(err, LayerSpecError::ConflictingReason { .. }),
+            "{err:?}"
+        );
+        // Agreeing is fine, and recorded once.
+        let ok = text.replace("\"second\"", "\"first\"");
+        assert_eq!(env_of(&ok).unverified_ingest.len(), 1);
+    }
+
+    /// A manifest with nothing unverified must not emit the variable at all —
+    /// an empty opt-in list and an absent one are different statements.
+    // rivet: verifies REQ-LAYERADAPT-001
+    #[test]
+    fn a_manifest_with_nothing_unverified_emits_no_opt_in() {
+        let r = env_of(REAL).render();
+        assert!(!r.contains("UNVERIFIED_INGEST"), "{r}");
     }
 
     // rivet: verifies REQ-LAYERADAPT-001

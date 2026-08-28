@@ -158,6 +158,25 @@ jobs:
           VARVE_CORROSION_TEST: "1"
         run: cargo test -p varve-core --test corrosion_offline -- --nocapture
 
+  keydisk:
+    name: no signing key on disk (REQ-NOKEYDISK-001)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # `docs ci` names `echo "$SECRET" > key.tmp` as the thing adopters
+      # wrongly invent, and `docs root-ceremony` says the key must reach varve
+      # through a file descriptor. This repository's own deposit workflow wrote
+      # it to a predictable /tmp path on a shared runner for every layer it
+      # published, and an assessor found that by reading the repo rather than
+      # the docs. A rule the publisher does not follow is not evidence, so the
+      # rule is mechanical from here.
+      # Prove the gate can go red BEFORE trusting it green -- the controls
+      # include the exact line this repository shipped.
+      - name: Negative control — the gate must reject what it exists to reject
+        run: tools/no-key-on-disk.sh --self-test
+      - name: Refuse a workflow that writes key material to a file
+        run: tools/no-key-on-disk.sh
+
   mutants:
     name: cargo mutants (trust-critical gate)
     runs-on: ubuntu-latest
@@ -217,8 +236,12 @@ jobs:
             -f crates/varve-core/src/layerspec.rs \
             -f crates/varve-producer/src/asset.rs \
             -f crates/varve-producer/src/attestation.rs \
+            -f crates/varve-producer/src/binfmt.rs \
+            -f crates/varve-producer/src/carryforward.rs \
+            -f crates/varve-producer/src/extract.rs \
             -f crates/varve-producer/src/forge.rs \
             -f crates/varve-producer/src/ingest.rs \
+            -f crates/varve-producer/src/plan.rs \
             -f crates/varve-producer/src/spec.rs \
             -f crates/varve-producer/src/sums.rs
 

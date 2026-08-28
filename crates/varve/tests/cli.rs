@@ -148,7 +148,56 @@ fn verify_fails_when_path_runs_a_different_binary_than_the_pin() {
         .success();
 }
 
+/// The shell contract, which is the whole point of the command: what a caller
+/// captures must BE the path. `predicate::str::contains` cannot see this — it
+/// passes just as happily on a two-line stdout, which is how the defect
+/// survived a test named for the behaviour it broke. A consumer's build script
+/// captured this value, got a non-executable string, fell through to an ambient
+/// binary, and died naming the wrong version (#102).
+// rivet: verifies REQ-WHICHSTDOUT-001
+#[test]
+fn what_a_script_captures_from_which_is_exactly_the_path() {
+    let fx = fixture(Some(PIN_JULY), &[(MANIFEST_JULY, &[("synth", b"s")])]);
+    let out = varve(&fx).args(["which", "synth"]).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+
+    // Exactly what `M=$(varve which synth)` yields, after the shell strips
+    // trailing newlines.
+    let captured = stdout.trim_end_matches('\n');
+    assert!(
+        !captured.contains('\n'),
+        "stdout is {} lines; a script capturing it gets a string that is not a \
+         path:\n{stdout}",
+        captured.lines().count()
+    );
+    assert!(
+        std::path::Path::new(captured).is_absolute(),
+        "captured value is not an absolute path: {captured:?}"
+    );
+    assert!(
+        captured.ends_with("bin/synth"),
+        "captured value is not the tool's path: {captured:?}"
+    );
+
+    // The provenance is not lost — it moves to stderr, where a human at a
+    // terminal still reads it and command substitution does not.
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("2026.07.0"),
+        "layer id missing from stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("sha256:"),
+        "digest missing from stderr: {stderr}"
+    );
+}
+
+/// The human still gets everything — the path to act on and the layer it came
+/// from — but on the two streams that mean different things. This test used to
+/// assert BOTH on stdout, which is how it passed while the command returned a
+/// value no script could use.
 // rivet: verifies REQ-PIN-001
+// rivet: verifies REQ-WHICHSTDOUT-001
 #[test]
 fn which_prints_the_resolved_binary_and_its_layer() {
     let fx = fixture(Some(PIN_JULY), &[(MANIFEST_JULY, &[("synth", b"s")])]);
@@ -156,11 +205,9 @@ fn which_prints_the_resolved_binary_and_its_layer() {
         .args(["which", "synth"])
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("bin/synth")
-                .and(predicate::str::contains("2026.07.0"))
-                .and(predicate::str::contains("sha256:")),
-        );
+        .stdout(predicate::str::contains("bin/synth"))
+        .stdout(predicate::str::contains("2026.07.0").not())
+        .stderr(predicate::str::contains("2026.07.0").and(predicate::str::contains("sha256:")));
 }
 
 // rivet: verifies REQ-PIN-001
@@ -6366,6 +6413,44 @@ fn inspect_reports_name_version_kind_and_platform_for_every_payload() {
     );
 }
 
+/// A layer identifier is YYYY.MM.P and is unique only WITHIN a realm — two
+/// realms can each publish 2026.08.26. varve is built for that world, and
+/// `inspect` said layer, channel, digest, platform and never the realm. A user
+/// read that output beside a `realm = "linc"` pin and observed, correctly, that
+/// the word appeared nowhere in it.
+// rivet: verifies REQ-NAMETHEREALM-001
+#[test]
+fn inspect_names_the_realm_because_a_layer_id_alone_does_not() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let trust = inspectable_composition(&fx);
+
+    let assert = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .arg("inspect")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let header = stdout.lines().next().unwrap_or_default();
+    assert!(
+        header.contains("realm"),
+        "the header identifies a layer without saying which realm it belongs \
+         to: {header}"
+    );
+
+    // And a pipeline gets it as a field rather than by scraping the header.
+    let assert = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["inspect", "--json"])
+        .assert()
+        .success();
+    let doc: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("inspect --json parses");
+    assert!(
+        doc.get("realm").and_then(|v| v.as_str()).is_some(),
+        "inspect --json carries no top-level realm: {doc}"
+    );
+}
+
 // rivet: verifies REQ-INSPECT-001
 #[test]
 fn inspect_json_is_the_shape_a_pipeline_was_promised() {
@@ -6776,15 +6861,13 @@ fn the_unselected_layer_stays_installed_verified_and_addressable() {
         .args(["which", "pulseengine/wasm-tools"])
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("/bin/wasm-tools")
-                .and(predicate::str::contains("provided by realm 'pulseengine'")),
-        );
+        .stdout(predicate::str::contains("/bin/wasm-tools"))
+        .stderr(predicate::str::contains("provided by realm 'pulseengine'"));
     in_realm_project(&fx, &project)
         .args(["which", "bytecodealliance/wasm-tools"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
+        .stderr(predicate::str::contains(
             "provided by realm 'bytecodealliance' layer 2026.08.0",
         ));
 }

@@ -153,3 +153,16 @@ jobs:
         # It ends by rebuilding varve with the pin's choice deleted from the
         # one place it is consulted, and requires the run to go red.
         run: tools/systest/compose-realms.sh "$RUNNER_TEMP/compose-realms"
+
+  install-shadow:
+    name: the installer names which varve will run (REQ-INSTALLSHADOW-001)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # A maintainer followed the documented install and ended up running a
+      # DIFFERENT binary than the one it installed, because being on PATH is
+      # not being first on it. varve refuses to claim success when PATH
+      # shadows a pinned tool; this holds its own installer to that standard.
+      # The gate carries its own negative control.
+      - name: Installer must warn when another varve wins PATH
+        run: tools/systest/install-shadow.sh

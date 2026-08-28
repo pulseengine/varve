@@ -12,7 +12,11 @@
 
 pub mod asset;
 pub mod attestation;
+pub mod binfmt;
+pub mod carryforward;
+pub mod extract;
 pub mod forge;
 pub mod ingest;
+pub mod plan;
 pub mod spec;
 pub mod sums;

@@ -157,7 +157,10 @@ fn store_of(l: &crate::ComposedLayer) -> &Store {
 /// ```text
 /// {
 ///   "command": "inspect",
-///   "layer", "channel", "manifest_digest",   the layer the pin resolved to
+///   "layer", "channel", "realm", "manifest_digest",   the layer the pin
+///                                             resolved to, and the realm that
+///                                             vouched for it (a layer id is
+///                                             unique only within a realm)
 ///   "host_platform",                          what `present` was decided against
 ///   "composition": [ {"layer","manifest_digest","realm","root"} ],
 ///   "payloads":    [ {"name","version","kind","known_kind","platform",
@@ -213,6 +216,13 @@ fn print_json(
         "command": "inspect",
         "layer": target.entry.layer.to_string(),
         "channel": target.entry.channel,
+        // A layer id is YYYY.MM.P and is only unique WITHIN a realm; a
+        // consumer diffing two inspect reports needs to know which realm each
+        // came from. It was in `composition[]` and absent from the top level.
+        "realm": layers
+            .iter()
+            .find(|l| l.entry.digest == target.entry.digest)
+            .map(|l| l.realm.clone()),
         "manifest_digest": target.entry.digest,
         "host_platform": host,
         "composition": composition,
@@ -243,10 +253,26 @@ fn print_text(
     rows: &[Row],
     host: &str,
 ) {
-    println!(
-        "layer {} ({}) {}",
-        target.entry.layer, target.entry.channel, target.entry.digest
-    );
+    // The realm belongs on this line, not only in the composition block below.
+    // Layer ids are YYYY.MM.P, so two realms can publish the same one --
+    // "layer 2026.08.26" alone does not say WHICH 2026.08.26, and the realm is
+    // what the trust root, the store partition and the pin all hang on.
+    // Reported from a real session: a user read this output beside a
+    // `realm = "linc"` pin and the word realm appeared nowhere in it.
+    let realm = layers
+        .iter()
+        .find(|l| l.entry.digest == target.entry.digest)
+        .map(|l| l.realm.as_str());
+    match realm {
+        Some(r) => println!(
+            "layer {} ({}) realm '{}' {}",
+            target.entry.layer, target.entry.channel, r, target.entry.digest
+        ),
+        None => println!(
+            "layer {} ({}) {}",
+            target.entry.layer, target.entry.channel, target.entry.digest
+        ),
+    }
     if layers.len() > 1 {
         println!("composition: {} layers —", layers.len());
         for l in layers {

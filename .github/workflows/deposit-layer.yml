@@ -77,10 +77,17 @@ jobs:
           VARVE_ROLLING_KEY: ${{ secrets.VARVE_ROLLING_KEY }}
           LAYER: ${{ inputs.layer }}
           COUNTER: ${{ inputs.counter }}
+        shell: bash
         run: |
           set -euo pipefail
           test -n "$VARVE_ROLLING_KEY" || { echo "::error::VARVE_ROLLING_KEY not provisioned"; exit 1; }
-          printf '%s' "$VARVE_ROLLING_KEY" > /tmp/rolling.key
+          # The key reaches varve through a FILE DESCRIPTOR, never a file
+          # (REQ-NOKEYDISK-001). `docs ci` documents this form and names
+          # `echo "$SECRET" > key.tmp` as the thing adopters wrongly invent --
+          # and this workflow did exactly that, to a predictable path, on a
+          # shared runner, for every deposit. An assessor found it by reading
+          # the repository rather than the documentation, which is the way
+          # this class of finding is always found.
           ISSUED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           # The spec and the payload bytes it points at live together under
           # deposit-stage/ — a payload `path` resolves relative to the SPEC
@@ -88,7 +95,7 @@ jobs:
           ./target/release/varve deposit \
             --spec deposit-stage/deposit-spec.toml \
             --issued-at "$ISSUED_AT" \
-            --key /tmp/rolling.key --key-id varve-rolling-1 \
+            --key <(printf '%s' "$VARVE_ROLLING_KEY") --key-id varve-rolling-1 \
             --out layer-layout
           # Sign and attach a BASELINE line-status (REQ-STATUS-DIST-001) so
           # `varve status` works after an offline OR registry install with no
@@ -100,11 +107,10 @@ jobs:
             "$LINE" "$COUNTER" "$ISSUED_AT" > baseline-status.json
           ./target/release/varve sign-status \
             --file baseline-status.json \
-            --key /tmp/rolling.key --key-id varve-rolling-1 \
+            --key <(printf '%s' "$VARVE_ROLLING_KEY") --key-id varve-rolling-1 \
             --out baseline-status.dsse.json
           ./target/release/varve attach-status \
             --layout layer-layout --status baseline-status.dsse.json
-          rm -f /tmp/rolling.key
           # Sanity: the deposit installs and verifies on THIS runner before
           # anything is published.
           mkdir -p sanity-project

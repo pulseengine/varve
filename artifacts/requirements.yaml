@@ -3537,7 +3537,7 @@ artifacts:
   - id: REQ-PRODUCER-002
     type: requirement
     title: The producer pipeline is a tested Rust program, not a shell script shipped as a tarball
-    status: draft
+    status: implemented
     release: v0.30.0
     description: >
       The pipeline that assembles, signs and publishes a layer is ~3.5k lines
@@ -3595,6 +3595,282 @@ artifacts:
       instance from this repository, so it shall be reported as a caveat
       rather than assumed — a release publishing a cosign-signed
       SHA256SUMS.txt uses rung 1 and does not depend on it.
+
+  - id: REQ-NAMETHEREALM-001
+    type: requirement
+    title: Output that identifies a layer names the realm, because a layer id alone does not
+    status: verified
+    release: v0.30.0
+    description: >
+      A layer identifier is `YYYY.MM.P` and is unique only WITHIN a realm. Two
+      realms can each publish `2026.08.26`, and varve is built for exactly that
+      world — REQ-REALM2-001 stood up a second realm and a pin qualifier to
+      settle name collisions between them.
+      .
+      `varve inspect` never printed the realm. Not in the header, not in
+      `--json`, which had no `realm` key at all. It appeared only inside the
+      `composition` block, which is skipped when a layer composes nothing — the
+      ordinary case. A user read that output beside a `realm = "linc"` pin and
+      observed, correctly, that the word realm appeared nowhere in it.
+      .
+      The refusal path had the same gap from the other side: a shim declining a
+      tool named the layer and the tools it exposes, but not which `varve.toml`
+      chose that layer or which realm it named. With one shim directory serving
+      every realm and `cd` switching toolchains, "why did this tool stop
+      working HERE" is the question, and the answer is a file the user can
+      open.
+      .
+      Clauses: (1) `varve inspect` shall name the realm in its header and carry
+      a top-level `realm` in `--json`. (2) A dispatch refusal shall name the
+      pin file and the realm it selects, not merely the layer. (3) Any output
+      that identifies a layer to a human shall be unambiguous about which realm
+      it belongs to, since the identifier alone is not.
+
+  - id: REQ-INSTALLSHADOW-001
+    type: requirement
+    title: The installer says what it replaced, and which varve will actually run
+    status: implemented
+    release: v0.30.0
+    description: >
+      `install.sh` writes the binary with `mv` over whatever was at
+      `$INSTALL_DIR/varve` and reports "Installed varve X". It never says a
+      previous version was there, and never checks whether a DIFFERENT varve
+      earlier on PATH will win the lookup. Its PATH message makes the second
+      worse: it prints "$INSTALL_DIR is already on PATH", which is true and
+      misleading — on PATH is not the same as first on PATH.
+      .
+      Reproduced on a maintainer's machine: `~/.varve/bin/varve` at 0.25.0 from
+      the installer, `~/.cargo/bin/varve` at 0.29.0 from cargo, and plain
+      `varve` resolving to the cargo one. A user follows the documented install,
+      is told it succeeded, and then runs a binary the installer did not put
+      there. They have no way to know from the output.
+      .
+      This is REQ-SHADOW-001's hazard turned on varve itself. varve REFUSES to
+      claim success when a pinned tool is shadowed by PATH — "your shell will
+      run the first one; varve dispatches the second" — and its own installer
+      does not apply that reasoning to the binary it just installed. A
+      bootstrap that can leave the user running a different build than the one
+      it verified is a bootstrap that has not bootstrapped anything.
+      .
+      Clauses: (1) When a binary already exists at the destination, the
+      installer shall report the version it replaced alongside the version it
+      installed; an unchanged reinstall shall say so rather than implying
+      change. (2) After installing, the installer shall resolve `varve` the way
+      the user's shell will and, if the winner is not the binary it just
+      installed, shall say so prominently — naming the winning path, its
+      version, and how to make the intended one win. (3) The check shall use
+      the same resolution order the shell uses, not an assumption about where
+      things live. (4) It shall not silently succeed: the difference between
+      "installed" and "installed and this is what you will run" is the whole
+      value of the message. (5) A negative control shall prove the warning
+      fires — an installer that only ever prints the happy path has not been
+      tested, and this defect survived because nothing exercised the shadowed
+      case.
+
+  - id: REQ-REALM2-002
+    type: requirement
+    title: The bytecodealliance realm gets its own root, and is the first real ceremony
+    status: draft
+    release: v1.0.0
+    description: >
+      The second realm exists only inside `tools/systest/compose-realms.sh`.
+      The shipped `varve-realms.toml` defines exactly one realm and all
+      published tags are pulseengine's, so "varve composes two realms" is true
+      in the gate and untrue in the registry.
+      .
+      Carrying `wasm-tools` inside the pulseengine realm was proposed and
+      REJECTED. It is buildable today — all four platforms resolve through the
+      %U upstream tag, `gh attestation verify` succeeds on the real release and
+      fails on tampered bytes — and it needs no new key. It was rejected
+      because it defeats what a realm is. A realm is a trust universe defined
+      by one root; letting that root sign bytes the organisation did not build
+      makes the boundary decorative. Recording an ingestion proof documents
+      whose bytes they are, it does not change who vouched for them. The
+      shortcut's whole appeal was avoiding the key problem, which is an
+      argument for solving the key problem.
+      .
+      Clauses: (1) `bytecodealliance` shall be a realm with its OWN root, its
+      own entry in `varve-realms.toml`, and its own layer line. (2) That root
+      shall be produced by the ceremony REQ-CEREMONY-001 defines — not
+      generated into CI, which is how the pulseengine root came to be
+      unbackupable and unmovable (#110). (3) A rehearsal with a genuinely
+      throwaway key shall precede it, and the rehearsal's transcript is the
+      runbook the real ceremony is executed from; the two shall not happen on
+      the same day, because a real ceremony run at hour eight of a rehearsal is
+      where custody defects are born. (4) The pulseengine realm shall not carry
+      payloads from outside the organisation in the meantime; a name collision
+      between the two realms is settled by the pin's realm qualifier
+      (REQ-REALM2-001 clause 4c), which is what that mechanism was built for.
+      .
+      Why this realm first: it is the only realm whose ceremony can go wrong
+      cheaply. It has no consumers, no published root anyone pins, and nothing
+      frozen if it must be redone — the exact opposite of the pulseengine
+      realm, where a mistake is unrecoverable because varve has neither
+      rotation nor revocation. An assessor's first recommendation was to stop
+      writing about the ceremony and run one; this gives that run a real
+      deliverable instead of a discarded key, and gives the ceremony a deadline
+      that "at v1.0" never supplied.
+
+  - id: REQ-CARRYFORWARD-001
+    type: requirement
+    title: A deposit does the work that changed, and re-proves the work that did not
+    status: implemented
+    release: v0.30.0
+    description: >
+      Every deposit downloads all four platforms of every tool the layer
+      carries — 421 MiB for layer 2026.08.4 — re-hashes them and re-pushes
+      them, even when a single tool moved. Consumers are unaffected: install
+      filters by platform before fetching, so a machine pulls 99 MiB. The cost
+      is the producer's, and daily scanning (DD-024) multiplies it by the
+      cadence.
+      .
+      The previous layer's SIGNED manifest already records each payload's
+      upstream repo, release, asset name and sha256. When `layer.toml` still
+      pins the same release, that work is already done and proven.
+      .
+      The trap is that reusing it naively would REGRESS a security property.
+      A release asset can be deleted and re-uploaded under the same tag, so
+      "rivet v0.34.0" today is not necessarily the bytes it was yesterday.
+      Carrying a digest forward on the strength of a version string would make
+      varve blind to exactly the substitution it exists to catch.
+      .
+      So the saving must come from skipping the DOWNLOAD, never from skipping
+      the PROOF. Re-verifying a release costs a sums file — kilobytes — while
+      the binary it describes is tens of megabytes.
+      .
+      Clauses: (1) The ingestion proof shall be re-established every deposit,
+      unconditionally; carry-forward shall never skip it. (2) The digest
+      recorded upstream NOW shall be compared against the digest the previous
+      layer recorded; only when they agree may the payload bytes go
+      un-downloaded. (3) A disagreement shall ABORT and name both digests: an
+      upstream that re-published a release under the same version is a fact an
+      operator must see, and it is not varve's to resolve silently in either
+      direction. (4) Reuse shall additionally require that the blob is still
+      present in the destination registry, since a manifest entry is not a
+      guarantee of storage. (5) A payload with no previous entry — a new tool,
+      a new platform, a changed version — shall be fetched normally. (6) The
+      gate shall be that depositing an unchanged `layer.toml` twice fetches no
+      payload bytes the second time.
+
+  - id: REQ-PAYLOADSMOKE-001
+    type: requirement
+    title: A deposited payload is checked for being usable, not merely for being the bytes upstream published
+    status: implemented
+    release: v0.30.0
+    description: >
+      Everything the producer verifies today answers one question: are these
+      the bytes upstream published? A cosign-signed sums file or a build
+      attestation establishes that, and the digest recorded in the layer
+      transcribes it. Nothing establishes that the bytes are a WORKING TOOL for
+      the platform they are deposited under.
+      .
+      The deposit's own "sanity" step installs the layer and runs `varve
+      verify`, which checks signatures and digests — the same property again,
+      more carefully. No deposited binary is ever executed, and no systest runs
+      one. A layer can therefore be assembled, signed, published and installed
+      while carrying an x86_64 binary under `aarch64-unknown-linux-gnu`, a
+      shell script where a binary was expected, or a file upstream truncated
+      before publishing. Each of those is faithfully hashed and correctly
+      signed, and fails for the first time on a consumer's machine.
+      .
+      An architecture mismatch is the sharp case because it is a real upstream
+      packaging mistake, it is invisible to every check varve currently runs,
+      and the consumer who finds it is the one who can do least about it.
+      .
+      Clauses: (1) Before a payload is staged, its executable format shall be
+      parsed and its architecture compared with the platform it is being
+      deposited under; a mismatch shall abort the deposit naming both. (2) The
+      check shall work for EVERY platform in the layer, not only the runner's,
+      so it shall read the file's header rather than execute it — a deposit
+      runs on one machine and ships four platforms. (3) A payload whose format
+      is not recognised shall be reported, not silently accepted: "this is not
+      an executable varve can identify" is a fact the operator should see
+      before signing, since a wrapper script is a legitimate payload and a
+      truncated download is not. (4) Where the host CAN run a payload, the
+      producer shall additionally smoke it — execute it with a harmless
+      argument and require a clean exit — because a correct architecture is
+      still not a working binary. (5) These checks shall run before the
+      irreversible step; a published layer tag is spent and varve has no
+      revocation.
+
+  - id: REQ-WHICHSTDOUT-001
+    type: requirement
+    title: A resolver's answer is its stdout, and nothing else is
+    status: verified
+    release: v0.30.0
+    description: >
+      `varve which <tool>` prints the resolved path AND a provenance line to
+      stdout, so `M=$(varve which meld)` yields a two-line string that is not
+      an executable path. A caller doing the obvious thing gets a broken value
+      from the command whose entire purpose is answering "which binary runs
+      here".
+      .
+      This is not hypothetical and it is not cosmetic. It is what made a
+      consumer's build script fall through to an ambient `meld 0.41.3` and die
+      with an `unexpected argument` error naming the wrong version (#102) —
+      the mixed-toolchain hazard varve exists to close, produced by varve, and
+      still reproducing on v0.29.0 against a layer published the same day.
+      .
+      Clauses: (1) `varve which` shall print the resolved path on stdout and
+      nothing else on stdout. (2) Provenance — the layer id, channel and
+      manifest digest — shall go to stderr, where it stays visible to a human
+      at a terminal and invisible to command substitution. (3) `--json` shall
+      remain a single JSON document on stdout. (4) The gate shall be the shell
+      contract itself: a test asserting `[ -x "$(varve which <tool>)" ]`, run
+      against a real installed layer rather than a fixture, because a fixture
+      that never runs the shell cannot see this class of defect. (5) Every
+      other command whose output a script would capture shall be audited for
+      the same shape, since the defect is one of habit rather than of this one
+      call site.
+
+  - id: REQ-NOKEYDISK-001
+    type: requirement
+    title: The realm's signing key does not touch disk, in varve's own pipelines first
+    status: implemented
+    release: v0.30.0
+    description: >
+      `varve docs ci` tells adopters that "every adopter therefore invents
+      `echo "$SECRET" > key.tmp`, which leaves the realm's one secret on disk",
+      and documents two forms that avoid the file entirely — a pipe through
+      `/dev/stdin`, and process substitution. `docs root-ceremony` states the
+      rule outright: in CI the key "reaches varve through a file descriptor,
+      never a workspace file".
+      .
+      varve's own deposit workflow writes it to `/tmp/rolling.key` on a shared
+      cloud runner. Not to a `mktemp` path, not mode 0600 — a predictable name,
+      the pattern the documentation names as the thing adopters wrongly invent.
+      An independent assessor found this by reading the repository rather than
+      the documentation, and correctly called it the finding that invalidates
+      every other procedural claim by induction: a published procedure the
+      publisher does not follow cannot be evidence of anything.
+      .
+      Clauses: (1) No varve-operated workflow shall write key material to a
+      filesystem path; the documented file-descriptor forms shall be used.
+      (2) A mechanical gate shall refuse a workflow that redirects a secret
+      into a file — the check must fail on the pattern, not rely on review.
+      (3) The gate shall carry a negative control proving it goes red, since a
+      lint that cannot fail is the defect class this project exists to close.
+      (4) The signing job shall be gated by whatever control the operating
+      organisation can actually staff, and the documentation shall claim
+      exactly that and no more. For a SINGLE-OPERATOR realm — which this one
+      is, at 105 commits by one person — a required-reviewer gate is
+      unstaffable, and configuring one would produce either a self-approval
+      (a control in name only) or a permanently blocked pipeline. Neither is
+      better than saying so. What such an operator can have instead is
+      DETECTION rather than prevention: a wait timer that opens a cancel
+      window, an environment restricted to the ref the deposit may run from,
+      and above all a durable record of what was signed and when, so an
+      unauthorised signature is discoverable after the fact. Prevention needs
+      a second person; detection does not.
+      (5) No varve document shall prescribe a two-person rule for varve's own
+      realm while varve's own realm has one person. The rule stays in
+      `docs root-ceremony` as advice to organisations that HAVE two people,
+      explicitly marked as such, and varve's own posture is stated plainly
+      beside it. A procedure the publisher cannot follow is the finding that
+      invalidates every other procedural claim by induction, and this project
+      has already collected that finding once.
+      (6) `docs ci` shall stop presenting the file fallback as acceptable for a
+      realm root: it is acceptable for a throwaway key and nothing else.
 
   - id: REQ-LAYERADAPT-001
     type: requirement
