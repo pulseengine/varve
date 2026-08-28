@@ -27,6 +27,7 @@ set -euo pipefail
 # controls below include the EXACT line this repository shipped for every layer
 # it published, so a future refactor that guts the pattern fails here rather
 # than silently allowing the thing back.
+# rivet: verifies REQ-NOKEYDISK-001
 if [ "${1:-}" = "--self-test" ]; then
   work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
   mkdir -p "$work/wf"

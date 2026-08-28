@@ -6413,6 +6413,44 @@ fn inspect_reports_name_version_kind_and_platform_for_every_payload() {
     );
 }
 
+/// A layer identifier is YYYY.MM.P and is unique only WITHIN a realm — two
+/// realms can each publish 2026.08.26. varve is built for that world, and
+/// `inspect` said layer, channel, digest, platform and never the realm. A user
+/// read that output beside a `realm = "linc"` pin and observed, correctly, that
+/// the word appeared nowhere in it.
+// rivet: verifies REQ-NAMETHEREALM-001
+#[test]
+fn inspect_names_the_realm_because_a_layer_id_alone_does_not() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let trust = inspectable_composition(&fx);
+
+    let assert = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .arg("inspect")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let header = stdout.lines().next().unwrap_or_default();
+    assert!(
+        header.contains("realm"),
+        "the header identifies a layer without saying which realm it belongs \
+         to: {header}"
+    );
+
+    // And a pipeline gets it as a field rather than by scraping the header.
+    let assert = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .args(["inspect", "--json"])
+        .assert()
+        .success();
+    let doc: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("inspect --json parses");
+    assert!(
+        doc.get("realm").and_then(|v| v.as_str()).is_some(),
+        "inspect --json carries no top-level realm: {doc}"
+    );
+}
+
 // rivet: verifies REQ-INSPECT-001
 #[test]
 fn inspect_json_is_the_shape_a_pipeline_was_promised() {

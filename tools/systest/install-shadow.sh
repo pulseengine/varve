@@ -36,6 +36,7 @@ probe() { # PATH-value -> prints, exit 7 when it warns
   '
 }
 
+# rivet: verifies REQ-INSTALLSHADOW-001
 echo "== the warning must FIRE when another varve wins PATH"
 if probe "$WORK/other/bin:$WORK/installed/bin:/usr/bin:/bin" >/dev/null 2>&1; then
   fail "a shadowing varve did not produce a warning — the exact defect this gate exists for"

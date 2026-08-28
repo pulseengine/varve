@@ -3537,7 +3537,7 @@ artifacts:
   - id: REQ-PRODUCER-002
     type: requirement
     title: The producer pipeline is a tested Rust program, not a shell script shipped as a tarball
-    status: draft
+    status: implemented
     release: v0.30.0
     description: >
       The pipeline that assembles, signs and publishes a layer is ~3.5k lines
@@ -3599,7 +3599,7 @@ artifacts:
   - id: REQ-NAMETHEREALM-001
     type: requirement
     title: Output that identifies a layer names the realm, because a layer id alone does not
-    status: draft
+    status: verified
     release: v0.30.0
     description: >
       A layer identifier is `YYYY.MM.P` and is unique only WITHIN a realm. Two
@@ -3629,7 +3629,7 @@ artifacts:
   - id: REQ-INSTALLSHADOW-001
     type: requirement
     title: The installer says what it replaced, and which varve will actually run
-    status: draft
+    status: implemented
     release: v0.30.0
     description: >
       `install.sh` writes the binary with `mv` over whatever was at
@@ -3714,7 +3714,7 @@ artifacts:
   - id: REQ-CARRYFORWARD-001
     type: requirement
     title: A deposit does the work that changed, and re-proves the work that did not
-    status: draft
+    status: implemented
     release: v0.30.0
     description: >
       Every deposit downloads all four platforms of every tool the layer
@@ -3755,7 +3755,7 @@ artifacts:
   - id: REQ-PAYLOADSMOKE-001
     type: requirement
     title: A deposited payload is checked for being usable, not merely for being the bytes upstream published
-    status: draft
+    status: implemented
     release: v0.30.0
     description: >
       Everything the producer verifies today answers one question: are these
@@ -3796,7 +3796,7 @@ artifacts:
   - id: REQ-WHICHSTDOUT-001
     type: requirement
     title: A resolver's answer is its stdout, and nothing else is
-    status: draft
+    status: verified
     release: v0.30.0
     description: >
       `varve which <tool>` prints the resolved path AND a provenance line to
@@ -3826,7 +3826,7 @@ artifacts:
   - id: REQ-NOKEYDISK-001
     type: requirement
     title: The realm's signing key does not touch disk, in varve's own pipelines first
-    status: draft
+    status: implemented
     release: v0.30.0
     description: >
       `varve docs ci` tells adopters that "every adopter therefore invents
