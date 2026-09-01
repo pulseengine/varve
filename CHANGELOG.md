@@ -1,5 +1,123 @@
 # Changelog
 
+## v0.30.0 — 2026-09-01
+
+The release a five-way review produced. A design concept went to a security
+architect, an STPA-Sec analysis, a ceremony operator, an adopting engineer and
+an independent certification assessor. **All five dissented**, and the useful
+half of what they found was not about the design at all — it was live defects
+in shipped code, several in the exact failure class varve exists to close.
+
+| | before | now |
+|---|---|---|
+| `varve which <tool>` | two lines on stdout, so `$(…)` yields a non-path | the path on stdout, provenance on stderr |
+| the signing key in CI | written to `/tmp/rolling.key` on a shared runner | reaches varve through a file descriptor, with a gate refusing the pattern |
+| `install.sh` | replaced silently; never said another varve wins PATH | names what it replaced and which varve actually runs |
+| `varve inspect` | layer id, no realm — and an id is unique only *within* a realm | names the realm, in text and `--json` |
+| the producer pipeline | ~3.5k lines of bash | ten Rust modules, all at zero mutation survivors |
+
+### Fixed — defects, not polish
+
+- **`varve which` returned a value no script could use.** It printed the
+  resolved path *and* the provenance to stdout, so `M=$(varve which meld)`
+  produced a two-line string that is not an executable path. The code carried a
+  comment claiming *"scripts that capture it keep working"* and another saying
+  *"the first two lines are what scripts capture"* — a script captures all of
+  them. This is what made a consumer's build script fall through to an ambient
+  `meld 0.41.3` and die naming a version nobody pinned (#102): the
+  mixed-toolchain failure varve exists to close, produced by the command whose
+  job is closing it. The test that should have caught it asserted
+  `stdout.contains(path)` *and* `stdout.contains(layer_id)`, which passes just
+  as happily on two lines. (REQ-WHICHSTDOUT-001)
+- **The realm's signing key was written to disk on a shared runner.**
+  `docs ci` names `echo "$SECRET" > key.tmp` as the thing adopters wrongly
+  invent; `docs root-ceremony` says the key must reach varve *"through a file
+  descriptor, never a workspace file"*. varve's own deposit workflow wrote it
+  to a predictable `/tmp` path for every layer it has ever published, and
+  `release.yml` did the same for the release sums. Both now use the documented
+  form, and `tools/no-key-on-disk.sh` refuses the pattern with a `--self-test`
+  proving it goes red against four shapes — including the exact line this
+  repository shipped. (REQ-NOKEYDISK-001)
+- **The installer said it succeeded while a different varve won PATH.** It
+  overwrote the destination with `mv` without saying what it replaced, and its
+  reassuring *"$INSTALL_DIR is already on PATH"* is true and useless — being on
+  PATH is not being *first* on it. Reproduced on a maintainer's machine:
+  `~/.varve/bin/varve` at 0.25.0 from the installer, `~/.cargo/bin/varve` at
+  0.29.0 from cargo, and plain `varve` resolving to the second. A bootstrap
+  that leaves you running a build it did not install has not bootstrapped
+  anything. (REQ-INSTALLSHADOW-001)
+- **`varve inspect` never named the realm.** A layer identifier is `YYYY.MM.P`
+  and is unique only *within* a realm — two realms can each publish
+  `2026.08.26`, which is the world REQ-REALM2-001 built the pin qualifier for.
+  The realm was available all along and printed only in the `composition`
+  block, which is skipped when a layer composes nothing. A dispatch refusal now
+  also names the `varve.toml` that chose the layer and the realm it selects.
+  (REQ-NAMETHEREALM-001)
+
+### Added
+
+- **`varve-producer`** — the producer pipeline, in Rust. Ten modules, each at
+  zero mutation survivors and all in the required trust-critical gate. It reads
+  `layer.toml` **directly**, so the space-and-colon environment encoding that
+  `layerspec` has to defend against does not exist on this path. It also lifts
+  a hard limit: the shell carried exactly one raw-per-platform tool, because
+  that layout lived in a variable named `WSC_VERSION`; layout is now a property
+  of a tool. (REQ-PRODUCER-002)
+- **Architecture verification for every payload.** Everything the producer
+  verified answered *are these upstream's bytes?* Nothing answered *are they a
+  working tool?* An upstream shipping an x86_64 binary inside its aarch64
+  tarball produces a layer that signs, publishes and installs perfectly — the
+  digest is correct, faithfully recording the wrong file — and fails on a
+  consumer's machine as `cannot execute binary file`. The header is now read
+  (not executed, since a deposit runs on one machine and ships four platforms).
+  (REQ-PAYLOADSMOKE-001)
+- **Carry-forward that skips the download, never the proof.** A release asset
+  can be deleted and re-uploaded under the same tag, so reusing a digest
+  because the *version string* matched would make varve blind to exactly the
+  substitution it exists to catch. The ingestion proof is re-established every
+  deposit; only when upstream's *current* digest matches do the bytes go
+  unfetched. A disagreement stops the deposit and names both digests — a
+  detection varve did not have. (REQ-CARRYFORWARD-001)
+- **`unverified-reason` in the manifest**, so a release that offers no proof of
+  origin carries the operator's stated reason beside the tool it excuses rather
+  than in a workflow variable. Also `%R` (the release tag as written) and
+  `[tool.asset-for]` (an explicit per-platform asset name), both found by
+  planning a real manifest and checking every name against the live releases:
+  four of twelve did not exist. (REQ-LAYERADAPT-001)
+
+### Documentation — what this project cannot claim
+
+- **`docs root-ceremony` prescribed a two-person rule that varve's own realm
+  cannot staff.** 105 of 105 commits are by one person. A required-reviewer
+  gate here produces either a self-approval — a control in name only — or a
+  permanently blocked pipeline. The topic now carries a **"When you are one
+  person"** section: trade prevention for detection, prefer a custody share
+  held by an *institution* over a friend's desk drawer, and write down what
+  happens to the realm if the operator stops.
+- **The provisional rolling root has no backup at all**, and the topic now says
+  so. It was generated straight into CI; its secret half exists only as a
+  write-only Actions secret. It cannot be moved, cannot be recovered, and must
+  not be extracted. An earlier draft called that *"write-only — nobody can read
+  one back, by design"*, which is false: it is a property of the settings API,
+  not of the secret. (#110)
+
+### Known limitations
+
+- **The producer port is partial.** The `gh` seam and the orchestrator are not
+  written, so `tools/build-deposit-spec.sh` still runs the real deposits and
+  the wildcard-digest defect it contains is still live. REQ-PRODUCER-002 stays
+  `implemented`.
+- **Two requirements cannot reach `verified`**, and the reason is a tool limit
+  rather than missing evidence: REQ-NOKEYDISK-001 and REQ-INSTALLSHADOW-001 are
+  verified by shell gates that each carry a negative control, and
+  `rivet coverage` does not read markers from `.sh` files (rivet#870).
+- **The `bytecodealliance` realm is still unpublished.** Its manifest is
+  drafted and every asset verified to exist, and the tooling limits are gone —
+  it is blocked on a root key, which needs the ceremony (REQ-REALM2-002).
+- The published rolling root remains **provisional**: no rotation, no
+  revocation, no threshold, no transparency log. That is why the qualified
+  channel is not open. (REQ-CEREMONY-001, v1.0.0)
+
 ## v0.29.0 — 2026-08-25
 
 Multi-realm distribution, and an ingestion premise I got wrong twice.
