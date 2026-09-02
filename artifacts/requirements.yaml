@@ -3806,6 +3806,8 @@ artifacts:
       a new platform, a changed version — shall be fetched normally. (6) The
       gate shall be that depositing an unchanged `layer.toml` twice fetches no
       payload bytes the second time.
+    fields:
+      blocked-by: "varve#124: clause 6 unreachable — a deposit spec cannot reference a blob the registry already holds, so the download cannot be skipped. Clauses 1-5 hold."
 
   - id: REQ-PAYLOADSMOKE-001
     type: requirement

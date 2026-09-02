@@ -24,19 +24,58 @@ use std::path::Path;
 /// Previous entries, keyed by payload name, read from a spec this assembler
 /// wrote last time.
 pub fn previous_from_spec(text: &str) -> anyhow::Result<BTreeMap<String, PreviousEntry>> {
+    // `deny_unknown_fields` is the guard, not a formality. Without it a spec
+    // whose sections are named anything else parses cleanly to an empty
+    // history — which is indistinguishable from a first run, so every payload
+    // is silently re-fetched forever. That is precisely the bug this reader
+    // shipped with until a live deposit exposed it.
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Prev {
-        #[serde(default)]
+        #[allow(dead_code)]
+        layer: String,
+        #[allow(dead_code)]
+        channel: String,
+        #[allow(dead_code)]
+        counter: u64,
+        #[serde(rename = "include", default)]
+        #[allow(dead_code)]
+        includes: Vec<toml::Value>,
+        // `tool`, not `tools`: SpecOut serialises the field under that name.
+        // Reading a key the writer never emits yields an empty history that
+        // looks exactly like a first run — every payload re-fetched, silently,
+        // for as long as nobody times the job. A live run is what caught it;
+        // the unit test below round-trips through the real writer so the two
+        // cannot drift apart again.
+        #[serde(rename = "tool", default)]
         tools: Vec<PrevTool>,
     }
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct PrevTool {
+        #[allow(dead_code)]
+        version: String,
+        #[allow(dead_code)]
+        path: String,
+        #[serde(default)]
+        #[allow(dead_code)]
+        kind: Option<String>,
         name: String,
         platform: Option<String>,
         source: PrevSource,
     }
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct PrevSource {
+        #[serde(rename = "proof", default)]
+        #[allow(dead_code)]
+        proof: Option<String>,
+        #[serde(rename = "proof-signer", default)]
+        #[allow(dead_code)]
+        proof_signer: Option<String>,
+        #[serde(rename = "proof-asserts", default)]
+        #[allow(dead_code)]
+        proof_asserts: Option<String>,
         repo: String,
         release: String,
         asset: String,
@@ -394,43 +433,85 @@ mod tests {
         );
     }
 
-    /// One layer carries the same tool for four platforms. A previous-entry
+    fn spec_with_two_platforms() -> String {
+        let src = |asset: &str, sha: &str| SourceOut {
+            repo: "pulseengine/rivet".into(),
+            release: "v0.34.0".into(),
+            asset: asset.into(),
+            sha256: sha.into(),
+            proof: Some("cosign-sums".into()),
+            proof_signer: Some("https://github.com/pulseengine/rivet/".into()),
+            proof_asserts: Some("signed".into()),
+        };
+        let tool = |platform: &str, asset: &str, sha: &str| ToolOut {
+            name: "rivet".into(),
+            version: "0.34.0".into(),
+            platform: Some(platform.into()),
+            path: format!("tools/rivet-{platform}"),
+            kind: None,
+            source: src(asset, sha),
+        };
+        describe(
+            "2026.09.1",
+            "rolling",
+            7,
+            vec![
+                tool(
+                    "x86_64-unknown-linux-gnu",
+                    "rivet-v0.34.0-x86_64-unknown-linux-gnu.tar.gz",
+                    "aaaa",
+                ),
+                tool(
+                    "aarch64-apple-darwin",
+                    "rivet-v0.34.0-aarch64-apple-darwin.tar.gz",
+                    "bbbb",
+                ),
+            ],
+        )
+        .render()
+        .expect("the writer produces a valid spec")
+    }
+
+    /// Round-tripped through the REAL writer, deliberately.
+    ///
+    /// The first version of this test hand-wrote its TOML with `[[tools]]`,
+    /// while SpecOut serialises `[[tool]]`. It passed, and the reader silently
+    /// returned an empty history for every real spec — which looks exactly
+    /// like a first run, so every payload was re-fetched and nothing failed.
+    /// A live deposit caught it. A fixture the writer never produces tests the
+    /// fixture, not the program.
+    // rivet: verifies REQ-CARRYFORWARD-001
+    #[test]
+    fn a_spec_this_program_wrote_is_a_spec_this_program_can_read_back() {
+        let text = spec_with_two_platforms();
+        assert!(
+            text.contains("[[tool]]"),
+            "the writer changed shape: {text}"
+        );
+        let prev = previous_from_spec(&text).expect("parses");
+        assert_eq!(
+            prev.len(),
+            2,
+            "read {} entries back from {text}",
+            prev.len()
+        );
+        assert_eq!(prev["rivet@x86_64-unknown-linux-gnu"].sha256, "aaaa");
+        assert_eq!(prev["rivet@aarch64-apple-darwin"].sha256, "bbbb");
+        assert_eq!(prev["rivet@aarch64-apple-darwin"].repo, "pulseengine/rivet");
+        assert_eq!(prev["rivet@aarch64-apple-darwin"].release, "v0.34.0");
+    }
+
+    /// One layer carries the same tool for four platforms, so a previous-entry
     /// map keyed by name alone would let one platform's record answer for
-    /// another's, and carry forward a linux digest as a darwin payload.
+    /// another's and carry a linux digest forward as a darwin payload.
     // rivet: verifies REQ-CARRYFORWARD-001
     #[test]
     fn previous_entries_are_remembered_per_platform_not_per_tool() {
-        let text = r#"
-layer = "2026.09.1"
-channel = "rolling"
-counter = 7
-
-[[tools]]
-name = "rivet"
-version = "0.34.0"
-platform = "x86_64-unknown-linux-gnu"
-path = "tools/rivet-x86_64-unknown-linux-gnu"
-[tools.source]
-repo = "pulseengine/rivet"
-release = "v0.34.0"
-asset = "rivet-v0.34.0-x86_64-unknown-linux-gnu.tar.gz"
-sha256 = "aaaa"
-
-[[tools]]
-name = "rivet"
-version = "0.34.0"
-platform = "aarch64-apple-darwin"
-path = "tools/rivet-aarch64-apple-darwin"
-[tools.source]
-repo = "pulseengine/rivet"
-release = "v0.34.0"
-asset = "rivet-v0.34.0-aarch64-apple-darwin.tar.gz"
-sha256 = "bbbb"
-"#;
-        let prev = previous_from_spec(text).expect("parses");
-        assert_eq!(prev.len(), 2, "{prev:?}");
-        assert_eq!(prev["rivet@x86_64-unknown-linux-gnu"].sha256, "aaaa");
-        assert_eq!(prev["rivet@aarch64-apple-darwin"].sha256, "bbbb");
+        let prev = previous_from_spec(&spec_with_two_platforms()).expect("parses");
+        assert_ne!(
+            prev["rivet@x86_64-unknown-linux-gnu"].sha256,
+            prev["rivet@aarch64-apple-darwin"].sha256
+        );
     }
 
     // rivet: verifies REQ-CARRYFORWARD-001
@@ -465,7 +546,19 @@ sha256 = "bbbb"
         // MISREAD history is not: it would answer carry-forward questions with
         // whatever survived the parse.
         assert!(previous_from_spec("this is not toml {{{").is_err());
-        assert!(previous_from_spec("[[tools]]\nname = \"x\"\n").is_err());
+        // A section this program does not write must be an ERROR, not an
+        // empty history: an empty history is indistinguishable from a first
+        // run, so the mistake shows up as permanent silent re-fetching rather
+        // than as a failure.
+        let wrong_name = previous_from_spec(
+            "layer = \"x\"\nchannel = \"c\"\ncounter = 1\n[[tools]]\nname = \"x\"\n",
+        );
+        assert!(
+            wrong_name.is_err(),
+            "a misnamed section parsed as an empty history"
+        );
+        // And a spec missing the fields carry-forward needs is an error too.
+        assert!(previous_from_spec("layer = \"x\"\n").is_err());
     }
 
     // rivet: verifies REQ-PRODUCER-002

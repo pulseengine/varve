@@ -26,11 +26,15 @@ fn workflow() -> String {
 fn the_assembler_is_built_wherever_varve_is() {
     let w = workflow();
     assert!(
-        w.contains("cargo build --release --locked --target ${{ matrix.target }} -p varve-producer"),
+        w.contains(
+            "cargo build --release --locked --target ${{ matrix.target }} -p varve-producer"
+        ),
         "no native build of varve-producer"
     );
     assert!(
-        w.contains("cross build --release --locked --target ${{ matrix.target }} -p varve-producer"),
+        w.contains(
+            "cross build --release --locked --target ${{ matrix.target }} -p varve-producer"
+        ),
         "no cross build of varve-producer"
     );
 }
@@ -83,7 +87,10 @@ fn a_release_missing_the_assembler_is_refused() {
         .nth(1)
         .expect("the gate step is gone");
     let gate = gate.split("- name:").next().expect("gate body");
-    assert!(gate.contains("varve-producer-"), "the gate counts nothing:\n{gate}");
+    assert!(
+        gate.contains("varve-producer-"),
+        "the gate counts nothing:\n{gate}"
+    );
     assert!(
         gate.contains("exit 1"),
         "the gate reports but does not refuse:\n{gate}"

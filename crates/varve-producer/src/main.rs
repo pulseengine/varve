@@ -201,9 +201,28 @@ fn main() -> anyhow::Result<()> {
                 m.realm.name,
                 forge.host
             );
-            let resolved = orchestrate::run(&src, &forge, &planned, &prev, &optins, &|d| {
-                present.contains(d)
-            })?;
+            // Carry-forward is DECIDED by the orchestrator and not yet ACTED
+            // on here, deliberately.
+            //
+            // REQ-CARRYFORWARD-001 clause 4 requires reuse only when the blob
+            // is still in the destination registry — which is also what would
+            // let a deposit REFERENCE that blob rather than upload it again.
+            // But varve's DepositSpec requires a `path` for every tool: there
+            // is no way to say "these bytes are already the registry's blob at
+            // this digest". Until there is, skipping the download leaves the
+            // deposit with nothing to point at.
+            //
+            // So every payload is fetched. Reporting a saving that did not
+            // happen, or failing on a payload we chose to reuse, would both be
+            // worse than doing the work. Tracked as varve#124.
+            if !present.is_empty() {
+                eprintln!(
+                    "note: --present-digests is recorded but not yet acted on: a \
+deposit spec cannot reference a blob it has no path for (varve#124). \
+Every payload is fetched."
+                );
+            }
+            let resolved = orchestrate::run(&src, &forge, &planned, &prev, &optins, &|_| false)?;
 
             // A payload the layer does not carry on some platform is reported
             // by name. An operator reading a shorter list than they expected
