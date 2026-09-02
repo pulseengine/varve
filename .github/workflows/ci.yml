@@ -246,6 +246,7 @@ jobs:
             -f crates/varve-producer/src/plan.rs \
             -f crates/varve-producer/src/source.rs \
             -f crates/varve-producer/src/spec.rs \
+            -f crates/varve-producer/src/stage.rs \
             -f crates/varve-producer/src/sums.rs
 
   proofs:
