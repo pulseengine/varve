@@ -20,5 +20,6 @@ pub mod gh;
 pub mod ingest;
 pub mod orchestrate;
 pub mod plan;
+pub mod source;
 pub mod spec;
 pub mod sums;

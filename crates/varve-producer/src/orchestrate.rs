@@ -83,7 +83,10 @@ pub enum RunError {
         mechanism: &'static str,
     },
     /// Something in the outside world failed.
-    Io { context: String, detail: String },
+    Io {
+        context: String,
+        detail: String,
+    },
 }
 
 impl fmt::Display for RunError {
@@ -426,7 +429,9 @@ mod tests {
         )
         .expect_err("must refuse");
         match &e {
-            RunError::DigestMismatch { expected, actual, .. } => {
+            RunError::DigestMismatch {
+                expected, actual, ..
+            } => {
                 assert_eq!(expected, &sha256_hex(A));
                 assert_eq!(actual, &sha256_hex(B));
             }
@@ -496,9 +501,21 @@ mod tests {
         )
         .expect("runs");
         let log = f.log();
-        assert_eq!(log.iter().filter(|c| c.starts_with("probe ")).count(), 1, "{log:?}");
-        assert_eq!(log.iter().filter(|c| c.starts_with("sums ")).count(), 1, "{log:?}");
-        assert_eq!(log.iter().filter(|c| c.starts_with("fetch ")).count(), 2, "{log:?}");
+        assert_eq!(
+            log.iter().filter(|c| c.starts_with("probe ")).count(),
+            1,
+            "{log:?}"
+        );
+        assert_eq!(
+            log.iter().filter(|c| c.starts_with("sums ")).count(),
+            1,
+            "{log:?}"
+        );
+        assert_eq!(
+            log.iter().filter(|c| c.starts_with("fetch ")).count(),
+            2,
+            "{log:?}"
+        );
     }
 
     /// Verification is not a step that happens somewhere near the download; it
@@ -517,8 +534,14 @@ mod tests {
         )
         .expect("runs");
         let log = f.log();
-        let first_fetch = log.iter().position(|c| c.starts_with("fetch ")).expect("fetched");
-        let sums_at = log.iter().position(|c| c.starts_with("sums ")).expect("verified");
+        let first_fetch = log
+            .iter()
+            .position(|c| c.starts_with("fetch "))
+            .expect("fetched");
+        let sums_at = log
+            .iter()
+            .position(|c| c.starts_with("sums "))
+            .expect("verified");
         assert!(sums_at < first_fetch, "{log:?}");
     }
 
@@ -548,7 +571,11 @@ mod tests {
             &present,
         )
         .expect("runs");
-        assert!(matches!(got[0].decision, Decision::Reuse { .. }), "{:?}", got[0].decision);
+        assert!(
+            matches!(got[0].decision, Decision::Reuse { .. }),
+            "{:?}",
+            got[0].decision
+        );
         assert!(got[0].bytes.is_none());
         assert_eq!(got[0].digest, sha256_hex(A));
         // Still verified: the proof is what told us it was unchanged.
@@ -583,8 +610,15 @@ mod tests {
             &never,
         )
         .expect_err("must abort");
-        assert!(matches!(&e, RunError::Ingest(IngestError::ProofRejected { .. })), "{e:?}");
-        assert!(!f.log().iter().any(|c| c.starts_with("fetch ")), "{:?}", f.log());
+        assert!(
+            matches!(&e, RunError::Ingest(IngestError::ProofRejected { .. })),
+            "{e:?}"
+        );
+        assert!(
+            !f.log().iter().any(|c| c.starts_with("fetch ")),
+            "{:?}",
+            f.log()
+        );
     }
 
     /// Grouping must not reorder the payloads it returns; the caller indexes
@@ -592,8 +626,11 @@ mod tests {
     // rivet: verifies REQ-PRODUCER-002
     #[test]
     fn payloads_come_back_in_the_order_they_were_planned() {
-        let f = Fixture::signed("a/one", "v1", &[("x", A)])
-            .with(Fixture::signed("b/two", "v2", &[("y", B)]));
+        let f = Fixture::signed("a/one", "v1", &[("x", A)]).with(Fixture::signed(
+            "b/two",
+            "v2",
+            &[("y", B)],
+        ));
         let plans = [
             plan("first", "a/one", "v1", "x"),
             plan("second", "b/two", "v2", "y"),
@@ -649,8 +686,11 @@ mod tests {
     // rivet: verifies REQ-PRODUCER-002
     #[test]
     fn the_same_repo_at_two_versions_in_one_layer_is_refused() {
-        let f = Fixture::signed("o/r", "v1", &[("a", A)])
-            .with(Fixture::signed("o/r", "v2", &[("b", B)]));
+        let f = Fixture::signed("o/r", "v1", &[("a", A)]).with(Fixture::signed(
+            "o/r",
+            "v2",
+            &[("b", B)],
+        ));
         let e = run(
             &f,
             &Forge::github_com(),

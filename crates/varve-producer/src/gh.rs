@@ -186,10 +186,11 @@ pub fn classify_attestation(out: &RunOutput) -> AttestationProbe {
 
 /// Assets a release publishes, from `gh release view --json assets`.
 pub fn parse_release_assets(stdout: &str) -> Result<Vec<String>, GhError> {
-    let doc: serde_json::Value = serde_json::from_str(stdout).map_err(|e| GhError::Unparseable {
-        program: "gh".into(),
-        detail: e.to_string(),
-    })?;
+    let doc: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| GhError::Unparseable {
+            program: "gh".into(),
+            detail: e.to_string(),
+        })?;
     let arr = doc
         .get("assets")
         .and_then(|a| a.as_array())
@@ -305,7 +306,10 @@ mod tests {
     // rivet: verifies REQ-PRODUCER-002
     #[test]
     fn a_release_with_no_assets_parses_to_an_empty_list() {
-        assert_eq!(parse_release_assets(r#"{"assets":[]}"#).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            parse_release_assets(r#"{"assets":[]}"#).unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     // rivet: verifies REQ-PRODUCER-002
@@ -343,7 +347,10 @@ mod tests {
         assert_eq!(&argv[..3], &["attestation", "verify", "a.tar.gz"]);
         // The JSON is what classify_attestation reads; human output would parse
         // to Rejected and read as a failure that never happened.
-        assert!(argv.windows(2).any(|w| w == ["--format", "json"]), "{argv:?}");
+        assert!(
+            argv.windows(2).any(|w| w == ["--format", "json"]),
+            "{argv:?}"
+        );
     }
 
     /// `--json assets` is what makes the output parseable at all; dropping it
@@ -355,7 +362,10 @@ mod tests {
         let argv = release_assets_argv("o/r", "v1.2.3");
         assert_eq!(&argv[..3], &["release", "view", "v1.2.3"]);
         assert!(argv.windows(2).any(|w| w == ["--repo", "o/r"]), "{argv:?}");
-        assert!(argv.windows(2).any(|w| w == ["--json", "assets"]), "{argv:?}");
+        assert!(
+            argv.windows(2).any(|w| w == ["--json", "assets"]),
+            "{argv:?}"
+        );
     }
 
     /// The identity and issuer are the whole security content of this command;
@@ -372,8 +382,14 @@ mod tests {
             "SHA256SUMS.txt",
         );
         let joined = argv.join(" ");
-        assert!(joined.contains("https://ghe.example.com/acme/tool/"), "{joined}");
-        assert!(joined.contains("https://ghe.example.com/_services/token"), "{joined}");
+        assert!(
+            joined.contains("https://ghe.example.com/acme/tool/"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("https://ghe.example.com/_services/token"),
+            "{joined}"
+        );
         assert!(!joined.contains("githubusercontent"), "{joined}");
     }
 
@@ -390,7 +406,10 @@ mod tests {
     // rivet: verifies REQ-PRODUCER-002
     #[test]
     fn a_missing_tool_reads_differently_from_a_tool_that_said_no() {
-        let missing = GhError::NotInstalled { program: "gh".into() }.to_string();
+        let missing = GhError::NotInstalled {
+            program: "gh".into(),
+        }
+        .to_string();
         assert!(missing.contains("not on PATH"), "{missing}");
         let said_no = GhError::Failed {
             program: "gh".into(),
@@ -399,6 +418,9 @@ mod tests {
             stderr: "release not found".into(),
         }
         .to_string();
-        assert!(said_no.contains("exited 1") && said_no.contains("release not found"), "{said_no}");
+        assert!(
+            said_no.contains("exited 1") && said_no.contains("release not found"),
+            "{said_no}"
+        );
     }
 }

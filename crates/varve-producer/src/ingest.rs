@@ -103,6 +103,14 @@ pub enum AttestationProbe {
     Verified { signer: String, commit: String },
     /// An attestation EXISTS and did not verify. Not the same as absent.
     Rejected(String),
+    /// Nobody looked. A caller that satisfied rung 1 has no reason to spend a
+    /// download probing rung 2, and saying `NotAttested` there would be a
+    /// claim about something never observed — the precise habit the rest of
+    /// this module exists to break.
+    ///
+    /// Reaching rung 2 in this state is a caller ordering error, and it fails
+    /// closed rather than reading as an absent mechanism.
+    NotProbed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +216,13 @@ pub fn rung_cosign_sums(forge: &Forge, repo: &str, probe: &ReleaseProbe) -> Rung
 pub fn rung_build_provenance(probe: &ReleaseProbe) -> Rung {
     match &probe.attestation {
         AttestationProbe::NotAttested => Rung::NotOffered,
+        // Never observed, so nothing may be concluded — including "absent".
+        AttestationProbe::NotProbed => Rung::Failed(
+            "this release's attestation was never probed, so rung 2 cannot be \
+             decided; reaching it in this state is an ordering error in the \
+             caller, not an absent attestation"
+                .into(),
+        ),
         AttestationProbe::Rejected(detail) => Rung::Failed(detail.clone()),
         AttestationProbe::Verified { signer, commit } => Rung::Accepted {
             signer: signer.clone(),
