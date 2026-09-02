@@ -102,6 +102,19 @@ jobs:
         if: matrix.cross
         run: cross build --release --locked --target ${{ matrix.target }} -p varve
 
+      # The assembler ships through this same track (REQ-PRODUCERSHIP-001).
+      # A layers repository cannot deposit a layer without it, and an assembler
+      # distributed less carefully than the tool it feeds would invert the
+      # trust story: its digests go into SHA256SUMS.txt before cosign signs it,
+      # and the build attestation covers its archive too.
+      - name: Build varve-producer (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p varve-producer
+
+      - name: Build varve-producer (cross)
+        if: matrix.cross
+        run: cross build --release --locked --target ${{ matrix.target }} -p varve-producer
+
       - name: Assert built binary reports the tag version (REQ-RELVER-001)
         # The artifact-level twin of the version-guard job: run the freshly
         # built binary and confirm `--version` == the tag. This is the exact
@@ -121,9 +134,33 @@ jobs:
             exit 1
           fi
 
+      - name: Assert varve-producer reports the tag version (REQ-PRODUCERSHIP-001)
+        # Same oracle as varve's. The two binaries are versioned together, and
+        # a producer that mis-reports its version cannot appear in evidence
+        # about which assembler built a layer.
+        if: ${{ !matrix.cross }}
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          REPORTED=$("target/${{ matrix.target }}/release/varve-producer" --version | awk '{print $2}')
+          NAME=$("target/${{ matrix.target }}/release/varve-producer" --version | awk '{print $1}')
+          echo "tag=${VERSION#v}  binary --version=$NAME $REPORTED"
+          if [ "$NAME" != "varve-producer" ]; then
+            echo "::error::the assembler reports its name as '$NAME', not varve-producer"
+            exit 1
+          fi
+          if [ "${VERSION#v}" != "$REPORTED" ]; then
+            echo "::error::varve-producer reports '$REPORTED' but the release tag is $VERSION"
+            exit 1
+          fi
+
       - name: Strip binary
         if: ${{ !matrix.cross }}
-        run: strip "target/${{ matrix.target }}/release/varve" 2>/dev/null || true
+        run: |
+          strip "target/${{ matrix.target }}/release/varve" 2>/dev/null || true
+          strip "target/${{ matrix.target }}/release/varve-producer" 2>/dev/null || true
 
       - name: Package archive
         env:
@@ -143,10 +180,28 @@ jobs:
           tar -czf "$ARCHIVE" -C staging .
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
+          # A SEPARATE archive, deliberately. install.sh installs varve's
+          # tarball, and putting a binary that fetches over the network inside
+          # the archive of the tool whose "contacts no network" claim is
+          # load-bearing would hand every varve user an assembler they did not
+          # ask for. A layers repository downloads this one by name.
+          PRODUCER="varve-producer-${VERSION}-${TARGET}.tar.gz"
+          mkdir -p staging-producer
+          cp "target/${TARGET}/release/varve-producer" staging-producer/
+          cp LICENSE staging-producer/ 2>/dev/null || true
+          tar -czf "$PRODUCER" -C staging-producer .
+          echo "PRODUCER_ARCHIVE=$PRODUCER" >> "$GITHUB_ENV"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: binary-${{ matrix.target }}
           path: ${{ env.ARCHIVE }}
+          retention-days: 7
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: producer-${{ matrix.target }}
+          path: ${{ env.PRODUCER_ARCHIVE }}
           retention-days: 7
 
   # ── Create the GitHub Release: checksums, provenance, signing ─────────
@@ -179,6 +234,31 @@ jobs:
           ls -la release-assets/
 
       # Phase 6: CycloneDX SBOM for varve itself. Generated *before*
+      # A release that ships varve without the assembler leaves every layers
+      # repository unable to build a layer, and the failure appears in someone
+      # else's repo hours later as a missing download (REQ-PRODUCERSHIP-001
+      # clause 3). Counted per platform: a matrix leg that silently dropped its
+      # producer archive is the shape this is here to catch.
+      - name: Assert the assembler ships with the toolchain (REQ-PRODUCERSHIP-001)
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          varve_n=$(ls release-assets/varve-"${VERSION}"-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
+          prod_n=$(ls release-assets/varve-producer-"${VERSION}"-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
+          echo "varve archives=$varve_n  varve-producer archives=$prod_n"
+          if [ "$prod_n" -eq 0 ]; then
+            echo "::error::this release ships no varve-producer archive; a layers \
+          repository has nothing to assemble a layer with"
+            exit 1
+          fi
+          if [ "$prod_n" -ne "$varve_n" ]; then
+            echo "::error::$varve_n varve archives but $prod_n varve-producer \
+          archives — a build leg dropped its assembler"
+            exit 1
+          fi
+
       # SHA256SUMS so its digest is captured in the checksum manifest;
       # the cosign signature over SHA256SUMS.txt transitively covers it.
       - name: Install cargo-cyclonedx
