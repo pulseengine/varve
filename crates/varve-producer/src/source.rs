@@ -52,6 +52,21 @@ impl CommandRunner for Spawn {
 pub const SUMS: &str = "SHA256SUMS.txt";
 pub const BUNDLE: &str = "SHA256SUMS.txt.cosign.bundle";
 
+/// Where a release's downloads live under a work directory.
+///
+/// One definition, used by both the downloader and whatever stages what it
+/// downloaded. A second copy of this convention anywhere else is a bug waiting
+/// for its first divergence: the fetch would write one path and the staging
+/// would read another, and the symptom would be a missing file rather than
+/// anything naming the real cause.
+///
+/// `/` is replaced rather than nested, so two repos whose names share a tail
+/// cannot land in the same directory.
+pub fn release_dir(root: &Path, repo: &str, version: &str) -> PathBuf {
+    root.join(repo.replace('/', "__"))
+        .join(version.replace('/', "__"))
+}
+
 pub struct GhSource<R: CommandRunner> {
     runner: R,
     forge: Forge,
@@ -73,11 +88,7 @@ impl<R: CommandRunner> GhSource<R> {
     }
 
     fn dir_for(&self, repo: &str, version: &str) -> PathBuf {
-        // `/` in a repo name would otherwise nest a directory per owner, and
-        // two repos with the same tail would collide.
-        self.workdir
-            .join(repo.replace('/', "__"))
-            .join(version.replace('/', "__"))
+        release_dir(&self.workdir, repo, version)
     }
 
     fn gh(&self, args: Vec<String>) -> Result<String, RunError> {
@@ -586,6 +597,19 @@ mod tests {
             }
             other => panic!("must not be decidable: {other:?}"),
         }
+    }
+
+    /// The downloader and anything that stages what it downloaded must agree
+    /// on where the bytes are. They agree by construction — one function — and
+    /// this pins that they still do.
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn the_download_path_has_exactly_one_definition() {
+        let src = GhSource::new(Spawn, Forge::github_com(), "/w");
+        assert_eq!(
+            src.dir_for("o/r", "v1"),
+            release_dir(Path::new("/w"), "o/r", "v1")
+        );
     }
 
     /// A repo name contains `/`; two repos sharing a tail must not share a

@@ -240,9 +240,9 @@ Every payload is fetched."
                     .and_then(|t| t.binary.clone())
                     .unwrap_or_else(|| r.plan.name.clone());
                 let version = asset::bare_version(&r.plan.version).to_string();
-                let dl = downloads
-                    .join(r.plan.repo.replace('/', "__"))
-                    .join(r.plan.version.replace('/', "__"));
+                // The same function the downloader used, not a second copy
+                // of the convention.
+                let dl = source::release_dir(&downloads, &r.plan.repo, &r.plan.version);
                 tools.push(deposit::stage_one(
                     &source::Spawn,
                     r,
