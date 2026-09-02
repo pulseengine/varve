@@ -16,6 +16,7 @@ pub mod binfmt;
 pub mod carryforward;
 pub mod extract;
 pub mod forge;
+pub mod gh;
 pub mod ingest;
 pub mod plan;
 pub mod spec;
