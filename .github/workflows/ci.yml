@@ -178,7 +178,14 @@ jobs:
         run: tools/no-key-on-disk.sh
 
   mutants:
-    name: cargo mutants (trust-critical gate)
+    # Named from the shard alone. Without an explicit name GitHub appends every
+    # matrix value, so the check was called "cargo mutants (trust-critical
+    # gate) (varve-producer, -f crates/varve-producer/src/asset.rs \ -f c…" —
+    # a 400-character string. That is not merely ugly: branch protection
+    # matches required checks BY NAME, so a check whose name absorbs its inputs
+    # stops matching the rule that required it, and the gate quietly becomes
+    # optional the next time the file list changes.
+    name: cargo mutants (${{ matrix.shard }})
     runs-on: ubuntu-latest
     # SHARDED, not shortened. The v0.31.0 run found 705 mutants across 28 files
     # and was cancelled at the 60-minute limit — which is the failure this job's
