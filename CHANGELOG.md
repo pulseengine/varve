@@ -59,6 +59,15 @@ forced the correction.
   it accepts an attestation issued by *any* repository for those bytes — the
   entire binding between a payload and who built it. Found by mutation testing;
   nothing had asserted the flag was present.
+- **The previous-spec reader could not read the specs this program writes.**
+  It deserialised a `tools` key while `SpecOut` serialises `tool`, and serde
+  ignores unknown fields — so every real spec parsed to an *empty history*,
+  indistinguishable from a first run, and every payload was silently
+  re-fetched. The unit test passed because its fixture was hand-written with
+  the wrong key: it tested the fixture, not the program. Found by running a
+  live deposit. The test now round-trips through the real writer, and the
+  reader denies unknown fields so a misnamed section is an error rather than
+  an empty history.
 - **Rung 2 was probed even when rung 1 had settled the release.** Probing an
   attestation means downloading an asset, and every repo in the pulseengine
   realm publishes cosign sums — so this would have fetched one asset per repo
@@ -81,10 +90,27 @@ forced the correction.
   binary-selection check so much as make it vacuous — answering "is this the
   binary?" with yes for the README.
 
+### Known gap
+
+- **`REQ-CARRYFORWARD-001` clause 6 is not met** ([#124](https://github.com/pulseengine/varve/issues/124)).
+  The producer resolves an unchanged payload to *reuse* and skips the upstream
+  download correctly — but `varve`'s deposit spec requires a `path` for every
+  tool, with no way to say *"these bytes are already the registry's blob at
+  this digest"*, even though clause 4 already presupposes it. So the producer
+  fetches everything and says so. Reporting a saving that did not happen, or
+  failing on a payload it chose to reuse, would both be worse than doing the
+  work. The reuse logic stays tested and in place, unused, so closing #124 is
+  a wiring change rather than a rewrite.
+
 ### Verification
 
 - 177 unit tests plus 5 release-track tests; the mutation gate covers **15**
   producer modules at zero survivors.
+- Exercised live against `pulseengine/rivet` v0.34.0, not only fixtures:
+  cosign verified, the recorded digest equals both the upstream signed sums and
+  the bytes held, and the staged payload is a real Mach-O arm64. Substituting
+  the archive is refused with both digests named and exit 1. Both defects above
+  were found this way and by no test.
 - The release-track tests are negative-controlled: deleting the gate, bundling
   the producer into varve's archive, or weakening the leg-drop check each fail
   a named test.
