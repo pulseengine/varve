@@ -177,6 +177,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
                 forge,
                 repo,
                 &ReleaseProbe {
+                    published: Vec::new(),
                     has_sums,
                     has_cosign_bundle,
                     cosign: cosign.clone(),
@@ -187,6 +188,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
         );
         if settled_by_cosign {
             return Ok(ReleaseProbe {
+                published: names,
                 has_sums,
                 has_cosign_bundle,
                 cosign,
@@ -213,6 +215,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
         };
 
         Ok(ReleaseProbe {
+            published: names,
             has_sums,
             has_cosign_bundle,
             cosign,

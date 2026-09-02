@@ -72,6 +72,14 @@ pub enum Rung {
 /// is not, which is why they are separate types.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReleaseProbe {
+    /// Every asset name the release publishes.
+    ///
+    /// Kept separate from the digests a proof covers, because the two answer
+    /// different questions and confusing them is how an UNSIGNED asset gets
+    /// treated as an unbuilt one. "This platform has no build" is routine —
+    /// loom ships no aarch64-apple-darwin. "This platform was built and
+    /// published but nothing vouches for it" is a refusal.
+    pub published: Vec<String>,
     /// `SHA256SUMS.txt` is published.
     pub has_sums: bool,
     /// `SHA256SUMS.txt.cosign.bundle` is published.
@@ -369,6 +377,7 @@ mod tests {
 
     fn sums_ok() -> ReleaseProbe {
         ReleaseProbe {
+            published: Vec::new(),
             has_sums: true,
             has_cosign_bundle: true,
             cosign: Some(Ok(())),
@@ -551,6 +560,7 @@ mod tests {
     #[test]
     fn a_sums_file_without_a_bundle_is_not_offered() {
         let probe = ReleaseProbe {
+            published: Vec::new(),
             has_sums: true,
             has_cosign_bundle: false,
             cosign: Some(Ok(())),

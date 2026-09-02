@@ -46,6 +46,8 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verified {
     pub accepted: Accepted,
+    /// Every asset the release publishes, whether or not the proof covers it.
+    pub published: Vec<String>,
     /// The digests the proof covers. `None` for an `unverified` opt-in, where
     /// nothing vouches for anything and saying otherwise would be the lie.
     pub sums: Option<Sums>,
@@ -82,6 +84,16 @@ pub enum RunError {
         asset: String,
         mechanism: &'static str,
     },
+    /// A tool matched no asset on ANY platform. Per-platform absence is
+    /// routine; absence everywhere means the asset template no longer
+    /// describes the release, and the layer would silently ship without a tool
+    /// it claims to carry.
+    NothingMatched {
+        name: String,
+        repo: String,
+        version: String,
+        tried: Vec<String>,
+    },
     /// Something in the outside world failed.
     Io {
         context: String,
@@ -117,6 +129,21 @@ impl fmt::Display for RunError {
                  The proof is a signature over a list of digests; an asset that \
                  is not in the list is not covered by it, however valid the \
                  signature over the list is. Refusing to record it as proven."
+            ),
+            RunError::NothingMatched {
+                name,
+                repo,
+                version,
+                tried,
+            } => write!(
+                f,
+                "{name}: no asset of {repo} {version} matched on any platform.\n\
+                 tried: {}\n\
+                 A platform with no build is routine and is skipped with a \
+                 notice. Matching NOTHING means the asset naming has changed or \
+                 the entry is wrong, and shipping the layer anyway would omit a \
+                 tool it claims to carry.",
+                tried.join(", ")
             ),
             RunError::Io { context, detail } => write!(f, "{context}: {detail}"),
         }
@@ -203,7 +230,11 @@ pub fn verify_release<S: Source>(
         // is no list of covered digests because there is no list.
         Mechanism::Unverified => None,
     };
-    Ok(Verified { accepted, sums })
+    Ok(Verified {
+        accepted,
+        published: probe.published,
+        sums,
+    })
 }
 
 /// One payload, resolved.
@@ -259,6 +290,14 @@ pub fn run<S: Source>(
         seen.record(&repo, &version, v.accepted.clone())?;
         for i in idxs {
             let p = &plans[i];
+            // "This platform has no build" and "this platform was built,
+            // published, and nothing vouches for it" are opposite facts, and
+            // the release listing is what separates them. The shell asked only
+            // the sums file, so an UNSIGNED asset was skipped with the same
+            // friendly notice as an absent one.
+            if !v.published.is_empty() && !v.published.contains(&p.asset) {
+                continue; // no build for this platform — recorded by the caller
+            }
             let upstream = match &v.sums {
                 Some(s) => s
                     .digest_of(&p.asset)
@@ -307,10 +346,32 @@ pub fn run<S: Source>(
             });
         }
     }
-    Ok(out
-        .into_iter()
-        .map(|r| r.expect("every index was assigned by its release group"))
-        .collect())
+    // A payload name that matched on NO platform is an asset template that no
+    // longer describes the release. Per-platform gaps are fine; a total miss
+    // is not, and going green with four notices is exactly how a tool went
+    // missing from a published layer once already.
+    let mut matched: BTreeMap<&str, bool> = BTreeMap::new();
+    for (i, p) in plans.iter().enumerate() {
+        let e = matched.entry(p.name.as_str()).or_insert(false);
+        *e |= out[i].is_some();
+    }
+    for (name, ok) in &matched {
+        if !ok {
+            let tried: Vec<String> = plans
+                .iter()
+                .filter(|p| p.name == *name)
+                .map(|p| p.asset.clone())
+                .collect();
+            let first = plans.iter().find(|p| p.name == *name).expect("named above");
+            return Err(RunError::NothingMatched {
+                name: (*name).to_string(),
+                repo: first.repo.clone(),
+                version: first.version.clone(),
+                tried,
+            });
+        }
+    }
+    Ok(out.into_iter().flatten().collect())
 }
 
 #[cfg(test)]
@@ -357,6 +418,7 @@ mod tests {
             f.probes.insert(
                 key,
                 ReleaseProbe {
+                    published: pairs.iter().map(|(n, _)| n.to_string()).collect(),
                     has_sums: true,
                     has_cosign_bundle: true,
                     cosign: Some(Ok(())),
@@ -440,12 +502,113 @@ mod tests {
         assert!(e.to_string().contains("cannot tell which"), "{e}");
     }
 
+    /// The pair of facts the shell could not tell apart, because it asked only
+    /// the sums file. loom genuinely ships no aarch64-apple-darwin build; that
+    /// platform is skipped. An asset the release DOES publish but does not
+    /// sign is the opposite situation and must stop the run.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_platform_with_no_build_is_skipped_but_an_unsigned_published_asset_is_not() {
+        // Case 1 — never built: absent from the release listing entirely.
+        let f = Fixture::signed("o/r", "v1", &[("linux.tar.gz", A)]);
+        let got = run(
+            &f,
+            &Forge::github_com(),
+            &[
+                plan("t", "o/r", "v1", "linux.tar.gz"),
+                plan("t", "o/r", "v1", "darwin.tar.gz"),
+            ],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &never,
+        )
+        .expect("a missing platform is routine");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].plan.asset, "linux.tar.gz");
+
+        // Case 2 — built, published, and NOT covered by the proof.
+        let mut f = Fixture::signed("o/r", "v1", &[("linux.tar.gz", A)]);
+        f.probes
+            .get_mut("o/r@v1")
+            .unwrap()
+            .published
+            .push("darwin.tar.gz".into());
+        f.blobs.insert("o/r@v1/darwin.tar.gz".into(), B.to_vec());
+        let e = run(
+            &f,
+            &Forge::github_com(),
+            &[
+                plan("t", "o/r", "v1", "linux.tar.gz"),
+                plan("t", "o/r", "v1", "darwin.tar.gz"),
+            ],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &never,
+        )
+        .expect_err("a published-but-unproven asset must stop the run");
+        assert!(
+            matches!(&e, RunError::NotCoveredByProof { asset, .. } if asset == "darwin.tar.gz"),
+            "{e:?}"
+        );
+    }
+
+    /// A tool that matched on NO platform is a template that no longer
+    /// describes the release. The last time this went unchecked the run went
+    /// green with four notices and published a layer missing a tool.
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn a_tool_that_matches_nothing_anywhere_stops_the_run() {
+        // The tool that matched nothing lives in a DIFFERENT repo from the one
+        // that matched. The error has to name its own repo: an operator sent to
+        // the wrong release finds a perfectly healthy one and learns nothing.
+        let f = Fixture::signed("o/kept", "v1", &[("linux.tar.gz", A)]).with(Fixture::signed(
+            "o/gone",
+            "v9",
+            &[("something-else.tar.gz", B)],
+        ));
+        let e = run(
+            &f,
+            &Forge::github_com(),
+            &[
+                plan("kept", "o/kept", "v1", "linux.tar.gz"),
+                plan("gone", "o/gone", "v9", "gone-v9-linux.tar.gz"),
+                plan("gone", "o/gone", "v9", "gone-v9-darwin.tar.gz"),
+            ],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &never,
+        )
+        .expect_err("must refuse");
+        match &e {
+            RunError::NothingMatched {
+                name,
+                repo,
+                version,
+                tried,
+            } => {
+                assert_eq!(name, "gone");
+                assert_eq!(repo, "o/gone", "named the wrong repo");
+                assert_eq!(version, "v9", "named the wrong release");
+                assert_eq!(tried.len(), 2, "{tried:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(e.to_string().contains("claims to carry"), "{e}");
+    }
+
     /// Being absent from a signed list is being outside the proof. The
     /// tempting bug is to accept it "because the sums file verified".
     // rivet: verifies REQ-PRODUCER-002
     #[test]
     fn an_asset_the_proof_does_not_name_is_not_covered_by_it() {
-        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)]);
+        let mut f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)]);
+        // Published by the release, absent from the signed list.
+        f.probes
+            .get_mut("o/r@v1")
+            .unwrap()
+            .published
+            .push("elsewhere.tar.gz".into());
+        f.blobs.insert("o/r@v1/elsewhere.tar.gz".into(), B.to_vec());
         let e = run(
             &f,
             &Forge::github_com(),
@@ -673,6 +836,7 @@ mod tests {
     #[test]
     fn an_unverified_payload_records_the_digest_we_observed_and_claims_nothing() {
         let v = Verified {
+            published: Vec::new(),
             accepted: Accepted {
                 mechanism: Mechanism::Unverified,
                 signer: "nobody".into(),
