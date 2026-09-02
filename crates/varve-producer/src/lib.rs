@@ -18,6 +18,7 @@ pub mod extract;
 pub mod forge;
 pub mod gh;
 pub mod ingest;
+pub mod orchestrate;
 pub mod plan;
 pub mod spec;
 pub mod sums;
