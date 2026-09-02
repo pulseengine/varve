@@ -1,5 +1,98 @@
 # Changelog
 
+## v0.31.0 — 2026-09-02
+
+The release that makes `varve-producer` an assembler rather than an inspector,
+and then actually ships it. v0.30.0 ported the pipeline out of bash into ten
+Rust modules — but every subcommand was inspection-only, the crate was
+`publish = false`, and `release.yml` built `-p varve` alone. So a layers
+repository had a well-tested library it could not obtain and could not run.
+
+That, not a signing key, is what blocked REQ-LAYERREPO-001. A key matters for
+signing; it is not what stops a repository running a program it does not have.
+This session mis-stated that blocker twice before writing the requirement down
+forced the correction.
+
+| | before | now |
+|---|---|---|
+| `varve-producer` | four inspection-only subcommands | `deposit` walks a manifest end to end |
+| the release | `-p varve` only | a signed, attested `varve-producer-<version>-<target>.tar.gz` per platform |
+| a release with no assembler | shipped quietly | refused by a gate, per platform |
+| the proof over a sums file | verified, then a digest computed from the download | the two are compared, and the proof's digest is what gets recorded |
+| an asset absent from a signed list | recorded as proven | refused as outside the proof |
+| an unsigned published asset | skipped with the same notice as an unbuilt one | refused |
+
+### Added
+
+- **`varve-producer deposit`** — plan, verify each release once, fetch what
+  changed, unpack, arch-check, stage, and write the deposit spec `varve
+  deposit` consumes. It still does not deposit, sign or publish: those need the
+  signing key, and keeping them separate means anyone can run this and see what
+  a layer would contain without holding anything secret.
+- **The assembler ships through the signed release track** (`REQ-PRODUCERSHIP-001`)
+  — its digests enter `SHA256SUMS.txt` before cosign signs it, and SLSA build
+  provenance covers its archives. In its **own** archive: `install.sh` installs
+  varve's tarball, and putting a binary that fetches over the network inside
+  the archive of the tool whose "contacts no network" claim is load-bearing
+  would hand every user an assembler they never asked for.
+
+### Fixed — defects found by building it
+
+- **A verified sums file was never compared to the bytes.** The ingest ladder
+  has always printed, into every spec it accepts, *"this payload's recorded
+  asset digest is transcribed from it"*. A signature over a sums file proves
+  that file came from an identity; it proves nothing about the bytes in the
+  staging directory until someone compares them. Every field of the resulting
+  spec was individually true while the sentence they formed was false.
+- **An asset absent from a signed list was treated as covered by it.** The
+  proof is a signature over a *list*; being absent from that list is being
+  outside the proof, however valid the signature over the list is.
+- **"No build for this platform" and "nobody signed it" were the same
+  notice.** The shell asked only the sums file, so an asset a release published
+  but did not sign was skipped exactly like one that was never built. loom
+  genuinely ships no `aarch64-apple-darwin`; an artifact built, uploaded and
+  left unvouched-for is the case the whole ladder exists to catch.
+- **Carry-forward could answer a darwin question with a linux record.** One
+  layer carries the same tool for four platforms, and previous entries were
+  keyed by payload name alone.
+- **`gh attestation verify` was not bound to a repository.** Without `--repo`
+  it accepts an attestation issued by *any* repository for those bytes — the
+  entire binding between a payload and who built it. Found by mutation testing;
+  nothing had asserted the flag was present.
+- **Rung 2 was probed even when rung 1 had settled the release.** Probing an
+  attestation means downloading an asset, and every repo in the pulseengine
+  realm publishes cosign sums — so this would have fetched one asset per repo
+  on every run and quietly broken the promise that re-depositing an unchanged
+  `layer.toml` fetches nothing.
+
+### Changed
+
+- `AttestationProbe` gains a fourth state, `NotProbed`, and rung 2 **fails** on
+  it rather than reading it as absence. Skipping a probe is not a finding about
+  a release, and an ordering error that silently continues to a weaker
+  mechanism is worse than one that stops.
+- `ReleaseProbe` now carries the release's published asset names alongside the
+  digests a proof covers — deliberately two fields, because collapsing them is
+  the bug above.
+- Staging never follows symlinks out of an extraction, and refuses to guess an
+  unpacker from an unknown extension.
+- `varve-producer` no longer compiles for non-unix targets. The only available
+  fallback was to report every file as executable, which does not weaken the
+  binary-selection check so much as make it vacuous — answering "is this the
+  binary?" with yes for the README.
+
+### Verification
+
+- 177 unit tests plus 5 release-track tests; the mutation gate covers **15**
+  producer modules at zero survivors.
+- The release-track tests are negative-controlled: deleting the gate, bundling
+  the producer into varve's archive, or weakening the leg-drop check each fail
+  a named test.
+
+`REQ-PRODUCERSHIP-001` is `implemented`, not `verified`. Its last clause is
+discharged by a layers **repository** publishing with this binary — another
+repo's run, and not ours to claim.
+
 ## v0.30.0 — 2026-09-01
 
 The release a five-way review produced. A design concept went to a security
