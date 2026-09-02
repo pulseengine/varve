@@ -4311,7 +4311,7 @@ artifacts:
   - id: REQ-PRODUCERSHIP-001
     type: requirement
     title: The assembler is released, or a layers repository has nothing to consume
-    status: draft
+    status: implemented
     description: |-
       REQ-LAYERREPO-001 clause 3 says a layers repository needs no varve source checkout: it takes a released varve AND A RELEASED ASSEMBLER. No assembler is released. `release.yml` builds `-p varve` only, and `varve-producer` is `publish = false`, so v0.30.0 shipped the producer as source in the workspace and nothing a layers repository could consume. That is what actually blocks clause 4, and it was mis-stated twice as a key problem.
       .
