@@ -180,17 +180,60 @@ jobs:
   mutants:
     name: cargo mutants (trust-critical gate)
     runs-on: ubuntu-latest
-    # 60, not 45: the v0.29.0 run finished in ~40 minutes with twelve files, and
-    # layerspec.rs made it thirteen. A gate that times out is indistinguishable
+    # SHARDED, not shortened. The v0.31.0 run found 705 mutants across 28 files
+    # and was cancelled at the 60-minute limit — which is the failure this job's
+    # previous comment warned about: a gate that times out is indistinguishable
     # from a gate that fails, and the wrong lesson to draw from a red timeout is
-    # "drop a file from the list".
+    # "drop a file from the list". A timeout does not report a survivor; it
+    # reports nothing, so zero-survivor goes UNVERIFIED while the check looks
+    # like it ran.
+    #
+    # So the list grows and the job splits. Each shard carries one crate's
+    # modules and runs the whole workspace's lib tests as its kill criteria, so
+    # sharding changes how long the gate takes and not what it proves.
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: varve-core
+            files: >-
+              -f crates/varve-core/src/rollback.rs \
+              -f crates/varve-core/src/layer.rs \
+              -f crates/varve-core/src/platform.rs \
+              -f crates/varve-core/src/verify.rs \
+              -f crates/varve-core/src/pin.rs \
+              -f crates/varve-core/src/realm.rs \
+              -f crates/varve-core/src/resolve.rs \
+              -f crates/varve-core/src/compose.rs \
+              -f crates/varve-core/src/install.rs \
+              -f crates/varve-core/src/selfverify.rs \
+              -f crates/varve-core/src/reverify.rs \
+              -f crates/varve-core/src/exportstamp.rs \
+              -f crates/varve-core/src/layerspec.rs
+          - shard: varve-producer
+            files: >-
+              -f crates/varve-producer/src/asset.rs \
+              -f crates/varve-producer/src/attestation.rs \
+              -f crates/varve-producer/src/binfmt.rs \
+              -f crates/varve-producer/src/carryforward.rs \
+              -f crates/varve-producer/src/deposit.rs \
+              -f crates/varve-producer/src/extract.rs \
+              -f crates/varve-producer/src/forge.rs \
+              -f crates/varve-producer/src/gh.rs \
+              -f crates/varve-producer/src/ingest.rs \
+              -f crates/varve-producer/src/orchestrate.rs \
+              -f crates/varve-producer/src/plan.rs \
+              -f crates/varve-producer/src/source.rs \
+              -f crates/varve-producer/src/spec.rs \
+              -f crates/varve-producer/src/stage.rs \
+              -f crates/varve-producer/src/sums.rs
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: mutants
+          key: mutants-${{ matrix.shard }}
       - name: Install cargo-mutants
         run: cargo install --locked cargo-mutants
       - name: Mutate the trust-critical modules — zero survivors required
@@ -198,57 +241,14 @@ jobs:
         # modules that hold the trust decisions must kill every mutant.
         # The nightly workflow covers the full workspace, advisory.
         #
-        # compose.rs joined the list in v0.29.0: `select_tools` decides which
-        # binary a bare tool name dispatches to across two realms
-        # (REQ-REALM2-001 clause 4c), which is a trust decision by any reading.
-        # It was at three survivors when it was advisory-only — two off-by-ones
-        # in the depth bound and one refusal branch — all killed before it was
-        # promoted, since a gate admitted with known survivors is not a gate.
-        #
-        # The varve-producer modules joined together (REQ-PRODUCER-002 clause
-        # 4). They decide which upstream release becomes which payload, which
-        # mechanism vouched for it, and which digest is transcribed into the
-        # signed layer -- the same class of decision the varve-core entries
-        # hold. A clean-room review pointed out that they were at zero
-        # survivors with NOTHING keeping them there: the nightly full-workspace
-        # run is `|| true`, so a snapshot is not a gate.
-        #
-        # layerspec.rs joined on the same terms: it decides which upstream
-        # release becomes which payload in a signed layer, and a mistranslation
-        # there deposits the wrong bytes under a good signature. It arrived at
-        # two survivors, both real — an untested `layout = "tarball"`, and a
-        # tool whose repo basename disagreed with its name being silently
-        # deposited under the basename. Both fixed before promotion.
+        # `-j 4` matches the hosted runner's cores. The unsharded job ran
+        # serially, which is how 705 mutants overran an hour.
+        env:
+          FILES: ${{ matrix.files }}
         run: |
-          cargo mutants --no-shuffle \
-            -f crates/varve-core/src/rollback.rs \
-            -f crates/varve-core/src/layer.rs \
-            -f crates/varve-core/src/platform.rs \
-            -f crates/varve-core/src/verify.rs \
-            -f crates/varve-core/src/pin.rs \
-            -f crates/varve-core/src/realm.rs \
-            -f crates/varve-core/src/resolve.rs \
-            -f crates/varve-core/src/compose.rs \
-            -f crates/varve-core/src/install.rs \
-            -f crates/varve-core/src/selfverify.rs \
-            -f crates/varve-core/src/reverify.rs \
-            -f crates/varve-core/src/exportstamp.rs \
-            -f crates/varve-core/src/layerspec.rs \
-            -f crates/varve-producer/src/asset.rs \
-            -f crates/varve-producer/src/attestation.rs \
-            -f crates/varve-producer/src/binfmt.rs \
-            -f crates/varve-producer/src/carryforward.rs \
-            -f crates/varve-producer/src/deposit.rs \
-            -f crates/varve-producer/src/extract.rs \
-            -f crates/varve-producer/src/forge.rs \
-            -f crates/varve-producer/src/gh.rs \
-            -f crates/varve-producer/src/ingest.rs \
-            -f crates/varve-producer/src/orchestrate.rs \
-            -f crates/varve-producer/src/plan.rs \
-            -f crates/varve-producer/src/source.rs \
-            -f crates/varve-producer/src/spec.rs \
-            -f crates/varve-producer/src/stage.rs \
-            -f crates/varve-producer/src/sums.rs
+          set -euo pipefail
+          # shellcheck disable=SC2086 -- FILES is a deliberate flag list
+          cargo mutants --no-shuffle -j 4 $FILES
 
   proofs:
     name: SMT obligations (ordeal, certificate-checked)
