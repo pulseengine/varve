@@ -3667,6 +3667,61 @@ artifacts:
       tested, and this defect survived because nothing exercised the shadowed
       case.
 
+  - id: REQ-COVALENT-001
+    type: requirement
+    title: A third realm covalently composes the other two, so neither depends on the other
+    status: draft
+    release: v1.0.0
+    description: >
+      `rules_wasm_component` needs both toolchains: bytecodealliance tools that
+      BUILD (wasm-tools, wac, wit-bindgen, wkg, wrpc, wasmtime) and PulseEngine
+      tools that CHECK, including `wsc` — which is what wasmsign2 became, so
+      that dependency is now internal rather than third-party.
+      .
+      A pin names exactly ONE layer, so a project cannot pin two. Composition
+      is the only path: a layer may include another by digest, and the include
+      names the realm whose root is authoritative for it. The composing root
+      signs the COMPOSITION, never the included bytes — which is precisely the
+      line the rejected shortcut crossed (REQ-REALM2-002) and this does not.
+      .
+      Why a third REALM rather than a third layer in an existing one: a `Line`
+      is `YYYY.MM` and nothing else, so every layer of a month within a realm
+      shares one monotonic counter. A tools layer and a composition layer in
+      one realm would collide — a consumer moving between them would trip
+      anti-rollback because the counter went backwards, which is correct
+      behaviour applied to two things that are not versions of each other.
+      .
+      Why not simply have `pulseengine` compose `bytecodealliance`: it would
+      make the second realm a hard dependency of the first. `verify` refuses a
+      composing layer whose include is not installed, so every consumer who
+      wants only meld and witness would have to install a second layer and
+      define a realm they do not use. Independence is worth a third root.
+      .
+      Clauses: (1) The realm shall be named `covalent` and carry NO payloads
+      of its own — only includes. A composition that also shipped binaries
+      would be a fourth place tools are defined. (2) It shall include the
+      `pulseengine` and `bytecodealliance` layers by digest, each annotated
+      with its realm, so each is verified against the root that built it.
+      (3) The other two realms shall remain independently pinnable and shall
+      not include one another. (4) Its layer line shall advance independently;
+      it composes specific digests, so a new composition is a deliberate act
+      naming what it composes, not an automatic consequence of either input
+      moving. (5) Its root shall come from the ceremony (REQ-CEREMONY-001) like
+      any other.
+      .
+      The name asserts the trust model rather than decorating it. In an ALLOY
+      the constituents lose their identity and become one material; in a
+      COVALENT bond each atom keeps its own nucleus and what is shared is the
+      bond itself. That is this realm exactly — each included layer stays
+      verified against the root that built it, nothing is merged, and the
+      composition IS the shared bond rather than a new substance. A name that
+      described merging would misdescribe what happens.
+      .
+      Cost stated plainly: three realms means three roots, three ceremonies and
+      three custody burdens, in an organisation with one operator. That is the
+      price of the two realms not depending on each other, and it should be
+      paid knowingly rather than discovered.
+
   - id: REQ-REALM2-002
     type: requirement
     title: The bytecodealliance realm gets its own root, and is the first real ceremony
