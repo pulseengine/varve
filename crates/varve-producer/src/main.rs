@@ -6,7 +6,7 @@
 //! and pushes to a registry. Keeping them apart keeps that claim true.
 
 use clap::{Parser, Subcommand};
-use varve_producer::{asset, binfmt, forge::Forge, plan};
+use varve_producer::{asset, binfmt, deposit, forge::Forge, ingest, orchestrate, plan, source};
 
 #[derive(Parser)]
 #[command(name = "varve-producer", version, about, long_about = None)]
@@ -59,6 +59,39 @@ enum Cmd {
         /// Target triples to cover. Defaults to the layer's four.
         #[arg(long = "platform", value_delimiter = ',')]
         platforms: Vec<String>,
+    },
+
+    /// Assemble a layer: fetch every payload the manifest names, verify each
+    /// release, stage the bytes, and write the deposit spec `varve deposit`
+    /// consumes.
+    ///
+    /// This is the one subcommand that touches the network. It does NOT
+    /// deposit, sign or publish — those need the signing key, and keeping them
+    /// in a separate step keeps this program runnable by anyone who wants to
+    /// see what a layer would contain.
+    Deposit {
+        #[arg(long, default_value = "layer.toml")]
+        manifest: std::path::PathBuf,
+        /// Where to write `deposit-spec.toml` and the staged payloads.
+        #[arg(long)]
+        stage: std::path::PathBuf,
+        /// The layer id being built, e.g. `2026.09.1`.
+        #[arg(long)]
+        layer: String,
+        /// The layer's monotonic counter.
+        #[arg(long)]
+        counter: u64,
+        #[arg(long = "platform", value_delimiter = ',')]
+        platforms: Vec<String>,
+        /// The deposit spec from the previous layer, for carry-forward.
+        /// Without it every payload is fetched.
+        #[arg(long)]
+        previous: Option<std::path::PathBuf>,
+        /// Digests the registry already holds, one per line. Without it every
+        /// payload is fetched — see the note in `deposit.rs`: assuming
+        /// presence would publish a manifest naming bytes nobody can serve.
+        #[arg(long = "present-digests")]
+        present_digests: Option<std::path::PathBuf>,
     },
 }
 
@@ -122,6 +155,105 @@ fn main() -> anyhow::Result<()> {
                     }
                 );
             }
+            Ok(())
+        }
+        Cmd::Deposit {
+            manifest,
+            stage: stage_root,
+            layer,
+            counter,
+            platforms,
+            previous,
+            present_digests,
+        } => {
+            let forge = forge_from_env();
+            let text = std::fs::read_to_string(&manifest)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", manifest.display()))?;
+            let m = varve_core::layerspec::parse_layer_manifest(&text)?;
+            let owned: Vec<String> = if platforms.is_empty() {
+                asset::DEFAULT_PLATFORMS
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect()
+            } else {
+                platforms
+            };
+            let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+            let planned = plan::plan(&m, &refs)?;
+
+            let prev = match &previous {
+                Some(p) => deposit::previous_from_spec(&std::fs::read_to_string(p)?)?,
+                None => Default::default(),
+            };
+            let present = match &present_digests {
+                Some(p) => deposit::parse_present_digests(&std::fs::read_to_string(p)?),
+                None => Default::default(),
+            };
+            let optins =
+                ingest::parse_optins(&std::env::var("UNVERIFIED_INGEST").unwrap_or_default());
+
+            let downloads = stage_root.join("downloads");
+            let scratch = stage_root.join("extract");
+            let src = source::GhSource::new(source::Spawn, forge.clone(), &downloads);
+            eprintln!(
+                "assembling {} payload(s) for realm '{}' from {}",
+                planned.len(),
+                m.realm.name,
+                forge.host
+            );
+            let resolved = orchestrate::run(&src, &forge, &planned, &prev, &optins, &|d| {
+                present.contains(d)
+            })?;
+
+            // A payload the layer does not carry on some platform is reported
+            // by name. An operator reading a shorter list than they expected
+            // should not have to work out which entry went missing.
+            for note in deposit::omitted(&planned, &resolved) {
+                eprintln!("note: {note}");
+            }
+
+            let mut tools = Vec::with_capacity(resolved.len());
+            for r in &resolved {
+                let bin = m
+                    .tools
+                    .iter()
+                    .find(|t| t.name == r.plan.name)
+                    .and_then(|t| t.binary.clone())
+                    .unwrap_or_else(|| r.plan.name.clone());
+                let version = asset::bare_version(&r.plan.version).to_string();
+                let dl = downloads
+                    .join(r.plan.repo.replace('/', "__"))
+                    .join(r.plan.version.replace('/', "__"));
+                tools.push(deposit::stage_one(
+                    &source::Spawn,
+                    r,
+                    &version,
+                    &stage_root,
+                    &dl,
+                    &scratch,
+                    &bin,
+                )?);
+            }
+
+            let spec = deposit::describe(&layer, &m.realm.channel, counter, tools);
+            // render() re-parses with varve's own parser and refuses a spec
+            // `varve deposit` could not read — before the signing step, not
+            // during it.
+            let rendered = spec.render()?;
+            let out = stage_root.join("deposit-spec.toml");
+            std::fs::write(&out, &rendered)?;
+            println!("{}", out.display());
+            eprintln!(
+                "{} payload(s) staged, {} carried forward",
+                spec.tools.len(),
+                resolved
+                    .iter()
+                    .filter(|r| matches!(
+                        r.decision,
+                        varve_producer::carryforward::Decision::Reuse { .. }
+                    ))
+                    .count()
+            );
             Ok(())
         }
         Cmd::Arch { file, platform } => {

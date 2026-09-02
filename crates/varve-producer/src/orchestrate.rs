@@ -318,7 +318,11 @@ pub fn run<S: Source>(
                 }
             } else {
                 carryforward::decide(
-                    previous.get(&p.name),
+                    // Keyed per platform. One layer carries the same tool for
+                    // four of them, and a lookup by name alone would let the
+                    // linux record answer a darwin question — carrying forward
+                    // a digest for bytes of the wrong architecture.
+                    previous.get(&crate::deposit::payload_key(&p.name, p.platform.as_deref())),
                     &repo,
                     &version,
                     &p.asset,
@@ -470,6 +474,10 @@ mod tests {
 
     fn never(_: &str) -> bool {
         false
+    }
+
+    fn payload_key_for_test(name: &str, platform: Option<&str>) -> String {
+        crate::deposit::payload_key(name, platform)
     }
 
     /// THE property. A signature over a sums file says nothing about the bytes
@@ -716,7 +724,7 @@ mod tests {
         let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)]);
         let mut prev = BTreeMap::new();
         prev.insert(
-            "t".to_string(),
+            payload_key_for_test("t", Some("x86_64-unknown-linux-gnu")),
             PreviousEntry {
                 repo: "o/r".into(),
                 release: "v1".into(),
@@ -745,6 +753,52 @@ mod tests {
         let log = f.log();
         assert!(log.iter().any(|c| c.starts_with("sums ")), "{log:?}");
         assert!(!log.iter().any(|c| c.starts_with("fetch ")), "{log:?}");
+    }
+
+    /// The bug this prevents: four platforms of one tool, a previous-entry
+    /// lookup by name alone, and the linux record answers the darwin question —
+    /// carrying forward a digest for bytes of the wrong architecture.
+    // rivet: verifies REQ-CARRYFORWARD-001
+    #[test]
+    fn one_platforms_history_does_not_answer_for_another_platforms_payload() {
+        let f = Fixture::signed("o/r", "v1", &[("linux.tar.gz", A), ("darwin.tar.gz", B)]);
+        let mut prev = BTreeMap::new();
+        // Only linux has a history, and it is up to date.
+        prev.insert(
+            "t@x86_64-unknown-linux-gnu".to_string(),
+            PreviousEntry {
+                repo: "o/r".into(),
+                release: "v1".into(),
+                asset: "linux.tar.gz".into(),
+                sha256: sha256_hex(A),
+            },
+        );
+        let present = |_: &str| true;
+        let mut linux = plan("t", "o/r", "v1", "linux.tar.gz");
+        linux.platform = Some("x86_64-unknown-linux-gnu".into());
+        let mut darwin = plan("t", "o/r", "v1", "darwin.tar.gz");
+        darwin.platform = Some("aarch64-apple-darwin".into());
+        let got = run(
+            &f,
+            &Forge::github_com(),
+            &[linux, darwin],
+            &prev,
+            &BTreeMap::new(),
+            &present,
+        )
+        .expect("runs");
+        // linux is carried forward; darwin has no history and must be fetched.
+        assert!(
+            matches!(got[0].decision, Decision::Reuse { .. }),
+            "{:?}",
+            got[0].decision
+        );
+        assert!(
+            matches!(got[1].decision, Decision::Fetch { .. }),
+            "darwin was answered by linux's record: {:?}",
+            got[1].decision
+        );
+        assert_eq!(got[1].digest, sha256_hex(B));
     }
 
     /// A rejected proof aborts the run. It must not become a quieter mechanism.
