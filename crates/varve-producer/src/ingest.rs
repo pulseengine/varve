@@ -72,6 +72,14 @@ pub enum Rung {
 /// is not, which is why they are separate types.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReleaseProbe {
+    /// Every asset name the release publishes.
+    ///
+    /// Kept separate from the digests a proof covers, because the two answer
+    /// different questions and confusing them is how an UNSIGNED asset gets
+    /// treated as an unbuilt one. "This platform has no build" is routine —
+    /// loom ships no aarch64-apple-darwin. "This platform was built and
+    /// published but nothing vouches for it" is a refusal.
+    pub published: Vec<String>,
     /// `SHA256SUMS.txt` is published.
     pub has_sums: bool,
     /// `SHA256SUMS.txt.cosign.bundle` is published.
@@ -103,6 +111,14 @@ pub enum AttestationProbe {
     Verified { signer: String, commit: String },
     /// An attestation EXISTS and did not verify. Not the same as absent.
     Rejected(String),
+    /// Nobody looked. A caller that satisfied rung 1 has no reason to spend a
+    /// download probing rung 2, and saying `NotAttested` there would be a
+    /// claim about something never observed — the precise habit the rest of
+    /// this module exists to break.
+    ///
+    /// Reaching rung 2 in this state is a caller ordering error, and it fails
+    /// closed rather than reading as an absent mechanism.
+    NotProbed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +224,13 @@ pub fn rung_cosign_sums(forge: &Forge, repo: &str, probe: &ReleaseProbe) -> Rung
 pub fn rung_build_provenance(probe: &ReleaseProbe) -> Rung {
     match &probe.attestation {
         AttestationProbe::NotAttested => Rung::NotOffered,
+        // Never observed, so nothing may be concluded — including "absent".
+        AttestationProbe::NotProbed => Rung::Failed(
+            "this release's attestation was never probed, so rung 2 cannot be \
+             decided; reaching it in this state is an ordering error in the \
+             caller, not an absent attestation"
+                .into(),
+        ),
         AttestationProbe::Rejected(detail) => Rung::Failed(detail.clone()),
         AttestationProbe::Verified { signer, commit } => Rung::Accepted {
             signer: signer.clone(),
@@ -354,6 +377,7 @@ mod tests {
 
     fn sums_ok() -> ReleaseProbe {
         ReleaseProbe {
+            published: Vec::new(),
             has_sums: true,
             has_cosign_bundle: true,
             cosign: Some(Ok(())),
@@ -536,6 +560,7 @@ mod tests {
     #[test]
     fn a_sums_file_without_a_bundle_is_not_offered() {
         let probe = ReleaseProbe {
+            published: Vec::new(),
             has_sums: true,
             has_cosign_bundle: false,
             cosign: Some(Ok(())),

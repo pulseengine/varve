@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/varve", "crates/varve-core", "crates/varve-producer"]
 
 [workspace.package]
-version = "0.30.0"
+version = "0.31.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/pulseengine/varve"
@@ -14,4 +14,4 @@ authors = ["PulseEngine"]
 # dependency cannot be published (REQ-BOOTSTRAP-001). It must be bumped in
 # lockstep with workspace.package.version above — `publish-crates.yml`
 # asserts they agree before it publishes anything.
-varve-core = { path = "crates/varve-core", version = "0.30.0" }
+varve-core = { path = "crates/varve-core", version = "0.31.0" }

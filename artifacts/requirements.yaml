@@ -3806,6 +3806,8 @@ artifacts:
       a new platform, a changed version — shall be fetched normally. (6) The
       gate shall be that depositing an unchanged `layer.toml` twice fetches no
       payload bytes the second time.
+    fields:
+      blocked-by: "varve#124: clause 6 unreachable — a deposit spec cannot reference a blob the registry already holds, so the download cannot be skipped. Clauses 1-5 hold."
 
   - id: REQ-PAYLOADSMOKE-001
     type: requirement
@@ -4307,3 +4309,14 @@ artifacts:
       building against it would produce a gate that verifies nothing, which is
       the defect class this project exists to remove.
 
+
+  - id: REQ-PRODUCERSHIP-001
+    type: requirement
+    title: The assembler is released, or a layers repository has nothing to consume
+    status: implemented
+    description: |-
+      REQ-LAYERREPO-001 clause 3 says a layers repository needs no varve source checkout: it takes a released varve AND A RELEASED ASSEMBLER. No assembler is released. `release.yml` builds `-p varve` only, and `varve-producer` is `publish = false`, so v0.30.0 shipped the producer as source in the workspace and nothing a layers repository could consume. That is what actually blocks clause 4, and it was mis-stated twice as a key problem.
+      .
+      Clauses: (1) `varve-producer` shall ship through the SAME signed release track as `varve` — per-platform archives whose digests enter `SHA256SUMS.txt` before it is cosign-signed, and SLSA build provenance covering them. An assembler distributed less carefully than the tool it feeds would invert the trust story. (2) It shall be a separate binary, not a `varve` subcommand: `varve` contacts no network and that claim is load-bearing in `docs air-gap` and the threat model, while the producer fetches releases, verifies signatures over the network and pushes to a registry. (3) The release shall not silently omit it — a gate shall refuse a release whose asset list lacks the producer for every platform `varve` itself ships, since "the assembler is released" is exactly the kind of claim that rots quietly. (4) It shall NOT be published to crates.io: it is an operator tool consumed as a binary by a layers repository, and publishing it would put a network-touching assembler in the same namespace as the offline tool. (5) Its `--version` shall print `varve-producer <semver>` per the CLI conventions, so a layer can record which assembler built it.
+      .
+      Verified is not fully decidable here: clause 4 of REQ-LAYERREPO-001 is discharged by a layers REPOSITORY publishing with this binary, which is another repo's run. This requirement holds at `implemented` until that happens, rather than claiming a migration on the strength of an asset appearing in a release.
