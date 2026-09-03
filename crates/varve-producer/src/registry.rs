@@ -1,26 +1,41 @@
 //! Asking a registry what it already holds (REQ-IMMUTABLE-001 clause 1).
 //!
-//! ## The three states, again
+//! ## Why this does not read error messages
 //!
-//! `oras manifest fetch` answers one of three things, and only the first two
-//! are answers:
+//! The first version of this module decided "the tag does not exist" by
+//! looking for `not found`, `404`, `manifest_unknown` and friends in oras's
+//! output. A clean-room review refuted it in three lines:
 //!
-//! * the tag exists, here is its digest;
-//! * the tag does not exist;
-//! * I could not tell you.
+//! ```text
+//! --repo 127.0.0.1:4040/o/r      -> connection refused -> verdict: publish
+//! --repo host.invalid/org/b-404  -> no such host       -> verdict: publish
+//! --layer 2026.09.404            -> no such host       -> verdict: publish
+//! ```
 //!
-//! Collapsing the third into the second is what makes this dangerous rather
-//! than merely wrong. "Absent" means *publish*, so a registry that is
-//! unreachable — an outage, an expired token, a typo'd repository, a network
-//! partition — would be read as "nothing is there" and the publisher would
-//! republish over a layer that very much exists. That is precisely the
-//! `2026.08.4` incident, arrived at by a different route and with a plausible
-//! excuse attached.
+//! oras echoes the reference and the URL it was given, so the haystack
+//! contains operator-supplied text as well as the registry's answer. A port
+//! number, a repository path or a layer id containing `404` turned an
+//! unreachable registry into "nothing is published here" — the exact failure
+//! this module exists to prevent, reached by a route the module's own tests
+//! never tried, because every test message I wrote was a realistic error and
+//! none of them contained an incidental `404`.
 //!
-//! So `lookup` returns `Result<Existing, _>`: absence is a value, and failure
-//! is an error that stops the publish.
+//! (A Go TCP error quotes the local ephemeral port — `read tcp
+//! 10.1.0.4:54043->…` — so roughly one connection reset in two hundred would
+//! have hit it against the live registry.)
+//!
+//! So absence is no longer inferred from prose. Two authoritative signals:
+//!
+//! * `oras manifest fetch --descriptor` **succeeding** is proof the tag exists,
+//!   and yields its digest;
+//! * `oras repo tags` **succeeding** is an authoritative listing, and a tag
+//!   absent from it is genuinely absent.
+//!
+//! Anything else is "the registry did not answer", which stops the publish.
+//! Absence must be *established*, never assumed from a failure whose text we
+//! happened to recognise.
 
-use crate::gh::{CommandRunner, RunOutput};
+use crate::gh::CommandRunner;
 use crate::immutable::Existing;
 use std::fmt;
 
@@ -51,9 +66,10 @@ impl fmt::Display for LookupError {
                 f,
                 "cannot determine what {repo} already holds: {detail}\n\n\
                  Refusing to publish. This is NOT the same as the registry \
-                 holding nothing — an unreachable registry read as an empty \
-                 one would republish over a layer that exists, which is the \
-                 exact failure this check was added to prevent."
+                 holding nothing — an unreachable registry read as an empty one \
+                 would republish over a layer that exists, which is the exact \
+                 failure this check was added to prevent. Absence has to be \
+                 established, not assumed from a failure."
             ),
             LookupError::Unparseable { detail } => write!(
                 f,
@@ -66,7 +82,7 @@ impl fmt::Display for LookupError {
 
 impl std::error::Error for LookupError {}
 
-/// `oras manifest fetch --descriptor <repo>:<tag>`
+/// `oras manifest fetch --descriptor <repo>:<tag>` — exact, for one tag.
 pub fn fetch_descriptor_argv(repo: &str, tag: &str) -> Vec<String> {
     vec![
         "manifest".into(),
@@ -76,68 +92,93 @@ pub fn fetch_descriptor_argv(repo: &str, tag: &str) -> Vec<String> {
     ]
 }
 
-/// Turn one `oras` invocation into an answer, or into a refusal to answer.
-pub fn classify(repo: &str, out: &RunOutput) -> Result<Existing, LookupError> {
-    if out.code == 127 {
-        return Err(LookupError::NotInstalled);
-    }
-    if out.ok() {
-        let doc: serde_json::Value =
-            serde_json::from_str(&out.stdout).map_err(|e| LookupError::Unparseable {
-                detail: e.to_string(),
-            })?;
-        let digest =
-            doc.get("digest")
-                .and_then(|d| d.as_str())
-                .ok_or_else(|| LookupError::Unparseable {
-                    detail: "the descriptor carries no `digest`".into(),
-                })?;
-        if digest.trim().is_empty() {
-            return Err(LookupError::Unparseable {
-                detail: "the descriptor's `digest` is empty".into(),
-            });
-        }
-        return Ok(Existing::At(digest.to_string()));
-    }
+/// `oras repo tags <repo>` — the authoritative listing.
+pub fn tags_argv(repo: &str) -> Vec<String> {
+    vec!["repo".into(), "tags".into(), repo.into()]
+}
 
-    let hay = format!("{} {}", out.stdout, out.stderr).to_lowercase();
-    // The ONLY failure that means "nothing is there". Everything else — auth,
-    // DNS, TLS, rate limits, a repository that does not exist — is a registry
-    // that did not answer, and must not be read as an empty one.
-    let absent = hay.contains("not found")
-        || hay.contains("manifest_unknown")
-        || hay.contains("name_unknown")
-        || hay.contains("404");
-    // ...except that a 401/403 often ALSO renders as "not found" by design, to
-    // avoid leaking whether a private repository exists. Treating that as
-    // absent would publish over a layer we simply are not allowed to see.
-    let denied = hay.contains("unauthorized")
-        || hay.contains("denied")
-        || hay.contains("forbidden")
-        || hay.contains("401")
-        || hay.contains("403");
-    if absent && !denied {
-        return Ok(Existing::Absent);
+/// The digest from a SUCCESSFUL descriptor fetch.
+pub fn parse_descriptor(stdout: &str) -> Result<String, LookupError> {
+    let doc: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| LookupError::Unparseable {
+            detail: e.to_string(),
+        })?;
+    let digest =
+        doc.get("digest")
+            .and_then(|d| d.as_str())
+            .ok_or_else(|| LookupError::Unparseable {
+                detail: "the descriptor carries no `digest`".into(),
+            })?;
+    if digest.trim().is_empty() {
+        return Err(LookupError::Unparseable {
+            detail: "the descriptor's `digest` is empty".into(),
+        });
     }
-    Err(LookupError::Unreachable {
-        repo: repo.to_string(),
-        detail: out.stderr.trim().to_string(),
-    })
+    Ok(digest.to_string())
+}
+
+/// Is `tag` in a SUCCESSFUL listing? One line per tag.
+pub fn tag_is_listed(stdout: &str, tag: &str) -> bool {
+    stdout.lines().any(|l| l.trim() == tag)
 }
 
 /// Ask the registry what it holds for one layer id.
+///
+/// Never infers absence from an error message. See the module docs.
 pub fn lookup<R: CommandRunner>(
     runner: &R,
     repo: &str,
     tag: &str,
 ) -> Result<Existing, LookupError> {
-    let out = runner.run("oras", &fetch_descriptor_argv(repo, tag), &[]);
-    classify(repo, &out)
+    let d = runner.run("oras", &fetch_descriptor_argv(repo, tag), &[]);
+    if d.code == 127 {
+        return Err(LookupError::NotInstalled);
+    }
+    if d.ok() {
+        // The tag exists and we read it. Nothing to interpret.
+        return Ok(Existing::At(parse_descriptor(&d.stdout)?));
+    }
+
+    // The manifest could not be read. That is not yet an answer about whether
+    // the tag exists, so ask for the listing rather than guessing from the
+    // failure text.
+    let t = runner.run("oras", &tags_argv(repo), &[]);
+    if t.code == 127 {
+        return Err(LookupError::NotInstalled);
+    }
+    if !t.ok() {
+        return Err(LookupError::Unreachable {
+            repo: repo.to_string(),
+            detail: format!(
+                "neither the manifest nor the tag listing could be read.\n  \
+                 manifest: {}\n  listing:  {}",
+                d.stderr.trim(),
+                t.stderr.trim()
+            ),
+        });
+    }
+    if tag_is_listed(&t.stdout, tag) {
+        // It IS published; we simply could not read it. Publishing over it is
+        // exactly what must not happen.
+        return Err(LookupError::Unreachable {
+            repo: repo.to_string(),
+            detail: format!(
+                "the registry lists {tag}, but its manifest could not be read: {}",
+                d.stderr.trim()
+            ),
+        });
+    }
+    // An authoritative listing that does not contain the tag.
+    Ok(Existing::Absent)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gh::RunOutput;
+    use std::cell::RefCell;
+
+    const D: &str = "sha256:088db18c45da66ae7b8570f5736fc71e777df2c4a48ab2263242bb6eb0e4655b";
 
     fn out(code: i32, stdout: &str, stderr: &str) -> RunOutput {
         RunOutput {
@@ -147,110 +188,154 @@ mod tests {
         }
     }
 
-    const D: &str = "sha256:088db18c45da66ae7b8570f5736fc71e777df2c4a48ab2263242bb6eb0e4655b";
+    /// Answers `manifest fetch` and `repo tags` separately.
+    struct Oras {
+        descriptor: RunOutput,
+        tags: RunOutput,
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl CommandRunner for Oras {
+        fn run(&self, program: &str, args: &[String], _e: &[(String, String)]) -> RunOutput {
+            assert_eq!(program, "oras");
+            self.calls.borrow_mut().push(args.join(" "));
+            match args.first().map(String::as_str) {
+                Some("manifest") => self.descriptor.clone(),
+                Some("repo") => self.tags.clone(),
+                other => panic!("unexpected argv {other:?}"),
+            }
+        }
+    }
+
+    fn oras(descriptor: RunOutput, tags: RunOutput) -> Oras {
+        Oras {
+            descriptor,
+            tags,
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn desc_ok() -> RunOutput {
+        out(0, &format!(r#"{{"digest":"{D}","size":1493}}"#), "")
+    }
 
     // rivet: verifies REQ-IMMUTABLE-001
     #[test]
-    fn a_published_tag_yields_its_digest() {
-        let json = format!(r#"{{"mediaType":"application/json","digest":"{D}","size":1493}}"#);
+    fn a_readable_tag_yields_its_digest_without_consulting_anything_else() {
+        let o = oras(desc_ok(), out(1, "", "should not be called"));
         assert_eq!(
-            classify("ghcr.io/o/r", &out(0, &json, "")).unwrap(),
+            lookup(&o, "ghcr.io/o/r", "2026.09.0").unwrap(),
             Existing::At(D.into())
+        );
+        assert_eq!(o.calls.borrow().len(), 1, "{:?}", o.calls.borrow());
+    }
+
+    /// Absence is ESTABLISHED by an authoritative listing, never inferred from
+    /// the text of a failure.
+    // rivet: verifies REQ-IMMUTABLE-001
+    #[test]
+    fn absence_comes_from_a_listing_that_does_not_contain_the_tag() {
+        let o = oras(
+            out(1, "", "Error: ... : not found"),
+            out(0, "2026.08.4\n2026.09.0\n", ""),
+        );
+        assert_eq!(
+            lookup(&o, "ghcr.io/o/r", "2099.12.9").unwrap(),
+            Existing::Absent
         );
     }
 
+    /// THE refutation that produced this rewrite. Three unreachable registries
+    /// whose error text happens to contain `404` — from a port, a repository
+    /// path, and a layer id — every one of which the previous implementation
+    /// reported as `publish`, exit 0.
     // rivet: verifies REQ-IMMUTABLE-001
     #[test]
-    fn a_tag_that_does_not_exist_is_absent() {
-        for msg in [
-            "Error: ghcr.io/o/r:2026.09.1: not found",
-            "MANIFEST_UNKNOWN: manifest unknown",
-            "unexpected status code 404",
+    fn an_incidental_404_in_the_error_text_cannot_produce_absence() {
+        for (msg, tag) in [
+            (
+                r#"Error: Get "https://127.0.0.1:4040/v2/o/r/tags/list": dial tcp 127.0.0.1:4040: connect: connection refused"#,
+                "2026.09.0",
+            ),
+            (
+                r#"Error: Get "https://host.invalid/v2/org/build-404/manifests/x": dial tcp: lookup host.invalid: no such host"#,
+                "2026.09.0",
+            ),
+            (
+                r#"Error: Get "https://host.invalid/v2/o/r/manifests/2026.09.404": no such host"#,
+                "2026.09.404",
+            ),
+            (
+                "read tcp 10.1.0.4:54043->140.82.121.34:443: read: connection reset by peer",
+                "2026.09.0",
+            ),
         ] {
-            assert_eq!(
-                classify("ghcr.io/o/r", &out(1, "", msg)).unwrap(),
-                Existing::Absent,
-                "{msg}"
-            );
-        }
-    }
-
-    /// THE dangerous case. "Absent" means publish, so a registry that could not
-    /// answer must never produce it — an outage would otherwise become
-    /// permission to republish over a live layer.
-    // rivet: verifies REQ-IMMUTABLE-001
-    #[test]
-    fn a_registry_that_could_not_answer_is_never_read_as_an_empty_one() {
-        for msg in [
-            "dial tcp: lookup ghcr.io: no such host",
-            "x509: certificate signed by unknown authority",
-            "context deadline exceeded",
-            "TOOMANYREQUESTS: retry later",
-            "unexpected status code 500 Internal Server Error",
-        ] {
-            let e = classify("ghcr.io/o/r", &out(1, "", msg)).expect_err(msg);
-            assert!(matches!(e, LookupError::Unreachable { .. }), "{msg}: {e:?}");
+            // Both calls fail, as they would for an unreachable registry.
+            let o = oras(out(1, "", msg), out(1, "", msg));
+            let e = lookup(&o, "ghcr.io/o/r", tag).expect_err(msg);
             assert!(
-                e.to_string().contains("NOT the same as"),
-                "the refusal must say why: {e}"
+                matches!(e, LookupError::Unreachable { .. }),
+                "{msg} -> {e:?}"
             );
         }
     }
 
-    /// A private repository answers "not found" to someone who may not see it.
-    /// Reading that as absent publishes over a layer we simply cannot look at.
+    /// A registry that hides a private repository behind a bare 404, with no
+    /// denial word anywhere — Harbor and Artifactory do this. The old
+    /// substring veto was GHCR-specific and would have published over it.
     // rivet: verifies REQ-IMMUTABLE-001
     #[test]
-    fn a_denial_dressed_up_as_not_found_is_not_absence() {
-        for msg in [
-            "unauthorized: authentication required",
-            "denied: requested access to the resource is denied",
-            "GET https://ghcr.io/v2/o/r/manifests/x: 403 Forbidden (not found)",
-            "unexpected status code 401 Unauthorized: not found",
-        ] {
-            let e = classify("ghcr.io/o/r", &out(1, "", msg)).expect_err(msg);
-            assert!(matches!(e, LookupError::Unreachable { .. }), "{msg}: {e:?}");
+    fn a_repository_we_cannot_see_is_not_reported_as_empty() {
+        let o = oras(
+            out(1, "", "NAME_UNKNOWN: repository name not known to registry"),
+            out(1, "", "NAME_UNKNOWN: repository name not known to registry"),
+        );
+        let e = lookup(&o, "harbor.example/o/r", "2026.09.0").expect_err("must refuse");
+        assert!(matches!(e, LookupError::Unreachable { .. }), "{e:?}");
+    }
+
+    /// Listed but unreadable is the worst case to get wrong: the layer is
+    /// demonstrably there.
+    // rivet: verifies REQ-IMMUTABLE-001
+    #[test]
+    fn a_tag_that_is_listed_but_unreadable_never_reads_as_absent() {
+        let o = oras(
+            out(1, "", "denied: requested access to the resource is denied"),
+            out(0, "2026.09.0\n", ""),
+        );
+        let e = lookup(&o, "ghcr.io/o/r", "2026.09.0").expect_err("must refuse");
+        match &e {
+            LookupError::Unreachable { detail, .. } => {
+                assert!(detail.contains("lists 2026.09.0"), "{detail}")
+            }
+            other => panic!("{other:?}"),
         }
     }
 
-    /// Each denial marker must independently veto absence.
-    ///
-    /// The previous test paired several markers in one message, so breaking any
-    /// single one still left a sibling to catch it — four surviving mutants
-    /// said so. A registry that hides a private repository behind "not found"
-    /// may use any ONE of these words, and if that word stops counting, the
-    /// answer becomes "nothing is published here" and the publisher overwrites
-    /// a layer it was merely not allowed to see.
+    /// A tag listing must match whole lines: `2026.09.1` must not satisfy a
+    /// lookup for `2026.09.10`, nor the other way round.
     // rivet: verifies REQ-IMMUTABLE-001
     #[test]
-    fn any_single_denial_marker_is_enough_to_veto_absence() {
-        for msg in [
-            "unauthorized: not found",
-            "denied: not found",
-            "forbidden: not found",
-            "401: not found",
-            "403: not found",
-        ] {
-            let got = classify("ghcr.io/o/r", &out(1, "", msg));
-            assert!(
-                matches!(got, Err(LookupError::Unreachable { .. })),
-                "{msg} was read as {got:?} — a hidden repository would be overwritten"
-            );
-        }
+    fn tag_membership_is_by_whole_line_not_by_substring() {
+        let listing = "2026.09.1\n2026.09.10\n";
+        assert!(tag_is_listed(listing, "2026.09.1"));
+        assert!(tag_is_listed(listing, "2026.09.10"));
+        assert!(!tag_is_listed(listing, "2026.09"));
+        assert!(!tag_is_listed(listing, "026.09.1"));
+        assert!(!tag_is_listed("", "2026.09.1"));
     }
 
-    /// A success whose body we cannot read is our problem, and still must not
-    /// be reported as absence.
     // rivet: verifies REQ-IMMUTABLE-001
     #[test]
     fn an_unreadable_descriptor_refuses_rather_than_reporting_absence() {
         for body in [
-            "not json at all",
+            "not json",
             r#"{"size":1}"#,
             r#"{"digest":""}"#,
             r#"{"digest":null}"#,
         ] {
-            let e = classify("ghcr.io/o/r", &out(0, body, "")).expect_err(body);
+            let o = oras(out(0, body, ""), out(0, "", ""));
+            let e = lookup(&o, "ghcr.io/o/r", "x").expect_err(body);
             assert!(
                 matches!(e, LookupError::Unparseable { .. }),
                 "{body}: {e:?}"
@@ -261,18 +346,57 @@ mod tests {
     // rivet: verifies REQ-IMMUTABLE-001
     #[test]
     fn a_missing_oras_is_named_as_such_rather_than_as_a_registry_problem() {
-        let e = classify("ghcr.io/o/r", &out(127, "", "no such file")).expect_err("must fail");
-        assert_eq!(e, LookupError::NotInstalled);
-        assert!(e.to_string().contains("not on PATH"), "{e}");
+        let o = oras(out(127, "", "not found"), out(127, "", "not found"));
+        assert_eq!(
+            lookup(&o, "ghcr.io/o/r", "x").expect_err("must fail"),
+            LookupError::NotInstalled
+        );
+        // ...including when only the LISTING is missing it.
+        let o = oras(out(1, "", "boom"), out(127, "", "no such file"));
+        assert_eq!(
+            lookup(&o, "ghcr.io/o/r", "x").expect_err("must fail"),
+            LookupError::NotInstalled
+        );
+    }
+
+    /// A refusal nobody can read is a refusal nobody acts on — and the
+    /// "NOT the same as" sentence is the one that stops an operator reaching
+    /// for a force flag.
+    // rivet: verifies REQ-IMMUTABLE-001
+    #[test]
+    fn every_lookup_failure_explains_itself() {
+        let un = LookupError::Unreachable {
+            repo: "ghcr.io/o/r".into(),
+            detail: "no such host".into(),
+        }
+        .to_string();
+        assert!(
+            un.contains("ghcr.io/o/r") && un.contains("no such host"),
+            "{un}"
+        );
+        assert!(un.contains("NOT the same as"), "{un}");
+        assert!(un.contains("established, not assumed"), "{un}");
+
+        let ni = LookupError::NotInstalled.to_string();
+        assert!(ni.contains("oras is not on PATH"), "{ni}");
+
+        let up = LookupError::Unparseable {
+            detail: "no `digest`".into(),
+        }
+        .to_string();
+        assert!(
+            up.contains("no `digest`") && up.contains("Refusing"),
+            "{up}"
+        );
     }
 
     // rivet: verifies REQ-IMMUTABLE-001
     #[test]
-    fn the_lookup_asks_for_the_descriptor_of_the_right_tag() {
-        let argv = fetch_descriptor_argv("ghcr.io/o/r", "2026.09.1");
+    fn the_commands_name_the_right_reference() {
         assert_eq!(
-            argv,
+            fetch_descriptor_argv("ghcr.io/o/r", "2026.09.1"),
             ["manifest", "fetch", "--descriptor", "ghcr.io/o/r:2026.09.1"]
         );
+        assert_eq!(tags_argv("ghcr.io/o/r"), ["repo", "tags", "ghcr.io/o/r"]);
     }
 }

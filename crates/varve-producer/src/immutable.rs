@@ -77,6 +77,41 @@ impl fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
+/// Reject a digest that is not one.
+///
+/// `--digest ""` used to sail straight through to `verdict: publish` — an
+/// unset shell variable in a workflow would have published without the check
+/// ever comparing anything. A digest is 64 hex characters, optionally prefixed
+/// `sha256:`; anything else is a caller bug and is refused rather than
+/// compared.
+pub fn parse_digest(raw: &str) -> Result<String, String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Err(
+            "no digest given (an unset variable reaches here as an empty \
+                    string, and an empty digest must never be compared)"
+                .into(),
+        );
+    }
+    let hex = match t.split_once(':') {
+        Some(("sha256", h)) => h,
+        Some((alg, _)) => {
+            return Err(format!(
+                "digest algorithm `{alg}` is not supported; a layer manifest \
+                 digest is sha256"
+            ));
+        }
+        None => t,
+    };
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "`{t}` is not a sha256 digest: expected 64 hex characters, \
+             optionally prefixed `sha256:`"
+        ));
+    }
+    Ok(t.to_string())
+}
+
 /// The whole decision, as a pure function over two descriptors.
 ///
 /// Deliberately not a method on anything that can reach a network: what the
@@ -187,6 +222,27 @@ mod tests {
             decide(&Existing::At(D1.into()), ""),
             Verdict::WouldReplace { .. }
         ));
+    }
+
+    /// An unset shell variable arrives as an empty string. It used to reach
+    /// `verdict: publish` untouched.
+    // rivet: verifies REQ-IMMUTABLE-001
+    #[test]
+    fn a_digest_that_is_not_a_digest_is_refused_before_anything_is_compared() {
+        for bad in [
+            "",
+            "   ",
+            "sha256:",
+            "not-a-digest",
+            "sha256:088db18c",
+            "sha512:088db18c45da66ae7b8570f5736fc71e777df2c4a48ab2263242bb6eb0e4655b",
+            "088db18c45da66ae7b8570f5736fc71e777df2c4a48ab2263242bb6eb0e4655bZZ",
+        ] {
+            assert!(parse_digest(bad).is_err(), "{bad:?} was accepted");
+        }
+        assert!(parse_digest(D1).is_ok());
+        assert!(parse_digest(D1.trim_start_matches("sha256:")).is_ok());
+        assert!(parse_digest(&format!("  {D1}  ")).is_ok());
     }
 
     /// Clause 3: an operator's next question is always "which one is live".

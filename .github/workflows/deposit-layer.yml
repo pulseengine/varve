@@ -8,6 +8,16 @@ name: Deposit layer
 # Rolling channel only until the root ceremony: signs with the PROVISIONAL
 # rolling root (trust-roots/rolling.pub / secret VARVE_ROLLING_KEY).
 
+# Two runs dispatched for the SAME layer id would both ask the registry, both
+# be told the id is unpublished, and both push — the immutability check is a
+# read, and `oras manifest push` has no if-not-exists. One id would end up
+# naming two digests, which is the very thing this workflow now checks for.
+# Serialising per layer closes the window; it does not need to be clever,
+# because a second deposit of the same id has nothing useful to do anyway.
+concurrency:
+  group: deposit-layer-${{ inputs.layer }}
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
@@ -149,18 +159,7 @@ jobs:
           ENVELOPE_FILE="../layer-layout/blobs/sha256/${ENVELOPE_DIGEST#sha256:}"
           STATUS_FILE="../layer-layout/blobs/sha256/${STATUS_DIGEST#sha256:}"
 
-          # 1. Push every blob: config, envelope, payload, tools, line-status.
-          printf '{}' > empty-config.json
-          oras blob push "$REPO" empty-config.json
-          oras blob push "$REPO" "$ENVELOPE_FILE"
-          oras blob push "$REPO" "$PAYLOAD_FILE"
-          for digest in $(jq -r '.manifests[].digest' "$PAYLOAD_FILE"); do
-            oras blob push "$REPO" "../layer-layout/blobs/sha256/${digest#sha256:}"
-          done
-          test -n "$STATUS_DIGEST" || { echo "::error::baseline line-status missing from layout"; exit 1; }
-          oras blob push "$REPO" "$STATUS_FILE"
-
-          # 2. Build the artifact manifest — envelope + payload + tools, plus
+          # 1. Build the artifact manifest — envelope + payload + tools, plus
           #    the baseline line-status as a role-annotated layer so
           #    RegistrySource.fetch_line_status finds it.
           jq -n \
@@ -206,10 +205,16 @@ jobs:
             }' > artifact-manifest.json
           head -c 1500 artifact-manifest.json; echo
 
-          # 3. REQ-IMMUTABLE-001 — a layer id names one set of bytes, forever.
+          # 2. REQ-IMMUTABLE-001 — a layer id names one set of bytes, forever.
           #
-          # Ask the registry what it already carries under this tag BEFORE
-          # pushing. rolling republished 2026.08.4 overnight (varve#115) and
+          # Ask the registry what it already carries under this tag before
+          # ANYTHING is written to it. This runs ahead of the blob pushes,
+          # not merely ahead of the manifest push: a refused publish should
+          # not leave blobs behind in the destination. (They are
+          # content-addressed, so they overwrite nothing — but "the check
+          # runs before we touch the registry" should be true rather than
+          # nearly true.)
+          # rolling republished 2026.08.4 overnight (varve#115) and
           # every name-only pin on it stopped resolving: two digests under one
           # name means the name identifies nothing, and no amount of
           # consumer-side care repairs it afterwards.
@@ -243,9 +248,21 @@ jobs:
             exit "$CHECK_RC"
           fi
           VERDICT="$(jq -r .verdict publish-check.json)"
+          # 3. Push every blob: config, envelope, payload, tools, line-status.
+          printf '{}' > empty-config.json
+          oras blob push "$REPO" empty-config.json
+          oras blob push "$REPO" "$ENVELOPE_FILE"
+          oras blob push "$REPO" "$PAYLOAD_FILE"
+          for digest in $(jq -r '.manifests[].digest' "$PAYLOAD_FILE"); do
+            oras blob push "$REPO" "../layer-layout/blobs/sha256/${digest#sha256:}"
+          done
+          test -n "$STATUS_DIGEST" || { echo "::error::baseline line-status missing from layout"; exit 1; }
+          oras blob push "$REPO" "$STATUS_FILE"
+
           if [ "$VERDICT" = "already-published" ]; then
             echo "::notice::$LAYER is already published at $INCOMING — skipping the push"
           else
+            # 4. Push the manifest under the layer tag.
             oras manifest push "$REPO:$LAYER" artifact-manifest.json
           fi
 

@@ -316,7 +316,25 @@ Every payload is fetched."
             replace_published,
             format,
         } => {
-            let json = format.as_deref() == Some("json");
+            // An unvalidated --format silently produced human output for
+            // `--format JSON` or `--format yaml`, leaving a workflow's `jq` to
+            // discover it downstream. Unknown values exit 2, per the CLI
+            // conventions for a bad flag.
+            let json = match format.as_deref() {
+                None | Some("text") => false,
+                Some("json") => true,
+                Some(other) => {
+                    eprintln!("error: unknown --format `{other}` (expected `json` or `text`)");
+                    std::process::exit(2);
+                }
+            };
+            let digest = match immutable::parse_digest(&digest) {
+                Ok(d) => d,
+                Err(why) => {
+                    eprintln!("error: --digest {why}");
+                    std::process::exit(2);
+                }
+            };
             let existing = registry::lookup(&source::Spawn, &repo, &layer)?;
             let verdict = immutable::decide(&existing, &digest);
             let (state, publish, refusal) = match &verdict {
