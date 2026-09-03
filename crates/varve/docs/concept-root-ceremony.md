@@ -223,6 +223,73 @@ That is why varve's qualified channel is not open. Do not read the fact that
 varve ships a root as evidence that the ceremony problem is solved — it is the
 same problem, deferred to the same requirement.
 
+### And it has no backup at all — read this before copying the pattern
+
+Everything above prescribes paper backup in two locations, split custody over
+the seed, an access log, and an annual read test. **varve's own provisional
+rolling key has none of them.** It was generated straight into CI, and its
+secret half exists in exactly one place: a write-only GitHub Actions secret in
+the varve repository. Nobody can read it back — not the maintainers, not
+through the API, by design of the secret store.
+
+The consequences are worth stating flatly, because "provisional" reads far
+milder than what this is:
+
+* **It cannot be moved.** A second repository cannot be given the key, because
+  the key cannot be read out of the first. That is why a realm's *contents*
+  live in their own repository while the *signing step* stays where the secret
+  is (`varve docs deploy`).
+* **It cannot be recovered.** If that secret is deleted, or the repository is
+  lost, the `pulseengine` rolling line can never be signed again. Every
+  consumer pinned to it stays frozen on the layer they already installed, with
+  no in-band way to be told why — because there is no revocation channel to
+  tell them on.
+* **It must not be extracted.** With write access to a repository it is
+  technically possible to print a secret into a workflow log in pieces. Doing
+  that here would expose the root permanently, and with no rotation and no
+  revocation the only remedy would be abandoning the realm. The inability to
+  read the secret back is a property worth keeping, not an obstacle to route
+  around.
+
+A key with a single write-only copy is not in custody. **Do not run a realm
+this way.** The ceremony above exists precisely so that your root is not held
+the way varve's provisional one currently is, and REQ-CEREMONY-001 is where
+varve fixes its own.
+
+## What changes at v1.0
+
+REQ-CEREMONY-001 is not a polish item; it is the requirement that makes a root
+holdable. It defines custody, rotation, revocation and expiry, dual-signs one
+release so an old root verifies a new one, and adds a transparency mechanism
+that makes key compromise detectable rather than merely regrettable. The
+qualified channel opens then, and not before.
+
+**Whether v1.0 keeps a file-based key at all is an open decision, not a settled
+one.** Keyless signing — an ephemeral Sigstore identity per release, with no
+long-lived secret in CI — was proposed (DD-025), rejected (DD-026), and is
+being reconsidered, because the reason it was rejected has partly expired and
+the reason to want it has grown:
+
+* The rejection rested in part on the offline verifier being a stub that failed
+  open. **That is no longer true**: as of `wsc` 0.11.0 the air-gapped verifier
+  performs real certificate-chain, Rekor SET, signature, revocation and
+  identity checks offline, and documents the two things it deliberately does
+  not verify (the Rekor Merkle inclusion proof, and SCT/CT logs).
+* The rejection's structural half **still stands**: the offline trust bundle is
+  itself signed with a long-lived key that every consumer must pin. Keyless
+  *relocates* the long-lived secret; it does not abolish it.
+* But relocation is close to the whole point. Today's long-lived key sits in
+  CI, is used on every deposit, and — as above — cannot be backed up or moved.
+  A bundle-signing key is used rarely, changes rarely, and can plausibly be
+  held the way this topic actually prescribes: offline, split, on paper, with a
+  read test. **The question for v1.0 is not "keys or no keys", it is which key
+  has to be online.**
+
+Do not plan around either outcome yet. Plan around the fact that the trust root
+you pin today is provisional, and that the transition will be announced through
+the channel that bootstrapped you, because varve has no in-band way to announce
+it.
+
 ## Where to go next
 
 * `varve docs signing-keys` — the key format and what varve checks
