@@ -147,6 +147,21 @@ enum Cmd {
         #[arg(trailing_var_arg = true, required = true)]
         tool_and_args: Vec<std::ffi::OsString>,
     },
+    /// (CI) The support horizon for a layer issued now, derived from the
+    /// channel's stated policy (REQ-SUPPORTUNTIL-001).
+    ///
+    /// Derived, not typed: a window a human enters each release is one that
+    /// drifts, and the drift is invisible because every value looks plausible.
+    SupportHorizon {
+        /// `rolling` or `qualified`.
+        #[arg(long)]
+        channel: String,
+        /// The layer's issued-at, RFC 3339.
+        #[arg(long = "issued-at")]
+        issued_at: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Mint a signing key and its public half — the value a realm pins as
     /// `trust-root` (REQ-KEYGEN-001). Without this an organisation cannot
     /// stand up its own realm at all: nothing else in varve emits a public key.
@@ -719,6 +734,27 @@ fn run() -> anyhow::Result<Outcome> {
             &layouts,
             force,
         ),
+        Cmd::SupportHorizon {
+            channel,
+            issued_at,
+            json,
+        } => {
+            let until = varve_core::support::horizon(&issued_at, &channel)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "command": "support-horizon",
+                        "channel": channel,
+                        "issued_at": issued_at,
+                        "support_until": until,
+                    })
+                );
+            } else {
+                println!("{until}");
+            }
+            Ok(())
+        }
         Cmd::Keygen { out, public } => keygen(&out, public.as_deref()),
         Cmd::Pubkey { key } => pubkey(&key),
         Cmd::LayerSpec { manifest, json } => layer_spec(&manifest, json),
@@ -1074,6 +1110,10 @@ fn status(
                 "yanked": verdict.yanked_reason.is_some(),
                 "yanked_reason": verdict.yanked_reason,
                 "support_until": verdict.support_until,
+                // REQ-SUPPORTUNTIL-001 clause 3: a date alone makes the reader
+                // do the arithmetic, and a reader who has to compute whether
+                // they are still supported mostly does not.
+                "support_standing": support_standing_json(verdict.support_until.as_deref()),
                 "known_problems": verdict.problems_total,
                 "known_problems_with_workaround": verdict.problems_with_workaround,
                 "exit_code": if verdict.yanked_reason.is_some() {
@@ -1094,7 +1134,15 @@ fn status(
             None => println!("  not yanked"),
         }
         match &verdict.support_until {
-            Some(until) => println!("  supported until {until}"),
+            Some(until) => match varve_core::support::standing(until, &today_rfc3339()) {
+                Ok(st) => println!(
+                    "  {}",
+                    varve_core::support::advisory(&pin.layer.to_string(), until, st)
+                ),
+                // A window that will not parse is a defect in what was signed,
+                // and saying so beats printing it as though it meant something.
+                Err(e) => println!("  support window unusable: {e}"),
+            },
             None => println!("  no stated support window"),
         }
         println!(
@@ -1233,6 +1281,37 @@ fn sign_status(
     // to sign a malformed advisory.
     let doc: varve_core::LineStatus =
         serde_json::from_slice(&bytes).context("status document does not match the schema")?;
+    // REQ-SUPPORTUNTIL-001 clauses 1 and 5. `support-until` shipped in v0.5.0,
+    // signed, round-tripped and printed by `varve status` — and nothing ever
+    // set it, so every published layer carried None while the docs promised a
+    // stated window. A capability nobody populates is worse than a missing one:
+    // the code, the tests and the docs all imply a guarantee no artifact holds.
+    //
+    // It was never PARSED either. The field is a String, so "2028-13-45" would
+    // have signed cleanly and then been unusable by everything downstream —
+    // which is why "warn when the window has passed" was not implementable.
+    //
+    // Refused here rather than defaulted: a horizon this command invented would
+    // be a promise nobody decided to make, signed with the realm's root.
+    match doc.support_until.as_deref() {
+        None => anyhow::bail!(
+            "{} states no support window.\n\n\
+             Every published layer must say how long it is supported. A line \
+             whose window is absent reads to a consumer as \"no stated support \
+             window\" — which is what every layer varve has published so far \
+             says, because this field has never once been set.\n\n\
+             Derive it from the channel rather than typing one:\n\
+             \n    varve support-horizon --channel <rolling|qualified> --issued-at <RFC3339>\n\n\
+             then set \"support-until\" in the document.",
+            file.display()
+        ),
+        Some(raw) => {
+            // Comparing it with itself is enough to establish it parses.
+            varve_core::support::standing(raw, raw).with_context(|| {
+                format!("the support window in {} is not usable", file.display())
+            })?;
+        }
+    }
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
     // Refuse a key that cannot produce verifiable signatures BEFORE signing.
@@ -3034,6 +3113,28 @@ fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
 
 /// Today, day-resolution, RFC 3339 — sampled once here at the CLI boundary;
 /// everything below treats time as data.
+/// Where a layer stands against its stated window, as JSON.
+///
+/// `null` when no window is stated, so a consumer can tell "not supported any
+/// more" from "nobody said" — collapsing those is the whole reason this
+/// requirement exists.
+fn support_standing_json(support_until: Option<&str>) -> serde_json::Value {
+    let Some(until) = support_until else {
+        return serde_json::Value::Null;
+    };
+    match varve_core::support::standing(until, &today_rfc3339()) {
+        Ok(varve_core::support::Standing::Supported { days_left }) => serde_json::json!({
+            "state": "supported",
+            "days_left": days_left,
+        }),
+        Ok(varve_core::support::Standing::Expired { days_ago }) => serde_json::json!({
+            "state": "expired",
+            "days_ago": days_ago,
+        }),
+        Err(e) => serde_json::json!({ "state": "unusable", "detail": e.to_string() }),
+    }
+}
+
 fn today_rfc3339() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

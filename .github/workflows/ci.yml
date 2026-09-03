@@ -206,6 +206,7 @@ jobs:
           - shard: varve-core
             files: >-
               -f crates/varve-core/src/rollback.rs
+              -f crates/varve-core/src/support.rs
               -f crates/varve-core/src/layer.rs
               -f crates/varve-core/src/platform.rs
               -f crates/varve-core/src/verify.rs

@@ -113,8 +113,16 @@ jobs:
           # counter tracks the deposit counter (advisories issued later carry
           # higher counters). Empty problems/yanked — a clean starting record.
           LINE="${LAYER%.*}"
-          printf '{"line":"%s","counter":%s,"issued-at":"%s"}\n' \
-            "$LINE" "$COUNTER" "$ISSUED_AT" > baseline-status.json
+          # REQ-SUPPORTUNTIL-001: derived from the channel's policy, never
+          # typed here. `support-until` has existed and been signed since
+          # v0.5.0 and this workflow never set it, so every layer varve has
+          # published says "no stated support window" while the docs promise
+          # one. `varve sign-status` now refuses a document without it.
+          SUPPORT_UNTIL="$(./target/release/varve support-horizon \
+            --channel rolling --issued-at "$ISSUED_AT")"
+          echo "::notice::layer $LAYER supported until $SUPPORT_UNTIL (rolling policy)"
+          printf '{"line":"%s","counter":%s,"issued-at":"%s","support-until":"%s"}\n' \
+            "$LINE" "$COUNTER" "$ISSUED_AT" "$SUPPORT_UNTIL" > baseline-status.json
           ./target/release/varve sign-status \
             --file baseline-status.json \
             --key <(printf '%s' "$VARVE_ROLLING_KEY") --key-id varve-rolling-1 \

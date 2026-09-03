@@ -54,6 +54,7 @@ pub mod selfverify;
 pub mod shadow;
 pub mod source;
 pub mod store;
+pub mod support;
 pub mod update;
 pub mod verify;
 pub mod vsixexport;
