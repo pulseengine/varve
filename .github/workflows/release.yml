@@ -245,8 +245,19 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
-          varve_n=$(ls release-assets/varve-"${VERSION}"-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
-          prod_n=$(ls release-assets/varve-producer-"${VERSION}"-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
+          # NOT `ls … | wc -l`. Under `set -euo pipefail` a glob that matches
+          # nothing makes `ls` fail, the pipeline fail, and the step abort — so
+          # the zero-producer branch below was dead code and the release failed
+          # with no explanation at all. Found by a clean-room review that
+          # replayed this script with synthetic asset directories; my own test
+          # ran in zsh without `set -e` and printed the message happily.
+          count() {
+            local n=0 f
+            for f in "$@"; do [ -e "$f" ] && n=$((n + 1)); done
+            echo "$n"
+          }
+          varve_n=$(count release-assets/varve-"${VERSION}"-*.tar.gz)
+          prod_n=$(count release-assets/varve-producer-"${VERSION}"-*.tar.gz)
           echo "varve archives=$varve_n  varve-producer archives=$prod_n"
           if [ "$prod_n" -eq 0 ]; then
             echo "::error::this release ships no varve-producer archive; a layers \
@@ -285,6 +296,25 @@ jobs:
           test -n "$SBOM_SRC" && test -f "$SBOM_SRC"
           cp "$SBOM_SRC" "release-assets/varve-${BARE}.cdx.json"
           echo "::notice::Toolchain SBOM written to release-assets/varve-${BARE}.cdx.json"
+
+          # The assembler gets its own SBOM (REQ-PRODUCERGET-001 clause 3).
+          # v0.31.0 shipped one SBOM covering pkg:cargo/varve — 172 components,
+          # none of them varve-producer — so anyone with an SBOM-ingest
+          # requirement got nothing for a binary they were being told to run.
+          # It is a different dependency set (it links sha2, hex and clap that
+          # varve's CLI crate does not pull the same way), so one SBOM cannot
+          # stand for both.
+          cargo cyclonedx \
+            --manifest-path crates/varve-producer/Cargo.toml \
+            --format json \
+            --spec-version 1.5
+          PROD_SBOM="crates/varve-producer/varve-producer.cdx.json"
+          if [ ! -f "$PROD_SBOM" ]; then
+            PROD_SBOM=$(find crates/varve-producer -maxdepth 2 -name '*.cdx.json' | head -1)
+          fi
+          test -n "$PROD_SBOM" && test -f "$PROD_SBOM"
+          cp "$PROD_SBOM" "release-assets/varve-producer-${BARE}.cdx.json"
+          echo "::notice::Assembler SBOM written to release-assets/varve-producer-${BARE}.cdx.json"
           ls -la release-assets/
 
       - name: Stage onboarding assets (trust root + canonical realms)
@@ -356,6 +386,26 @@ jobs:
             artifacts/ claims.yaml rivet.yaml
           echo "::notice::Traceability evidence staged (ReqIF + HTML + rivet artifacts)"
           ls -la release-assets/
+
+      # BEFORE the checksums, deliberately. It used to run after them, so the
+      # one asset describing how everything else was built was the one asset
+      # with no integrity binding at all — not in SHA256SUMS.txt, not an
+      # attestation subject. Found by a clean-room review of v0.31.0. Same
+      # ordering rule as the SBOM: anything that must be covered has to exist
+      # before the sums are taken.
+      - name: Capture build environment
+        run: |
+          set -euo pipefail
+          {
+            echo "rustc: $(rustc --version)"
+            echo "cargo: $(cargo --version)"
+            # `cosign version | head -1` captured the first line of its ASCII
+            # art banner, so build-env.txt recorded a row of underscores where
+            # the version should be. --json is the machine-readable form.
+            echo "cosign: $(cosign version --json 2>/dev/null | jq -r .gitVersion)"
+            echo "runner: $(uname -srm)"
+          } > release-assets/build-env.txt
+          cat release-assets/build-env.txt
 
       - name: Generate SHA256 checksums
         run: |
@@ -438,17 +488,6 @@ jobs:
             --key-id "$KEY_ID" \
             --out SHA256SUMS.txt.dsse.json
           ls -la SHA256SUMS.txt.dsse.json
-
-      - name: Capture build environment
-        run: |
-          set -euo pipefail
-          {
-            echo "rustc: $(rustc --version)"
-            echo "cargo: $(cargo --version)"
-            echo "cosign: $(cosign version 2>&1 | head -1)"
-            echo "runner: $(uname -srm)"
-          } > release-assets/build-env.txt
-          cat release-assets/build-env.txt
 
       - name: Create or update GitHub Release
         env:

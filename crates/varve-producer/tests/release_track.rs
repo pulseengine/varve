@@ -151,3 +151,95 @@ fn the_release_checks_the_assembler_reports_its_own_name_and_version() {
         "the version is not checked:\n{step}"
     );
 }
+
+/// Clause 4 of REQ-PRODUCERGET-001. `build-env.txt` used to be written AFTER
+/// the checksums, so the one asset describing how everything else was built
+/// was the one asset with no integrity binding at all. Same ordering rule as
+/// the SBOM: anything that must be covered has to exist before the sums.
+// rivet: verifies REQ-PRODUCERGET-001
+#[test]
+fn every_asset_exists_before_the_checksums_are_taken() {
+    let w = workflow();
+    let be = w
+        .find("- name: Capture build environment")
+        .expect("the build-env step is gone");
+    let sums = w
+        .find("- name: Generate SHA256 checksums")
+        .expect("the checksum step is gone");
+    assert!(
+        be < sums,
+        "build-env.txt is written after the sums, so nothing covers it"
+    );
+    let sbom = w
+        .find("- name: Generate toolchain SBOM")
+        .expect("the SBOM step is gone");
+    assert!(sbom < sums, "the SBOM must enter the sums too");
+}
+
+/// Clause 3. v0.31.0 shipped one SBOM covering pkg:cargo/varve — 172
+/// components, none of them the assembler.
+// rivet: verifies REQ-PRODUCERGET-001
+#[test]
+fn the_assembler_gets_an_sbom_of_its_own() {
+    let w = workflow();
+    assert!(
+        w.contains("--manifest-path crates/varve-producer/Cargo.toml"),
+        "no SBOM is generated for varve-producer"
+    );
+    assert!(
+        w.contains(r#"release-assets/varve-producer-${BARE}.cdx.json"#),
+        "the assembler's SBOM never reaches the release assets"
+    );
+}
+
+/// The gate's zero-producer branch was dead code: under `set -euo pipefail`,
+/// `ls <glob> | wc -l` aborts the step when the glob matches nothing, so the
+/// release failed with no explanation. A clean-room review replayed it under
+/// bash; my own check ran in zsh without `set -e` and printed the message.
+// rivet: verifies REQ-PRODUCERSHIP-001
+#[test]
+fn the_gates_diagnostics_are_reachable_under_set_e() {
+    let w = workflow();
+    let gate = w
+        .split("Assert the assembler ships with the toolchain")
+        .nth(1)
+        .expect("the gate is gone");
+    let gate = gate.split("- name:").next().expect("gate body");
+    assert!(
+        !gate.contains("ls release-assets/"),
+        "counting with `ls` makes the diagnostics unreachable under set -e:\n{gate}"
+    );
+    assert!(gate.contains("count()"), "no failure-free counter:\n{gate}");
+}
+
+/// Clause 5. A consumer who cannot find the assembler in the README will not
+/// find it: install.sh cannot fetch it and crates.io does not carry it.
+// rivet: verifies REQ-PRODUCERGET-001
+#[test]
+fn the_readme_says_how_to_get_the_assembler_and_to_verify_it_first() {
+    let readme = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md"),
+    )
+    .expect("README.md");
+    assert!(
+        readme.contains("varve-producer"),
+        "the README never names the assembler"
+    );
+    // And the documented path verifies BEFORE extracting.
+    let section = readme
+        .split("### The assembler")
+        .nth(1)
+        .expect("no assembler section");
+    let verify_at = section.find("SHA256SUMS.txt").expect("no digest check");
+    let extract_at = section.find("tar xzf").expect("no extraction");
+    assert!(
+        verify_at < extract_at,
+        "the README extracts before verifying, which is the habit varve exists to break"
+    );
+
+    // The stale claim that cargo install is unavailable must be gone.
+    assert!(
+        !readme.contains("Not available until v0.26.0"),
+        "the README still tells users a working install path does not work"
+    );
+}
