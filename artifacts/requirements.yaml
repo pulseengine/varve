@@ -3495,44 +3495,7 @@ artifacts:
     title: A realm's layers are assembled outside varve, in that realm's own repository
     status: approved
     release: v0.30.0
-    description: >
-      `deposit-layer.yml` lives inside varve and hard-codes one realm's tool
-      list, so bumping a tool version is a commit to the tool that installs
-      tools, and a second realm's signing key would live in varve's repository
-      settings. That couples varve's release cadence to every tool bump and
-      puts two realms' custody in one place — which `docs root-ceremony`
-      argues against in the same breath as it argues for split custody.
-      .
-      Clauses: (1) Layer assembly shall live in a repository per realm, each
-      holding its own tool manifest and its own signing secret. (2) The
-      assembler itself shall stay in varve and be CONSUMED by those repos as a
-      released artifact — it is system-tested here (REQ-SYSTEST-002) and a
-      copy per realm is a copy that drifts, which is the same defect as a gate
-      testing a re-implementation. (3) A layers repo shall need no varve
-      source checkout: it takes a released varve and a released assembler.
-      (4) EXACTLY ONE layers repo shall be stood up first — `pulseengine-layers`,
-      the realm that already has consumers and an existing key — and it shall
-      publish a layer successfully before a second repo is created. The
-      two-realm topology is proven in the gate (REQ-REALM2-001 clause 1)
-      rather than by standing up two repos at once, so a migration failure
-      lands on the realm we can fix rather than on a new realm's first
-      impression. A single repo holding BOTH realms was rejected: it puts two
-      roots' secrets in one repo's settings, and unpicking that later means
-      rotating keys varve cannot rotate. (5) varve's own repository shall stop
-      carrying any realm's signing secret once the migration completes.
-      .
-      Moved v0.29.0 -> v0.30.0 deliberately. The ADAPTER this depends on
-      shipped in v0.29.0 and is verified separately (REQ-LAYERADAPT-001), but
-      clauses 4 and 5 are not code: clause 4 requires `pulseengine-layers` to
-      publish a real layer, which needs `VARVE_ROLLING_KEY` provisioned in
-      that repository by its custodian, and clause 5 requires removing the
-      secret from varve only AFTER that publish succeeds. Neither can be
-      discharged by the party writing the code, and marking this verified on
-      the strength of the adapter alone would claim a migration that has not
-      happened. The layers repository's deposit workflow therefore still
-      refuses to run rather than pretending, and the ordering is deliberate:
-      varve keeps the secret until the new repository has proven it can
-      publish without it.
+    description: "`deposit-layer.yml` lives inside varve and hard-codes one realm's tool list, so bumping a tool version is a commit to the tool that installs tools, and a second realm's signing key would live in varve's repository settings. That couples varve's release cadence to every tool bump and puts two realms' custody in one place — which `docs root-ceremony` argues against in the same breath as it argues for split custody. . Clauses: (1) Layer assembly shall live in a repository per realm, each holding its own tool manifest and its own signing secret. (2) The assembler itself shall stay in varve and be CONSUMED by those repos as a released artifact — it is system-tested here (REQ-SYSTEST-002) and a copy per realm is a copy that drifts, which is the same defect as a gate testing a re-implementation. (3) A layers repo shall need no varve source checkout: it takes a released varve and a released assembler. (4) EXACTLY ONE layers repo shall be stood up first — `pulseengine-layers`, the realm that already has consumers and an existing key — and it shall publish a layer successfully before a second repo is created. The two-realm topology is proven in the gate (REQ-REALM2-001 clause 1) rather than by standing up two repos at once, so a migration failure lands on the realm we can fix rather than on a new realm's first impression. A single repo holding BOTH realms was rejected: it puts two roots' secrets in one repo's settings, and unpicking that later means rotating keys varve cannot rotate. (5) varve's own repository shall stop carrying any realm's signing secret once the migration completes. . Moved v0.29.0 -> v0.30.0 deliberately. The ADAPTER this depends on shipped in v0.29.0 and is verified separately (REQ-LAYERADAPT-001), but clauses 4 and 5 are not code: clause 4 requires `pulseengine-layers` to publish a real layer, which needs `VARVE_ROLLING_KEY` provisioned in that repository by its custodian, and clause 5 requires removing the secret from varve only AFTER that publish succeeds. Neither can be discharged by the party writing the code, and marking this verified on the strength of the adapter alone would claim a migration that has not happened. The layers repository's deposit workflow therefore still refuses to run rather than pretending, and the ordering is deliberate: varve keeps the secret until the new repository has proven it can publish without it. . STATE AS OF 2026-09-02, recorded because it drifted from what was claimed. `pulseengine-layers` exists and holds the manifest, and has NEVER RUN ANYTHING — zero workflow runs, and its deposit still exits 1. Layers 2026.08.4 and 2026.09.0 were both deposited from `pulseengine/varve`. Clause 4's gate is therefore NOT met, and no second layers repository may be created: not for `bytecodealliance` (REQ-REALM2-002), not for `covalent` (REQ-COVALENT-001). Both were described as blocked only on a root key; that was wrong, and they are blocked on this clause first. . The present arrangement is a HALF-MIGRATION and should be named as such: the manifest lives in the layers repository while signing lives in varve, so a cut edits both and keeps them byte-identical by a check. That check is better than drift but it is not clause 1 — it is two sources kept in step, which is the state the migration exists to end. . What blocks clause 4 has also changed. It is no longer the adapter — `varve layer-spec` shipped in v0.29.0, and the layers repository's workflow still carries a stale TODO saying otherwise. It is that no ASSEMBLER is released for a layers repo to consume (clause 3), plus the key and the GHCR write permission. The Rust producer changes the answer to the first: rather than packaging shell scripts as a signed release asset, the released binary IS the assembler. So finishing REQ-PRODUCER-002 is now a prerequisite of this clause, not work beside it."
 
   - id: REQ-PRODUCER-002
     type: requirement
