@@ -257,6 +257,39 @@ jobs:
           # shellcheck disable=SC2086 -- FILES is a deliberate flag list
           cargo mutants --no-shuffle -j 4 $FILES
 
+  # The name the branch ruleset requires. It must not move when the gate is
+  # resharded, so it lives on a job that does no work and only reports.
+  #
+  # This is not hypothetical tidiness. Sharding the gate renamed its checks from
+  # `cargo mutants (trust-critical gate)` to one name per shard, and the ruleset
+  # still required the old name — a check that no longer existed, so it could
+  # never report and nothing could merge. That failed closed, which was luck:
+  # the same mistake made while REMOVING a shard would leave a required check
+  # that passes without testing anything.
+  #
+  # With an aggregator the required name is stable by construction, and adding
+  # or splitting shards is a change to `needs:` rather than to a protection rule
+  # nobody remembers to update.
+  mutants-gate:
+    name: cargo mutants (trust-critical gate)
+    needs: [mutants]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard must have passed
+        env:
+          RESULT: ${{ needs.mutants.result }}
+        run: |
+          set -euo pipefail
+          echo "shard result: $RESULT"
+          # `success` only. A skipped or cancelled matrix is NOT a pass — a
+          # cancelled shard is how a 60-minute timeout previously reported
+          # nothing at all, and this gate exists to be believed.
+          if [ "$RESULT" != "success" ]; then
+            echo "::error::the mutation gate did not pass (result: $RESULT)"
+            exit 1
+          fi
+
   proofs:
     name: SMT obligations (ordeal, certificate-checked)
     runs-on: ubuntu-latest
