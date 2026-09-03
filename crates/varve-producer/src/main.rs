@@ -6,7 +6,9 @@
 //! and pushes to a registry. Keeping them apart keeps that claim true.
 
 use clap::{Parser, Subcommand};
-use varve_producer::{asset, binfmt, deposit, forge::Forge, ingest, orchestrate, plan, source};
+use varve_producer::{
+    asset, binfmt, deposit, forge::Forge, immutable, ingest, orchestrate, plan, registry, source,
+};
 
 #[derive(Parser)]
 #[command(name = "varve-producer", version, about, long_about = None)]
@@ -32,6 +34,38 @@ enum Cmd {
         #[arg(long = "platform", value_delimiter = ',')]
         platforms: Vec<String>,
     },
+    /// Ask the destination registry whether this layer id is already
+    /// published, and refuse to replace it with different bytes
+    /// (REQ-IMMUTABLE-001).
+    ///
+    /// Run this BEFORE pushing. `varve deposit` cannot do it: it contacts no
+    /// network by design, and spending that property to fix a publisher's bug
+    /// would be a bad trade.
+    PublishCheck {
+        /// Destination repository, e.g. `ghcr.io/pulseengine/varve-layers`.
+        #[arg(long)]
+        repo: String,
+        /// The layer id being published, e.g. `2026.09.1`.
+        #[arg(long)]
+        layer: String,
+        /// The manifest digest about to be pushed, as `varve deposit --json`
+        /// reports it.
+        #[arg(long)]
+        digest: String,
+        /// Replace a DIFFERENT already-published layer under this id.
+        ///
+        /// Only correct when nobody has consumed the published layer: it does
+        /// not retract what anyone already resolved, and any pin naming this
+        /// layer without a digest breaks. Prefer publishing a new layer id —
+        /// the counter exists so a correction is a new layer, not a rewritten
+        /// one.
+        #[arg(long = "replace-published")]
+        replace_published: bool,
+        /// Machine-readable result.
+        #[arg(long = "format", value_name = "FORMAT")]
+        format: Option<String>,
+    },
+
     /// Check a staged payload's architecture against the platform it would be
     /// deposited under, without executing it.
     Arch {
@@ -273,6 +307,73 @@ Every payload is fetched."
                     ))
                     .count()
             );
+            Ok(())
+        }
+        Cmd::PublishCheck {
+            repo,
+            layer,
+            digest,
+            replace_published,
+            format,
+        } => {
+            let json = format.as_deref() == Some("json");
+            let existing = registry::lookup(&source::Spawn, &repo, &layer)?;
+            let verdict = immutable::decide(&existing, &digest);
+            let (state, publish, refusal) = match &verdict {
+                immutable::Verdict::Publish => ("publish", true, None),
+                immutable::Verdict::AlreadyPublished => ("already-published", false, None),
+                immutable::Verdict::WouldReplace { existing, incoming } => (
+                    "would-replace",
+                    replace_published,
+                    Some(immutable::Refusal {
+                        layer: layer.clone(),
+                        existing: existing.clone(),
+                        incoming: incoming.clone(),
+                    }),
+                ),
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "command": "publish-check",
+                        "layer": layer,
+                        "repo": repo,
+                        "verdict": state,
+                        "publish": publish,
+                        "existing": match &existing {
+                            immutable::Existing::At(d) => serde_json::Value::String(d.clone()),
+                            immutable::Existing::Absent => serde_json::Value::Null,
+                        },
+                        "incoming": digest,
+                    })
+                );
+            }
+            match (&refusal, replace_published) {
+                (Some(r), false) => return Err(anyhow::anyhow!("{r}")),
+                (Some(r), true) => {
+                    // Loud, and on stderr, so it appears in the log of the run
+                    // that did it rather than only in someone's shell history.
+                    eprintln!(
+                        "::warning::REPLACING published layer {} — was {}, now {}.                          Anyone who already resolved this id keeps the old bytes.",
+                        r.layer, r.existing, r.incoming
+                    );
+                }
+                (None, _) => {}
+            }
+            if !json {
+                match &verdict {
+                    immutable::Verdict::Publish => {
+                        println!("publish        {layer} is not yet published in {repo}")
+                    }
+                    immutable::Verdict::AlreadyPublished => println!(
+                        "already        {layer} is already published in {repo} at {digest} — nothing to do"
+                    ),
+                    immutable::Verdict::WouldReplace { existing, .. } => {
+                        println!("replacing      {layer} was {existing} in {repo}")
+                    }
+                }
+            }
             Ok(())
         }
         Cmd::Arch { file, platform } => {
