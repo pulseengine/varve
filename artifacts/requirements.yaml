@@ -1156,7 +1156,7 @@ artifacts:
     type: requirement
     title: A fresh consumer cannot be handed an arbitrarily old signed layer
     status: approved
-    release: v0.20.0
+    release: v0.32.0
     description: >
       The first-contact rollback window (empty high-water mark accepts any
       counter) shall be closed: a signed per-line floor (carried in the
@@ -3770,7 +3770,7 @@ artifacts:
       gate shall be that depositing an unchanged `layer.toml` twice fetches no
       payload bytes the second time.
     fields:
-      blocked-by: "varve#124: clause 6 unreachable — a deposit spec cannot reference a blob the registry already holds, so the download cannot be skipped. Clauses 1-5 hold."
+      blocked-by: "REQ-REUSEBLOB-001 (varve#124): clause 6 needs a deposit spec that can reference an existing blob. Clauses 1-5 hold."
 
   - id: REQ-PAYLOADSMOKE-001
     type: requirement
@@ -4283,3 +4283,31 @@ artifacts:
       Clauses: (1) `varve-producer` shall ship through the SAME signed release track as `varve` — per-platform archives whose digests enter `SHA256SUMS.txt` before it is cosign-signed, and SLSA build provenance covering them. An assembler distributed less carefully than the tool it feeds would invert the trust story. (2) It shall be a separate binary, not a `varve` subcommand: `varve` contacts no network and that claim is load-bearing in `docs air-gap` and the threat model, while the producer fetches releases, verifies signatures over the network and pushes to a registry. (3) The release shall not silently omit it — a gate shall refuse a release whose asset list lacks the producer for every platform `varve` itself ships, since "the assembler is released" is exactly the kind of claim that rots quietly. (4) It shall NOT be published to crates.io: it is an operator tool consumed as a binary by a layers repository, and publishing it would put a network-touching assembler in the same namespace as the offline tool. (5) Its `--version` shall print `varve-producer <semver>` per the CLI conventions, so a layer can record which assembler built it.
       .
       Verified is not fully decidable here: clause 4 of REQ-LAYERREPO-001 is discharged by a layers REPOSITORY publishing with this binary, which is another repo's run. This requirement holds at `implemented` until that happens, rather than claiming a migration on the strength of an asset appearing in a release.
+
+  - id: REQ-IMMUTABLE-001
+    type: requirement
+    title: A layer id names one set of bytes, forever
+    status: approved
+    description: "Measured 2026-09-03 against varve 0.31.0: depositing the SAME deposit spec twice with issued-at one second apart yields two different manifest digests (088db18c… and 9d2a30f2…), while the same issued-at reproduces the digest exactly. The deposit is therefore already deterministic GIVEN its inputs; what is not constrained is that a layer id may be deposited more than once. . That is not theoretical. rolling republished 2026.08.4 overnight and every name-only pin on it stopped resolving (varve#115): gale's shimmed tools failed with 'layer 2026.08.4 is installed more than once under different digests'. varve's CONSUMER side behaved correctly and is why it was caught — refusing an ambiguous pin is right. The defect is on the publisher side, and no consumer-side care can repair it once two digests exist under one name. . Clauses: (1) A deposit shall refuse to publish a layer id the destination already carries under a DIFFERENT manifest digest. (2) Re-depositing an id the destination already carries under the SAME digest shall succeed as a no-op, so a retried workflow is safe. (3) The refusal shall name both digests and the layer id, because an operator's next question is always 'which one is live'. (4) An escape hatch shall exist and shall be explicit, since a mistaken layer sometimes must be replaced before anyone consumes it; it shall not be reachable by accident. (5) issued-at shall be recorded in the layer so that a re-deposit of identical content is bit-identical rather than merely equivalent."
+    release: v0.32.0
+
+  - id: REQ-MIRROR-001
+    type: requirement
+    title: A realm may be served from more than one place
+    status: approved
+    description: "Today a realm names exactly one registry. If it is unreachable — outage, partition, an org-level package change, a blocked region — no consumer can install or update, and a fresh consumer cannot bootstrap at all. . Mirroring is SAFE BY CONSTRUCTION here in a way it is not for most package managers, and that is the whole reason to do it: varve's trust does not rest on where bytes came from. A layer is accepted because its manifest verifies against the realm's trust root and its payload digests match, so the registry is transport, not authority. A tampered mirror fails the DSSE check; a truncated one fails the digest check. A second source can therefore be added without widening the trust surface at all. . A partial escape hatch already exists and is currently undocumented as one: varve archive writes a portable OCI layout and varve install --from consumes it, so a filesystem, an internal registry or a USB stick already works for recovery. . Clauses: (1) A realm shall be able to declare an ordered list of sources rather than a single registry. (2) Sources shall be tried in order, and a source that fails for transport reasons shall fall through to the next. (3) A source that returns bytes which FAIL VERIFICATION shall NOT fall through — it shall abort, because a mirror serving bad bytes is a fact the operator must see, and silently trying the next source would hide exactly the event this design makes detectable. (4) Which source served a layer shall be reportable, so an operator can tell a mirror is being used before an incident rather than during one. (5) The realms file shall stay backward compatible: a realm naming one registry shall keep working unchanged."
+    release: v0.32.0
+
+  - id: REQ-SUPPORTUNTIL-001
+    type: requirement
+    title: A published layer states how long it is supported
+    status: approved
+    description: "REQ-KP-001 shipped this metadata in v0.5.0 and it is verified: known-problems entries, a stated support window and yank markers, DSSE-signed and attached as OCI referrers so they can be added after deposit without changing the layer digest. LineStatus.support_until is in the schema, round-trips, and is covered by tests. varve status already prints it. . Nothing ever sets it. The deposit writes a baseline of line, counter and issued-at only, so every published layer carries the field as None and the feature is invisible in practice. This is not a missing capability — it is a capability nobody populates, which is worse, because the code, the tests and the docs all imply a guarantee that no artifact actually carries. . The cost of the gap is concrete: triaging varve#102 found gale about to adopt layer 2026.08.3, four releases behind, carrying meld 0.42.0 against a hard floor of 0.48.0. Adopting it would not have degraded their build, it would have broken it, and nothing in the layer said so. . Clauses: (1) Every deposit shall populate a support horizon; a layer published without one shall be a release failure, not a default. (2) The horizon shall be derived from the channel's stated policy rather than typed per release, so it cannot drift by hand. (3) varve shall report remaining support in status and inspect, in text and JSON. (4) Past the horizon varve shall warn loudly on install and verify but SHALL NOT refuse: an expired layer is a maintenance signal, and a tool that bricks a working build over a date will be removed from the build. (5) The horizon shall be a property of the signed record, so it cannot be edited by whoever serves the bytes."
+    release: v0.32.0
+
+  - id: REQ-REUSEBLOB-001
+    type: requirement
+    title: A deposit can reference bytes the registry already holds
+    status: approved
+    description: "REQ-CARRYFORWARD-001 clause 6 promises that depositing an unchanged layer.toml twice fetches no payload bytes the second time. The producer half is built, tested and INERT: varve-producer resolves an unchanged payload to reuse and skips the upstream download correctly, and then staging has nothing to stage, because varve's DepositSpec requires a path for every tool. There is no way to say 'these bytes are already the registry's blob at this digest' — even though clause 4 already PRESUPPOSES the blob is in the destination registry, which is precisely the condition under which an OCI manifest may reference it without re-upload. Measured cost of the gap: 421 MiB re-downloaded and re-pushed per deposit for layer 2026.08.4, against a sums file of a few kilobytes to re-prove it, multiplied by the daily scanning cadence of DD-024. . Clauses: (1) A deposit spec entry shall be able to name a digest INSTEAD of a path. (2) Exactly one of the two shall be permitted per entry, enforced by the parser, so a spec cannot state both and leave the winner to reading order. (3) Before building a manifest that references a blob it did not upload, varve shall assert that blob is present in the destination — clause 4 of REQ-CARRYFORWARD-001 says a manifest entry is not a guarantee of storage, and this is where that check belongs. (4) A referenced blob that is absent shall ABORT rather than publish a manifest naming bytes the registry cannot serve. (5) The resulting layer shall be indistinguishable from one deposited with the bytes in hand: same digest for same content, so carry-forward changes the work done and not the artifact produced."
+    release: v0.32.0
