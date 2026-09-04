@@ -219,6 +219,7 @@ jobs:
               -f crates/varve-core/src/reverify.rs
               -f crates/varve-core/src/exportstamp.rs
               -f crates/varve-core/src/layerspec.rs
+              -f crates/varve-core/src/mirror.rs
           - shard: varve-producer
             files: >-
               -f crates/varve-producer/src/asset.rs

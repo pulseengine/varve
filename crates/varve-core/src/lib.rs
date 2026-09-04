@@ -40,6 +40,7 @@ pub mod lineindex;
 pub mod linestatus;
 pub mod lockpin;
 pub mod manifest;
+pub mod mirror;
 pub mod pin;
 pub mod platform;
 pub mod realm;
