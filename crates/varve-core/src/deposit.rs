@@ -758,6 +758,7 @@ mod producer_tests {
         // Evidence attached after the deposit — the append-only half of the
         // producer pipeline.
         let status = crate::linestatus::LineStatus {
+            min_counter: None,
             line: "2026.08".into(),
             counter: 1,
             issued_at: "2026-08-07T00:00:00Z".into(),

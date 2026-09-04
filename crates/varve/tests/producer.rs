@@ -71,6 +71,8 @@ fn deposit_spec(layer: &str, counter: u64) -> varve_core::DepositSpec {
 
 fn status_doc(counter: u64, affected: &[&str]) -> varve_core::LineStatus {
     varve_core::LineStatus {
+        // REQ-FIRSTCONTACT-001: no floor stated, so behaviour is unchanged.
+        min_counter: None,
         line: LINE.into(),
         counter,
         issued_at: "2026-08-07T00:00:00Z".into(),
