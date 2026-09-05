@@ -254,15 +254,39 @@ jobs:
           # `set -euo pipefail` above is the only thing that would save it —
           # a setting a hundred lines away is a thin thread to hang a refusal
           # on. Written to a file, exit status checked on its own line.
+          # $GITHUB_WORKSPACE, not ./ — this step runs from `push/` (see the
+          # `cd push` above and the `../layer-layout` paths beside it), so a
+          # workspace-relative ./target resolved to push/target and the binary
+          # was simply not there. Cost a dispatched deposit to find.
+          PRODUCER="$GITHUB_WORKSPACE/target/release/varve-producer"
+          test -x "$PRODUCER" || {
+            echo "::error::$PRODUCER is missing or not executable — the deposit \
+          cannot check whether this layer id is already published, and \
+          publishing without that check is how one id comes to name two sets \
+          of bytes"
+            exit 1
+          }
           set +e
-          ./target/release/varve-producer publish-check \
+          "$PRODUCER" publish-check \
             --repo "$REPO" --layer "$LAYER" --digest "$INCOMING" \
             --format json > publish-check.json
           CHECK_RC=$?
           set -e
           cat publish-check.json
+          # 127 is "could not run", not "said no". Both stop the push, and
+          # must: a check that did not run is not a check that passed. But
+          # reporting them identically sends an operator hunting for a
+          # republish that never happened — the same conflation this whole
+          # check exists to prevent, reproduced one level up in its own error
+          # handling.
+          if [ "$CHECK_RC" -eq 127 ]; then
+            echo "::error::publish-check could not run (exit 127) — this is not \
+          a refusal; nothing was checked and nothing was pushed"
+            exit "$CHECK_RC"
+          fi
           if [ "$CHECK_RC" -ne 0 ]; then
-            echo "::error::publish-check refused this push (exit $CHECK_RC)"
+            echo "::error::publish-check REFUSED this push (exit $CHECK_RC) — \
+          see the output above for which digests disagree"
             exit "$CHECK_RC"
           fi
           VERDICT="$(jq -r .verdict publish-check.json)"
