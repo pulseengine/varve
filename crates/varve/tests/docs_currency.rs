@@ -18,7 +18,9 @@
 use std::path::{Path, PathBuf};
 
 fn repo(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
 }
 
 fn read(rel: &str) -> String {
@@ -80,12 +82,13 @@ fn no_readme_snippet_pins_a_varve_version() {
 #[test]
 fn the_docs_pin_the_layer_they_say_they_do() {
     let current = current_layer();
+    // YYYY.MM.P, so a truncated or empty file cannot pass as "matching".
+    let parts: Vec<&str> = current.split('.').collect();
     assert!(
-        current
-            .split('.')
-            .zip(["2026", "09", "0"])
-            .count()
-            == 3,
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
         "docs/current-layer.txt does not look like a layer id: {current:?}"
     );
 
@@ -125,13 +128,19 @@ fn the_docs_pin_the_layer_they_say_they_do() {
 #[test]
 fn the_readme_does_not_repeat_claims_it_has_already_outlived() {
     let readme = read("README.md");
-    for dead in [
+    // One entry today; the list is the point, not its length. Each is a
+    // sentence that was true when written and silently stopped being true.
+    const OUTLIVED: &[&str] = &[
         // `varve` has been on crates.io continuously since 0.26.0.
         "Not available until v0.26.0",
-    ] {
-        assert!(
-            !readme.contains(dead),
-            "README repeats a claim that is no longer true: {dead:?}"
-        );
-    }
+    ];
+    let repeated: Vec<&str> = OUTLIVED
+        .iter()
+        .copied()
+        .filter(|dead| readme.contains(dead))
+        .collect();
+    assert!(
+        repeated.is_empty(),
+        "README repeats claims that are no longer true: {repeated:?}"
+    );
 }
