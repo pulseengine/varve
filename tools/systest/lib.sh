@@ -228,8 +228,12 @@ systest_make_layer() {
 
   # A baseline line-status, exactly as deposit-layer.yml attaches one: the
   # registry push recipe reads it, and `varve status` works after install.
-  printf '{"line":"%s","counter":1,"issued-at":"%s"}\n' "$line" "$issued_at" \
-    > "$work/baseline-status.json"
+  # REQ-SUPPORTUNTIL-001: derived, exactly as deposit-layer.yml does it.
+  # `sign-status` refuses a document with no support window.
+  local support_until
+  support_until="$("$VARVE" support-horizon --channel rolling --issued-at "$issued_at")"
+  printf '{"line":"%s","counter":1,"issued-at":"%s","support-until":"%s"}\n' \
+    "$line" "$issued_at" "$support_until" > "$work/baseline-status.json"
   "$VARVE" sign-status \
     --file "$work/baseline-status.json" \
     --key "$work/root.key" --key-id systest-root-1 \

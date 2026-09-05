@@ -26,7 +26,16 @@ pub const REALMS_FILE: &str = "varve-realms.toml";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Realm {
     pub name: String,
+    /// The realm's primary source. Kept as the first element of `sources` too,
+    /// so existing callers that read `registry` keep working unchanged
+    /// (REQ-MIRROR-001 clause 5).
     pub registry: String,
+    /// Every source, in the realm's stated order of preference, primary first.
+    ///
+    /// Ordered, not raced: an operator must be able to predict which source
+    /// served them, and a run that picked differently each time would make an
+    /// incident unreproducible.
+    pub sources: Vec<String>,
     /// Raw ed25519 root public key bytes.
     pub trust_root: Vec<u8>,
     /// The realm asserts that it publishes a signed line index
@@ -96,6 +105,16 @@ struct RawRealmsFile {
 #[serde(deny_unknown_fields)]
 struct RawRealm {
     registry: String,
+    /// Additional sources, tried in order after `registry`, when it cannot be
+    /// reached (REQ-MIRROR-001).
+    ///
+    /// Safe by construction: a layer is accepted because its manifest verifies
+    /// against this realm's trust root, so a mirror is transport and not
+    /// authority. A tampered mirror fails the signature check and a truncated
+    /// one fails the digest check — a second source widens availability, never
+    /// the trust surface.
+    #[serde(default)]
+    mirrors: Vec<String>,
     /// Inline hex-encoded ed25519 public key…
     #[serde(rename = "trust-root", default)]
     trust_root: Option<String>,
@@ -200,6 +219,9 @@ pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
     Ok(Realm {
         name: name.to_string(),
         registry: def.registry.clone(),
+        sources: std::iter::once(def.registry.clone())
+            .chain(def.mirrors.iter().cloned())
+            .collect(),
         trust_root,
         signed_index: def.signed_index,
     })
@@ -357,6 +379,78 @@ trust-root = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
         assert!(
             !resolve_realm(tmp.path(), "silent").unwrap().signed_index,
             "the default must be false, or every existing realm breaks at once"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::*;
+
+    fn parse(text: &str, name: &str) -> Realm {
+        let dir = std::env::temp_dir().join(format!("varve-realm-mirror-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        std::fs::write(dir.join(REALMS_FILE), text).expect("write");
+        resolve_realm(&dir, name).expect("parses")
+    }
+
+    /// Clause 5. Every realms file in existence names one registry and no
+    /// mirrors; all of them must keep working with no edit.
+    // rivet: verifies REQ-MIRROR-001
+    #[test]
+    fn a_realm_naming_one_registry_still_works_and_has_one_source() {
+        let r = parse(
+            "[realm.solo]\nregistry = \"oci://ghcr.io/o/r\"\n\
+             trust-root = \"4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973\"\n",
+            "solo",
+        );
+        assert_eq!(r.registry, "oci://ghcr.io/o/r");
+        assert_eq!(r.sources, vec!["oci://ghcr.io/o/r".to_string()]);
+    }
+
+    /// Clause 1 and the ordering in clause 2: primary first, then the stated
+    /// mirrors in the order written.
+    // rivet: verifies REQ-MIRROR-001
+    #[test]
+    fn mirrors_follow_the_primary_in_the_order_they_are_written() {
+        let r = parse(
+            "[realm.many]\nregistry = \"oci://primary\"\n\
+             mirrors = [\"oci://second\", \"oci://third\"]\n\
+             trust-root = \"4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973\"\n",
+            "many",
+        );
+        assert_eq!(
+            r.sources,
+            vec![
+                "oci://primary".to_string(),
+                "oci://second".to_string(),
+                "oci://third".to_string()
+            ]
+        );
+        // `registry` still names the primary, so nothing that reads it changes.
+        assert_eq!(r.registry, "oci://primary");
+    }
+
+    /// The trust root is per REALM, not per source. A mirrors list cannot
+    /// introduce a second authority — that is what makes mirroring safe here
+    /// rather than a trust decision.
+    // rivet: verifies REQ-MIRROR-001
+    #[test]
+    fn mirrors_cannot_carry_a_trust_root_of_their_own() {
+        let dir = std::env::temp_dir().join("varve-realm-mirror-root");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        std::fs::write(
+            dir.join(REALMS_FILE),
+            "[realm.x]\nregistry = \"oci://a\"\n\
+             mirrors = [{ registry = \"oci://b\", trust-root = \"dead\" }]\n\
+             trust-root = \"4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973\"\n",
+        )
+        .expect("write");
+        assert!(
+            resolve_realm(&dir, "x").is_err(),
+            "a mirror must not be able to declare its own trust root"
         );
     }
 }

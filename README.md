@@ -72,12 +72,42 @@ the first is `varve self-update`, which re-verifies the successor with the
 running binary against the pinned trust root.
 
 From source, on any target Rust supports — a source build, so covered by neither
-the release signature nor the DSSE envelope. **Not available until v0.26.0 is
-published to crates.io**; until then use a route above:
+the release signature nor the DSSE envelope:
 
 ```sh
 cargo install varve
 ```
+
+### The assembler
+
+`varve-producer` assembles a layer for a realm's own repository. It is a
+separate binary because `varve` contacts no registry to *do its job* and that
+claim is load-bearing, while the assembler fetches upstream releases, verifies
+their signatures and pushes to a registry. It is **not** on crates.io for the
+same reason, and `install.sh` does not install it — a network-fetching tool
+should not arrive unasked alongside the one that promises not to.
+
+It ships in every release, signed and attested like everything else:
+
+```sh
+# Resolved, not pinned in this README: a version written here is one that goes
+# stale on the next release, and a document that tells you the wrong version is
+# worse than one that tells you nothing. Pin it deliberately if you want a
+# specific release.
+VERSION=$(gh release view --repo pulseengine/varve --json tagName -q .tagName)
+TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu, ...
+gh release download "$VERSION" --repo pulseengine/varve \
+  -p "varve-producer-$VERSION-$TARGET.tar.gz" -p SHA256SUMS.txt
+
+# Verify BEFORE extracting. A mismatch must stop you here.
+grep " ./varve-producer-$VERSION-$TARGET.tar.gz\$" SHA256SUMS.txt | sha256sum -c -
+
+tar xzf "varve-producer-$VERSION-$TARGET.tar.gz"
+./varve-producer --version
+```
+
+`SHA256SUMS.txt` is itself cosign-signed, and the archives carry SLSA build
+provenance — see the verification block in the release notes for both checks.
 
 The **fully manual path** (no script at all), and what the first hop can and
 cannot prove, are in `varve docs bootstrap` — including `varve self-verify`,
@@ -97,7 +127,7 @@ manifest-version = 1
 [toolchain]
 realm   = "pulseengine"
 channel = "rolling"
-layer   = "2026.08.2"
+layer   = "2026.09.0"
 PIN
 
 # 2. Drop in the canonical realm definitions (registry + trust root).

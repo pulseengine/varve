@@ -206,6 +206,7 @@ jobs:
           - shard: varve-core
             files: >-
               -f crates/varve-core/src/rollback.rs
+              -f crates/varve-core/src/support.rs
               -f crates/varve-core/src/layer.rs
               -f crates/varve-core/src/platform.rs
               -f crates/varve-core/src/verify.rs
@@ -218,6 +219,7 @@ jobs:
               -f crates/varve-core/src/reverify.rs
               -f crates/varve-core/src/exportstamp.rs
               -f crates/varve-core/src/layerspec.rs
+              -f crates/varve-core/src/mirror.rs
           - shard: varve-producer
             files: >-
               -f crates/varve-producer/src/asset.rs
@@ -228,9 +230,11 @@ jobs:
               -f crates/varve-producer/src/extract.rs
               -f crates/varve-producer/src/forge.rs
               -f crates/varve-producer/src/gh.rs
+              -f crates/varve-producer/src/immutable.rs
               -f crates/varve-producer/src/ingest.rs
               -f crates/varve-producer/src/orchestrate.rs
               -f crates/varve-producer/src/plan.rs
+              -f crates/varve-producer/src/registry.rs
               -f crates/varve-producer/src/source.rs
               -f crates/varve-producer/src/spec.rs
               -f crates/varve-producer/src/stage.rs

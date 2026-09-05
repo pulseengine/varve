@@ -56,6 +56,22 @@ pub struct LineStatus {
         default
     )]
     pub support_until: Option<String>,
+    /// The lowest counter a consumer with NO history should accept on this
+    /// line (REQ-FIRSTCONTACT-001).
+    ///
+    /// Carried here because this document is already DSSE-signed by the realm
+    /// root and already distributed beside the layer — a floor is only worth
+    /// anything if it cannot be chosen by whoever serves the bytes.
+    ///
+    /// Optional, so every existing line-status keeps parsing. Absent means the
+    /// first-contact window stays open for that line, which is the behaviour
+    /// varve has always had; stating one closes it.
+    #[serde(
+        rename = "min-counter",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub min_counter: Option<u64>,
     /// Yanked layers of this line, layer → reason.
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub yanked: BTreeMap<String, String>,
@@ -1001,6 +1017,7 @@ mod tests {
 
     fn status(counter: u64) -> LineStatus {
         LineStatus {
+            min_counter: None,
             line: "2026.07".into(),
             counter,
             issued_at: "2026-08-07T00:00:00Z".into(),
@@ -1216,6 +1233,7 @@ mod tests {
         // A self-consistent document for the WRONG line — internally valid,
         // validly signed, and still not the line this consumer asked about.
         let doc = LineStatus {
+            min_counter: None,
             line: "2026.08".into(),
             counter: 5,
             issued_at: "2026-08-07T00:00:00Z".into(),

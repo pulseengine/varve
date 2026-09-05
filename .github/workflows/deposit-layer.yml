@@ -8,6 +8,16 @@ name: Deposit layer
 # Rolling channel only until the root ceremony: signs with the PROVISIONAL
 # rolling root (trust-roots/rolling.pub / secret VARVE_ROLLING_KEY).
 
+# Two runs dispatched for the SAME layer id would both ask the registry, both
+# be told the id is unpublished, and both push — the immutability check is a
+# read, and `oras manifest push` has no if-not-exists. One id would end up
+# naming two digests, which is the very thing this workflow now checks for.
+# Serialising per layer closes the window; it does not need to be clever,
+# because a second deposit of the same id has nothing useful to do anyway.
+concurrency:
+  group: deposit-layer-${{ inputs.layer }}
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
@@ -57,7 +67,7 @@ jobs:
       - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1 as of 2026-08-07
 
       - name: Build varve
-        run: cargo build --release -p varve
+        run: cargo build --release -p varve -p varve-producer
 
       - name: Fetch and verify the tools, build the deposit spec
         # The logic is NOT inline any more. It lives in tools/build-deposit-spec.sh
@@ -103,8 +113,16 @@ jobs:
           # counter tracks the deposit counter (advisories issued later carry
           # higher counters). Empty problems/yanked — a clean starting record.
           LINE="${LAYER%.*}"
-          printf '{"line":"%s","counter":%s,"issued-at":"%s"}\n' \
-            "$LINE" "$COUNTER" "$ISSUED_AT" > baseline-status.json
+          # REQ-SUPPORTUNTIL-001: derived from the channel's policy, never
+          # typed here. `support-until` has existed and been signed since
+          # v0.5.0 and this workflow never set it, so every layer varve has
+          # published says "no stated support window" while the docs promise
+          # one. `varve sign-status` now refuses a document without it.
+          SUPPORT_UNTIL="$(./target/release/varve support-horizon \
+            --channel rolling --issued-at "$ISSUED_AT")"
+          echo "::notice::layer $LAYER supported until $SUPPORT_UNTIL (rolling policy)"
+          printf '{"line":"%s","counter":%s,"issued-at":"%s","support-until":"%s"}\n' \
+            "$LINE" "$COUNTER" "$ISSUED_AT" "$SUPPORT_UNTIL" > baseline-status.json
           ./target/release/varve sign-status \
             --file baseline-status.json \
             --key <(printf '%s' "$VARVE_ROLLING_KEY") --key-id varve-rolling-1 \
@@ -149,18 +167,7 @@ jobs:
           ENVELOPE_FILE="../layer-layout/blobs/sha256/${ENVELOPE_DIGEST#sha256:}"
           STATUS_FILE="../layer-layout/blobs/sha256/${STATUS_DIGEST#sha256:}"
 
-          # 1. Push every blob: config, envelope, payload, tools, line-status.
-          printf '{}' > empty-config.json
-          oras blob push "$REPO" empty-config.json
-          oras blob push "$REPO" "$ENVELOPE_FILE"
-          oras blob push "$REPO" "$PAYLOAD_FILE"
-          for digest in $(jq -r '.manifests[].digest' "$PAYLOAD_FILE"); do
-            oras blob push "$REPO" "../layer-layout/blobs/sha256/${digest#sha256:}"
-          done
-          test -n "$STATUS_DIGEST" || { echo "::error::baseline line-status missing from layout"; exit 1; }
-          oras blob push "$REPO" "$STATUS_FILE"
-
-          # 2. Build the artifact manifest — envelope + payload + tools, plus
+          # 1. Build the artifact manifest — envelope + payload + tools, plus
           #    the baseline line-status as a role-annotated layer so
           #    RegistrySource.fetch_line_status finds it.
           jq -n \
@@ -206,8 +213,66 @@ jobs:
             }' > artifact-manifest.json
           head -c 1500 artifact-manifest.json; echo
 
-          # 3. Push the manifest under the layer tag.
-          oras manifest push "$REPO:$LAYER" artifact-manifest.json
+          # 2. REQ-IMMUTABLE-001 — a layer id names one set of bytes, forever.
+          #
+          # Ask the registry what it already carries under this tag before
+          # ANYTHING is written to it. This runs ahead of the blob pushes,
+          # not merely ahead of the manifest push: a refused publish should
+          # not leave blobs behind in the destination. (They are
+          # content-addressed, so they overwrite nothing — but "the check
+          # runs before we touch the registry" should be true rather than
+          # nearly true.)
+          # rolling republished 2026.08.4 overnight (varve#115) and
+          # every name-only pin on it stopped resolving: two digests under one
+          # name means the name identifies nothing, and no amount of
+          # consumer-side care repairs it afterwards.
+          #
+          # This cannot live in `varve deposit`, which contacts no network by
+          # design. varve-producer is the binary that talks to registries, so
+          # it is the one that asks.
+          #
+          # A registry that cannot ANSWER stops the push. "Unreachable" is not
+          # "empty": reading an outage as an empty registry is how you
+          # republish over a layer that exists while believing you are
+          # publishing a new one.
+          # An OCI manifest's digest IS the sha256 of its bytes — verified
+          # against the live registry before relying on it: the descriptor
+          # ghcr.io returns for 2026.09.0 equals sha256sum of the manifest it
+          # serves. (`oras manifest push` has no --dry-run to ask with.)
+          INCOMING="sha256:$(sha256sum artifact-manifest.json | cut -d' ' -f1)"
+          # NOT piped into tee. `cmd | tee` reports tee's exit status, and
+          # `set -euo pipefail` above is the only thing that would save it —
+          # a setting a hundred lines away is a thin thread to hang a refusal
+          # on. Written to a file, exit status checked on its own line.
+          set +e
+          ./target/release/varve-producer publish-check \
+            --repo "$REPO" --layer "$LAYER" --digest "$INCOMING" \
+            --format json > publish-check.json
+          CHECK_RC=$?
+          set -e
+          cat publish-check.json
+          if [ "$CHECK_RC" -ne 0 ]; then
+            echo "::error::publish-check refused this push (exit $CHECK_RC)"
+            exit "$CHECK_RC"
+          fi
+          VERDICT="$(jq -r .verdict publish-check.json)"
+          # 3. Push every blob: config, envelope, payload, tools, line-status.
+          printf '{}' > empty-config.json
+          oras blob push "$REPO" empty-config.json
+          oras blob push "$REPO" "$ENVELOPE_FILE"
+          oras blob push "$REPO" "$PAYLOAD_FILE"
+          for digest in $(jq -r '.manifests[].digest' "$PAYLOAD_FILE"); do
+            oras blob push "$REPO" "../layer-layout/blobs/sha256/${digest#sha256:}"
+          done
+          test -n "$STATUS_DIGEST" || { echo "::error::baseline line-status missing from layout"; exit 1; }
+          oras blob push "$REPO" "$STATUS_FILE"
+
+          if [ "$VERDICT" = "already-published" ]; then
+            echo "::notice::$LAYER is already published at $INCOMING — skipping the push"
+          else
+            # 4. Push the manifest under the layer tag.
+            oras manifest push "$REPO:$LAYER" artifact-manifest.json
+          fi
 
       - name: Upload the oci-layout (artifact of record)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

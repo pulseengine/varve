@@ -271,6 +271,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "cmd-status.md"
     ),
     topic!(
+        "support-horizon",
+        "support-horizon — derive a layer's support window from its channel (CI)",
+        "cmd-support-horizon.md"
+    ),
+    topic!(
         "sign-attestation",
         "sign-attestation — bind an attestation to a layer (CI)",
         "cmd-sign-attestation.md"

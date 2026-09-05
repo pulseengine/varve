@@ -54,6 +54,41 @@ tools   = ["rivet", "synth", "meld", "witness"]
 
 ## 2. The layer manifest — an OCI image index
 
+## `varve-realms.toml` — where a realm's layers come from
+
+A realm binds a name to a trust root and one or more sources:
+
+```toml
+[realm.pulseengine]
+registry   = "oci://ghcr.io/pulseengine/varve/layers"
+# Optional: additional sources, tried IN ORDER after `registry` when it cannot
+# be reached (REQ-MIRROR-001).
+mirrors    = ["oci://registry.example/pulseengine/layers"]
+trust-root = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
+```
+
+`mirrors` is optional and defaults to empty, so every existing realms file
+keeps working unchanged.
+
+The trust root is a property of the **realm**, not of a source, and a mirror
+cannot declare one. That is what makes this safe rather than a trust decision:
+a layer is accepted because its manifest verifies against the realm's root and
+its payload digests match, so a registry is transport, not authority. A
+tampered mirror fails the signature check and a truncated one fails the digest
+check, exactly as the primary would. A second source widens **availability**
+without widening the trust surface.
+
+Order is a stated preference, not a race — an operator must be able to predict
+which source served them, and a run that chose differently each time would make
+an incident unreproducible.
+
+Falling through happens only when a source cannot supply the bytes. Bytes that
+**fail verification never cause a fall-through**: skipping a source that served
+bad bytes would hide the single most interesting event this design can surface,
+and the system would look healthier the more it was attacked. That is
+structural rather than a rule — verification runs above the source layer, and
+`SourceError` has no variant meaning "did not verify".
+
 Produced by `varve deposit`, pushed to the registry, signed by `sigil` **by digest**.
 Not hand-edited, ever.
 
