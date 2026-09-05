@@ -1,5 +1,143 @@
 # Changelog
 
+## v0.32.0 — 2026-09-05
+
+*A layer id means one thing, from more than one place, for a stated time.*
+
+Three of these came from real incidents rather than a wish list, and two of
+them close gaps where a capability already existed and quietly promised
+something no artifact carried.
+
+| | before | now |
+|---|---|---|
+| a layer id | could be published twice, under different bytes | one set of bytes, enforced before the push |
+| a realm | exactly one registry; an outage meant nobody could install | an ordered list of sources |
+| a support window | signed, printed, and **never once set** | derived from the channel, refused if absent |
+| a fresh machine | accepted any counter on a line it had never seen | refuses below the realm's signed floor |
+| the assembler | shipped, but obtainable only by improvising | documented, verified-before-extract, with its own SBOM |
+
+### The layer id that named two things
+
+`rolling` republished `2026.08.4` overnight and every name-only pin on it
+stopped resolving — gale's shimmed tools failed with *"installed more than once
+under different digests"*. varve's **consumer** side behaved correctly and is
+why it was caught; once two digests exist under one name, no consumer-side care
+repairs it.
+
+Measured before writing anything: the same deposit spec, deposited twice with
+`issued-at` one second apart, yields two different manifest digests; with the
+same `issued-at` it reproduces exactly. The deposit was already deterministic
+*given its inputs* — nothing stopped an id being **published** twice. So
+`varve-producer publish-check` asks the registry before any write, and refuses.
+
+The check lives in the producer, not in `varve deposit`, because deposit
+contacts no network by design and buying a publisher-side fix with that
+property would be a bad trade. A test asserts the deposit path gained no HTTP
+client.
+
+### A support window that was signed and never populated
+
+`support-until` shipped **verified** in v0.5.0 — DSSE-signed, round-tripped,
+printed by `varve status`. Nothing ever set it, so every layer varve published
+said *"no stated support window"* while the docs promised one. It was never
+parsed either, so `"2028-13-45"` would have signed cleanly — which is why
+"warn when the window has passed" was not implementable.
+
+A capability nobody populates is worse than a missing one: the code, the tests
+and the documentation all imply a guarantee no artifact carries.
+
+Now derived from the channel (`rolling` 6 months, `qualified` 24) rather than
+typed per release, `sign-status` refuses a document without one, and `varve
+status` reports where the layer **stands**. Past the window varve **warns and
+does not refuse** — the bytes verify exactly as before; what changed is that
+nobody has undertaken to publish advisories. A tool that bricks a working build
+over a date gets removed from the build, and then it protects nobody.
+
+### First contact
+
+A machine with no high-water mark accepted any counter on a line it had never
+seen. That is the one moment anti-rollback protects nobody, and the moment
+worth attacking — a fresh checkout, a new CI runner and a new laptop are each a
+first contact, so "first contact is rare" is false in exactly the environments
+varve is built for. The realm now signs a per-line floor.
+
+### Added
+
+- **`varve-producer publish-check`** (`REQ-IMMUTABLE-001`) — refuses to
+  republish a layer id under different bytes; an idempotent no-op when the
+  digest matches, so a re-run is safe rather than lucky.
+- **`mirrors` in `varve-realms.toml`** (`REQ-MIRROR-001`) — ordered sources per
+  realm. Safe by construction, and that is the point: a layer is accepted
+  because its manifest verifies against the realm root, so a registry is
+  transport, not authority. A tampered mirror fails the signature check; a
+  truncated one fails the digest check. Availability widens, the trust surface
+  does not.
+- **`varve support-horizon`** (`REQ-SUPPORTUNTIL-001`) and a signed
+  `min-counter` floor (`REQ-FIRSTCONTACT-001`).
+- **A documented, verifying install path for the assembler**
+  (`REQ-PRODUCERGET-001`), its own CycloneDX SBOM, and `build-env.txt` finally
+  covered by `SHA256SUMS.txt`.
+
+### Fixed — found by clean-room review of v0.31.0
+
+- **The release gate's zero-producer diagnostic was dead code.** Under `set
+  -euo pipefail`, `ls <glob> | wc -l` aborts the step when the glob matches
+  nothing, so a release shipping no assembler failed with **no explanation at
+  all**. My own check had run in zsh without `set -e`.
+- **`build-env.txt` was covered by nothing** — written after the checksums, so
+  the one asset describing how everything else was built had no integrity
+  binding. Its `cosign:` line also recorded a row of ASCII-art underscores
+  instead of a version.
+- **One SBOM covered only `varve`** — 172 components, none of them the
+  assembler.
+- **The README told users `cargo install varve` was unavailable**, which it has
+  not been since v0.26.0.
+
+### Fixed — found by clean-room review of this release
+
+- **`publish-check` reported "publish" for registries that never answered.**
+  Absence was inferred from oras's error *text*, and oras echoes the reference
+  and URL it was given — so a port (`:4040`), a repository path (`org/b-404`)
+  or a layer id (`2026.09.404`) containing `404` turned an unreachable registry
+  into "nothing is published here". A Go TCP error quotes the local ephemeral
+  port, so roughly one connection reset in two hundred would have hit it.
+  Absence is now **established** by an authoritative tag listing, never
+  inferred; no error text is parsed anywhere.
+- The `denied` veto was GHCR-specific: Harbor and Artifactory answer a bare
+  `NAME_UNKNOWN` for repositories a token cannot see.
+- `--digest ""` reached `verdict: publish` (an unset shell variable arrives as
+  an empty string); `--format YAML` silently produced human output; blobs were
+  pushed **before** the check, so a refused publish still left bytes behind;
+  and two dispatches of one layer id would both push.
+
+### Changed
+
+- The mutation gate is **sharded by crate**. 705 mutants in one serial job had
+  been silently hitting the 60-minute cap — which reports *nothing* rather than
+  reporting a survivor, so zero-survivor went unverified while the check looked
+  like it had gone red for a reason. The name the branch ruleset requires now
+  sits on an aggregator, so resharding cannot orphan the required check.
+
+### Verification
+
+- 4 new modules at zero mutation survivors; the required gate covers **34**
+  files across two shards.
+- `publish-check` exercised live against `ghcr.io/pulseengine/varve/layers` —
+  identical digest, different digest, absent id, unresolvable host, unreadable
+  repository — not fixtures.
+- The README's verification command is negative-controlled: appending a byte
+  makes it exit 1.
+
+### Deferred, deliberately
+
+`REQ-REUSEBLOB-001` moves to v0.33.0. Scoping it surfaced a conflict rather than
+an implementation detail: `REQ-CARRYFORWARD-001` clause 6 promises that
+re-depositing an unchanged `layer.toml` fetches **no payload bytes**, but the
+deposit layout contains every payload blob and is uploaded as the artifact of
+record. No download means no bytes means an incomplete layout. That wants
+deciding together with `REQ-ARCHIVE-002`, not settled quietly by whichever was
+implemented first.
+
 ## v0.31.0 — 2026-09-02
 
 The release that makes `varve-producer` an assembler rather than an inspector,
