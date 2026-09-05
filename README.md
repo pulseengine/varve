@@ -90,7 +90,11 @@ should not arrive unasked alongside the one that promises not to.
 It ships in every release, signed and attested like everything else:
 
 ```sh
-VERSION=v0.31.0
+# Resolved, not pinned in this README: a version written here is one that goes
+# stale on the next release, and a document that tells you the wrong version is
+# worse than one that tells you nothing. Pin it deliberately if you want a
+# specific release.
+VERSION=$(gh release view --repo pulseengine/varve --json tagName -q .tagName)
 TARGET=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu, ...
 gh release download "$VERSION" --repo pulseengine/varve \
   -p "varve-producer-$VERSION-$TARGET.tar.gz" -p SHA256SUMS.txt
@@ -123,7 +127,7 @@ manifest-version = 1
 [toolchain]
 realm   = "pulseengine"
 channel = "rolling"
-layer   = "2026.08.2"
+layer   = "2026.09.0"
 PIN
 
 # 2. Drop in the canonical realm definitions (registry + trust root).
