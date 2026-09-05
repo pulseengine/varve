@@ -42,7 +42,17 @@ env:
   # ordeal rejoined at v0.18.0 — its first cosign-signed release (ordeal#116).
   # Entry shape: repo_tool:version[:binary] — binary defaults to the tool
   # name; kiln ships its CLI as `kilnd`.
-  TARBALL_TOOLS: "rivet:v0.35.0 spar:v0.40.0 synth:v0.61.0 witness:v0.43.0 ordeal:v0.19.0 loom:v1.4.1 meld:v0.53.0 kiln:v0.4.4:kilnd"
+  # varve-producer rides in the layer like any other tool, so a layers
+  # repository gets a PINNED, signature-verified assembler instead of fetching
+  # one ad hoc. Its asset is not `<tool>-<version>-<triple>` — the repo is
+  # `varve` and the binary is `varve-producer` — so the entry spells the binary
+  # and the template out. `v%V` reconstructs the tag from the bare version
+  # rather than repeating it, so a bump is one edit and cannot drift.
+  #
+  # Bootstrapping is not circular: the deposit downloads the released archive
+  # exactly as it does for every other tool. The first assembler comes from the
+  # release; after that a layers repo can pin the one varve signed.
+  TARBALL_TOOLS: "rivet:v0.35.0 spar:v0.40.0 synth:v0.61.0 witness:v0.43.0 ordeal:v0.19.0 loom:v1.4.1 meld:v0.53.0 kiln:v0.4.4:kilnd pulseengine/varve:v0.32.0:varve-producer:varve-producer-v%V-%T.tar.gz"
   WSC_VERSION: v0.11.0
   # VS Code extensions carried as kind="vsix" payloads (REQ-VSIX-001).
   # Entry shape: repo:version:extension-name:asset-template, where the
