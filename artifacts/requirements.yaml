@@ -3736,45 +3736,11 @@ artifacts:
     title: A deposit does the work that changed, and re-proves the work that did not
     status: implemented
     release: v0.30.0
-    description: >
-      Every deposit downloads all four platforms of every tool the layer
-      carries — 421 MiB for layer 2026.08.4 — re-hashes them and re-pushes
-      them, even when a single tool moved. Consumers are unaffected: install
-      filters by platform before fetching, so a machine pulls 99 MiB. The cost
-      is the producer's, and daily scanning (DD-024) multiplies it by the
-      cadence.
-      .
-      The previous layer's SIGNED manifest already records each payload's
-      upstream repo, release, asset name and sha256. When `layer.toml` still
-      pins the same release, that work is already done and proven.
-      .
-      The trap is that reusing it naively would REGRESS a security property.
-      A release asset can be deleted and re-uploaded under the same tag, so
-      "rivet v0.34.0" today is not necessarily the bytes it was yesterday.
-      Carrying a digest forward on the strength of a version string would make
-      varve blind to exactly the substitution it exists to catch.
-      .
-      So the saving must come from skipping the DOWNLOAD, never from skipping
-      the PROOF. Re-verifying a release costs a sums file — kilobytes — while
-      the binary it describes is tens of megabytes.
-      .
-      Clauses: (1) The ingestion proof shall be re-established every deposit,
-      unconditionally; carry-forward shall never skip it. (2) The digest
-      recorded upstream NOW shall be compared against the digest the previous
-      layer recorded; only when they agree may the payload bytes go
-      un-downloaded. (3) A disagreement shall ABORT and name both digests: an
-      upstream that re-published a release under the same version is a fact an
-      operator must see, and it is not varve's to resolve silently in either
-      direction. (4) Reuse shall additionally require that the blob is still
-      present in the destination registry, since a manifest entry is not a
-      guarantee of storage. (5) A payload with no previous entry — a new tool,
-      a new platform, a changed version — shall be fetched normally. (6) The
-      gate shall be that depositing an unchanged `layer.toml` twice fetches no
-      payload bytes the second time.
+    description: "Every deposit downloads all four platforms of every tool the layer carries — 421 MiB for layer 2026.08.4 — re-hashes them and re-pushes them, even when a single tool moved. Consumers are unaffected: install filters by platform before fetching, so a machine pulls 99 MiB. The cost is the producer's, and daily scanning (DD-024) multiplies it by the cadence. . The previous layer's SIGNED manifest already records each payload's upstream repo, release, asset name and sha256. When `layer.toml` still pins the same release, that work is already done and proven. . The trap is that reusing it naively would REGRESS a security property. A release asset can be deleted and re-uploaded under the same tag, so \"rivet v0.34.0\" today is not necessarily the bytes it was yesterday. Carrying a digest forward on the strength of a version string would make varve blind to exactly the substitution it exists to catch. . So the saving must come from skipping the DOWNLOAD, never from skipping the PROOF. Re-verifying a release costs a sums file — kilobytes — while the binary it describes is tens of megabytes. . Clauses: (1) The ingestion proof shall be re-established every deposit, unconditionally; carry-forward shall never skip it. (2) The digest recorded upstream NOW shall be compared against the digest the previous layer recorded; only when they agree may the payload bytes go un-downloaded. (3) A disagreement shall ABORT and name both digests: an upstream that re-published a release under the same version is a fact an operator must see, and it is not varve's to resolve silently in either direction. (4) Reuse shall additionally require that the blob is still present in the destination registry, since a manifest entry is not a guarantee of storage. (5) A payload with no previous entry — a new tool, a new platform, a changed version — shall be fetched normally. (6) The gate shall be that depositing an unchanged `layer.toml` twice fetches no payload bytes FROM UPSTREAM the second time. DECIDED 2026-09-06, after clause 6 as first written turned out to be unsatisfiable: it promised no payload bytes at all, and the deposit layout contains every payload blob and is uploaded as the artifact of record, so no download means no bytes means an incomplete artifact. The two could not both hold. Of the three ways out — let a carry-forward layout reference blobs it does not contain, weakening the artifact of record that REQ-ARCHIVE-002 already calls inadequate; keep the promise and abandon the artifact; or narrow the promise — the third is chosen. A carried-forward payload is fetched from the DESTINATION REGISTRY, which by clause 4 already holds it, rather than from upstream. The layout stays complete. The saving is smaller than first claimed and honestly stated: not zero bytes, but one host instead of four upstream CDNs, no upstream rate limits, and no re-verification of an unchanged upstream release. The original clause promised a number nobody could deliver, which is the failure this requirement family keeps finding in other people's documents."
     fields:
       blocked-by: "REQ-REUSEBLOB-001 (varve#124): clause 6 needs a deposit spec that can reference an existing blob. Clauses 1-5 hold."
 
-      clause-6-conflict: "Clause 6 (a second deposit of an unchanged layer.toml fetches no payload bytes) conflicts with the deposit layout being a complete artifact of record: no download means no bytes means no blob in the layout. Surfaced 2026-09-04 while scoping REQ-REUSEBLOB-001; see that requirement's deferral note. Decide with REQ-ARCHIVE-002."
+      clause-6-conflict: RESOLVED 2026-09-06. Clause 6 rewritten to promise no UPSTREAM fetch; a carried-forward payload comes from the destination registry, which clause 4 already requires to hold it. The layout stays a complete artifact of record and REQ-ARCHIVE-002 is unaffected.
   - id: REQ-PAYLOADSMOKE-001
     type: requirement
     title: A deposited payload is checked for being usable, not merely for being the bytes upstream published
@@ -4315,13 +4281,14 @@ artifacts:
 
   - id: REQ-REUSEBLOB-001
     type: requirement
-    title: A deposit can reference bytes the registry already holds
+    title: A carried-forward payload comes from the registry, not from upstream
     status: approved
-    description: "REQ-CARRYFORWARD-001 clause 6 promises that depositing an unchanged layer.toml twice fetches no payload bytes the second time. The producer half is built, tested and INERT: varve-producer resolves an unchanged payload to reuse and skips the upstream download correctly, and then staging has nothing to stage, because varve's DepositSpec requires a path for every tool. There is no way to say 'these bytes are already the registry's blob at this digest' — even though clause 4 already PRESUPPOSES the blob is in the destination registry, which is precisely the condition under which an OCI manifest may reference it without re-upload. Measured cost of the gap: 421 MiB re-downloaded and re-pushed per deposit for layer 2026.08.4, against a sums file of a few kilobytes to re-prove it, multiplied by the daily scanning cadence of DD-024. . Clauses: (1) A deposit spec entry shall be able to name a digest INSTEAD of a path. (2) Exactly one of the two shall be permitted per entry, enforced by the parser, so a spec cannot state both and leave the winner to reading order. (3) Before building a manifest that references a blob it did not upload, varve shall assert that blob is present in the destination — clause 4 of REQ-CARRYFORWARD-001 says a manifest entry is not a guarantee of storage, and this is where that check belongs. (4) A referenced blob that is absent shall ABORT rather than publish a manifest naming bytes the registry cannot serve. (5) The resulting layer shall be indistinguishable from one deposited with the bytes in hand: same digest for same content, so carry-forward changes the work done and not the artifact produced."
+    description: "REQ-CARRYFORWARD-001 clause 6 promises that re-depositing an unchanged layer.toml fetches no payload bytes FROM UPSTREAM. The producer half is built and tested and INERT: varve-producer resolves an unchanged payload to Reuse and skips the upstream download correctly, and then staging has nothing to stage, because varve's DepositSpec requires a `path` for every tool and there is no way to say where else the bytes are. . DECIDED 2026-09-06. The first framing of this requirement asked for a spec entry naming a digest INSTEAD of a path, so the deposit would reference a blob it never held. That was abandoned when clause 6 was narrowed: a layout missing its blobs is not the artifact of record it is uploaded as, and weakening that to save a download is the wrong trade. The bytes come from the DESTINATION REGISTRY instead — which clause 4 of REQ-CARRYFORWARD-001 already requires to hold them before reuse is permitted, so the check that makes reuse safe and the source that makes it possible are the same check. . The saving is smaller than first claimed and worth stating plainly: not zero bytes, but one host instead of four upstream CDNs, no upstream rate limits, and no re-verification of an unchanged upstream release. 421 MiB still moves; it moves from somewhere closer, already verified, that we control. . Clauses: (1) A payload resolved to Reuse shall be fetched from the destination registry by the digest the freshly verified proof names, never from upstream. (2) The digest used to fetch shall be the one the CURRENT proof states, not the one the previous layer recorded — otherwise a republished upstream is carried forward unnoticed, which is the substitution REQ-CARRYFORWARD-001 exists to catch. (3) Bytes fetched from the registry shall be verified against that digest exactly as an upstream download is; the destination is a source like any other and gets no more trust for being ours. (4) A blob absent from the destination shall fall back to the upstream fetch rather than abort — clause 4's presence check can race a garbage collection, and a deposit that fails because a cache was pruned would be worse than a slower one. (5) The resulting layout shall be complete and the resulting layer indistinguishable from one deposited with the bytes fetched from upstream: same digest for the same content."
     release: v0.33.0
     fields:
       deferred-2026-09-04: "Deferred from v0.32.0 BEFORE writing code, because scoping it surfaced a conflict with the artifact-of-record model that is a decision rather than an implementation detail. REQ-CARRYFORWARD-001 clause 6 requires that re-depositing an unchanged layer.toml fetch NO payload bytes. But 'varve deposit --out' writes an OCI layout containing every payload blob, and deposit-layer.yml uploads that layout as 'the artifact of record'. Skipping the upstream download means having no bytes, which means an INCOMPLETE layout — so clause 6 and a complete artifact of record cannot both hold. Three ways out, none of them free: (a) pull the blob from the DESTINATION registry instead of upstream, which keeps the layout complete and avoids four upstream CDNs and their rate limits, but transfers the same bytes and so does not satisfy clause 6 as written; (b) let a carry-forward layout reference blobs it does not contain, making it explicitly a delta and leaving 'varve archive' from an install as the way to obtain a complete one — which weakens the artifact of record that REQ-ARCHIVE-002 already says is inadequate; (c) rewrite clause 6 to promise no UPSTREAM fetch rather than no fetch at all. This interacts directly with REQ-ARCHIVE-002 (approved, not implemented), so the two should be decided together rather than one being quietly shaped by the other."
 
+      decided-2026-09-06: "Design settled: fetch from the destination registry, not a path-less spec entry. The artifact of record stays complete. Supersedes the deferral note."
   - id: REQ-PRODUCERGET-001
     type: requirement
     title: The assembler is obtainable, not merely present
