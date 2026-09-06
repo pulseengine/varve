@@ -361,19 +361,48 @@ fn safe_member_path(raw: &str) -> Result<String, SdkExportError> {
     Ok(trimmed.to_string())
 }
 
-/// Decompress a gzip archive, or pass a plain tar through. An SDK ships as
-/// either, and guessing from the file name would be one more thing to get
-/// wrong.
+/// Decompress a gzip or xz archive, or pass a plain tar through.
+///
+/// Decided by MAGIC, not by a file name — and deliberately the opposite of the
+/// producer, which chooses an unpacker from the asset name. The two are at
+/// different points in the same pipeline: the producer is picking a tool to
+/// run on bytes nobody has verified yet, so a name that disagrees with the
+/// content is a reason to stop; here the bytes have already been checked
+/// against the signed digest, so what they ARE is the only question left.
+///
+/// xz matters because it is not an edge case: every wasmtime archive and all
+/// 140 Zephyr SDK toolchains are .tar.xz. Decoding it with a pure-Rust
+/// implementation keeps a C build dependency out of the crate every consumer
+/// links (REQ-SDKDEPOSIT-001).
 fn decompress(archive: &[u8]) -> Result<Cow<'_, [u8]>, SdkExportError> {
     if archive.starts_with(&[0x1f, 0x8b]) {
         let mut out = Vec::new();
         flate2::read::GzDecoder::new(archive)
             .read_to_end(&mut out)
             .map_err(|e| SdkExportError::Archive(e.to_string()))?;
-        Ok(Cow::Owned(out))
-    } else {
-        Ok(Cow::Borrowed(archive))
+        return Ok(Cow::Owned(out));
     }
+    // xz: FD 37 7A 58 5A 00
+    if archive.starts_with(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
+        let mut out = Vec::new();
+        let mut input = std::io::BufReader::new(archive);
+        lzma_rs::xz_decompress(&mut input, &mut out)
+            .map_err(|e| SdkExportError::Archive(format!("xz: {e}")))?;
+        return Ok(Cow::Owned(out));
+    }
+    // bzip2: "BZh". Named rather than left to fail as a tar parse error,
+    // because "not a readable tar archive" sends a reader looking for a
+    // corrupt download when the real answer is that varve cannot open this
+    // compression at all. A payload varve cannot decode must say so.
+    if archive.starts_with(b"BZh") {
+        return Err(SdkExportError::Archive(
+            "this payload is bzip2-compressed, which varve cannot decode. It was \
+             deposited and its bytes verify; what is missing is a decoder. \
+             Re-deposit the sdk as .tar.gz or .tar.xz, or file for bzip2 support."
+                .into(),
+        ));
+    }
+    Ok(Cow::Borrowed(archive))
 }
 
 /// Read every member of a tree payload out of its archive.
@@ -1297,5 +1326,87 @@ mod tests {
             export_sdk(b"\x1f\x8bnot really gzip", BUILT, &tmp.path().join("s2")),
             Err(SdkExportError::Archive(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod xz_tests {
+    use super::*;
+
+    /// Build a real xz stream with the system `xz`, so this is not a fixture
+    /// that agrees with my own encoder.
+    fn xz(bytes: &[u8]) -> Option<Vec<u8>> {
+        use std::io::Write;
+        let mut c = std::process::Command::new("xz")
+            .args(["-c", "-0"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        c.stdin.as_mut()?.write_all(bytes).ok()?;
+        let out = c.wait_with_output().ok()?;
+        out.status.success().then_some(out.stdout)
+    }
+
+    /// Every wasmtime archive and all 140 Zephyr SDK toolchains are .tar.xz.
+    /// Before this, `decompress` passed them through as though they were plain
+    /// tar and the caller reported "not a readable tar archive" — a message
+    /// that sends a reader looking for a corrupt download.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn an_xz_payload_is_decoded() {
+        let plain = b"the tar bytes, near enough for a decoder test".repeat(40);
+        let Some(compressed) = xz(&plain) else {
+            eprintln!("system xz unavailable; skipping");
+            return;
+        };
+        assert!(compressed.starts_with(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]));
+        assert_ne!(compressed, plain, "the fixture is not actually compressed");
+        let out = decompress(&compressed).expect("xz must decode");
+        assert_eq!(out.as_ref(), plain.as_slice());
+    }
+
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn gzip_and_plain_tar_still_work() {
+        use std::io::Write;
+        let plain = b"still a tar".repeat(30);
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&plain).unwrap();
+        let gz = enc.finish().unwrap();
+        assert_eq!(decompress(&gz).unwrap().as_ref(), plain.as_slice());
+        assert_eq!(decompress(&plain).unwrap().as_ref(), plain.as_slice());
+    }
+
+    /// A compression varve cannot decode must SAY so. Left to fall through, a
+    /// bzip2 payload reaches the tar parser and reports "not a readable tar
+    /// archive", which is true and useless: the download is fine and the
+    /// decoder is missing.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn a_compression_varve_cannot_decode_names_itself() {
+        let mut bz = b"BZh9".to_vec();
+        bz.extend_from_slice(&[0x31, 0x41, 0x59, 0x26, 0x53, 0x59]);
+        let e = decompress(&bz).expect_err("must refuse");
+        let msg = e.to_string();
+        assert!(msg.contains("bzip2"), "{msg}");
+        assert!(msg.contains("what is missing is a decoder"), "{msg}");
+    }
+
+    /// Truncated xz must fail, not yield a short tree. The bytes are
+    /// digest-verified before they reach here, so this is a decoder-integrity
+    /// check rather than a trust one — but a decoder that returns partial
+    /// output on truncation would hand `export_members` an SDK missing files.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn a_truncated_xz_stream_is_an_error_not_a_short_tree() {
+        let plain = b"a payload long enough to span blocks".repeat(200);
+        let Some(compressed) = xz(&plain) else { return };
+        let cut = &compressed[..compressed.len() / 2];
+        assert!(
+            decompress(cut).is_err(),
+            "a truncated stream decoded anyway"
+        );
     }
 }

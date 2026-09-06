@@ -115,6 +115,28 @@ pub fn unpack_argv(
 /// arrived last under every platform's name — a payload that runs on one
 /// machine and is silently wrong on three.
 pub fn staged_path(kind: PayloadKind, name: &str, version: &str, platform: Option<&str>) -> String {
+    staged_path_for(kind, name, version, platform, "")
+}
+
+/// As [`staged_path`], preserving an archive's extension.
+///
+/// An `sdk` payload is stored as the archive upstream published, so the
+/// extension is not decoration: it is how anything downstream knows whether
+/// the bytes are gzip or xz. Dropping it would leave `varve export-sdk` to
+/// sniff, which is the guess this whole path refuses to make.
+pub fn staged_path_for(
+    kind: PayloadKind,
+    name: &str,
+    version: &str,
+    platform: Option<&str>,
+    ext: &str,
+) -> String {
+    if kind == PayloadKind::Sdk {
+        return match platform {
+            Some(p) => format!("sdk/{name}-{p}-{version}{ext}"),
+            None => format!("sdk/{name}-{version}{ext}"),
+        };
+    }
     match kind {
         PayloadKind::Vsix => match platform {
             Some(p) => format!("vsix/{name}-{p}-{version}.vsix"),
@@ -124,7 +146,21 @@ pub fn staged_path(kind: PayloadKind, name: &str, version: &str, platform: Optio
             Some(p) => format!("tools/{name}-{p}"),
             None => format!("tools/{name}"),
         },
+        PayloadKind::Sdk => unreachable!("handled above, where the extension is kept"),
     }
+}
+
+/// The archive extension of an asset name, for [`staged_path_for`].
+pub fn archive_ext(asset: &str) -> &str {
+    let lower = asset.to_ascii_lowercase();
+    for e in [
+        ".tar.gz", ".tar.xz", ".tar.bz2", ".tgz", ".txz", ".tbz2", ".zip",
+    ] {
+        if lower.ends_with(e) {
+            return &asset[asset.len() - e.len()..];
+        }
+    }
+    ""
 }
 
 /// Every regular file under `dir`, as extraction candidates.
@@ -342,6 +378,35 @@ mod tests {
             msg.contains("will NOT open") || msg.contains("NOT an archive"),
             "{msg}"
         );
+    }
+
+    /// The extension is sliced off the END of the name, and the slice has to
+    /// be exactly the extension — an off-by-anything here writes the staged
+    /// sdk under a filename that misstates its own compression, which is the
+    /// one thing `export-sdk` reads it for.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn the_archive_extension_is_exactly_the_extension() {
+        for (asset, want) in [
+            (
+                "toolchain_gnu_linux-x86_64_arm-zephyr-eabi.tar.xz",
+                ".tar.xz",
+            ),
+            ("wasi-sdk-34.0-arm64-linux.tar.gz", ".tar.gz"),
+            ("wrsdk-vxworks7-qemu-1.16.1.tar.bz2", ".tar.bz2"),
+            ("a.txz", ".txz"),
+            ("x.zip", ".zip"),
+            ("no-extension-at-all", ""),
+            ("sdk.tar.zst", ""),
+        ] {
+            assert_eq!(archive_ext(asset), want, "{asset}");
+        }
+        // And the result really is a suffix of the input, not a coincidence.
+        for asset in ["a.tar.xz", "much-longer-name-here.tar.gz"] {
+            let e = archive_ext(asset);
+            assert!(asset.ends_with(e), "{asset} -> {e:?}");
+            assert!(!e.is_empty());
+        }
     }
 
     /// One layer carries the same tool for four platforms. A layout that

@@ -49,6 +49,15 @@ pub enum Layout {
     Tarball,
     /// Bare per-platform binaries with no archive (sigil ships `wsc` this way).
     RawPerPlatform,
+    /// A TREE: the archive itself is the payload (REQ-SDKDEPOSIT-001).
+    ///
+    /// The other two layouts mine one binary out of an archive and discard the
+    /// rest. An SDK is the opposite shape — a compiler, its binutils, its
+    /// headers and its sysroot are one thing, and taking a binary out of it
+    /// destroys it. The archive is stored exactly as upstream published it;
+    /// unpacking and relocating is `varve export-sdk`'s job, on the consumer's
+    /// machine, per REQ-SDK-001 clause 3.
+    Sdk,
 }
 
 impl Layout {
@@ -56,6 +65,7 @@ impl Layout {
         match s {
             "tarball" => Some(Layout::Tarball),
             "raw-per-platform" => Some(Layout::RawPerPlatform),
+            "sdk" => Some(Layout::Sdk),
             _ => None,
         }
     }
@@ -91,6 +101,16 @@ pub struct ManifestTool {
     /// than a boolean.
     #[serde(rename = "unverified-reason", default)]
     pub unverified_reason: Option<String>,
+    /// A path that must exist inside a `sdk` payload once unpacked
+    /// (REQ-SDKDEPOSIT-001 clause 5).
+    ///
+    /// A tree payload cannot be architecture-checked the way a binary can — an
+    /// SDK holds executables for several architectures and checking its first
+    /// ELF proves nothing. What CAN be checked is shape, and the failure this
+    /// catches is concrete: a 14 GB download that turns out to be an HTML
+    /// error page hashes and signs perfectly well.
+    #[serde(rename = "contains", default)]
+    pub contains: Option<String>,
     /// Asset name for one target triple, when no template can derive it.
     ///
     /// Some upstreams ship a musl binary as their only Linux build —

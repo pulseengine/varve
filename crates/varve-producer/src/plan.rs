@@ -31,6 +31,9 @@ pub enum PayloadKind {
     RawPerPlatform,
     /// A VS Code extension package.
     Vsix,
+    /// A TREE: the archive is the payload (REQ-SDKDEPOSIT-001). Not mined for
+    /// a binary, not architecture-checked as though it were one.
+    Sdk,
 }
 
 /// One asset to fetch, verify and stage.
@@ -48,6 +51,9 @@ pub struct PayloadPlan {
     pub kind: PayloadKind,
     /// Why this release is ingested with no proof, if it is.
     pub unverified_reason: Option<String>,
+    /// A path that must exist inside an `sdk` payload once unpacked
+    /// (REQ-SDKDEPOSIT-001 clause 5). `None` for every other kind.
+    pub contains: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +108,11 @@ fn template_of(t: &ManifestTool, kind: PayloadKind) -> String {
         PayloadKind::Tarball => asset::default_tarball_template(&t.name, &t.version),
         PayloadKind::RawPerPlatform => format!("{}-%T", t.name),
         PayloadKind::Vsix => unreachable!("a vsix carries its template"),
+        // An SDK's asset name is never derivable: sdk-ng spells it
+        // `toolchain_gnu_<host>_<target>.tar.xz`, wasi-sdk spells it
+        // `wasi-sdk-34.0-arm64-linux.tar.gz`. Neither follows from the tool
+        // name, so the manifest states it and `plan` refuses without one.
+        PayloadKind::Sdk => unreachable!("an sdk carries its template"),
     }
 }
 
@@ -109,6 +120,7 @@ fn kind_of(t: &ManifestTool) -> Result<PayloadKind, PlanError> {
     match t.layout.as_deref() {
         None | Some("tarball") => Ok(PayloadKind::Tarball),
         Some("raw-per-platform") => Ok(PayloadKind::RawPerPlatform),
+        Some("sdk") => Ok(PayloadKind::Sdk),
         Some(other) => Err(PlanError::UnknownLayout {
             tool: t.name.clone(),
             layout: other.to_string(),
@@ -136,6 +148,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             platform: None,
             kind,
             unverified_reason: t.unverified_reason.clone(),
+            contains: t.contains.clone(),
         });
         return Ok(out);
     }
@@ -155,6 +168,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             platform: Some((*p).to_string()),
             kind,
             unverified_reason: t.unverified_reason.clone(),
+            contains: t.contains.clone(),
         });
     }
     Ok(out)
@@ -173,6 +187,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             platform: None,
             kind: PayloadKind::Vsix,
             unverified_reason: None,
+            contains: None,
         });
         return Ok(out);
     }
@@ -185,6 +200,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             platform: Some((*p).to_string()),
             kind: PayloadKind::Vsix,
             unverified_reason: None,
+            contains: None,
         });
     }
     Ok(out)

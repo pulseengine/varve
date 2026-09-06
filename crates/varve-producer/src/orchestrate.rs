@@ -388,6 +388,7 @@ mod tests {
 
     fn plan(name: &str, repo: &str, version: &str, asset: &str) -> PayloadPlan {
         PayloadPlan {
+            contains: None,
             name: name.into(),
             repo: repo.into(),
             version: version.into(),
