@@ -96,6 +96,11 @@ blind to composition; this is not.
 const EMBEDDED_TOPICS: &[Topic] = &[
     // ── concepts ──────────────────────────────────────────────────────
     topic!(
+        "sdk",
+        "sdk — tree-shaped payloads: Zephyr, WASI, Yocto, and why .sh is refused",
+        "concept-sdk-payloads.md"
+    ),
+    topic!(
         "config-reference",
         "Configuration reference — every file, every field",
         "concept-config-reference.md"
