@@ -267,12 +267,19 @@ Every payload is fetched."
 
             let mut tools = Vec::with_capacity(resolved.len());
             for r in &resolved {
+                // Two names, not one (REQ-PAYLOADID-001). `binary` is the
+                // executable inside the archive; the plan's `name` is what the
+                // payload is CALLED in the layer. They are usually equal, which
+                // is why one variable served both until a repository needed to
+                // contribute two payloads — at which point every entry from
+                // that repo wanted the same deposited name and collided.
                 let bin = m
                     .tools
                     .iter()
                     .find(|t| t.name == r.plan.name)
                     .and_then(|t| t.binary.clone())
                     .unwrap_or_else(|| r.plan.name.clone());
+                let deposited = r.plan.name.clone();
                 let version = asset::bare_version(&r.plan.version).to_string();
                 // The same function the downloader used, not a second copy
                 // of the convention.
@@ -284,7 +291,10 @@ Every payload is fetched."
                     &stage_root,
                     &dl,
                     &scratch,
-                    &bin,
+                    deposit::Names {
+                        deposited: &deposited,
+                        binary: &bin,
+                    },
                 )?);
             }
 

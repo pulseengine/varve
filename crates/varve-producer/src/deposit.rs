@@ -112,6 +112,20 @@ pub fn payload_key(name: &str, platform: Option<&str>) -> String {
     }
 }
 
+/// The two names a payload has (REQ-PAYLOADID-001).
+///
+/// `deposited` is what it is CALLED in the layer — what a consumer resolves.
+/// `binary` is what the executable is called INSIDE the archive. Usually the
+/// same string, and one variable served both until a repository needed to
+/// contribute two payloads: a payload could then only ever be deposited under
+/// the name of the file found in its own tarball, so one repository meant one
+/// payload.
+#[derive(Debug, Clone, Copy)]
+pub struct Names<'a> {
+    pub deposited: &'a str,
+    pub binary: &'a str,
+}
+
 /// Stage one resolved payload and describe it.
 pub fn stage_one<R: CommandRunner>(
     runner: &R,
@@ -120,11 +134,11 @@ pub fn stage_one<R: CommandRunner>(
     stage_root: &Path,
     downloads: &Path,
     scratch: &Path,
-    binary_name: &str,
+    names: Names<'_>,
 ) -> anyhow::Result<ToolOut> {
     let rel = stage::staged_path_for(
         r.plan.kind,
-        binary_name,
+        names.deposited,
         version,
         r.plan.platform.as_deref(),
         stage::archive_ext(&r.plan.asset),
@@ -139,7 +153,7 @@ pub fn stage_one<R: CommandRunner>(
                 r.plan.name,
                 r.plan.platform.as_deref().unwrap_or("any")
             ));
-            let bin = stage::extract_binary(runner, &r.plan.asset, &archive, &ex, binary_name)?;
+            let bin = stage::extract_binary(runner, &r.plan.asset, &archive, &ex, names.binary)?;
             stage::place(&bin, &dest, true)?;
         }
         PayloadKind::RawPerPlatform => stage::place(&archive, &dest, true)?,
@@ -208,7 +222,7 @@ pub fn stage_one<R: CommandRunner>(
     }
 
     Ok(ToolOut {
-        name: binary_name.to_string(),
+        name: names.deposited.to_string(),
         version: version.to_string(),
         platform: r.plan.platform.clone(),
         path: rel,
@@ -370,7 +384,10 @@ mod tests {
             &root,
             &dl,
             &root.join("extract"),
-            "rivet",
+            Names {
+                deposited: "rivet",
+                binary: "rivet",
+            },
         )
         .expect_err("must refuse");
         let msg = e.to_string();
@@ -396,7 +413,10 @@ mod tests {
             &root,
             &dl,
             &root.join("extract"),
-            "rivet",
+            Names {
+                deposited: "rivet",
+                binary: "rivet",
+            },
         )
         .expect("stages");
         assert_eq!(t.path, "tools/rivet-x86_64-unknown-linux-gnu");
@@ -439,7 +459,10 @@ mod tests {
             &root,
             &dl,
             &root.join("x"),
-            "zephyr-sdk",
+            Names {
+                deposited: "zephyr-sdk",
+                binary: "zephyr-sdk",
+            },
         )
         .expect("an sdk must not be arch-checked");
         assert_eq!(t.kind.as_deref(), Some("sdk"), "must be recorded as an sdk");
@@ -477,7 +500,10 @@ mod tests {
             &root,
             &dl,
             &root.join("x"),
-            "zephyr-sdk",
+            Names {
+                deposited: "zephyr-sdk",
+                binary: "zephyr-sdk",
+            },
         )
         .expect_err("an HTML error page must not deposit as an SDK");
         let msg = e.to_string();
@@ -527,7 +553,10 @@ mod tests {
             &root,
             &dl,
             &root.join("x"),
-            "yocto-sdk",
+            Names {
+                deposited: "yocto-sdk",
+                binary: "yocto-sdk",
+            },
         )
         .expect("an exact member path must satisfy contains");
         // A path that is NOT present, but shares a prefix with one that is.
@@ -539,7 +568,10 @@ mod tests {
                 &root,
                 &dl,
                 &root.join("x"),
-                "yocto-sdk"
+                Names {
+                    deposited: "yocto-sdk",
+                    binary: "yocto-sdk"
+                },
             )
             .is_err(),
             "an absent file must not be satisfied by a sibling"
@@ -565,7 +597,10 @@ mod tests {
             &root,
             &dl,
             &root.join("extract"),
-            "ext",
+            Names {
+                deposited: "ext",
+                binary: "ext",
+            },
         )
         .expect("a vsix is not arch-checked");
         assert_eq!(
@@ -602,7 +637,10 @@ mod tests {
             &root,
             &dl,
             &root.join("extract"),
-            "wsc",
+            Names {
+                deposited: "wsc",
+                binary: "wsc",
+            },
         )
         .expect("stages");
         assert_eq!(t.path, "tools/wsc-aarch64-unknown-linux-gnu");
@@ -619,7 +657,10 @@ mod tests {
                 &root,
                 &dl,
                 &root.join("extract"),
-                "wsc"
+                Names {
+                    deposited: "wsc",
+                    binary: "wsc"
+                },
             )
             .is_err(),
             "a raw asset must be arch-checked too"
