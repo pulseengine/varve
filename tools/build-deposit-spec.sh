@@ -47,7 +47,7 @@
 # CONTENTS are bumped in a reviewed diff, so they are not defaulted here):
 #   LAYER          layer identifier, e.g. 2026.08.4
 #   COUNTER        monotonic per-line release counter
-#   TARBALL_TOOLS  "[owner/]tool:version[:binary[:asset-template]] ..."
+#   TARBALL_TOOLS  "[owner/]tool:release[:binary[:asset-template[:payload-version]]] ..."
 #                  owner defaults to `pulseengine`, binary to the tool name, and
 #                  the template to "<tool>-<version>-%T.tar.gz". In a template,
 #                  %V is the bare version, %T the Rust target triple and %U the
@@ -368,7 +368,7 @@ for entry in $TARBALL_TOOLS; do
   # Every optional field keeps its old default, so the entries this workflow
   # already ships (`rivet:v0.33.1`, `kiln:v0.4.4:kilnd`) parse to exactly what
   # they parsed to before.
-  IFS=':' read -r f_tool f_version f_binary f_template <<ENTRYEOF
+  IFS=':' read -r f_tool f_version f_binary f_template f_payload_version <<ENTRYEOF
 $entry
 ENTRYEOF
   case "$f_tool" in
@@ -377,7 +377,18 @@ ENTRYEOF
   esac
   version="$f_version"
   binname="${f_binary:-$tool}"
-  bare="${version#v}"
+  # The PAYLOAD's version, which is not always the release's.
+  #
+  # Every tool here used to ship on its repo's own version line, so the tag and
+  # the tool version were the same number and one variable served both. That is
+  # an assumption, not a law: `pulseengine/jess` is a hub whose v0.7.1 release
+  # ships `with-device` 0.2.1. Deriving the recorded version from the tag would
+  # have put `version = "0.7.1"` in the signed manifest for a binary that
+  # reports 0.2.1 — the layer stating something untrue about its own contents,
+  # which is the one thing it exists not to do.
+  #
+  # Defaults to the tag minus its `v`, so every existing entry is unchanged.
+  bare="${f_payload_version:-${version#v}}"
   template="${f_template:-$tool-$version-%T.tar.gz}"
   verify_release "$repo" "$version"
   staged=0
