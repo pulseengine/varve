@@ -62,14 +62,33 @@ signed reason. Neither is called a signature, because neither is one.
 ## Declaring one
 
 ```toml
+[varve]
+version = "v0.33.0"
+
+[realm]
+name     = "pulseengine"
+channel  = "rolling"
+registry = "oci://ghcr.io/pulseengine/varve/layers"
+
 [[tool]]
-name     = "zephyr-sdk"
+# `name` is the REPOSITORY basename; `binary` is what the payload is called in
+# the layer. They differ here because the repo is `sdk-ng` and nobody wants to
+# type `varve export-sdk sdk-ng`.
+name     = "sdk-ng"
 repo     = "zephyrproject-rtos/sdk-ng"
+binary   = "zephyr-sdk"
 version  = "v1.0.1"
 layout   = "sdk"
 asset    = "toolchain_gnu_%U_arm-zephyr-eabi.tar.xz"
 contains = "arm-zephyr-eabi/bin"
 ```
+
+> **Requires the Rust assembler.** `varve-producer deposit --manifest layer.toml`
+> reads `layout = "sdk"` directly. The older path — `varve layer-spec` emitting
+> environment variables for a shell assembler — has no way to express a layout,
+> so an sdk entry translated through it arrives as an ordinary tarball tool and
+> the tree is mined for a binary. A realm carrying SDKs must use the assembler,
+> not the env encoding.
 
 `contains` is the shape check. A tree cannot be architecture-checked the way a
 binary can — an SDK holds executables for several architectures, so checking its
