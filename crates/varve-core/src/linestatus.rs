@@ -1314,6 +1314,63 @@ mod tests {
         assert_eq!(cached, Some(9), "the baseline is newer and must win");
     }
 
+    /// EQUAL counters must keep the BASELINE, not the tag document. The
+    /// comparison is strictly greater-than for a reason mutation testing
+    /// exposed: relaxing it to `>=` lets whatever is served under the tag
+    /// displace a baseline of the same counter, and the interesting version of
+    /// that is a yank being suppressed.
+    ///
+    /// A registry serving a same-counter document WITHOUT the yank would
+    /// otherwise overwrite the baseline that has it. Two validly-signed
+    /// documents at one counter means the signer issued two, which is an error
+    /// or a compromise; in either case the conservative choice is the copy
+    /// bound to the immutable layer.
+    // rivet: verifies REQ-POSTDEPOSIT-001
+    #[test]
+    fn an_equal_counter_tag_document_cannot_displace_the_baseline() {
+        use crate::source::{LayerRef, MemorySource};
+        let (sk, pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let line: Line = "2026.07.0".parse::<LayerId>().unwrap().line().clone();
+
+        // The baseline yanks the layer. Same counter, NO yank, under the tag.
+        //
+        // `status()` already yanks 2026.07.0, so the quiet document must have
+        // it CLEARED — the first version of this test built "quiet" from the
+        // helper and left the yank in, which made the assertion pass whichever
+        // document won. A test that cannot fail proves nothing.
+        let yanking = status(5);
+        assert!(
+            yanking.yanked.contains_key("2026.07.0"),
+            "fixture precondition: the baseline must actually yank"
+        );
+        let mut quiet = status(5);
+        quiet.yanked.clear();
+
+        let source = MemorySource::new()
+            .with_line_status(yanking.sign(&sk, "k").unwrap().as_bytes())
+            .with_published_line_status(quiet.sign(&sk, "k").unwrap().as_bytes());
+
+        cache_baseline_from_source(
+            &source,
+            &LayerRef::Name("2026.07.0".parse().unwrap()),
+            &line,
+            &pk,
+            tmp.path(),
+        )
+        .unwrap();
+
+        let kept = StatusCache::at_root(tmp.path())
+            .load(&line, &pk)
+            .unwrap()
+            .unwrap();
+        assert!(
+            kept.yanked.contains_key("2026.07.0"),
+            "an equal-counter document served under the tag must NOT suppress the \
+             baseline's yank"
+        );
+    }
+
     /// A forged tag document must not deny service. The registry is the party
     /// this document constrains, so "I put unverifiable bytes under the tag"
     /// must not be a way to stop a consumer reading the good baseline it

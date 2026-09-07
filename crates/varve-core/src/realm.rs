@@ -472,17 +472,79 @@ mod tests {
         );
     }
 
+    /// Both halves of the key check, each exercised ALONE. "not-a-key" fails
+    /// length AND alphabet at once, so it cannot tell `||` from `&&` — a
+    /// mutation survivor found exactly that. A 64-char non-hex string and a
+    /// short all-hex string each trip one condition only, so a weakened check
+    /// accepts them.
     // rivet: verifies REQ-ROTATE-002
     #[test]
     fn a_retired_root_that_is_not_a_key_is_refused() {
-        let dir = realms_dir(&realm_with_retired(
-            "{ key = \"not-a-key\", retired = \"2026-09-07\" }",
+        for (key, why) in [
+            ("not-a-key", "fails both length and alphabet"),
+            (
+                "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+                "right LENGTH, not hex",
+            ),
+            ("abcdef", "hex, wrong LENGTH"),
+            (
+                "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd997",
+                "hex, one char SHORT",
+            ),
+        ] {
+            let dir = realms_dir(&realm_with_retired(&format!(
+                "{{ key = \"{key}\", retired = \"2026-09-07\" }}"
+            )));
+            let err = resolve_realm(dir.path(), "r")
+                .expect_err(&format!("must refuse a retired root that {why}: {key}"))
+                .to_string();
+            assert!(
+                err.contains("64-hex"),
+                "a malformed retired root ({why}) must be refused like a malformed live one, \
+                 got: {err}"
+            );
+        }
+    }
+
+    /// A retired root's fingerprint must name the SAME store directory the
+    /// consumer already has on disk — it is looked up against partitions
+    /// written when that root was live. Asserting only that it DIFFERS from
+    /// the live one lets a constant stand in for it, which mutation testing
+    /// duly proved.
+    // rivet: verifies REQ-ROTATE-002
+    #[test]
+    fn a_retired_roots_fingerprint_is_the_one_its_partition_was_written_under() {
+        use crate::verify::generate_root_keypair;
+        let (_sk, old_pk) = generate_root_keypair();
+        let (_sk2, new_pk) = generate_root_keypair();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+
+        // The realm as it was BEFORE the rotation: the old key is the live
+        // root, so this is literally the fingerprint its partition was created
+        // under.
+        let before = realms_dir(&format!(
+            "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{}\"\n",
+            hex(&old_pk)
         ));
-        let err = resolve_realm(dir.path(), "r").unwrap_err().to_string();
-        assert!(
-            err.contains("64-hex"),
-            "a malformed retired root must be refused like a malformed live one, got: {err}"
+        let was_live = resolve_realm(before.path(), "r").unwrap().fingerprint();
+
+        // The realm AFTER, with the old key declared retired.
+        let after = realms_dir(&format!(
+            "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{}\"\n\
+             retired-roots = [{{ key = \"{}\", retired = \"2026-09-07\" }}]\n",
+            hex(&new_pk),
+            hex(&old_pk)
+        ));
+        let realm = resolve_realm(after.path(), "r").unwrap();
+
+        assert_eq!(
+            realm.retired_roots[0].fingerprint(),
+            was_live,
+            "a retired root must fingerprint to the partition it wrote, or `varve list` \
+             looks for a directory that does not exist"
         );
+        assert_eq!(was_live.len(), 16, "the store namespace is 16 hex chars");
+        assert!(was_live.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     /// Clause 6: every realms file written before this feature keeps working,
