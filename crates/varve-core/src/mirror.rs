@@ -147,6 +147,15 @@ impl LayerSource for Mirrors {
         self.try_each_optional("the line index", |s| s.fetch_line_index(line))
     }
 
+    fn fetch_published_line_status(&self, line: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        // A mirror that carries a correction the primary is missing is worth
+        // reaching — that asymmetry is the reason a yank can be suppressed by
+        // one registry and still arrive, so an explicit None keeps looking.
+        self.try_each_optional("the published line-status document", |s| {
+            s.fetch_published_line_status(line)
+        })
+    }
+
     fn fetch_attestations(
         &self,
         layer: &LayerRef,

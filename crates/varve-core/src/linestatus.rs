@@ -22,6 +22,26 @@ use crate::verify::{dsse_sign_typed, dsse_verify_typed};
 /// replayed as a status document.
 pub const LINE_STATUS_PAYLOAD_TYPE: &str = "application/vnd.pulseengine.varve.line-status.v1+json";
 
+/// Tag prefix under which a line's status document is published in its own
+/// right (REQ-POSTDEPOSIT-001 clause 1).
+///
+/// Deliberately not parseable as a `LayerId` (`YYYY.MM.P`), for the same
+/// reason `LINE_INDEX_TAG_PREFIX` is not: `layers_of_line` decides what a
+/// registry is WILLING TO SERVE, and a status tag counted as a layer would
+/// make an honest registry appear to serve one the signed index never named.
+pub const LINE_STATUS_TAG_PREFIX: &str = "line-status-";
+
+/// The registry tag carrying the published status document for a line.
+///
+/// The point of a separate tag is that a correction touches no layer digest.
+/// The baseline lives as a blob inside a LAYER's artifact manifest, so
+/// reissuing it means re-pushing that manifest with a different blob — which
+/// changes the manifest digest, and is exactly the republish
+/// REQ-IMMUTABLE-001 refuses. Yanking a layer must not require mutating it.
+pub fn status_tag(line: &str) -> String {
+    format!("{LINE_STATUS_TAG_PREFIX}{line}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnownProblem {
@@ -765,25 +785,62 @@ pub fn cache_baseline_from_source(
     root_pk: &[u8],
     store_root: &Path,
 ) -> Result<Option<u64>, LineStatusError> {
-    let envelope = match source
+    let baseline = source
         .fetch_line_status(layer)
-        .map_err(|e| LineStatusError::Payload(format!("fetching baseline line-status: {e}")))?
-    {
-        Some(bytes) => bytes,
-        None => return Ok(None),
-    };
-    let doc = LineStatus::verify_and_parse(&envelope, root_pk)?;
-    // A validly-signed status for a DIFFERENT line must not be cached under
-    // this one — mirror the `--from-file` guard so all cache paths agree.
-    if doc.line != line.to_string() {
-        return Err(LineStatusError::LineMismatch {
-            expected: line.to_string(),
-            got: doc.line,
-        });
+        .map_err(|e| LineStatusError::Payload(format!("fetching baseline line-status: {e}")))?;
+
+    // The document published under the line's own tag (REQ-POSTDEPOSIT-001).
+    // A source that cannot serve one must not be able to make that look like a
+    // failure, so a transport error here is treated as absence — the baseline
+    // path decides whether the consumer ends up with nothing.
+    let published = source
+        .fetch_published_line_status(&line.to_string())
+        .unwrap_or(None);
+
+    // VERIFY FIRST, RANK SECOND. Both documents are untrusted bytes from the
+    // party this evidence exists to constrain. Choosing by counter before
+    // checking the signature would hand the choice to whoever serves the tag:
+    // write a large counter, win the comparison, and a forged document
+    // displaces a real one — or, if it then failed verification, denied the
+    // consumer the good baseline it already had.
+    let mut best: Option<(u64, Vec<u8>, LineStatus)> = None;
+    let mut first_error: Option<LineStatusError> = None;
+    for envelope in [baseline, published].into_iter().flatten() {
+        let doc = match LineStatus::verify_and_parse(&envelope, root_pk) {
+            Ok(doc) => doc,
+            Err(e) => {
+                first_error.get_or_insert(e);
+                continue;
+            }
+        };
+        // A validly-signed status for a DIFFERENT line must not be cached
+        // under this one — mirror the `--from-file` guard so all cache paths
+        // agree, and apply it to BOTH documents rather than adding a second
+        // rule for the new one.
+        if doc.line != line.to_string() {
+            first_error.get_or_insert(LineStatusError::LineMismatch {
+                expected: line.to_string(),
+                got: doc.line.clone(),
+            });
+            continue;
+        }
+        if best.as_ref().is_none_or(|(c, _, _)| doc.counter > *c) {
+            best = Some((doc.counter, envelope, doc));
+        }
     }
-    let counter = doc.counter;
-    StatusCache::at_root(store_root).update(line, &envelope, &doc)?;
-    Ok(Some(counter))
+
+    match best {
+        Some((counter, envelope, doc)) => {
+            StatusCache::at_root(store_root).update(line, &envelope, &doc)?;
+            Ok(Some(counter))
+        }
+        // Nothing usable. If something was PRESENT but bad, that is a finding
+        // and is raised; if both were simply absent, the source carries none.
+        None => match first_error {
+            Some(e) => Err(e),
+            None => Ok(None),
+        },
+    }
 }
 
 /// Attach a signed line-status envelope to a deposit layout, deriving the
@@ -1189,6 +1246,161 @@ mod tests {
         // The cached newer document survives and re-verifies.
         let loaded = cache.load(&line, &pk).unwrap().unwrap();
         assert_eq!(loaded.counter, 2);
+    }
+
+    /// A correction published under the line's OWN tag reaches a consumer
+    /// whose layer carries an older baseline. This is the whole point of
+    /// REQ-POSTDEPOSIT-001: before it, saying anything new about a published
+    /// layer meant re-pushing that layer's manifest with a different blob,
+    /// which changes the manifest digest — the republish REQ-IMMUTABLE-001
+    /// refuses. A separate tag touches no layer digest.
+    // rivet: verifies REQ-POSTDEPOSIT-001
+    #[test]
+    fn a_correction_published_under_its_own_tag_overtakes_an_older_baseline() {
+        use crate::source::{LayerRef, MemorySource};
+        let (sk, pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let line: Line = "2026.07.0".parse::<LayerId>().unwrap().line().clone();
+
+        let baseline = status(1).sign(&sk, "k").unwrap();
+        let correction = status(7).sign(&sk, "k").unwrap();
+        let source = MemorySource::new()
+            .with_line_status(baseline.as_bytes())
+            .with_published_line_status(correction.as_bytes());
+
+        let cached = cache_baseline_from_source(
+            &source,
+            &LayerRef::Name("2026.07.0".parse().unwrap()),
+            &line,
+            &pk,
+            tmp.path(),
+        )
+        .unwrap();
+        assert_eq!(cached, Some(7), "the newer of the two is what is kept");
+        assert_eq!(
+            StatusCache::at_root(tmp.path())
+                .load(&line, &pk)
+                .unwrap()
+                .unwrap()
+                .counter,
+            7
+        );
+    }
+
+    /// Clause 2 says prefer the NEWER, not "prefer the tag". A registry that
+    /// serves a stale tag document must not be able to walk a consumer
+    /// backwards to a state where a known problem has disappeared — which is
+    /// exactly what a yank-suppressing registry would try.
+    // rivet: verifies REQ-POSTDEPOSIT-001
+    #[test]
+    fn a_stale_tag_document_does_not_walk_a_consumer_back_past_its_baseline() {
+        use crate::source::{LayerRef, MemorySource};
+        let (sk, pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let line: Line = "2026.07.0".parse::<LayerId>().unwrap().line().clone();
+
+        let source = MemorySource::new()
+            .with_line_status(status(9).sign(&sk, "k").unwrap().as_bytes())
+            .with_published_line_status(status(2).sign(&sk, "k").unwrap().as_bytes());
+
+        let cached = cache_baseline_from_source(
+            &source,
+            &LayerRef::Name("2026.07.0".parse().unwrap()),
+            &line,
+            &pk,
+            tmp.path(),
+        )
+        .unwrap();
+        assert_eq!(cached, Some(9), "the baseline is newer and must win");
+    }
+
+    /// A forged tag document must not deny service. The registry is the party
+    /// this document constrains, so "I put unverifiable bytes under the tag"
+    /// must not be a way to stop a consumer reading the good baseline it
+    /// already has beside the layer.
+    // rivet: verifies REQ-POSTDEPOSIT-001
+    #[test]
+    fn an_unverifiable_tag_document_does_not_deny_the_good_baseline() {
+        use crate::source::{LayerRef, MemorySource};
+        let (sk, pk) = generate_root_keypair();
+        let (other_sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let line: Line = "2026.07.0".parse::<LayerId>().unwrap().line().clone();
+
+        // Signed by a key that is NOT the realm root, and claiming a counter
+        // high enough to win if anyone were foolish enough to rank before
+        // verifying.
+        let forged = status(999).sign(&other_sk, "k").unwrap();
+        let source = MemorySource::new()
+            .with_line_status(status(3).sign(&sk, "k").unwrap().as_bytes())
+            .with_published_line_status(forged.as_bytes());
+
+        let cached = cache_baseline_from_source(
+            &source,
+            &LayerRef::Name("2026.07.0".parse().unwrap()),
+            &line,
+            &pk,
+            tmp.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            cached,
+            Some(3),
+            "the forged document is discarded and the baseline still lands"
+        );
+    }
+
+    /// A tag document for a different line is refused by the same guard the
+    /// baseline path uses, rather than a second rule that could drift.
+    // rivet: verifies REQ-POSTDEPOSIT-001
+    #[test]
+    fn a_tag_document_for_the_wrong_line_is_not_cached_under_this_one() {
+        use crate::source::{LayerRef, MemorySource};
+        let (sk, pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let requested: Line = "2026.07.0".parse::<LayerId>().unwrap().line().clone();
+        let wrong = LineStatus {
+            min_counter: None,
+            line: "2026.08".into(),
+            counter: 500,
+            issued_at: "2026-08-07T00:00:00Z".into(),
+            support_until: None,
+            yanked: BTreeMap::new(),
+            known_problems: Vec::new(),
+        };
+        let source = MemorySource::new()
+            .with_line_status(status(4).sign(&sk, "k").unwrap().as_bytes())
+            .with_published_line_status(wrong.sign(&sk, "k").unwrap().as_bytes());
+
+        let cached = cache_baseline_from_source(
+            &source,
+            &LayerRef::Name("2026.07.0".parse().unwrap()),
+            &requested,
+            &pk,
+            tmp.path(),
+        )
+        .unwrap();
+        assert_eq!(cached, Some(4), "the wrong-line document is not cached");
+    }
+
+    /// The tag must never be mistakable for a layer. `layers_of_line` decides
+    /// what a registry is willing to serve, and a status tag reported as a
+    /// layer would make an honest registry look like it was serving one the
+    /// signed index never named.
+    // rivet: verifies REQ-POSTDEPOSIT-001
+    #[test]
+    fn the_status_tag_cannot_be_parsed_as_a_layer_id() {
+        let tag = status_tag("2026.07");
+        assert_eq!(tag, "line-status-2026.07");
+        assert!(
+            tag.parse::<LayerId>().is_err(),
+            "a status tag that parses as a layer id would be reported as a served layer"
+        );
+        assert_ne!(
+            tag,
+            crate::lineindex::index_tag("2026.07"),
+            "status and index must not collide on one tag"
+        );
     }
 
     // rivet: verifies REQ-STATUS-DIST-001
