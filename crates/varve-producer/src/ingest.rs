@@ -34,6 +34,15 @@ use std::fmt;
 /// How a release's bytes were vouched for. Recorded inside the signed layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mechanism {
+    /// A digest manifest the upstream publishes beside its assets, that NOBODY
+    /// SIGNED (REQ-UPSTREAMSUMS-001).
+    ///
+    /// Weaker than either rung above it, and the name has to keep saying so.
+    /// It catches a corrupted or truncated download — which for a 90 MB
+    /// toolchain is the failure that actually happens — and it stops nobody
+    /// who can replace the manifest and the bytes together, because the same
+    /// host serves both. Real, and not a signature.
+    UpstreamSums,
     CosignSums,
     BuildProvenance,
     Unverified,
@@ -41,10 +50,27 @@ pub enum Mechanism {
 
 impl Mechanism {
     /// The value written into `[tool.source]`, and shown by `varve inspect`.
+    /// Does this mechanism carry a SIGNATURE over the digests?
+    ///
+    /// Clause 4: where a realm demands signed provenance, `upstream-sums` is
+    /// refused rather than counted. The question is asked here, once, so no
+    /// caller has to remember which of four names are signatures.
+    pub fn is_signed(self) -> bool {
+        match self {
+            Mechanism::CosignSums | Mechanism::BuildProvenance => true,
+            Mechanism::UpstreamSums | Mechanism::Unverified => false,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Mechanism::CosignSums => "cosign-sums",
             Mechanism::BuildProvenance => "build-provenance",
+            // Named so it cannot be mistaken for a signature by someone
+            // skimming a manifest. "upstream-sums" says who vouched (upstream)
+            // and what with (a digest list) — and conspicuously does not say
+            // "signed".
+            Mechanism::UpstreamSums => "upstream-sums",
             Mechanism::Unverified => "unverified",
         }
     }
@@ -242,6 +268,41 @@ pub fn rung_build_provenance(probe: &ReleaseProbe) -> Rung {
     }
 }
 
+/// Rung 3 — a digest manifest the upstream publishes and nobody signed.
+///
+/// `manifest_asset` is the asset that carries the digests; upstreams do not
+/// agree on a name (`sha256.sum` for zephyrproject-rtos/sdk-ng), so the realm
+/// states it rather than varve guessing. Guessing would be the worse failure:
+/// a file that is not the digest manifest, parsed as one, vouches for nothing
+/// while looking like it vouches.
+pub fn rung_upstream_sums(repo: &str, manifest_asset: Option<&str>, probe: &ReleaseProbe) -> Rung {
+    let Some(asset) = manifest_asset else {
+        return Rung::NotOffered;
+    };
+    if !probe.published.iter().any(|n| n == asset) {
+        // The realm says this release carries a digest manifest and it does
+        // not. That is a statement about the release that turned out false,
+        // not an absent mechanism — continuing to the unverified rung would
+        // silently downgrade a realm that asked for more.
+        return Rung::Failed(format!(
+            "the manifest names {asset:?} as this release's digest list, and \
+             {repo} does not publish it"
+        ));
+    }
+    Rung::Accepted {
+        signer: format!("{repo} (unsigned)"),
+        asserts: format!(
+            "this payload's digest is transcribed from {asset}, a digest list \
+             {repo} publishes beside the assets and DOES NOT SIGN. It \
+             establishes that the bytes are the bytes that list names — which \
+             catches a corrupted or truncated download — and nothing about who \
+             produced them: the same host serves the list and the bytes, so \
+             anyone able to replace both is unconstrained by it. Not a \
+             signature, and not to be counted as one"
+        ),
+    }
+}
+
 /// Parse `UNVERIFIED_INGEST` — one `owner/repo=reason` PER LINE.
 ///
 /// Lines, not a punctuation-separated list: the reason is prose an operator
@@ -268,6 +329,7 @@ pub fn choose(
     version: &str,
     probe: &ReleaseProbe,
     optins: &BTreeMap<String, String>,
+    upstream_sums: Option<&str>,
 ) -> Result<Accepted, IngestError> {
     match rung_cosign_sums(forge, repo, probe) {
         Rung::Accepted { signer, asserts } => {
@@ -291,6 +353,27 @@ pub fn choose(
         Rung::Accepted { signer, asserts } => {
             return Ok(Accepted {
                 mechanism: Mechanism::BuildProvenance,
+                signer,
+                asserts,
+            });
+        }
+        Rung::Failed(detail) => {
+            return Err(IngestError::ProofRejected {
+                repo: repo.to_string(),
+                detail,
+            });
+        }
+        Rung::NotOffered => {}
+    }
+
+    // Rung 3 — an unsigned upstream digest list. Below both signatures and
+    // above nothing, which is exactly where it belongs: it catches the
+    // corrupted 90 MB download and stops nobody who can replace the list and
+    // the bytes together.
+    match rung_upstream_sums(repo, upstream_sums, probe) {
+        Rung::Accepted { signer, asserts } => {
+            return Ok(Accepted {
+                mechanism: Mechanism::UpstreamSums,
                 signer,
                 asserts,
             });
@@ -393,8 +476,15 @@ mod tests {
     #[test]
     fn a_cosign_signed_sums_file_is_the_first_rung() {
         let f = Forge::github_com();
-        let a =
-            choose(&f, "pulseengine/rivet", "v0.34.0", &sums_ok(), &no_optins()).expect("accepts");
+        let a = choose(
+            &f,
+            "pulseengine/rivet",
+            "v0.34.0",
+            &sums_ok(),
+            &no_optins(),
+            None,
+        )
+        .expect("accepts");
         assert_eq!(a.mechanism, Mechanism::CosignSums);
         assert_eq!(a.signer, "https://github.com/pulseengine/rivet/");
     }
@@ -407,7 +497,7 @@ mod tests {
     #[test]
     fn an_enterprise_instance_records_its_own_identity_and_issuer() {
         let f = Forge::enterprise("ghe.example.com");
-        let a = choose(&f, "acme/tool", "v1.0.0", &sums_ok(), &no_optins()).expect("accepts");
+        let a = choose(&f, "acme/tool", "v1.0.0", &sums_ok(), &no_optins(), None).expect("accepts");
         assert_eq!(a.mechanism, Mechanism::CosignSums);
         assert_eq!(a.signer, "https://ghe.example.com/acme/tool/");
         assert!(
@@ -448,6 +538,7 @@ mod tests {
             "v0.34.0",
             &probe,
             &no_optins(),
+            None,
         )
         .expect_err("aborts");
         assert!(
@@ -478,6 +569,7 @@ mod tests {
             "v0.34.0",
             &probe,
             &optins,
+            None,
         )
         .expect_err("aborts");
         assert!(matches!(err, IngestError::ProofRejected { .. }), "{err:?}");
@@ -498,8 +590,15 @@ mod tests {
         // nothing, a failed proof must not be rescued.
         let mut optins = BTreeMap::new();
         optins.insert("acme/tool".to_string(), "we need it".to_string());
-        let err = choose(&Forge::github_com(), "acme/tool", "v1.0.0", &probe, &optins)
-            .expect_err("aborts");
+        let err = choose(
+            &Forge::github_com(),
+            "acme/tool",
+            "v1.0.0",
+            &probe,
+            &optins,
+            None,
+        )
+        .expect_err("aborts");
         assert!(
             matches!(&err, IngestError::ProofRejected { detail, .. }
                      if detail.contains("no attestation matches")),
@@ -533,6 +632,7 @@ mod tests {
             "v1.257.1",
             &probe,
             &no_optins(),
+            None,
         )
         .expect("accepts");
         assert_eq!(a.mechanism, Mechanism::BuildProvenance);
@@ -570,7 +670,7 @@ mod tests {
             rung_cosign_sums(&Forge::github_com(), "r", &probe),
             Rung::NotOffered
         );
-        let err = choose(&Forge::github_com(), "r", "v1", &probe, &no_optins())
+        let err = choose(&Forge::github_com(), "r", "v1", &probe, &no_optins(), None)
             .expect_err("no mechanism");
         assert!(matches!(err, IngestError::NoMechanism { .. }), "{err:?}");
     }
@@ -584,6 +684,7 @@ mod tests {
             "v1.0.0",
             &ReleaseProbe::default(),
             &no_optins(),
+            None,
         )
         .expect_err("refuses");
         let msg = err.to_string();
@@ -601,6 +702,7 @@ mod tests {
             "v1.0.0",
             &ReleaseProbe::default(),
             &optins,
+            None,
         )
         .expect("accepts");
         assert_eq!(a.mechanism, Mechanism::Unverified);
@@ -621,6 +723,7 @@ mod tests {
                 "v1.0.0",
                 &ReleaseProbe::default(),
                 &optins,
+                None,
             )
             .expect_err("refuses");
             assert!(
@@ -655,6 +758,7 @@ mod tests {
             "v0.34.0",
             &sums_ok(),
             &no_optins(),
+            None,
         )
         .unwrap();
         seen.record("pulseengine/rivet", "v0.34.0", a).unwrap();
@@ -673,6 +777,7 @@ mod tests {
             "v0.34.0",
             &sums_ok(),
             &no_optins(),
+            None,
         )
         .unwrap();
         seen.record("pulseengine/rivet", "v0.34.0", a.clone())
@@ -700,6 +805,7 @@ mod tests {
             "v0.34.0",
             &sums_ok(),
             &no_optins(),
+            None,
         )
         .unwrap();
         seen.record("pulseengine/rivet", "v0.34.0", a).unwrap();
@@ -712,5 +818,121 @@ mod tests {
         assert_eq!(Mechanism::CosignSums.as_str(), "cosign-sums");
         assert_eq!(Mechanism::BuildProvenance.as_str(), "build-provenance");
         assert_eq!(Mechanism::Unverified.as_str(), "unverified");
+    }
+}
+
+#[cfg(test)]
+mod upstream_sums_tests {
+    use super::*;
+
+    fn probe_with(published: &[&str]) -> ReleaseProbe {
+        ReleaseProbe {
+            published: published.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// zephyrproject-rtos/sdk-ng publishes a `sha256.sum` covering 160 assets
+    /// and signs nothing. Treating that as `unverified` throws away a real
+    /// property — it catches the truncated 90 MB download, which is the
+    /// failure a transfer that size actually has.
+    // rivet: verifies REQ-UPSTREAMSUMS-001
+    #[test]
+    fn an_unsigned_upstream_digest_list_is_its_own_mechanism() {
+        let p = probe_with(&[
+            "sha256.sum",
+            "toolchain_gnu_linux-x86_64_arm-zephyr-eabi.tar.xz",
+        ]);
+        match rung_upstream_sums("zephyrproject-rtos/sdk-ng", Some("sha256.sum"), &p) {
+            Rung::Accepted { signer, asserts } => {
+                assert!(signer.contains("unsigned"), "{signer}");
+                assert!(asserts.contains("DOES NOT SIGN"), "{asserts}");
+                assert!(asserts.contains("Not a signature"), "{asserts}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Clause 1 and 4. The name must not be mistakable for a signature by
+    /// someone skimning a manifest, and it must not COUNT as one.
+    // rivet: verifies REQ-UPSTREAMSUMS-001
+    #[test]
+    fn it_is_named_and_classified_as_not_a_signature() {
+        assert_eq!(Mechanism::UpstreamSums.as_str(), "upstream-sums");
+        assert!(!Mechanism::UpstreamSums.as_str().contains("sign"));
+        assert!(!Mechanism::UpstreamSums.is_signed());
+        assert!(!Mechanism::Unverified.is_signed());
+        assert!(Mechanism::CosignSums.is_signed());
+        assert!(Mechanism::BuildProvenance.is_signed());
+    }
+
+    /// A realm that says a release carries a digest list, when it does not,
+    /// has made a statement that turned out false. Continuing to the
+    /// unverified rung would silently downgrade a realm that asked for more.
+    // rivet: verifies REQ-UPSTREAMSUMS-001
+    #[test]
+    fn a_named_digest_list_that_the_release_lacks_aborts_rather_than_downgrades() {
+        let p = probe_with(&["toolchain.tar.xz"]);
+        match rung_upstream_sums("zephyrproject-rtos/sdk-ng", Some("sha256.sum"), &p) {
+            Rung::Failed(d) => assert!(d.contains("does not publish it"), "{d}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// Clause 5. An upstream that publishes NOTHING stays `unverified` with an
+    /// operator's reason — inventing a stronger word for nothing would be the
+    /// same lie in the other direction. wasi-sdk is this case today.
+    // rivet: verifies REQ-UPSTREAMSUMS-001
+    #[test]
+    fn an_upstream_that_publishes_nothing_is_not_promoted_to_this_rung() {
+        let p = probe_with(&["wasi-sdk-34.0-x86_64-linux.tar.gz"]);
+        assert_eq!(
+            rung_upstream_sums("WebAssembly/wasi-sdk", None, &p),
+            Rung::NotOffered,
+            "no digest list named means this rung is not offered"
+        );
+        // …and the ladder then lands on unverified, which needs a reason.
+        let mut optins = BTreeMap::new();
+        optins.insert(
+            "WebAssembly/wasi-sdk".to_string(),
+            "no upstream proof of any kind".to_string(),
+        );
+        let a = choose(
+            &Forge::github_com(),
+            "WebAssembly/wasi-sdk",
+            "wasi-sdk-34",
+            &p,
+            &optins,
+            None,
+        )
+        .expect("an opt-in with a reason is accepted");
+        assert_eq!(a.mechanism, Mechanism::Unverified);
+    }
+
+    /// The ladder's order: a signature outranks an unsigned list, always.
+    // rivet: verifies REQ-UPSTREAMSUMS-001
+    #[test]
+    fn a_signature_is_preferred_over_an_unsigned_list_when_both_exist() {
+        let p = ReleaseProbe {
+            published: vec![
+                "SHA256SUMS.txt".into(),
+                "SHA256SUMS.txt.cosign.bundle".into(),
+                "sha256.sum".into(),
+            ],
+            has_sums: true,
+            has_cosign_bundle: true,
+            cosign: Some(Ok(())),
+            ..Default::default()
+        };
+        let a = choose(
+            &Forge::github_com(),
+            "pulseengine/rivet",
+            "v0.35.0",
+            &p,
+            &BTreeMap::new(),
+            Some("sha256.sum"),
+        )
+        .expect("accepts");
+        assert_eq!(a.mechanism, Mechanism::CosignSums, "a signature must win");
     }
 }

@@ -204,14 +204,37 @@ pub fn verify_release<S: Source>(
     repo: &str,
     version: &str,
     optins: &BTreeMap<String, String>,
+    upstream_sums_asset: Option<&str>,
 ) -> Result<Verified, RunError> {
     let probe = src.probe(forge, repo, version)?;
-    let accepted = ingest::choose(forge, repo, version, &probe, optins)?;
+    let accepted = ingest::choose(forge, repo, version, &probe, optins, upstream_sums_asset)?;
     let sums = match accepted.mechanism {
         Mechanism::CosignSums => {
             let text = src.sums_text(repo, version)?;
             Some(Sums::parse(&text).map_err(|e| RunError::Io {
                 context: format!("{repo} {version}: reading the verified SHA256SUMS.txt"),
+                detail: e.to_string(),
+            })?)
+        }
+        // The digests come from the upstream's own list, fetched like any
+        // other asset and NOT verified against anything — there is nothing to
+        // verify it against, which is the whole point of the mechanism's name.
+        // The bytes are still checked against it in `admit`, so a truncated
+        // download still fails; what is absent is any claim about who made
+        // them.
+        Mechanism::UpstreamSums => {
+            let asset = upstream_sums_asset.ok_or_else(|| RunError::Io {
+                context: format!("{repo} {version}"),
+                detail: "the upstream-sums mechanism was accepted without an                          asset naming the digest list — a caller ordering error"
+                    .into(),
+            })?;
+            let bytes = src.asset_bytes(repo, version, asset)?;
+            let text = String::from_utf8(bytes).map_err(|e| RunError::Io {
+                context: format!("{repo} {version}: {asset}"),
+                detail: format!("not valid UTF-8: {e}"),
+            })?;
+            Some(Sums::parse(&text).map_err(|e| RunError::Io {
+                context: format!("{repo} {version}: reading {asset}"),
                 detail: e.to_string(),
             })?)
         }
@@ -286,7 +309,12 @@ pub fn run<S: Source>(
     let mut seen = ingest::VerifiedRepos::new();
     for ((repo, version), idxs) in by_release(plans) {
         // Verified ONCE per release, before any of its payloads are touched.
-        let v = verify_release(src, forge, &repo, &version, optins)?;
+        // A property of the release, so any payload of the group carries it;
+        // taking the first is not a choice between disagreeing values.
+        let sums_asset = idxs
+            .first()
+            .and_then(|i| plans[*i].upstream_sums.as_deref());
+        let v = verify_release(src, forge, &repo, &version, optins, sums_asset)?;
         seen.record(&repo, &version, v.accepted.clone())?;
         for i in idxs {
             let p = &plans[i];
@@ -388,6 +416,7 @@ mod tests {
 
     fn plan(name: &str, repo: &str, version: &str, asset: &str) -> PayloadPlan {
         PayloadPlan {
+            upstream_sums: None,
             contains: None,
             name: name.into(),
             repo: repo.into(),
