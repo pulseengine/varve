@@ -223,38 +223,63 @@ That is why varve's qualified channel is not open. Do not read the fact that
 varve ships a root as evidence that the ceremony problem is solved — it is the
 same problem, deferred to the same requirement.
 
-### And it has no backup at all — read this before copying the pattern
+### This already happened here — read it before copying the pattern
 
 Everything above prescribes paper backup in two locations, split custody over
-the seed, an access log, and an annual read test. **varve's own provisional
-rolling key has none of them.** It was generated straight into CI, and its
-secret half exists in exactly one place: a write-only GitHub Actions secret in
-the varve repository. Nobody can read it back — not the maintainers, not
-through the API, by design of the secret store.
+the seed, an access log, and an annual read test. varve's first provisional
+rolling root had **none of them**, and the bill arrived.
+
+It was generated straight into CI, and its secret half existed in exactly one
+place: a write-only GitHub Actions secret in the varve repository. Nobody could
+read it back — not the maintainers, not through the API, by design of the
+secret store. That was written down as a risk in varve#110 on 2026-08-16. Three
+weeks later, on 2026-09-07, it stopped being a risk and became an outage: a
+second repository (`pulseengine-layers`) needed the same key in order to
+deposit, and **there was no way to give it one.** The key could not be copied,
+moved, or delegated, because it could not be read.
 
 The consequences are worth stating flatly, because "provisional" reads far
-milder than what this is:
+milder than what this was:
 
-* **It cannot be moved.** A second repository cannot be given the key, because
-  the key cannot be read out of the first. That is why a realm's *contents*
-  live in their own repository while the *signing step* stays where the secret
-  is (`varve docs deploy`).
-* **It cannot be recovered.** If that secret is deleted, or the repository is
-  lost, the `pulseengine` rolling line can never be signed again. Every
-  consumer pinned to it stays frozen on the layer they already installed, with
-  no in-band way to be told why — because there is no revocation channel to
+* **It could not be moved.** A second repository could not be given the key,
+  because the key could not be read out of the first. That is why a realm's
+  *contents* live in their own repository while the *signing step* stays where
+  the secret is (`varve docs deploy`) — an architecture partly shaped by a
+  limitation, not only by a principle.
+* **It could not be recovered.** Had that secret been deleted, or the
+  repository lost, the `pulseengine` rolling line could never have been signed
+  again. Every consumer pinned to it would have stayed frozen on the layer they
+  had, with no in-band way to be told why — there is no revocation channel to
   tell them on.
 * **It must not be extracted.** With write access to a repository it is
   technically possible to print a secret into a workflow log in pieces. Doing
-  that here would expose the root permanently, and with no rotation and no
-  revocation the only remedy would be abandoning the realm. The inability to
-  read the secret back is a property worth keeping, not an obstacle to route
-  around.
+  that would have exposed the root permanently and created a reusable
+  exfiltration path, in order to save a rotation that was coming anyway. The
+  inability to read the secret back is a property worth keeping, not an
+  obstacle to route around.
 
-A key with a single write-only copy is not in custody. **Do not run a realm
-this way.** The ceremony above exists precisely so that your root is not held
-the way varve's provisional one currently is, and REQ-CEREMONY-001 is where
-varve fixes its own.
+**How it was resolved, and why that is not a general remedy.** The root was
+ROTATED, in v0.32.1: a new key generated offline, `varve-realms.toml` updated,
+every layer signed by the old root left unverifiable against the new one. That
+was available only because this root was declared PROVISIONAL from the start.
+A root you have told people is stable cannot be swapped this way — for that you
+need succession, which varve does not have (see the Limits above). So the
+escape hatch used here is one you get exactly once, by having promised little.
+
+**What is fixed, and what is not.** The replacement key was generated offline
+and the maintainer holds it, so it can be moved and delegated — `pulseengine-layers`
+now has it, which was the whole point. It still has **no backup**. One copy, on
+one machine, is better than one copy nobody can read, and it is still not
+custody.
+
+A key with a single copy is not in custody. **Do not run a realm this way.** The
+ceremony above exists precisely so that your root is not held the way varve's
+provisional ones have been, and REQ-CEREMONY-001 is where varve fixes its own.
+
+The generalisable lesson is not "back up your keys", which everyone already
+believes. It is that **a root you cannot use is a root you have already partly
+lost** — and that the last useful act of a retiring root is signing something
+that says it is retiring, which you can only do while you can still use it.
 
 ## What changes at v1.0
 
