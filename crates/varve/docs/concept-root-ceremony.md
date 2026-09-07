@@ -223,6 +223,98 @@ That is why varve's qualified channel is not open. Do not read the fact that
 varve ships a root as evidence that the ceremony problem is solved — it is the
 same problem, deferred to the same requirement.
 
+### This already happened here — read it before copying the pattern
+
+Everything above prescribes paper backup in two locations, split custody over
+the seed, an access log, and an annual read test. varve's first provisional
+rolling root had **none of them**, and the bill arrived.
+
+It was generated straight into CI, and its secret half existed in exactly one
+place: a write-only GitHub Actions secret in the varve repository. Nobody could
+read it back — not the maintainers, not through the API, by design of the
+secret store. That was written down as a risk in varve#110 on 2026-08-16. Three
+weeks later, on 2026-09-07, it stopped being a risk and became an outage: a
+second repository (`pulseengine-layers`) needed the same key in order to
+deposit, and **there was no way to give it one.** The key could not be copied,
+moved, or delegated, because it could not be read.
+
+The consequences are worth stating flatly, because "provisional" reads far
+milder than what this was:
+
+* **It could not be moved.** A second repository could not be given the key,
+  because the key could not be read out of the first. That is why a realm's
+  *contents* live in their own repository while the *signing step* stays where
+  the secret is (`varve docs deploy`) — an architecture partly shaped by a
+  limitation, not only by a principle.
+* **It could not be recovered.** Had that secret been deleted, or the
+  repository lost, the `pulseengine` rolling line could never have been signed
+  again. Every consumer pinned to it would have stayed frozen on the layer they
+  had, with no in-band way to be told why — there is no revocation channel to
+  tell them on.
+* **It must not be extracted.** With write access to a repository it is
+  technically possible to print a secret into a workflow log in pieces. Doing
+  that would have exposed the root permanently and created a reusable
+  exfiltration path, in order to save a rotation that was coming anyway. The
+  inability to read the secret back is a property worth keeping, not an
+  obstacle to route around.
+
+**How it was resolved, and why that is not a general remedy.** The root was
+ROTATED, in v0.32.1: a new key generated offline, `varve-realms.toml` updated,
+every layer signed by the old root left unverifiable against the new one. That
+was available only because this root was declared PROVISIONAL from the start.
+A root you have told people is stable cannot be swapped this way — for that you
+need succession, which varve does not have (see the Limits above). So the
+escape hatch used here is one you get exactly once, by having promised little.
+
+**What is fixed, and what is not.** The replacement key was generated offline
+and the maintainer holds it, so it can be moved and delegated — `pulseengine-layers`
+now has it, which was the whole point. It still has **no backup**. One copy, on
+one machine, is better than one copy nobody can read, and it is still not
+custody.
+
+A key with a single copy is not in custody. **Do not run a realm this way.** The
+ceremony above exists precisely so that your root is not held the way varve's
+provisional ones have been, and REQ-CEREMONY-001 is where varve fixes its own.
+
+The generalisable lesson is not "back up your keys", which everyone already
+believes. It is that **a root you cannot use is a root you have already partly
+lost** — and that the last useful act of a retiring root is signing something
+that says it is retiring, which you can only do while you can still use it.
+
+## What changes at v1.0
+
+REQ-CEREMONY-001 is not a polish item; it is the requirement that makes a root
+holdable. It defines custody, rotation, revocation and expiry, dual-signs one
+release so an old root verifies a new one, and adds a transparency mechanism
+that makes key compromise detectable rather than merely regrettable. The
+qualified channel opens then, and not before.
+
+**Whether v1.0 keeps a file-based key at all is an open decision, not a settled
+one.** Keyless signing — an ephemeral Sigstore identity per release, with no
+long-lived secret in CI — was proposed (DD-025), rejected (DD-026), and is
+being reconsidered, because the reason it was rejected has partly expired and
+the reason to want it has grown:
+
+* The rejection rested in part on the offline verifier being a stub that failed
+  open. **That is no longer true**: as of `wsc` 0.11.0 the air-gapped verifier
+  performs real certificate-chain, Rekor SET, signature, revocation and
+  identity checks offline, and documents the two things it deliberately does
+  not verify (the Rekor Merkle inclusion proof, and SCT/CT logs).
+* The rejection's structural half **still stands**: the offline trust bundle is
+  itself signed with a long-lived key that every consumer must pin. Keyless
+  *relocates* the long-lived secret; it does not abolish it.
+* But relocation is close to the whole point. Today's long-lived key sits in
+  CI, is used on every deposit, and — as above — cannot be backed up or moved.
+  A bundle-signing key is used rarely, changes rarely, and can plausibly be
+  held the way this topic actually prescribes: offline, split, on paper, with a
+  read test. **The question for v1.0 is not "keys or no keys", it is which key
+  has to be online.**
+
+Do not plan around either outcome yet. Plan around the fact that the trust root
+you pin today is provisional, and that the transition will be announced through
+the channel that bootstrapped you, because varve has no in-band way to announce
+it.
+
 ## Where to go next
 
 * `varve docs signing-keys` — the key format and what varve checks
