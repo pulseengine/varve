@@ -364,12 +364,12 @@ trust-root = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             r#"
 [realm.declaring]
 registry     = "oci://example.test/layers"
-trust-root   = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
+trust-root   = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"
 signed-index = true
 
 [realm.silent]
 registry   = "oci://example.test/other"
-trust-root = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
+trust-root = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"
 "#,
         );
         assert!(
@@ -402,7 +402,7 @@ mod mirror_tests {
     fn a_realm_naming_one_registry_still_works_and_has_one_source() {
         let r = parse(
             "[realm.solo]\nregistry = \"oci://ghcr.io/o/r\"\n\
-             trust-root = \"4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973\"\n",
+             trust-root = \"7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0\"\n",
             "solo",
         );
         assert_eq!(r.registry, "oci://ghcr.io/o/r");
@@ -417,7 +417,7 @@ mod mirror_tests {
         let r = parse(
             "[realm.many]\nregistry = \"oci://primary\"\n\
              mirrors = [\"oci://second\", \"oci://third\"]\n\
-             trust-root = \"4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973\"\n",
+             trust-root = \"7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0\"\n",
             "many",
         );
         assert_eq!(
@@ -445,7 +445,7 @@ mod mirror_tests {
             dir.join(REALMS_FILE),
             "[realm.x]\nregistry = \"oci://a\"\n\
              mirrors = [{ registry = \"oci://b\", trust-root = \"dead\" }]\n\
-             trust-root = \"4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973\"\n",
+             trust-root = \"7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0\"\n",
         )
         .expect("write");
         assert!(

@@ -340,6 +340,7 @@ mod tests {
     fn resolved(kind: PayloadKind, asset: &str, platform: Option<&str>) -> Resolved {
         Resolved {
             plan: crate::plan::PayloadPlan {
+                upstream_sums: None,
                 contains: None,
                 name: "rivet".into(),
                 repo: "o/r".into(),
@@ -799,6 +800,7 @@ mod tests {
     #[test]
     fn planned_payloads_that_had_no_build_are_reported_by_name() {
         let p = |name: &str, plat: &str, asset: &str| crate::plan::PayloadPlan {
+            upstream_sums: None,
             contains: None,
             name: name.into(),
             repo: "o/r".into(),

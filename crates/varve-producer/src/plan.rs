@@ -54,6 +54,10 @@ pub struct PayloadPlan {
     /// A path that must exist inside an `sdk` payload once unpacked
     /// (REQ-SDKDEPOSIT-001 clause 5). `None` for every other kind.
     pub contains: Option<String>,
+    /// The asset carrying this release's unsigned digest list, if it publishes
+    /// one (REQ-UPSTREAMSUMS-001). A property of the RELEASE, so every payload
+    /// from one release carries the same value.
+    pub upstream_sums: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +153,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             kind,
             unverified_reason: t.unverified_reason.clone(),
             contains: t.contains.clone(),
+            upstream_sums: t.upstream_sums.clone(),
         });
         return Ok(out);
     }
@@ -169,6 +174,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             kind,
             unverified_reason: t.unverified_reason.clone(),
             contains: t.contains.clone(),
+            upstream_sums: t.upstream_sums.clone(),
         });
     }
     Ok(out)
@@ -188,6 +194,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             kind: PayloadKind::Vsix,
             unverified_reason: None,
             contains: None,
+            upstream_sums: None,
         });
         return Ok(out);
     }
@@ -201,6 +208,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             kind: PayloadKind::Vsix,
             unverified_reason: None,
             contains: None,
+            upstream_sums: None,
         });
     }
     Ok(out)

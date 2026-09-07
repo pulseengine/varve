@@ -24,6 +24,18 @@ pub const DEFAULT_PLATFORMS: &[&str] = &[
     "x86_64-unknown-linux-gnu",
 ];
 
+/// The same host, OS FIRST — zephyrproject-rtos/sdk-ng's convention
+/// (`toolchain_gnu_macos-aarch64_arm-zephyr-eabi.tar.xz`).
+///
+/// Derived by swapping [`upstream_platform_tag`]'s halves rather than by a
+/// second table: two tables would be two places to add a platform, and the one
+/// nobody remembers to update is the one that silently omits a payload.
+pub fn host_platform_tag(triple: &str) -> Option<String> {
+    let tag = upstream_platform_tag(triple)?;
+    let (arch, os) = tag.split_once('-')?;
+    Some(format!("{os}-{arch}"))
+}
+
 /// The short platform tags used OUTSIDE this organisation.
 ///
 /// bytecodealliance names its assets `<tool>-<version>-aarch64-macos.tar.gz`,
@@ -66,8 +78,19 @@ pub enum Placeholder {
     BareVersion,
     /// `%T` — the Rust target triple.
     Triple,
-    /// `%U` — the short upstream platform tag.
+    /// `%U` — the short upstream platform tag, ARCH FIRST: `aarch64-macos`.
+    /// bytecodealliance spells its assets this way.
     UpstreamTag,
+    /// `%H` — the same host, OS FIRST: `macos-aarch64`.
+    ///
+    /// Not a stylistic variant of `%U`. There is no single "upstream
+    /// convention": bytecodealliance writes `aarch64-macos` and
+    /// zephyrproject-rtos/sdk-ng writes `macos-aarch64`, and a template using
+    /// the wrong one matches nothing. varve had only the first, which is why
+    /// the first attempt to deposit a Zephyr SDK asked for
+    /// `toolchain_gnu_aarch64-macos_arm-zephyr-eabi.tar.xz` against a release
+    /// that publishes `toolchain_gnu_macos-aarch64_arm-zephyr-eabi.tar.xz`.
+    HostTag,
     /// `%P` — the VS Code platform tag.
     VsCodePlatform,
     /// `%R` — the release tag exactly as the manifest writes it, leading `v`
@@ -84,6 +107,7 @@ impl Placeholder {
             Placeholder::BareVersion => "%V",
             Placeholder::Triple => "%T",
             Placeholder::UpstreamTag => "%U",
+            Placeholder::HostTag => "%H",
             Placeholder::VsCodePlatform => "%P",
             Placeholder::ReleaseTag => "%R",
         }
@@ -93,6 +117,7 @@ impl Placeholder {
         Placeholder::BareVersion,
         Placeholder::Triple,
         Placeholder::UpstreamTag,
+        Placeholder::HostTag,
         Placeholder::VsCodePlatform,
         Placeholder::ReleaseTag,
     ];
@@ -206,6 +231,13 @@ pub fn expand(
                 })?;
             out = out.replace(Placeholder::UpstreamTag.token(), tag);
         }
+        if out.contains(Placeholder::HostTag.token()) {
+            let tag = host_platform_tag(triple).ok_or_else(|| TemplateError::NoUpstreamTag {
+                template: template.to_string(),
+                triple: triple.to_string(),
+            })?;
+            out = out.replace(Placeholder::HostTag.token(), &tag);
+        }
         if out.contains(Placeholder::VsCodePlatform.token()) {
             // Derived from the triple unless the caller named one explicitly:
             // a per-platform extension is selected over the SAME four machines
@@ -250,8 +282,15 @@ pub fn expand(
 /// expanding it per platform would download the same file four times and
 /// deposit four identical payloads.
 pub fn is_per_platform(template: &str) -> bool {
+    // Every placeholder that names a MACHINE must be listed here. A
+    // per-platform token missing from this list does not fail loudly: the
+    // template is treated as one portable asset, expanded once with no
+    // platform, and the payload is reported absent — which is how adding %H
+    // without touching this function made a correct Zephyr template match
+    // nothing.
     template.contains(Placeholder::Triple.token())
         || template.contains(Placeholder::UpstreamTag.token())
+        || template.contains(Placeholder::HostTag.token())
         || template.contains(Placeholder::VsCodePlatform.token())
 }
 

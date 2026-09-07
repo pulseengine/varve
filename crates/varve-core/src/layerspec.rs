@@ -115,6 +115,15 @@ pub struct ManifestTool {
     /// layer.toml could not, so porting a realm to layer.toml LOST the payload.
     #[serde(rename = "release", default)]
     pub release: Option<String>,
+    /// The asset carrying this release's UNSIGNED digest list, when it
+    /// publishes one (REQ-UPSTREAMSUMS-001).
+    ///
+    /// Upstreams do not agree on a name — zephyrproject-rtos/sdk-ng calls it
+    /// `sha256.sum` — so the realm states it rather than varve guessing.
+    /// Guessing would be the worse failure: a file that is not the digest
+    /// manifest, parsed as one, vouches for nothing while looking like it does.
+    #[serde(rename = "upstream-sums", default)]
+    pub upstream_sums: Option<String>,
     /// A path that must exist inside a `sdk` payload once unpacked
     /// (REQ-SDKDEPOSIT-001 clause 5).
     ///
