@@ -64,7 +64,7 @@ registry   = "oci://ghcr.io/pulseengine/varve/layers"
 # Optional: additional sources, tried IN ORDER after `registry` when it cannot
 # be reached (REQ-MIRROR-001).
 mirrors    = ["oci://registry.example/pulseengine/layers"]
-trust-root = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
+trust-root = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"
 ```
 
 `mirrors` is optional and defaults to empty, so every existing realms file

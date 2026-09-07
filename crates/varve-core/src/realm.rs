@@ -364,12 +364,12 @@ trust-root = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             r#"
 [realm.declaring]
 registry     = "oci://example.test/layers"
-trust-root   = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
+trust-root   = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"
 signed-index = true
 
 [realm.silent]
 registry   = "oci://example.test/other"
-trust-root = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
+trust-root = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"
 "#,
         );
         assert!(
@@ -402,7 +402,7 @@ mod mirror_tests {
     fn a_realm_naming_one_registry_still_works_and_has_one_source() {
         let r = parse(
             "[realm.solo]\nregistry = \"oci://ghcr.io/o/r\"\n\
-             trust-root = \"4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973\"\n",
+             trust-root = \"7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0\"\n",
             "solo",
         );
         assert_eq!(r.registry, "oci://ghcr.io/o/r");
@@ -417,7 +417,7 @@ mod mirror_tests {
         let r = parse(
             "[realm.many]\nregistry = \"oci://primary\"\n\
              mirrors = [\"oci://second\", \"oci://third\"]\n\
-             trust-root = \"4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973\"\n",
+             trust-root = \"7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0\"\n",
             "many",
         );
         assert_eq!(
@@ -445,12 +445,73 @@ mod mirror_tests {
             dir.join(REALMS_FILE),
             "[realm.x]\nregistry = \"oci://a\"\n\
              mirrors = [{ registry = \"oci://b\", trust-root = \"dead\" }]\n\
-             trust-root = \"4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973\"\n",
+             trust-root = \"7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0\"\n",
         )
         .expect("write");
         assert!(
             resolve_realm(&dir, "x").is_err(),
             "a mirror must not be able to declare its own trust root"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shipped_realm_agrees_with_shipped_key {
+    use super::*;
+
+    /// The repository ships the rolling root TWICE: as key material in
+    /// `trust-roots/rolling.pub` (uploaded as a release asset, and used by
+    /// `deposit-layer.yml` as `VARVE_TRUST_ROOT`) and as a fingerprint in
+    /// `varve-realms.toml` (downloaded by consumers, and authoritative over
+    /// the environment). Nothing compared them.
+    ///
+    /// A rotation touches both, and the half-done rotation is silent in a
+    /// specific and bad way: CI deposits a layer signed against the key file
+    /// and it verifies, because the same file is used on both sides — while
+    /// every consumer resolving the realm rejects that layer with "No valid
+    /// signatures". The break appears downstream, in someone else's repo,
+    /// after the release ships.
+    ///
+    /// A sibling test in `varve`'s docs module pins the DOCUMENTED key to
+    /// `rolling.pub`. This pins the SHIPPED realm to it. Together the three
+    /// copies cannot drift apart.
+    // rivet: verifies REQ-ROTATE-001
+    #[test]
+    fn the_committed_realms_file_names_the_committed_key() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crates/varve-core is two levels below the repo root")
+            .to_path_buf();
+
+        let key_file = repo_root.join("trust-roots/rolling.pub");
+        let shipped_key = std::fs::read_to_string(&key_file)
+            .expect("trust-roots/rolling.pub is committed")
+            .trim()
+            .to_ascii_lowercase();
+        assert_eq!(
+            shipped_key.len(),
+            64,
+            "{} must hold one 64-hex ed25519 public key",
+            key_file.display()
+        );
+
+        // The real parser on the real file: whatever a consumer would load.
+        let realm = resolve_realm(&repo_root, "pulseengine")
+            .expect("this repository commits varve-realms.toml with realm 'pulseengine'");
+
+        let named_root = realm
+            .trust_root
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+
+        assert_eq!(
+            named_root, shipped_key,
+            "varve-realms.toml names a rolling root that is NOT the key in \
+             trust-roots/rolling.pub. A layer signed with the key file will be \
+             REJECTED by every consumer that resolves the realm. Rotate both, \
+             or neither."
         );
     }
 }
