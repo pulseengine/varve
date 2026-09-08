@@ -332,6 +332,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "self-verify — verify a release file",
         "cmd-self-verify.md"
     ),
+    topic!(
+        "consumer-api",
+        "consumer-api — asking varve from Rust instead of from a shell",
+        "concept-consumer-api.md"
+    ),
     topic!("docs", "docs — this documentation", "cmd-docs.md"),
     Topic {
         slug: "inspect",

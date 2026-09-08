@@ -26,6 +26,7 @@ pub mod attest;
 pub mod attestcarry;
 pub mod bazel;
 pub mod compose;
+pub mod consumer;
 pub mod crateexport;
 pub mod deposit;
 pub mod discover;

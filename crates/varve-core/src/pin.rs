@@ -451,7 +451,12 @@ impl Pin {
             path: origin.to_string(),
             source: Box::new(source),
         })?;
-        if raw.manifest_version != 1 {
+        // The constant, not a literal: `consumer::PIN_MANIFEST_VERSION` is
+        // published so a consumer can record what it understands as a fact
+        // (REQ-CONSUMERAPI-001 clause 5). A second copy of the number here
+        // would let the published value drift from the enforced one, which is
+        // worse than not publishing it at all.
+        if raw.manifest_version != crate::consumer::PIN_MANIFEST_VERSION {
             return Err(PinError::UnsupportedManifestVersion {
                 path: origin.to_string(),
                 found: raw.manifest_version,
