@@ -295,7 +295,10 @@ pub enum PinError {
         #[source]
         source: Box<toml::de::Error>,
     },
-    #[error("{path}: manifest-version {found} is not supported (this varve understands version 1)")]
+    #[error(
+        "{path}: manifest-version {found} is not supported (this varve understands version {})",
+        crate::consumer::PIN_MANIFEST_VERSION
+    )]
     UnsupportedManifestVersion { path: String, found: i64 },
     // Display carries only the location; the cause prints once via the
     // #[source] chain (varve#7 — the anyhow alternate formatter was
@@ -1576,5 +1579,43 @@ path   = "before-shims"
             .collect();
         assert_eq!(no_shims.len(), 2);
         assert!(!no_shims.iter().any(|l| l.contains(".varve/env")));
+    }
+}
+
+#[cfg(test)]
+mod version_message_tests {
+    use super::*;
+
+    /// The refusal must name the version this build actually understands.
+    ///
+    /// The check reads `consumer::PIN_MANIFEST_VERSION`; the message used to
+    /// hardcode "version 1" beside it. A clean-room review set the constant to
+    /// 7 and got "manifest-version 1 is not supported (this varve understands
+    /// version 1)" — a self-contradictory diagnostic, in the one place a
+    /// consumer is being told what this build supports.
+    // rivet: verifies REQ-CONSUMERAPI-001
+    #[test]
+    fn the_unsupported_version_error_names_the_version_this_build_enforces() {
+        let newer = format!(
+            "manifest-version = {}\n[toolchain]\nchannel = \"rolling\"\nlayer = \"2026.09.1\"\n",
+            crate::consumer::PIN_MANIFEST_VERSION + 1
+        );
+        let msg = Pin::parse(&newer, "varve.toml")
+            .expect_err("a newer pin must be refused")
+            .to_string();
+        assert!(
+            msg.contains(&format!(
+                "understands version {}",
+                crate::consumer::PIN_MANIFEST_VERSION
+            )),
+            "the message must name the enforced constant, got: {msg}"
+        );
+        assert!(
+            msg.contains(&format!(
+                "manifest-version {}",
+                crate::consumer::PIN_MANIFEST_VERSION + 1
+            )),
+            "and the version it refused, got: {msg}"
+        );
     }
 }

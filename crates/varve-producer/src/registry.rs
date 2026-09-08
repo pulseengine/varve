@@ -105,8 +105,33 @@ pub fn blob_fetch_argv(repo: &str, digest: &str, out: &std::path::Path) -> Vec<S
         "fetch".into(),
         "--output".into(),
         out.display().to_string(),
-        format!("{repo}@{digest}"),
+        format!("{repo}@{}", oci_digest(digest)),
     ]
+}
+
+/// An OCI reference digest: `sha256:<hex>`, whether or not the caller already
+/// spelled the algorithm.
+///
+/// varve's proofs carry BARE lowercase hex — `Sums` validates with `is_hex64`
+/// and REFUSES a `sha256:`-prefixed line — while an OCI reference requires the
+/// algorithm. Passing the bare form to oras fails at REFERENCE PARSING, before
+/// any network call:
+///
+/// ```text
+/// invalid reference: invalid digest "2d711642…": invalid checksum digest format
+/// ```
+///
+/// which `fetch_blob` maps to `None`, which the orchestrator maps to a
+/// fallback — so carry-forward silently degrades to a full upstream download
+/// and blames the registry for it. Found by clean-room verification, after the
+/// unit tests all passed: every one supplied a fake keyed on bare hex, so the
+/// fakes agreed with the caller and neither agreed with oras.
+fn oci_digest(digest: &str) -> String {
+    if digest.contains(':') {
+        digest.to_string()
+    } else {
+        format!("sha256:{digest}")
+    }
 }
 
 /// Fetch a blob by digest, or `None` if it cannot be retrieved.
@@ -210,6 +235,62 @@ pub fn lookup<R: CommandRunner>(
 
 #[cfg(test)]
 mod tests {
+    /// The reference oras is handed must carry the ALGORITHM. varve's proofs
+    /// carry bare hex, oras requires `sha256:<hex>`, and the mismatch fails at
+    /// reference parsing — before any network call — so it looks exactly like
+    /// a blob that is not there.
+    ///
+    /// This function had no test at all, which is why the gate missed it: a
+    /// mutant can only be killed by a test, and being listed in the mutation
+    /// shard is not the same as being covered.
+    // rivet: verifies REQ-REUSEBLOB-001
+    #[test]
+    fn a_blob_reference_names_the_digest_algorithm() {
+        let out = std::path::Path::new("/tmp/x");
+        let bare = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881";
+        let argv = super::blob_fetch_argv("ghcr.io/org/layers", bare, out);
+        let reference = argv.last().expect("a reference");
+        assert_eq!(
+            reference,
+            &format!("ghcr.io/org/layers@sha256:{bare}"),
+            "a bare digest is rejected by oras as `invalid checksum digest format`, \
+             which fetch_blob reports as None and the orchestrator reports as the \
+             REGISTRY's fault"
+        );
+        assert!(
+            reference.contains("@sha256:"),
+            "the algorithm must be present: {reference}"
+        );
+    }
+
+    /// Idempotent: a digest that already names its algorithm is not given a
+    /// second one. `sha256:sha256:...` is as invalid as the bare form.
+    // rivet: verifies REQ-REUSEBLOB-001
+    #[test]
+    fn an_already_qualified_digest_is_not_prefixed_twice() {
+        let out = std::path::Path::new("/tmp/x");
+        let prefixed = "sha256:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881";
+        let argv = super::blob_fetch_argv("ghcr.io/org/layers", prefixed, out);
+        let reference = argv.last().unwrap();
+        assert_eq!(reference, &format!("ghcr.io/org/layers@{prefixed}"));
+        assert_eq!(reference.matches("sha256:").count(), 1, "{reference}");
+    }
+
+    /// The argv shape itself: a blob is a whole payload archive, so it goes to
+    /// a FILE. Routing tens of megabytes of binary through captured stdout is
+    /// the truncation-shaped bug this pipeline has been bitten by before.
+    // rivet: verifies REQ-REUSEBLOB-001
+    #[test]
+    fn a_blob_is_fetched_to_a_file_not_to_stdout() {
+        let out = std::path::Path::new("/tmp/reused/abc");
+        let argv = super::blob_fetch_argv("r", "aa", out);
+        assert_eq!(argv[0], "blob");
+        assert_eq!(argv[1], "fetch");
+        assert_eq!(argv[2], "--output");
+        assert_eq!(argv[3], "/tmp/reused/abc");
+        assert_ne!(argv[3], "-", "not stdout");
+    }
+
     use super::*;
     use crate::gh::RunOutput;
     use std::cell::RefCell;

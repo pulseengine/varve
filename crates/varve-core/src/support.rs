@@ -211,9 +211,14 @@ mod tests {
         assert_eq!(horizon("2026-09-03", "rolling").unwrap(), "2026-10-03");
     }
 
-    /// Adding six months to the 31st must not produce a date that does not
-    /// exist. Ending a day early is correct; an unparseable horizon is not —
-    /// and it would sign perfectly well, because nothing used to parse it.
+    /// Adding a month to the 31st must not produce a date that does not exist.
+    /// Ending a day early is correct; an unparseable horizon is not — and it
+    /// would sign perfectly well, because nothing used to parse it.
+    ///
+    /// (Said "six months" until the rolling policy became one. The assertions
+    /// below were always month-arithmetic; only the sentence describing them
+    /// was stale — which is the drift REQ-SUPPORTUNTIL-001 corrected
+    /// everywhere else in this file.)
     // rivet: verifies REQ-SUPPORTUNTIL-001
     #[test]
     fn a_horizon_that_would_fall_on_a_day_that_does_not_exist_is_clamped() {

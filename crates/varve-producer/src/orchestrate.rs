@@ -861,13 +861,22 @@ mod tests {
         prev
     }
 
-    /// Clause 2. The blob is fetched by the digest the CURRENT proof states,
-    /// never the one the previous layer recorded. If the old record chose,
-    /// a republished upstream would be carried forward unnoticed — the exact
-    /// substitution carry-forward exists to catch.
+    /// The registry is asked for the freshly verified digest, and asked ONCE.
+    ///
+    /// Named honestly after a clean-room review pointed out that the earlier
+    /// name — "…the digest the CURRENT proof states, never the previous
+    /// record" — claimed more than this test can show. `decide` only returns
+    /// Reuse after `digest_eq(prev.sha256, upstream)` succeeds, so at this
+    /// call site the two are equal BY CONSTRUCTION and no fixture can tell
+    /// them apart. Clause 2's real protection is `decide`'s
+    /// `UpstreamRepublished` refusal, which belongs to REQ-CARRYFORWARD-001
+    /// and is tested there.
+    ///
+    /// What this DOES establish is that the registry is consulted at all, with
+    /// the digest the proof produced — which is what was inert before.
     // rivet: verifies REQ-REUSEBLOB-001
     #[test]
-    fn the_registry_is_asked_for_the_digest_the_current_proof_states() {
+    fn the_registry_is_asked_once_for_the_freshly_verified_digest() {
         let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)]);
         let asked = std::cell::RefCell::new(Vec::<String>::new());
         let from_registry = |d: &str| {
