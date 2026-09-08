@@ -68,7 +68,7 @@ version = "v0.33.0"
 [realm]
 name     = "pulseengine"
 channel  = "rolling"
-registry = "oci://ghcr.io/pulseengine/varve/layers"
+registry = "oci://ghcr.io/pulseengine/layers"
 
 [[tool]]
 # `name` is the REPOSITORY basename; `binary` is what the payload is called in

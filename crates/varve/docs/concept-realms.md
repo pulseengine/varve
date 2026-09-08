@@ -8,7 +8,7 @@ layer signed by one realm's root will not verify under another. The canonical
 
 ```toml
 [realm.pulseengine]
-registry        = "oci://ghcr.io/pulseengine/varve/layers"
+registry        = "oci://ghcr.io/pulseengine/layers"
 trust-root      = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"
 # trust-root-file = "./roots/pe.pub"   # or a key file, relative to this one
 ```
@@ -28,7 +28,7 @@ how that looks:
 
 ```toml
 [realm.pulseengine]
-registry   = "oci://ghcr.io/pulseengine/varve/layers"
+registry   = "oci://ghcr.io/pulseengine/layers"
 trust-root = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"
 
 [realm.yourorg]

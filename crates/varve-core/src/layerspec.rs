@@ -677,7 +677,7 @@ version = "v0.28.0"
 [realm]
 name    = "pulseengine"
 channel = "rolling"
-registry = "oci://ghcr.io/pulseengine/varve/layers"
+registry = "oci://ghcr.io/pulseengine/layers"
 
 [[tool]]
 name    = "rivet"

@@ -700,7 +700,7 @@ mod tests {
 
     const TWO_REALMS: &str = r#"
 [realm.pulseengine]
-registry = "oci://ghcr.io/pulseengine/varve/layers"
+registry = "oci://ghcr.io/pulseengine/layers"
 trust-root = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 [realm.acme]
