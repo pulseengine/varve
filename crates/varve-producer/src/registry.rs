@@ -93,6 +93,42 @@ pub fn fetch_descriptor_argv(repo: &str, tag: &str) -> Vec<String> {
 }
 
 /// `oras repo tags <repo>` — the authoritative listing.
+/// `oras blob fetch --output <file> <repo>@<digest>` — retrieve a blob the
+/// destination registry already holds (REQ-REUSEBLOB-001 clause 1).
+///
+/// To a FILE, not to stdout. A blob is a whole payload archive, and routing
+/// tens of megabytes of binary through a captured stdout invites exactly the
+/// truncation-shaped bug this pipeline has been bitten by before.
+pub fn blob_fetch_argv(repo: &str, digest: &str, out: &std::path::Path) -> Vec<String> {
+    vec![
+        "blob".into(),
+        "fetch".into(),
+        "--output".into(),
+        out.display().to_string(),
+        format!("{repo}@{digest}"),
+    ]
+}
+
+/// Fetch a blob by digest, or `None` if it cannot be retrieved.
+///
+/// Every failure is `None`, deliberately: absent, unreachable, oras missing,
+/// truncated. The caller's only correct response to any of them is the same —
+/// fall back to upstream (clause 4) — and a Result here would invite a caller
+/// to abort a deposit because a cache was pruned. The bytes are NOT trusted:
+/// the caller re-hashes them against the digest it asked for (clause 3).
+pub fn fetch_blob<R: CommandRunner>(
+    runner: &R,
+    repo: &str,
+    digest: &str,
+    out: &std::path::Path,
+) -> Option<Vec<u8>> {
+    let d = runner.run("oras", &blob_fetch_argv(repo, digest, out), &[]);
+    if !d.ok() {
+        return None;
+    }
+    std::fs::read(out).ok()
+}
+
 pub fn tags_argv(repo: &str) -> Vec<String> {
     vec!["repo".into(), "tags".into(), repo.into()]
 }

@@ -304,6 +304,10 @@ pub fn run<S: Source>(
     previous: &BTreeMap<String, PreviousEntry>,
     optins: &BTreeMap<String, String>,
     blob_present: &dyn Fn(&str) -> bool,
+    // Fetch a blob the DESTINATION registry already holds, by digest
+    // (REQ-REUSEBLOB-001 clause 1). `None` means it could not be retrieved,
+    // which is a fallback and never a failure.
+    reuse_blob: &dyn Fn(&str) -> Option<Vec<u8>>,
 ) -> Result<Vec<Resolved>, RunError> {
     let mut out: Vec<Option<Resolved>> = vec![None; plans.len()];
     let mut seen = ingest::VerifiedRepos::new();
@@ -359,10 +363,39 @@ pub fn run<S: Source>(
                 )
                 .map_err(RunError::Carry)?
             };
+            let mut decision = decision;
             let (digest, bytes) = match &decision {
-                // Nothing to download: the proof already matched what the
-                // registry holds.
-                Decision::Reuse { .. } => (upstream.clone(), None),
+                // Carried forward: the bytes come from the DESTINATION
+                // registry rather than upstream — one host instead of four
+                // CDNs, no upstream rate limits, and no re-verification of an
+                // unchanged release. Clause 4 of REQ-CARRYFORWARD-001 already
+                // requires the blob to be there before reuse is permitted, so
+                // the check that makes reuse safe and the source that makes it
+                // possible are the same check.
+                //
+                // Fetched by `upstream` — the digest the CURRENT proof states,
+                // never the one the previous layer recorded (clause 2).
+                // Otherwise a republished upstream is carried forward
+                // unnoticed, which is the substitution carry-forward exists to
+                // catch.
+                Decision::Reuse { .. } => match reuse_blob(&upstream) {
+                    // The destination is a source like any other and gets no
+                    // more trust for being ours (clause 3).
+                    Some(b) if sha256_hex(&b) == upstream => (upstream.clone(), Some(b)),
+                    // Absent, unreachable, or serving something else: fall
+                    // back to upstream rather than abort (clause 4). A
+                    // presence check can race a garbage collection, and a
+                    // deposit that failed because a cache was pruned would be
+                    // worse than a slower one.
+                    _ => {
+                        decision = Decision::Fetch {
+                            why: crate::carryforward::FetchReason::ReuseUnusable,
+                        };
+                        let b = src.asset_bytes(&repo, &version, &p.asset)?;
+                        let d = admit(&v, &repo, &p.asset, &b)?;
+                        (d, Some(b))
+                    }
+                },
                 Decision::Fetch { .. } => {
                     let b = src.asset_bytes(&repo, &version, &p.asset)?;
                     let d = admit(&v, &repo, &p.asset, &b)?;
@@ -413,6 +446,12 @@ mod tests {
 
     const A: &[u8] = b"the real bytes";
     const B: &[u8] = b"different bytes";
+
+    /// No registry to reuse from — what every test that predates
+    /// REQ-REUSEBLOB-001 was written against.
+    fn no_reuse(_: &str) -> Option<Vec<u8>> {
+        None
+    }
 
     fn plan(name: &str, repo: &str, version: &str, asset: &str) -> PayloadPlan {
         PayloadPlan {
@@ -526,6 +565,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &never,
+            &no_reuse,
         )
         .expect_err("must refuse");
         match &e {
@@ -559,6 +599,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &never,
+            &no_reuse,
         )
         .expect("a missing platform is routine");
         assert_eq!(got.len(), 1);
@@ -582,6 +623,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &never,
+            &no_reuse,
         )
         .expect_err("a published-but-unproven asset must stop the run");
         assert!(
@@ -615,6 +657,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &never,
+            &no_reuse,
         )
         .expect_err("must refuse");
         match &e {
@@ -654,6 +697,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &never,
+            &no_reuse,
         )
         .expect_err("must refuse");
         assert!(
@@ -675,6 +719,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &never,
+            &no_reuse,
         )
         .expect("admits");
         assert_eq!(got[0].digest, sha256_hex(A));
@@ -699,6 +744,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &never,
+            &no_reuse,
         )
         .expect("runs");
         let log = f.log();
@@ -732,6 +778,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &never,
+            &no_reuse,
         )
         .expect("runs");
         let log = f.log();
@@ -763,6 +810,9 @@ mod tests {
             },
         );
         let present = |d: &str| d == sha256_hex(A);
+        // The destination registry holds it, so the bytes come from there and
+        // NOT from upstream (REQ-REUSEBLOB-001 clause 1).
+        let from_registry = |d: &str| (d == sha256_hex(A)).then(|| A.to_vec());
         let got = run(
             &f,
             &Forge::github_com(),
@@ -770,6 +820,7 @@ mod tests {
             &prev,
             &BTreeMap::new(),
             &present,
+            &from_registry,
         )
         .expect("runs");
         assert!(
@@ -777,12 +828,144 @@ mod tests {
             "{:?}",
             got[0].decision
         );
-        assert!(got[0].bytes.is_none());
         assert_eq!(got[0].digest, sha256_hex(A));
+        assert_eq!(
+            got[0].bytes.as_deref(),
+            Some(A),
+            "the layout must be COMPLETE — a carried-forward payload still has \
+             its bytes, or the artifact of record is not one"
+        );
         // Still verified: the proof is what told us it was unchanged.
         let log = f.log();
         assert!(log.iter().any(|c| c.starts_with("sums ")), "{log:?}");
-        assert!(!log.iter().any(|c| c.starts_with("fetch ")), "{log:?}");
+        assert!(
+            !log.iter().any(|c| c.starts_with("fetch ")),
+            "no UPSTREAM fetch: that is the whole saving — one host instead of \
+             four CDNs, and no re-verification of an unchanged release. {log:?}"
+        );
+    }
+
+    /// Helper: a previous entry that agrees with the current release, so
+    /// carry-forward resolves to Reuse.
+    fn prev_matching(asset: &str, bytes: &[u8]) -> BTreeMap<String, PreviousEntry> {
+        let mut prev = BTreeMap::new();
+        prev.insert(
+            payload_key_for_test("t", Some("x86_64-unknown-linux-gnu")),
+            PreviousEntry {
+                repo: "o/r".into(),
+                release: "v1".into(),
+                asset: asset.to_string(),
+                sha256: sha256_hex(bytes),
+            },
+        );
+        prev
+    }
+
+    /// Clause 2. The blob is fetched by the digest the CURRENT proof states,
+    /// never the one the previous layer recorded. If the old record chose,
+    /// a republished upstream would be carried forward unnoticed — the exact
+    /// substitution carry-forward exists to catch.
+    // rivet: verifies REQ-REUSEBLOB-001
+    #[test]
+    fn the_registry_is_asked_for_the_digest_the_current_proof_states() {
+        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)]);
+        let asked = std::cell::RefCell::new(Vec::<String>::new());
+        let from_registry = |d: &str| {
+            asked.borrow_mut().push(d.to_string());
+            (d == sha256_hex(A)).then(|| A.to_vec())
+        };
+        let got = run(
+            &f,
+            &Forge::github_com(),
+            &[plan("t", "o/r", "v1", "a.tar.gz")],
+            &prev_matching("a.tar.gz", A),
+            &BTreeMap::new(),
+            &|_| true,
+            &from_registry,
+        )
+        .expect("runs");
+        assert!(matches!(got[0].decision, Decision::Reuse { .. }));
+        assert_eq!(
+            asked.borrow().as_slice(),
+            &[sha256_hex(A)],
+            "the fetch must name the freshly verified digest"
+        );
+    }
+
+    /// Clause 3. The destination is a source like any other and gets no more
+    /// trust for being ours. Bytes that do not hash to the digest they were
+    /// fetched by are DISCARDED — never staged — and the payload falls back to
+    /// upstream, so the layer is still correct.
+    // rivet: verifies REQ-REUSEBLOB-001
+    #[test]
+    fn a_registry_serving_the_wrong_bytes_is_refused_and_does_not_reach_the_layer() {
+        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)]);
+        // Present, reachable, and wrong.
+        let liar = |_: &str| Some(B.to_vec());
+        let got = run(
+            &f,
+            &Forge::github_com(),
+            &[plan("t", "o/r", "v1", "a.tar.gz")],
+            &prev_matching("a.tar.gz", A),
+            &BTreeMap::new(),
+            &|_| true,
+            &liar,
+        )
+        .expect("a lying registry must not abort the deposit");
+        assert!(
+            matches!(
+                got[0].decision,
+                Decision::Fetch {
+                    why: crate::carryforward::FetchReason::ReuseUnusable
+                }
+            ),
+            "{:?}",
+            got[0].decision
+        );
+        assert_eq!(
+            got[0].bytes.as_deref(),
+            Some(A),
+            "the layer must carry the UPSTREAM bytes, not what the registry served"
+        );
+        assert_eq!(got[0].digest, sha256_hex(A));
+    }
+
+    /// Clause 4. A presence check can race a garbage collection. A deposit
+    /// that failed because a cache was pruned would be worse than a slower
+    /// one, so absence falls back rather than aborting — and the resulting
+    /// payload is indistinguishable from one that was never carried forward
+    /// (clause 5).
+    // rivet: verifies REQ-REUSEBLOB-001
+    #[test]
+    fn a_blob_that_vanished_between_check_and_fetch_falls_back_instead_of_failing() {
+        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)]);
+        let got = run(
+            &f,
+            &Forge::github_com(),
+            &[plan("t", "o/r", "v1", "a.tar.gz")],
+            &prev_matching("a.tar.gz", A),
+            &BTreeMap::new(),
+            // Reported present, then gone by the time it is fetched.
+            &|_| true,
+            &no_reuse,
+        )
+        .expect("a pruned cache must not fail the deposit");
+        assert!(
+            matches!(
+                got[0].decision,
+                Decision::Fetch {
+                    why: crate::carryforward::FetchReason::ReuseUnusable
+                }
+            ),
+            "{:?}",
+            got[0].decision
+        );
+        assert_eq!(got[0].bytes.as_deref(), Some(A));
+        assert_eq!(
+            got[0].digest,
+            sha256_hex(A),
+            "same digest for the same content, whichever host served it"
+        );
     }
 
     /// The bug this prevents: four platforms of one tool, a previous-entry
@@ -804,6 +987,11 @@ mod tests {
             },
         );
         let present = |_: &str| true;
+        // The registry holds the linux bytes. Keyed BY DIGEST, so if the
+        // darwin payload were ever answered by the linux record it would ask
+        // for A's digest and this fixture would hand back A — which is exactly
+        // the substitution the assertions below must catch.
+        let from_registry = |d: &str| (d == sha256_hex(A)).then(|| A.to_vec());
         let mut linux = plan("t", "o/r", "v1", "linux.tar.gz");
         linux.platform = Some("x86_64-unknown-linux-gnu".into());
         let mut darwin = plan("t", "o/r", "v1", "darwin.tar.gz");
@@ -815,6 +1003,7 @@ mod tests {
             &prev,
             &BTreeMap::new(),
             &present,
+            &from_registry,
         )
         .expect("runs");
         // linux is carried forward; darwin has no history and must be fetched.
@@ -855,6 +1044,7 @@ mod tests {
             &BTreeMap::new(),
             &optins,
             &never,
+            &no_reuse,
         )
         .expect_err("must abort");
         assert!(
@@ -890,6 +1080,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &never,
+            &no_reuse,
         )
         .expect("runs");
         assert_eq!(
@@ -946,6 +1137,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &never,
+            &no_reuse,
         )
         .expect_err("must refuse");
         assert!(
