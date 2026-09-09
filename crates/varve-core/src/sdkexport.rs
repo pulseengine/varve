@@ -282,10 +282,12 @@ pub fn relocate_bytes(
         };
         // Capacity is the string PLUS its NUL padding: exactly the `p_filesz`
         // the script compares against.
-        let mut pad_end = end;
-        while pad_end < out.len() && out[pad_end] == 0 {
-            pad_end += 1;
-        }
+        // Counted, not accumulated: `pad_end += 1` neutralised by a mutation
+        // never grows, and the loop then runs forever — a hang rather than a
+        // wrong answer. `take_while` has no counter to neutralise, so the same
+        // mutation now produces an observable number instead of an infinite
+        // loop, and the capacity test can see it.
+        let pad_end = end + out[end..].iter().take_while(|b| **b == 0).count();
         let capacity = pad_end - start;
 
         // Replace every occurrence of the prefix WITHIN this one string.
