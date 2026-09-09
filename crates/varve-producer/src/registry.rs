@@ -276,6 +276,115 @@ mod tests {
         assert_eq!(reference.matches("sha256:").count(), 1, "{reference}");
     }
 
+    /// `fetch_blob` had FIVE surviving mutants — the whole function replaceable
+    /// by None, by an empty vec, by arbitrary bytes, and its success check
+    /// invertible — because the tests above only covered the argv BUILDER.
+    /// The clean-room review said `blob_fetch_argv` AND `fetch_blob` were
+    /// untested; the first fix covered one of the two.
+    ///
+    /// Returning `Some(vec![])` is the one that matters: the caller re-hashes
+    /// what it gets, so empty bytes are refused there — but only because that
+    /// check exists. A fetch that invents bytes must be caught here too.
+    struct FakeOras {
+        code: i32,
+        writes: Option<Vec<u8>>,
+    }
+
+    impl CommandRunner for FakeOras {
+        fn run(&self, program: &str, args: &[String], _e: &[(String, String)]) -> RunOutput {
+            assert_eq!(program, "oras");
+            // Honour --output the way oras does: write the file, then report.
+            if let Some(bytes) = &self.writes {
+                let i = args.iter().position(|a| a == "--output").expect("--output");
+                std::fs::write(&args[i + 1], bytes).unwrap();
+            }
+            RunOutput {
+                code: self.code,
+                stdout: String::new(),
+                stderr: String::new(),
+            }
+        }
+    }
+
+    // rivet: verifies REQ-REUSEBLOB-001
+    #[test]
+    fn a_fetched_blob_returns_the_bytes_that_were_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("blob");
+        let got = super::fetch_blob(
+            &FakeOras {
+                code: 0,
+                writes: Some(b"payload bytes".to_vec()),
+            },
+            "ghcr.io/org/layers",
+            "aa",
+            &out,
+        );
+        assert_eq!(got.as_deref(), Some(b"payload bytes".as_slice()));
+    }
+
+    /// oras failed: absent, unauthorised, unreachable. All None, all one
+    /// fallback — but None must actually be reached, not assumed.
+    // rivet: verifies REQ-REUSEBLOB-001
+    #[test]
+    fn a_failed_fetch_is_none_rather_than_whatever_was_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("blob");
+        // A stale file from an earlier run sits exactly where the output goes.
+        std::fs::write(&out, b"stale bytes from a previous attempt").unwrap();
+        let got = super::fetch_blob(
+            &FakeOras {
+                code: 1,
+                writes: None,
+            },
+            "ghcr.io/org/layers",
+            "aa",
+            &out,
+        );
+        assert_eq!(
+            got, None,
+            "a failed fetch must not hand back a leftover file — the caller \
+             would re-hash it, and a stale blob whose digest happened to match \
+             is exactly the substitution carry-forward exists to prevent"
+        );
+    }
+
+    /// oras missing entirely. Same answer, different world: 127 is
+    /// command-not-found, and conflating it with a refusal is a mistake this
+    /// pipeline has made before.
+    // rivet: verifies REQ-REUSEBLOB-001
+    #[test]
+    fn a_missing_oras_is_a_fallback_not_a_pretend_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = super::fetch_blob(
+            &FakeOras {
+                code: 127,
+                writes: None,
+            },
+            "r",
+            "aa",
+            &dir.path().join("blob"),
+        );
+        assert_eq!(got, None);
+    }
+
+    /// Reported success, no file. Any Some() here would be invented bytes.
+    // rivet: verifies REQ-REUSEBLOB-001
+    #[test]
+    fn a_successful_command_that_wrote_nothing_yields_no_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = super::fetch_blob(
+            &FakeOras {
+                code: 0,
+                writes: None,
+            },
+            "r",
+            "aa",
+            &dir.path().join("never-written"),
+        );
+        assert_eq!(got, None);
+    }
+
     /// The argv shape itself: a blob is a whole payload archive, so it goes to
     /// a FILE. Routing tens of megabytes of binary through captured stdout is
     /// the truncation-shaped bug this pipeline has been bitten by before.

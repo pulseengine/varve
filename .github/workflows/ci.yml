@@ -203,22 +203,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard: varve-core
+          # SPLIT AGAIN at v0.33.0. Adding consumer.rs took the single
+          # varve-core shard from ~57 minutes to a CANCELLATION at exactly
+          # 60:16 — the same failure the comment above describes, arriving the
+          # same way: not as a survivor, but as a check that reported nothing
+          # while looking like it ran. Splitting is the response the comment
+          # prescribes; raising the timeout would buy one release and hide the
+          # next one. REQ-MUTATE-003 will grow this list further, so the shape
+          # has to be one that keeps splitting.
+          - shard: varve-core (trust)
+            files: >-
+              -f crates/varve-core/src/verify.rs
+              -f crates/varve-core/src/pin.rs
+              -f crates/varve-core/src/realm.rs
+              -f crates/varve-core/src/resolve.rs
+              -f crates/varve-core/src/consumer.rs
+              -f crates/varve-core/src/install.rs
+              -f crates/varve-core/src/selfverify.rs
+              -f crates/varve-core/src/reverify.rs
+          - shard: varve-core (layers)
             files: >-
               -f crates/varve-core/src/rollback.rs
               -f crates/varve-core/src/support.rs
               -f crates/varve-core/src/sdkexport.rs
               -f crates/varve-core/src/layer.rs
               -f crates/varve-core/src/platform.rs
-              -f crates/varve-core/src/verify.rs
-              -f crates/varve-core/src/pin.rs
-              -f crates/varve-core/src/realm.rs
-              -f crates/varve-core/src/resolve.rs
-              -f crates/varve-core/src/consumer.rs
               -f crates/varve-core/src/compose.rs
-              -f crates/varve-core/src/install.rs
-              -f crates/varve-core/src/selfverify.rs
-              -f crates/varve-core/src/reverify.rs
               -f crates/varve-core/src/exportstamp.rs
               -f crates/varve-core/src/layerspec.rs
               -f crates/varve-core/src/mirror.rs
