@@ -32,7 +32,7 @@
 
 set -euo pipefail
 
-REF="${1:-${VARVE_REGISTRY_REF:-ghcr.io/pulseengine/varve/layers}}"
+REF="${1:-${VARVE_REGISTRY_REF:-ghcr.io/pulseengine/layers}}"
 HOST="${REF%%/*}"
 REPO="${REF#*/}"
 LINE="${VARVE_LAYER_LINE:-$(date -u +%Y.%m)}"

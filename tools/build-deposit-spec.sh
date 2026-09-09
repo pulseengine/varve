@@ -403,7 +403,20 @@ ENTRYEOF
     fi
     fetch_asset "$repo" "$version" "$asset"
     mkdir -p "extract/$tool-$platform"
-    tar xzf "downloads/$tool/$asset" -C "extract/$tool-$platform"
+    # REQ-ARCHIVEFMT-001: the compression comes from the asset NAME, not from
+    # letting tar sniff it. `tar xf` would accommodate an archive whose
+    # contents disagree with its name; that is a case worth failing on. A
+    # self-extracting installer (.sh/.run) is deliberately absent — running a
+    # vendor's installer to find out what it holds defeats the property this
+    # deposit establishes.
+    case "$asset" in
+      *.tar.gz|*.tgz)   tar xzf "downloads/$tool/$asset" -C "extract/$tool-$platform" ;;
+      *.tar.xz|*.txz)   tar xJf "downloads/$tool/$asset" -C "extract/$tool-$platform" ;;
+      *.tar.bz2|*.tbz2) tar xjf "downloads/$tool/$asset" -C "extract/$tool-$platform" ;;
+      *) echo "::error::$asset: no unpacker is known for this archive (known: \
+.tar.gz, .tgz, .tar.xz, .txz, .tar.bz2, .tbz2). Refusing rather than guessing."
+         exit 1 ;;
+    esac
     # Layouts differ per repo (flat vs versioned subdir): locate the binary by
     # name anywhere in the extraction.
     bin="$(find "extract/$tool-$platform" -type f -name "$binname" | head -1)"

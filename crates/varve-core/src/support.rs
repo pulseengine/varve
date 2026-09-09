@@ -43,13 +43,21 @@ pub struct Policy {
 impl Policy {
     /// The stated policy for a channel.
     ///
-    /// `rolling` is short on purpose. It makes no qualification promise and
-    /// moves continuously; a long window would imply a stability it does not
-    /// have. `qualified` is where a long horizon belongs, because that is the
-    /// channel an assessor is pointed at.
+    /// `rolling` is ONE month, and that is not a placeholder to be grown
+    /// later. The rolling line ships monthly, so a layer is superseded about a
+    /// month after it is issued, and nobody has undertaken to publish
+    /// advisories or fixes for a superseded rolling layer. Six months was the
+    /// first value written here and it promised five months of attention that
+    /// no one had agreed to give — a support window is a commitment, and
+    /// stating one longer than the commitment is the same class of untruth as
+    /// stating none at all while the docs promise one.
+    ///
+    /// `qualified` is where a long horizon belongs, because that is the
+    /// channel an assessor is pointed at and the one whose contents are
+    /// deliberately frozen.
     pub fn for_channel(channel: &str) -> Option<Policy> {
         match channel {
-            "rolling" => Some(Policy { months: 6 }),
+            "rolling" => Some(Policy { months: 1 }),
             "qualified" => Some(Policy { months: 24 }),
             _ => None,
         }
@@ -193,28 +201,33 @@ mod tests {
     fn a_horizon_is_derived_from_the_channel_not_typed_by_hand() {
         assert_eq!(
             horizon("2026-09-03T00:00:00Z", "rolling").unwrap(),
-            "2027-03-03"
+            "2026-10-03"
         );
         assert_eq!(
             horizon("2026-09-03T00:00:00Z", "qualified").unwrap(),
             "2028-09-03"
         );
         // A date with no time part works too.
-        assert_eq!(horizon("2026-09-03", "rolling").unwrap(), "2027-03-03");
+        assert_eq!(horizon("2026-09-03", "rolling").unwrap(), "2026-10-03");
     }
 
-    /// Adding six months to the 31st must not produce a date that does not
-    /// exist. Ending a day early is correct; an unparseable horizon is not —
-    /// and it would sign perfectly well, because nothing used to parse it.
+    /// Adding a month to the 31st must not produce a date that does not exist.
+    /// Ending a day early is correct; an unparseable horizon is not — and it
+    /// would sign perfectly well, because nothing used to parse it.
+    ///
+    /// (Said "six months" until the rolling policy became one. The assertions
+    /// below were always month-arithmetic; only the sentence describing them
+    /// was stale — which is the drift REQ-SUPPORTUNTIL-001 corrected
+    /// everywhere else in this file.)
     // rivet: verifies REQ-SUPPORTUNTIL-001
     #[test]
     fn a_horizon_that_would_fall_on_a_day_that_does_not_exist_is_clamped() {
-        // 31 Aug + 6 months = 28/29 Feb, not 31 Feb.
-        assert_eq!(horizon("2026-08-31", "rolling").unwrap(), "2027-02-28");
-        // ...and the leap year is respected.
-        assert_eq!(horizon("2027-08-31", "rolling").unwrap(), "2028-02-29");
-        // 31 Oct + 6 months = 30 Apr.
-        assert_eq!(horizon("2026-10-31", "rolling").unwrap(), "2027-04-30");
+        // 31 Aug + 1 month = 30 Sep, not 31 Sep.
+        assert_eq!(horizon("2026-08-31", "rolling").unwrap(), "2026-09-30");
+        // 31 Jan + 1 month = 28 Feb; the leap rule still applies.
+        assert_eq!(horizon("2027-01-31", "rolling").unwrap(), "2027-02-28");
+        // 31 Jan + 1 month in a LEAP year = 29 Feb.
+        assert_eq!(horizon("2028-01-31", "rolling").unwrap(), "2028-02-29");
         // Every clamped result must itself parse.
         for d in ["2026-08-31", "2026-10-31", "2027-08-31", "2026-12-31"] {
             let h = horizon(d, "rolling").unwrap();
@@ -228,12 +241,14 @@ mod tests {
     // rivet: verifies REQ-SUPPORTUNTIL-001
     #[test]
     fn a_thirty_one_day_target_month_keeps_all_thirty_one_days() {
-        // Jan 31 + 6 = Jul 31, and July has 31 days.
-        assert_eq!(horizon("2026-01-31", "rolling").unwrap(), "2026-07-31");
-        // Mar 31 + 6 = Sep 30 — September does not.
-        assert_eq!(horizon("2026-03-31", "rolling").unwrap(), "2026-09-30");
-        // Jul 31 + 6 = Jan 31.
-        assert_eq!(horizon("2026-07-31", "rolling").unwrap(), "2027-01-31");
+        // Dec 31 + 1 = Jan 31, and January has 31 days.
+        assert_eq!(horizon("2026-12-31", "rolling").unwrap(), "2027-01-31");
+        // Mar 31 + 1 = Apr 30 — April does not.
+        assert_eq!(horizon("2026-03-31", "rolling").unwrap(), "2026-04-30");
+        // Jul 31 + 1 = Aug 31.
+        assert_eq!(horizon("2026-07-31", "rolling").unwrap(), "2026-08-31");
+        // A qualified layer still spans two years.
+        assert_eq!(horizon("2026-01-31", "qualified").unwrap(), "2028-01-31");
     }
 
     /// The Gregorian rule has three parts and a leap check that only tested
@@ -242,13 +257,13 @@ mod tests {
     #[test]
     fn february_follows_the_whole_gregorian_leap_rule() {
         // 2024: divisible by 4 -> leap.
-        assert_eq!(horizon("2023-08-31", "rolling").unwrap(), "2024-02-29");
+        assert_eq!(horizon("2024-01-31", "rolling").unwrap(), "2024-02-29");
         // 2100: divisible by 100, not by 400 -> NOT leap.
-        assert_eq!(horizon("2099-08-31", "rolling").unwrap(), "2100-02-28");
+        assert_eq!(horizon("2100-01-31", "rolling").unwrap(), "2100-02-28");
         // 2000: divisible by 400 -> leap.
-        assert_eq!(horizon("1999-08-31", "rolling").unwrap(), "2000-02-29");
+        assert_eq!(horizon("2000-01-31", "rolling").unwrap(), "2000-02-29");
         // 2026: not divisible by 4 -> not leap.
-        assert_eq!(horizon("2025-08-31", "rolling").unwrap(), "2026-02-28");
+        assert_eq!(horizon("2026-01-31", "rolling").unwrap(), "2026-02-28");
     }
 
     // rivet: verifies REQ-SUPPORTUNTIL-001
@@ -262,8 +277,8 @@ mod tests {
     // rivet: verifies REQ-SUPPORTUNTIL-001
     #[test]
     fn the_year_rolls_over_correctly() {
-        assert_eq!(horizon("2026-12-15", "rolling").unwrap(), "2027-06-15");
-        assert_eq!(horizon("2026-07-01", "rolling").unwrap(), "2027-01-01");
+        assert_eq!(horizon("2026-12-15", "rolling").unwrap(), "2027-01-15");
+        assert_eq!(horizon("2026-12-31", "rolling").unwrap(), "2027-01-31");
         assert_eq!(horizon("2026-01-15", "qualified").unwrap(), "2028-01-15");
     }
 

@@ -15,7 +15,7 @@
 > **Status: implemented, rolling channel.** varve is released (see the
 > [releases](https://github.com/pulseengine/varve/releases)) and dogfooded —
 > the PulseEngine toolchain ships as signed layers on
-> `ghcr.io/pulseengine/varve/layers`. The **qualified** channel is not open
+> `ghcr.io/pulseengine/layers`. The **qualified** channel is not open
 > yet: it awaits the trust-root ceremony (the v1.0 gate), so today's layers
 > are signed with a provisional rolling key and make no qualification
 > promise. The release plan lives in rivet (`rivet release status`); see
@@ -142,7 +142,7 @@ rivet --version           # dispatched from the pinned layer
 ```
 
 Without a realm, point `VARVE_TRUST_ROOT` at the published root key
-(`rolling.pub`, a release asset) and pass `--from oci://ghcr.io/pulseengine/varve/layers`.
+(`rolling.pub`, a release asset) and pass `--from oci://ghcr.io/pulseengine/layers`.
 The rolling channel is provisional and makes no qualification promise — see
 [SECURITY.md](SECURITY.md), or `varve docs threat-model` where the network is
 not available. New to varve? `varve docs getting-started` is the five-minute

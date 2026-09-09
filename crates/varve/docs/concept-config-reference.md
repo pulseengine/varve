@@ -74,16 +74,44 @@ Alongside the pin, found by the same upward walk. Nearest wins; definitions are 
 
 ```toml
 [realm.pulseengine]
-registry        = "oci://ghcr.io/pulseengine/varve/layers"   # required
+registry        = "oci://ghcr.io/pulseengine/layers"   # required
 trust-root      = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"
 # or, instead of an inline key:
 # trust-root-file = "./roots/pulseengine.pub"
 signed-index    = false                                      # default
+# Roots this realm used to sign with. DIAGNOSTIC ONLY — see below.
+retired-roots   = [
+  { key = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973", retired = "2026-09-07", last-layer = "2026.09.1" },
+]
 ```
 
 `registry` is required even when you never contact it — an air-gapped realm still needs the field; a placeholder is legitimate. `trust-root` is what `varve pubkey` prints.
 
 `signed-index = true` declares that this realm publishes a signed line index (`varve sign-index`). Where it is set, `varve install` refuses to fall back to a source's unauthenticated listing: a missing index is an error naming the realm, and a source that hides a layer the index names is refused. Leave it `false` — the default — until the realm actually publishes one, or every install of it fails closed. Only turn it on once the index is on the registry AND in the layouts you hand out: a bare `manifests/`+`blobs/` directory cannot carry one at all.
+
+### `retired-roots` — what it is, and emphatically what it is not
+
+**varve still has no key rotation.** Nothing signs "this new root replaces the old one", and no consumer would check such a statement if you produced it (`varve docs threat-model`). Changing a realm's root still means every consumer edits their own `varve-realms.toml`, and every layer signed by the old root stops verifying. `retired-roots` does not change any of that.
+
+What it changes is the **message**, never the **verdict**. Without it, a consumer whose pin was signed by the previous root sees:
+
+```
+error: manifest signature verification failed: … No valid signatures
+```
+
+which is indistinguishable from a forgery by a stranger — and their previously-installed layers simultaneously appear under a bare fingerprint in `varve list`, because the store partitions by root and no realm names that partition any more. Two symptoms, neither naming the cause, and the cause is not something they can deduce.
+
+With it, the same rejection explains itself: which root signed those bytes, when the realm retired it, what supersedes it, which layers used it, and that the fix is to move the pin.
+
+Three properties worth being explicit about, because a diagnostic that quietly widened trust would be far worse than the confusing error it replaces:
+
+* **A retired root never verifies anything.** It is not a second accepted key. The layer is rejected exactly as it was before.
+* **An unknown signer is not excused.** A signature that matches none of the declared retired roots gets the plain error — otherwise the diagnostic would tell an operator a rotation happened while they were being attacked.
+* **Listing the realm's live `trust-root` as retired is refused at parse.** It has no legitimate use and is precisely the slip a half-finished rotation makes.
+
+Omit the field entirely and nothing changes; every realms file written before this feature keeps working.
+
+`last-layer` is optional and worth setting: "layers up to and including 2026.09.1 were signed by the retired root" is the sentence that tells someone which of their pins are affected.
 
 ## The deposit spec — producing a layer
 

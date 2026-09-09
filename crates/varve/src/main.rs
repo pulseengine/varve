@@ -3209,7 +3209,32 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         staleness_threshold_days: 90,
         platform: &platform,
     };
-    let outcome = varve_core::install(pin, source, &verifier, store, &mut marks, &policy)?;
+    let outcome = match varve_core::install(pin, source, &verifier, store, &mut marks, &policy) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // REQ-ROTATE-002 clause 3. "No valid signatures" is
+            // indistinguishable from a forgery by a stranger, and the one
+            // thing the consumer cannot deduce is which they are looking at.
+            // If the realm declares the root that DID sign these bytes as one
+            // it retired, say so. Re-fetching the manifest here is cheap
+            // because we are already failing, and it keeps the diagnostic out
+            // of the success path entirely.
+            //
+            // This does not, and must not, change the verdict: `e` is still
+            // returned. A retired root explains a rejection; it never lifts
+            // one.
+            if let Some(realm) = ctx.realm.as_ref()
+                && !realm.retired_roots.is_empty()
+                && let Ok(bytes) =
+                    source.fetch_manifest(&varve_core::source::LayerRef::Name(pin.layer.clone()))
+                && let Some(why) =
+                    realm.explain_retired_signature(&bytes, varve_core::verify::LAYER_PAYLOAD_TYPE)
+            {
+                return Err(anyhow::Error::new(e).context(why));
+            }
+            return Err(e.into());
+        }
+    };
     // Clause 4: REPORT what the realm asserts the line contains, beside what
     // this install accepted. Reported and NOT enforced, deliberately — raising
     // the anti-rollback mark to the newest counter that merely EXISTS would
@@ -4265,14 +4290,17 @@ fn held_payload(
 fn realm_name_for(fingerprint: &str) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let names = varve_core::realm::realm_names(&cwd).ok()?;
-    for name in names {
-        if let Ok(realm) = varve_core::resolve_realm(&cwd, &name)
-            && realm.fingerprint() == fingerprint
-        {
-            return Some(name);
-        }
+    // Live partitions first: a realm that currently owns the fingerprint gets
+    // the plain name, and no retired root can shadow it.
+    let realms: Vec<_> = names
+        .iter()
+        .filter_map(|name| varve_core::resolve_realm(&cwd, name).ok())
+        .collect();
+    if let Some(realm) = realms.iter().find(|r| r.fingerprint() == fingerprint) {
+        return Some(realm.name.clone());
     }
-    None
+    // Then partitions a retired root left behind (REQ-ROTATE-002 clause 5).
+    realms.iter().find_map(|r| r.partition_label(fingerprint))
 }
 
 #[cfg(test)]

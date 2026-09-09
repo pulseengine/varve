@@ -1933,7 +1933,10 @@ artifacts:
         `concept-getting-started.md` taught
         `trust-root = "83a6991d…"` LABELLED as "the published rolling.pub", in
         the topic whose first line reads "Every file here is literal — copy
-        it". The real published root is 4e771dc6…. A user who copied it got
+        it". The real published root was then 4e771dc6… (rotated to 7d3b892e…
+        in v0.32.1 — see REQ-ROTATE-001, whose oracle exists because
+        THIS finding only pinned the documented copy of the root, not
+        the one varve-realms.toml ships). A user who copied it got
         "manifest signature verification failed … No valid signatures". The
         same fabricated value appeared under `[realm.pulseengine]` in
         config-reference and realms, alongside the REAL registry URL. Its

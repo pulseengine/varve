@@ -39,10 +39,15 @@ impl fmt::Display for StageError {
         match self {
             StageError::UnknownArchive { asset } => write!(
                 f,
-                "{asset}: no unpacker is known for this archive. Refusing rather \
+                "{asset}: no unpacker is known for this archive (known: .tar.gz, \
+                 .tgz, .tar.xz, .txz, .tar.bz2, .tbz2, .zip). Refusing rather \
                  than guessing — an archive opened with the wrong tool either \
                  fails loudly or, worse, yields a file that is not what the \
-                 proof covered."
+                 proof covered.\n\n\
+                 A self-extracting installer (.sh, .run) is NOT an archive this \
+                 program will open: running a vendor's installer to find out \
+                 what it contains defeats the property the deposit exists to \
+                 establish."
             ),
             StageError::Extract(e) => write!(f, "{e}"),
             StageError::Io { context, detail } => write!(f, "{context}: {detail}"),
@@ -70,6 +75,28 @@ pub fn unpack_argv(
             vec!["xzf".into(), archive.into(), "-C".into(), dest.into()],
         ));
     }
+    // .tar.xz and .tar.bz2 (REQ-ARCHIVEFMT-001). One missing branch here was
+    // the whole blocker for two separate things: bytecodealliance/wasmtime
+    // ships .tar.xz, so a second realm would have carried wasm-tools and
+    // wit-bindgen and silently omitted the runtime; and all 140
+    // toolchain_gnu_<host>_<target> assets of the Zephyr SDK are .tar.xz, so
+    // the sdk kind had nothing it could actually fetch.
+    //
+    // `-J` and `-j` rather than `tar xf` letting tar sniff: the format is
+    // decided by the asset NAME, and an archive whose contents disagree with
+    // its name is a case worth failing on rather than accommodating.
+    if lower.ends_with(".tar.xz") || lower.ends_with(".txz") {
+        return Ok((
+            "tar".into(),
+            vec!["xJf".into(), archive.into(), "-C".into(), dest.into()],
+        ));
+    }
+    if lower.ends_with(".tar.bz2") || lower.ends_with(".tbz2") {
+        return Ok((
+            "tar".into(),
+            vec!["xjf".into(), archive.into(), "-C".into(), dest.into()],
+        ));
+    }
     if lower.ends_with(".zip") {
         return Ok((
             "unzip".into(),
@@ -88,6 +115,28 @@ pub fn unpack_argv(
 /// arrived last under every platform's name — a payload that runs on one
 /// machine and is silently wrong on three.
 pub fn staged_path(kind: PayloadKind, name: &str, version: &str, platform: Option<&str>) -> String {
+    staged_path_for(kind, name, version, platform, "")
+}
+
+/// As [`staged_path`], preserving an archive's extension.
+///
+/// An `sdk` payload is stored as the archive upstream published, so the
+/// extension is not decoration: it is how anything downstream knows whether
+/// the bytes are gzip or xz. Dropping it would leave `varve export-sdk` to
+/// sniff, which is the guess this whole path refuses to make.
+pub fn staged_path_for(
+    kind: PayloadKind,
+    name: &str,
+    version: &str,
+    platform: Option<&str>,
+    ext: &str,
+) -> String {
+    if kind == PayloadKind::Sdk {
+        return match platform {
+            Some(p) => format!("sdk/{name}-{p}-{version}{ext}"),
+            None => format!("sdk/{name}-{version}{ext}"),
+        };
+    }
     match kind {
         PayloadKind::Vsix => match platform {
             Some(p) => format!("vsix/{name}-{p}-{version}.vsix"),
@@ -97,7 +146,21 @@ pub fn staged_path(kind: PayloadKind, name: &str, version: &str, platform: Optio
             Some(p) => format!("tools/{name}-{p}"),
             None => format!("tools/{name}"),
         },
+        PayloadKind::Sdk => unreachable!("handled above, where the extension is kept"),
     }
+}
+
+/// The archive extension of an asset name, for [`staged_path_for`].
+pub fn archive_ext(asset: &str) -> &str {
+    let lower = asset.to_ascii_lowercase();
+    for e in [
+        ".tar.gz", ".tar.xz", ".tar.bz2", ".tgz", ".txz", ".tbz2", ".zip",
+    ] {
+        if lower.ends_with(e) {
+            return &asset[asset.len() - e.len()..];
+        }
+    }
+    ""
 }
 
 /// Every regular file under `dir`, as extraction candidates.
@@ -240,16 +303,110 @@ mod tests {
 
     /// Guessing an unpacker is how a verified archive yields a file the proof
     /// never covered.
+    /// REQ-ARCHIVEFMT-001. wasmtime ships .tar.xz and so do all 140 Zephyr SDK
+    /// toolchains; kiln's VxWorks SDK is .tar.bz2.
+    // rivet: verifies REQ-ARCHIVEFMT-001
+    #[test]
+    fn xz_and_bzip2_tarballs_are_openable() {
+        for (asset, flag) in [
+            ("wasmtime-v48.0.1-x86_64-linux.tar.xz", "xJf"),
+            ("toolchain_gnu_linux-x86_64_arm-zephyr-eabi.tar.xz", "xJf"),
+            ("x.txz", "xJf"),
+            ("wrsdk-vxworks7-qemu-1.16.1.tar.bz2", "xjf"),
+            ("x.tbz2", "xjf"),
+        ] {
+            let (prog, args) =
+                unpack_argv(asset, "/d/a", "/e").unwrap_or_else(|e| panic!("{asset}: {e}"));
+            assert_eq!(prog, "tar", "{asset}");
+            assert_eq!(args[0], flag, "{asset}");
+            assert_eq!(&args[1..], &["/d/a", "-C", "/e"], "{asset}");
+        }
+    }
+
+    /// The flags are explicit rather than letting `tar xf` sniff the format:
+    /// the asset NAME decides, so an archive whose contents disagree with its
+    /// name fails instead of being accommodated.
+    // rivet: verifies REQ-ARCHIVEFMT-001
+    #[test]
+    fn the_compression_is_taken_from_the_name_not_sniffed() {
+        let (_, gz) = unpack_argv("a.tar.gz", "/d/a", "/e").unwrap();
+        let (_, xz) = unpack_argv("a.tar.xz", "/d/a", "/e").unwrap();
+        let (_, bz) = unpack_argv("a.tar.bz2", "/d/a", "/e").unwrap();
+        assert_eq!(
+            (gz[0].as_str(), xz[0].as_str(), bz[0].as_str()),
+            ("xzf", "xJf", "xjf")
+        );
+        // No bare `xf` anywhere — that is the sniffing form.
+        for v in [&gz, &xz, &bz] {
+            assert_ne!(v[0], "xf", "the format must not be left to tar to guess");
+        }
+    }
+
     // rivet: verifies REQ-PRODUCER-002
     #[test]
     fn an_archive_with_no_known_unpacker_is_refused_rather_than_guessed_at() {
-        for a in ["x.tar.bz2", "x.7z", "x", "x.tar"] {
+        for a in ["x.7z", "x", "x.tar", "x.tar.zst", "x.rar"] {
             let e = unpack_argv(a, "/d/x", "/e").expect_err("must refuse");
             assert!(matches!(e, StageError::UnknownArchive { .. }), "{a}: {e:?}");
         }
         // A .vsix is a zip, but it is a payload, never an extraction. It has no
         // unpacker here on purpose.
         assert!(unpack_argv("ext.vsix", "/d/x", "/e").is_err());
+    }
+
+    /// Clause 3. A self-extracting installer is the shape a Yocto SDK most
+    /// often ships in, and running one to discover what it contains defeats
+    /// the property the deposit exists to establish.
+    // rivet: verifies REQ-ARCHIVEFMT-001
+    #[test]
+    fn a_self_extracting_installer_is_refused_rather_than_executed() {
+        for a in [
+            "poky-glibc-x86_64-core-image-minimal-cortexa57-toolchain-5.0.sh",
+            "installer.run",
+            "sdk-setup.bin",
+        ] {
+            let e = unpack_argv(a, "/d/x", "/e").expect_err("must refuse");
+            assert!(matches!(e, StageError::UnknownArchive { .. }), "{a}: {e:?}");
+        }
+        // And the refusal says why, so nobody adds a branch for it later.
+        let msg = StageError::UnknownArchive {
+            asset: "x.sh".into(),
+        }
+        .to_string();
+        assert!(msg.contains("self-extracting installer"), "{msg}");
+        assert!(
+            msg.contains("will NOT open") || msg.contains("NOT an archive"),
+            "{msg}"
+        );
+    }
+
+    /// The extension is sliced off the END of the name, and the slice has to
+    /// be exactly the extension — an off-by-anything here writes the staged
+    /// sdk under a filename that misstates its own compression, which is the
+    /// one thing `export-sdk` reads it for.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn the_archive_extension_is_exactly_the_extension() {
+        for (asset, want) in [
+            (
+                "toolchain_gnu_linux-x86_64_arm-zephyr-eabi.tar.xz",
+                ".tar.xz",
+            ),
+            ("wasi-sdk-34.0-arm64-linux.tar.gz", ".tar.gz"),
+            ("wrsdk-vxworks7-qemu-1.16.1.tar.bz2", ".tar.bz2"),
+            ("a.txz", ".txz"),
+            ("x.zip", ".zip"),
+            ("no-extension-at-all", ""),
+            ("sdk.tar.zst", ""),
+        ] {
+            assert_eq!(archive_ext(asset), want, "{asset}");
+        }
+        // And the result really is a suffix of the input, not a coincidence.
+        for asset in ["a.tar.xz", "much-longer-name-here.tar.gz"] {
+            let e = archive_ext(asset);
+            assert!(asset.ends_with(e), "{asset} -> {e:?}");
+            assert!(!e.is_empty());
+        }
     }
 
     /// One layer carries the same tool for four platforms. A layout that

@@ -96,6 +96,11 @@ blind to composition; this is not.
 const EMBEDDED_TOPICS: &[Topic] = &[
     // ── concepts ──────────────────────────────────────────────────────
     topic!(
+        "sdk",
+        "sdk — tree-shaped payloads: Zephyr, WASI, Yocto, and why .sh is refused",
+        "concept-sdk-payloads.md"
+    ),
+    topic!(
         "config-reference",
         "Configuration reference — every file, every field",
         "concept-config-reference.md"
@@ -326,6 +331,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "self-verify",
         "self-verify — verify a release file",
         "cmd-self-verify.md"
+    ),
+    topic!(
+        "consumer-api",
+        "consumer-api — asking varve from Rust instead of from a shell",
+        "concept-consumer-api.md"
     ),
     topic!("docs", "docs — this documentation", "cmd-docs.md"),
     Topic {
@@ -1292,8 +1302,23 @@ mod tests {
                 "toml" if block.contains("[varve]") => {
                     let m = varve_core::layerspec::parse_layer_manifest(&block)
                         .expect("the documented layer.toml must parse as a layer manifest");
-                    varve_core::layerspec::assembler_env(&m)
-                        .expect("the documented layer.toml must TRANSLATE, not merely parse");
+                    // It must TRANSLATE — or refuse for the one reason a
+                    // documented manifest is allowed to: it uses a feature the
+                    // env encoding cannot carry. `layout = "sdk"` is that case,
+                    // and the refusal IS the documented behaviour (`varve docs
+                    // sdk`), so accepting it here keeps the check honest rather
+                    // than deleting it. Any OTHER translation failure is still
+                    // a broken example.
+                    match varve_core::layerspec::assembler_env(&m) {
+                        Ok(_) => {}
+                        Err(varve_core::layerspec::LayerSpecError::LayoutNotEncodable {
+                            ..
+                        }) => {}
+                        Err(e) => panic!(
+                            "the documented layer.toml must TRANSLATE, or refuse \
+                             as unencodable: {e}"
+                        ),
+                    }
                     checked += 1;
                 }
                 "toml" if block.contains("[[tool]]") || block.contains("[tool.runner]") => {

@@ -24,6 +24,18 @@ pub const DEFAULT_PLATFORMS: &[&str] = &[
     "x86_64-unknown-linux-gnu",
 ];
 
+/// The same host, OS FIRST — zephyrproject-rtos/sdk-ng's convention
+/// (`toolchain_gnu_macos-aarch64_arm-zephyr-eabi.tar.xz`).
+///
+/// Derived by swapping [`upstream_platform_tag`]'s halves rather than by a
+/// second table: two tables would be two places to add a platform, and the one
+/// nobody remembers to update is the one that silently omits a payload.
+pub fn host_platform_tag(triple: &str) -> Option<String> {
+    let tag = upstream_platform_tag(triple)?;
+    let (arch, os) = tag.split_once('-')?;
+    Some(format!("{os}-{arch}"))
+}
+
 /// The short platform tags used OUTSIDE this organisation.
 ///
 /// bytecodealliance names its assets `<tool>-<version>-aarch64-macos.tar.gz`,
@@ -66,8 +78,19 @@ pub enum Placeholder {
     BareVersion,
     /// `%T` — the Rust target triple.
     Triple,
-    /// `%U` — the short upstream platform tag.
+    /// `%U` — the short upstream platform tag, ARCH FIRST: `aarch64-macos`.
+    /// bytecodealliance spells its assets this way.
     UpstreamTag,
+    /// `%H` — the same host, OS FIRST: `macos-aarch64`.
+    ///
+    /// Not a stylistic variant of `%U`. There is no single "upstream
+    /// convention": bytecodealliance writes `aarch64-macos` and
+    /// zephyrproject-rtos/sdk-ng writes `macos-aarch64`, and a template using
+    /// the wrong one matches nothing. varve had only the first, which is why
+    /// the first attempt to deposit a Zephyr SDK asked for
+    /// `toolchain_gnu_aarch64-macos_arm-zephyr-eabi.tar.xz` against a release
+    /// that publishes `toolchain_gnu_macos-aarch64_arm-zephyr-eabi.tar.xz`.
+    HostTag,
     /// `%P` — the VS Code platform tag.
     VsCodePlatform,
     /// `%R` — the release tag exactly as the manifest writes it, leading `v`
@@ -84,6 +107,7 @@ impl Placeholder {
             Placeholder::BareVersion => "%V",
             Placeholder::Triple => "%T",
             Placeholder::UpstreamTag => "%U",
+            Placeholder::HostTag => "%H",
             Placeholder::VsCodePlatform => "%P",
             Placeholder::ReleaseTag => "%R",
         }
@@ -93,6 +117,7 @@ impl Placeholder {
         Placeholder::BareVersion,
         Placeholder::Triple,
         Placeholder::UpstreamTag,
+        Placeholder::HostTag,
         Placeholder::VsCodePlatform,
         Placeholder::ReleaseTag,
     ];
@@ -206,6 +231,13 @@ pub fn expand(
                 })?;
             out = out.replace(Placeholder::UpstreamTag.token(), tag);
         }
+        if out.contains(Placeholder::HostTag.token()) {
+            let tag = host_platform_tag(triple).ok_or_else(|| TemplateError::NoUpstreamTag {
+                template: template.to_string(),
+                triple: triple.to_string(),
+            })?;
+            out = out.replace(Placeholder::HostTag.token(), &tag);
+        }
         if out.contains(Placeholder::VsCodePlatform.token()) {
             // Derived from the triple unless the caller named one explicitly:
             // a per-platform extension is selected over the SAME four machines
@@ -250,8 +282,15 @@ pub fn expand(
 /// expanding it per platform would download the same file four times and
 /// deposit four identical payloads.
 pub fn is_per_platform(template: &str) -> bool {
+    // Every placeholder that names a MACHINE must be listed here. A
+    // per-platform token missing from this list does not fail loudly: the
+    // template is treated as one portable asset, expanded once with no
+    // platform, and the payload is reported absent — which is how adding %H
+    // without touching this function made a correct Zephyr template match
+    // nothing.
     template.contains(Placeholder::Triple.token())
         || template.contains(Placeholder::UpstreamTag.token())
+        || template.contains(Placeholder::HostTag.token())
         || template.contains(Placeholder::VsCodePlatform.token())
 }
 
@@ -649,5 +688,55 @@ mod tests {
             default_tarball_template("rivet", "v0.34.0"),
             "rivet-v0.34.0-%T.tar.gz"
         );
+    }
+}
+
+#[cfg(test)]
+mod host_tag_tests {
+    use super::*;
+
+    /// There is no single "upstream convention". bytecodealliance writes
+    /// `aarch64-macos`; zephyrproject-rtos/sdk-ng writes `macos-aarch64`. A
+    /// template using the wrong one matches nothing, which is how the first
+    /// attempt to deposit a Zephyr SDK asked for
+    /// `toolchain_gnu_aarch64-macos_arm-zephyr-eabi.tar.xz` against a release
+    /// that publishes `toolchain_gnu_macos-aarch64_arm-zephyr-eabi.tar.xz`.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn the_two_upstream_host_conventions_are_both_available_and_differ() {
+        for (triple, arch_first, os_first) in [
+            ("aarch64-apple-darwin", "aarch64-macos", "macos-aarch64"),
+            ("x86_64-apple-darwin", "x86_64-macos", "macos-x86_64"),
+            (
+                "aarch64-unknown-linux-gnu",
+                "aarch64-linux",
+                "linux-aarch64",
+            ),
+            ("x86_64-unknown-linux-gnu", "x86_64-linux", "linux-x86_64"),
+        ] {
+            assert_eq!(upstream_platform_tag(triple), Some(arch_first), "{triple}");
+            assert_eq!(
+                host_platform_tag(triple).as_deref(),
+                Some(os_first),
+                "{triple}"
+            );
+            assert_ne!(arch_first, os_first, "the conventions must actually differ");
+        }
+    }
+
+    /// A template naming a MACHINE must be recognised as per-platform. A token
+    /// missing from `is_per_platform` does not fail loudly — the template is
+    /// expanded once with no platform and the payload reported absent, which
+    /// is exactly what happened when %H was added without it.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn every_machine_naming_token_marks_a_template_per_platform() {
+        for tok in ["%T", "%U", "%H", "%P"] {
+            assert!(
+                is_per_platform(&format!("tool-{tok}.tar.gz")),
+                "{tok} does not mark a template per-platform"
+            );
+        }
+        assert!(!is_per_platform("tool-%V.tar.gz"), "%V names no machine");
     }
 }

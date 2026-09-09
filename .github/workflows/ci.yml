@@ -203,20 +203,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard: varve-core
+          # SPLIT AGAIN at v0.33.0. Adding consumer.rs took the single
+          # varve-core shard from ~57 minutes to a CANCELLATION at exactly
+          # 60:16 — the same failure the comment above describes, arriving the
+          # same way: not as a survivor, but as a check that reported nothing
+          # while looking like it ran. Splitting is the response the comment
+          # prescribes; raising the timeout would buy one release and hide the
+          # next one. REQ-MUTATE-003 will grow this list further, so the shape
+          # has to be one that keeps splitting.
+          - shard: varve-core (trust)
             files: >-
-              -f crates/varve-core/src/rollback.rs
-              -f crates/varve-core/src/support.rs
-              -f crates/varve-core/src/layer.rs
-              -f crates/varve-core/src/platform.rs
               -f crates/varve-core/src/verify.rs
               -f crates/varve-core/src/pin.rs
               -f crates/varve-core/src/realm.rs
               -f crates/varve-core/src/resolve.rs
-              -f crates/varve-core/src/compose.rs
+              -f crates/varve-core/src/consumer.rs
               -f crates/varve-core/src/install.rs
               -f crates/varve-core/src/selfverify.rs
               -f crates/varve-core/src/reverify.rs
+          - shard: varve-core (layers)
+            files: >-
+              -f crates/varve-core/src/rollback.rs
+              -f crates/varve-core/src/support.rs
+              -f crates/varve-core/src/sdkexport.rs
+              -f crates/varve-core/src/layer.rs
+              -f crates/varve-core/src/platform.rs
+              -f crates/varve-core/src/compose.rs
               -f crates/varve-core/src/exportstamp.rs
               -f crates/varve-core/src/layerspec.rs
               -f crates/varve-core/src/mirror.rs
@@ -258,8 +270,42 @@ jobs:
           FILES: ${{ matrix.files }}
         run: |
           set -euo pipefail
+          # A SURVIVOR and a HANG are opposite facts and the exit code conflates
+          # them: cargo-mutants exits 3 for "some mutants timed out" whether or
+          # not anything survived. A survivor is a mutant nothing noticed. A
+          # hang is a mutant the suite DID notice, by never finishing under it —
+          # `pad_end += 1` neutralised to `*=` never grows, so the scan loop runs
+          # forever. No timeout budget fixes non-termination, and no test can be
+          # written that makes an infinite loop terminate.
+          #
+          # So: `--timeout 120` first, against a lib suite that runs in about a
+          # second. That makes "slow" an implausible explanation for a timeout,
+          # which is the only reason to distrust one — a survivor could otherwise
+          # hide behind a test that was merely slow.
+          #
+          # Then the verdict comes from the SUMMARY, not the exit code: any
+          # missed mutant fails. A run with no summary line also fails, because
+          # a gate that cannot find its own result must not report success.
+          set +e
           # shellcheck disable=SC2086 -- FILES is a deliberate flag list
-          cargo mutants --no-shuffle -j 4 $FILES
+          cargo mutants --no-shuffle -j 4 --timeout 120 $FILES 2>&1 | tee mutants.log
+          set -e
+          SUMMARY="$(grep -E '[0-9]+ mutants tested' mutants.log | tail -1 || true)"
+          if [ -z "$SUMMARY" ]; then
+            echo "::error::cargo-mutants produced no summary — the gate did not run"
+            exit 1
+          fi
+          echo "::notice::$SUMMARY"
+          MISSED="$(printf '%s' "$SUMMARY" | grep -oE '[0-9]+ missed' | grep -oE '[0-9]+' || echo 0)"
+          if [ "$MISSED" -ne 0 ]; then
+            echo "::error::$MISSED mutant(s) SURVIVED — a change nothing noticed"
+            exit 1
+          fi
+          if printf '%s' "$SUMMARY" | grep -q 'timeout'; then
+            echo "::warning::$SUMMARY — timed-out mutants are ones the suite \
+          never finished under, which is detection, not silence. Named above."
+            grep 'TIMEOUT' mutants.log || true
+          fi
 
   # The name the branch ruleset requires. It must not move when the gate is
   # resharded, so it lives on a job that does no work and only reports.

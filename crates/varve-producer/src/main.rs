@@ -235,28 +235,41 @@ fn main() -> anyhow::Result<()> {
                 m.realm.name,
                 forge.host
             );
-            // Carry-forward is DECIDED by the orchestrator and not yet ACTED
-            // on here, deliberately.
+            // Carry-forward, ACTED ON (REQ-REUSEBLOB-001). The earlier design
+            // wanted a spec entry naming a digest instead of a path, so the
+            // deposit would reference a blob it never held; that was abandoned
+            // because a layout missing its blobs is not the artifact of record
+            // it gets uploaded as. The bytes come from the DESTINATION
+            // REGISTRY instead — which clause 4 of REQ-CARRYFORWARD-001
+            // already requires to hold them before reuse is permitted, so the
+            // check that makes reuse safe and the source that makes it
+            // possible are the same check.
             //
-            // REQ-CARRYFORWARD-001 clause 4 requires reuse only when the blob
-            // is still in the destination registry — which is also what would
-            // let a deposit REFERENCE that blob rather than upload it again.
-            // But varve's DepositSpec requires a `path` for every tool: there
-            // is no way to say "these bytes are already the registry's blob at
-            // this digest". Until there is, skipping the download leaves the
-            // deposit with nothing to point at.
+            // The saving is smaller than first claimed and worth stating
+            // plainly: not zero bytes, but one host instead of four upstream
+            // CDNs, no upstream rate limits, and no re-verification of an
+            // unchanged upstream release.
             //
-            // So every payload is fetched. Reporting a saving that did not
-            // happen, or failing on a payload we chose to reuse, would both be
-            // worse than doing the work. Tracked as varve#124.
-            if !present.is_empty() {
-                eprintln!(
-                    "note: --present-digests is recorded but not yet acted on: a \
-deposit spec cannot reference a blob it has no path for (varve#124). \
-Every payload is fetched."
-                );
-            }
-            let resolved = orchestrate::run(&src, &forge, &planned, &prev, &optins, &|_| false)?;
+            // The registry comes from the MANIFEST, never a literal — the same
+            // rule the deposit workflow follows, so there is one place the
+            // realm is defined.
+            let reuse_repo = m.realm.registry.trim_start_matches("oci://").to_string();
+            let reuse_dir = stage_root.join("reused");
+            std::fs::create_dir_all(&reuse_dir)?;
+            let reuse_blob = |digest: &str| -> Option<Vec<u8>> {
+                let out = reuse_dir.join(digest.replace(':', "-"));
+                registry::fetch_blob(&source::Spawn, &reuse_repo, digest, &out)
+            };
+            let present_check = |digest: &str| present.contains(digest);
+            let resolved = orchestrate::run(
+                &src,
+                &forge,
+                &planned,
+                &prev,
+                &optins,
+                &present_check,
+                &reuse_blob,
+            )?;
 
             // A payload the layer does not carry on some platform is reported
             // by name. An operator reading a shorter list than they expected
@@ -267,12 +280,19 @@ Every payload is fetched."
 
             let mut tools = Vec::with_capacity(resolved.len());
             for r in &resolved {
+                // Two names, not one (REQ-PAYLOADID-001). `binary` is the
+                // executable inside the archive; the plan's `name` is what the
+                // payload is CALLED in the layer. They are usually equal, which
+                // is why one variable served both until a repository needed to
+                // contribute two payloads — at which point every entry from
+                // that repo wanted the same deposited name and collided.
                 let bin = m
                     .tools
                     .iter()
                     .find(|t| t.name == r.plan.name)
                     .and_then(|t| t.binary.clone())
                     .unwrap_or_else(|| r.plan.name.clone());
+                let deposited = r.plan.name.clone();
                 let version = asset::bare_version(&r.plan.version).to_string();
                 // The same function the downloader used, not a second copy
                 // of the convention.
@@ -284,7 +304,10 @@ Every payload is fetched."
                     &stage_root,
                     &dl,
                     &scratch,
-                    &bin,
+                    deposit::Names {
+                        deposited: &deposited,
+                        binary: &bin,
+                    },
                 )?);
             }
 

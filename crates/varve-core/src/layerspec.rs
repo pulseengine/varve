@@ -49,6 +49,15 @@ pub enum Layout {
     Tarball,
     /// Bare per-platform binaries with no archive (sigil ships `wsc` this way).
     RawPerPlatform,
+    /// A TREE: the archive itself is the payload (REQ-SDKDEPOSIT-001).
+    ///
+    /// The other two layouts mine one binary out of an archive and discard the
+    /// rest. An SDK is the opposite shape — a compiler, its binutils, its
+    /// headers and its sysroot are one thing, and taking a binary out of it
+    /// destroys it. The archive is stored exactly as upstream published it;
+    /// unpacking and relocating is `varve export-sdk`'s job, on the consumer's
+    /// machine, per REQ-SDK-001 clause 3.
+    Sdk,
 }
 
 impl Layout {
@@ -56,6 +65,7 @@ impl Layout {
         match s {
             "tarball" => Some(Layout::Tarball),
             "raw-per-platform" => Some(Layout::RawPerPlatform),
+            "sdk" => Some(Layout::Sdk),
             _ => None,
         }
     }
@@ -91,6 +101,39 @@ pub struct ManifestTool {
     /// than a boolean.
     #[serde(rename = "unverified-reason", default)]
     pub unverified_reason: Option<String>,
+    /// The RELEASE tag to fetch, when it differs from the payload's version
+    /// (REQ-PAYLOADID-001).
+    ///
+    /// `version` is what the payload IS — the number it answers to, and the
+    /// one signed into the layer. For almost every tool that is also its
+    /// release tag, so `release` is absent and `version` serves both.
+    ///
+    /// A hub repository breaks that: `pulseengine/jess` tags `v0.7.2` and ships
+    /// `with-device` at `0.2.2`. Without this field the manifest can say one or
+    /// the other — sign a version the binary contradicts, or name a tag that
+    /// does not exist — and the env encoding could already express it while
+    /// layer.toml could not, so porting a realm to layer.toml LOST the payload.
+    #[serde(rename = "release", default)]
+    pub release: Option<String>,
+    /// The asset carrying this release's UNSIGNED digest list, when it
+    /// publishes one (REQ-UPSTREAMSUMS-001).
+    ///
+    /// Upstreams do not agree on a name — zephyrproject-rtos/sdk-ng calls it
+    /// `sha256.sum` — so the realm states it rather than varve guessing.
+    /// Guessing would be the worse failure: a file that is not the digest
+    /// manifest, parsed as one, vouches for nothing while looking like it does.
+    #[serde(rename = "upstream-sums", default)]
+    pub upstream_sums: Option<String>,
+    /// A path that must exist inside a `sdk` payload once unpacked
+    /// (REQ-SDKDEPOSIT-001 clause 5).
+    ///
+    /// A tree payload cannot be architecture-checked the way a binary can — an
+    /// SDK holds executables for several architectures and checking its first
+    /// ELF proves nothing. What CAN be checked is shape, and the failure this
+    /// catches is concrete: a 14 GB download that turns out to be an HTML
+    /// error page hashes and signs perfectly well.
+    #[serde(rename = "contains", default)]
+    pub contains: Option<String>,
     /// Asset name for one target triple, when no template can derive it.
     ///
     /// Some upstreams ship a musl binary as their only Linux build —
@@ -160,6 +203,12 @@ pub enum LayerSpecError {
     },
     /// Two entries would land under one name.
     Duplicate { kind: &'static str, name: String },
+    /// The env encoding has no field for this layout, so translating would
+    /// silently change what the payload IS (REQ-SDKDEPOSIT-001).
+    LayoutNotEncodable { tool: String, layout: String },
+    /// The entry's fields are POSITIONAL, so a payload version cannot be
+    /// carried past an absent binary or asset template.
+    ReleaseNeedsBinaryAndAsset { tool: String },
     /// An opt-in that states no reason.
     UnverifiedWithoutReason { tool: String },
     /// Two tools from one repository disagree about why it is unverified.
@@ -228,6 +277,27 @@ impl fmt::Display for LayerSpecError {
                  consumer asking for {name:?} would then find no such tool in \
                  a layer that deposited and verified. Rename the entry to \
                  {basename:?}, or set `binary` if only the executable differs."
+            ),
+            LayerSpecError::LayoutNotEncodable { tool, layout } => write!(
+                f,
+                "tool {tool:?} declares layout {layout:?}, which the environment \
+                 encoding cannot express — it has fields for a repository, a \
+                 version, a binary, an asset template and a payload version, \
+                 and none for a LAYOUT. Translating would emit an ordinary \
+                 tarball entry, and the shell assembler would mine the tree for \
+                 a binary and destroy it, silently, because every other field \
+                 survives the trip.\n\n\
+                 Deposit this realm with `varve-producer deposit --manifest \
+                 layer.toml`, which reads the layout directly. See `varve docs \
+                 sdk`."
+            ),
+            LayerSpecError::ReleaseNeedsBinaryAndAsset { tool } => write!(
+                f,
+                "tool {tool:?} sets `release` separately from `version`, which \
+                 the environment encoding carries in its FIFTH positional \
+                 field — so `binary` and `asset` must be set too, because a \
+                 positional field cannot be skipped. Set them explicitly, or \
+                 drop `release` if the tag and the version are the same."
             ),
             LayerSpecError::Duplicate { kind, name } => {
                 write!(f, "two {kind} entries are both named {name:?}")
@@ -374,6 +444,12 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
     for t in &m.tools {
         encodable("tool.name", &t.name)?;
         encodable("tool.version", &t.version)?;
+        // Keyed on the name the payload is DEPOSITED under — what a consumer
+        // resolves — rather than on the repository it came from
+        // (REQ-PAYLOADID-001). Keying it on the repo meant one repository could
+        // contribute at most one payload, which refused
+        // zephyrproject-rtos/sdk-ng's 140 host×target toolchains outright and
+        // would have refused any monorepo upstream.
         if !seen_tools.insert(t.name.as_str()) {
             return Err(LayerSpecError::Duplicate {
                 kind: "tool",
@@ -387,6 +463,15 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
                 layout: s.to_string(),
             })?,
         };
+        // A layout the encoding cannot carry must stop here, not arrive at the
+        // shell as something else. `sdk` is the case: the tree IS the payload,
+        // and a tarball entry would have a binary extracted from it.
+        if layout == Layout::Sdk {
+            return Err(LayerSpecError::LayoutNotEncodable {
+                tool: t.name.clone(),
+                layout: "sdk".into(),
+            });
+        }
         // The opt-in is per RELEASE, so it is keyed by repository; two tools
         // from one repo must agree about why it is unverified, or one reason
         // would be recorded and the other silently dropped.
@@ -449,7 +534,21 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
         // payload under a name nobody asked for. `raw-per-platform` is exempt
         // because the assembler hardcodes that one pairing (`wsc` from
         // `pulseengine/sigil`) instead of deriving it.
-        if repo_name != t.name {
+        // The property this protects is real and survives: a payload deposited
+        // under a name nobody asked for is a defect — a consumer looking for it
+        // finds nothing in a layer that deposited and verified.
+        //
+        // But the CAUSE is the env encoding, not the manifest. The shell
+        // assembler takes a tool's identity from its repository basename and
+        // has no field for a deposited name, so it can only ever deposit under
+        // the basename or under `binary`. That is the encoding's limit, and
+        // pinning `name` to the repository to respect it made one repository
+        // able to contribute exactly one payload.
+        //
+        // So the check moves to where the loss would actually happen — this
+        // translation — and states what to do instead, rather than forbidding
+        // a manifest the Rust assembler reads correctly.
+        if repo_name != t.name && t.binary.is_none() {
             return Err(LayerSpecError::RepoNameMismatch {
                 name: t.name.clone(),
                 repo: t.repo.clone().unwrap_or_else(|| repo_name.clone()),
@@ -460,15 +559,32 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
         // `[owner/]tool:version[:binary[:asset-template]]`. The owner prefix is
         // omitted when it is the default, so a manifest that names no repos
         // produces exactly the list the pre-migration workflow carried.
-        // `repo_name == t.name` holds by the check above, so testing it here
-        // too would be a condition no input could vary — cargo-mutants proved
-        // it dead by flipping it and killing nothing.
-        let head = if owner == "pulseengine" {
+        // This USED to read `if owner == "pulseengine" { t.name }`, with a
+        // comment explaining that `repo_name == t.name` held by the check
+        // above, so testing it here would be a condition no input could vary —
+        // and cargo-mutants had proved it dead by flipping it and killing
+        // nothing.
+        //
+        // That was true, and it stopped being true the moment a payload's name
+        // was allowed to differ from its repository (REQ-PAYLOADID-001). A
+        // branch is only dead relative to an invariant, and removing the
+        // invariant brings it back to life: with the shortcut left in,
+        // `name = "with-device"` from `pulseengine/jess` emitted
+        // `with-device:v0.7.2:…`, and the shell would have fetched
+        // `pulseengine/with-device` — a repository that does not exist.
+        //
+        // So the bare form is now used only when the name really is the
+        // repository, which is what made it safe in the first place.
+        let head = if owner == "pulseengine" && repo_name == t.name {
             t.name.clone()
         } else {
             format!("{owner}/{repo_name}")
         };
-        let mut entry = format!("{head}:{}", t.version);
+        // The tag to FETCH; `version` is what the payload is. They differ for
+        // a hub repo, and the entry carries both — the fifth positional field
+        // is the payload's own version.
+        let fetch_tag = t.release.as_deref().unwrap_or(&t.version);
+        let mut entry = format!("{head}:{fetch_tag}");
         // A template cannot be given without a binary: they are positional.
         match (&t.binary, &t.asset) {
             (None, None) => {}
@@ -486,6 +602,19 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
                 entry.push(':');
                 entry.push_str(a);
             }
+        }
+        // The fifth positional field: the payload's OWN version, emitted only
+        // when it differs from the tag. Omitted otherwise so every existing
+        // entry translates to exactly the string it did before.
+        if t.release.is_some() {
+            // Positional, so the earlier optional fields must be present.
+            if t.binary.is_none() || t.asset.is_none() {
+                return Err(LayerSpecError::ReleaseNeedsBinaryAndAsset {
+                    tool: t.name.clone(),
+                });
+            }
+            entry.push(':');
+            entry.push_str(t.version.trim_start_matches('v'));
         }
         tarballs.push(entry);
     }
@@ -548,7 +677,7 @@ version = "v0.28.0"
 [realm]
 name    = "pulseengine"
 channel = "rolling"
-registry = "oci://ghcr.io/pulseengine/varve/layers"
+registry = "oci://ghcr.io/pulseengine/layers"
 
 [[tool]]
 name    = "rivet"
@@ -971,5 +1100,177 @@ asset   = "spar-aadl-%P-%V.vsix"
                 "VARVE_VERSION"
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod payload_identity_tests {
+    use super::*;
+
+    fn env_of(text: &str) -> Result<AssemblerEnv, LayerSpecError> {
+        assembler_env(&parse_layer_manifest(text).expect("parses"))
+    }
+
+    const HEAD: &str = "[varve]\nversion = \"v0.33.0\"\n[realm]\nname=\"pulseengine\"\n\
+channel=\"rolling\"\nregistry=\"oci://x/y\"\n";
+
+    /// The wall this removes. sdk-ng publishes 140 host×target toolchains and
+    /// any monorepo upstream has the same shape; identity keyed on the
+    /// repository allowed each repo exactly one payload.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn one_repository_can_contribute_more_than_one_payload() {
+        let env = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"with-device\"\nrepo=\"pulseengine/jess\"\n\
+binary=\"with-device\"\nversion=\"v0.7.2\"\nasset=\"with-device-0.2.2-%T.tar.gz\"\n\
+\n[[tool]]\nname=\"bench-report\"\nrepo=\"pulseengine/jess\"\nbinary=\"bench-report\"\n\
+version=\"v0.7.2\"\nasset=\"bench-report-0.1.0-%T.tar.gz\"\n"
+        ))
+        .expect("two payloads from one repository must be expressible");
+        assert_eq!(env.layer_tools.split(' ').count(), 2, "{}", env.layer_tools);
+    }
+
+    /// The repository must survive translation. The old code shortened the
+    /// entry to the bare NAME whenever the owner was the default — safe only
+    /// while name == repo basename, which this requirement stops enforcing.
+    /// With the shortcut left in, `with-device` from `pulseengine/jess` emitted
+    /// `with-device:…` and the shell would fetch `pulseengine/with-device`.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn a_payload_named_differently_from_its_repo_still_names_its_repo() {
+        let env = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"with-device\"\nrepo=\"pulseengine/jess\"\n\
+binary=\"with-device\"\nversion=\"v0.7.2\"\nasset=\"w-%T.tar.gz\"\n"
+        ))
+        .expect("parses");
+        assert!(
+            env.layer_tools.starts_with("pulseengine/jess:"),
+            "the repository was lost: {}",
+            env.layer_tools
+        );
+    }
+
+    /// A hub repository tags a release and ships a tool at a DIFFERENT
+    /// version. `pulseengine/jess` tags v0.7.2 and ships with-device 0.2.2.
+    /// Without `release`, the manifest could only sign a version the binary
+    /// contradicts or name a tag that does not exist — and the env encoding
+    /// could already express it, so porting a realm to layer.toml LOST the
+    /// payload entirely. Found by the agent porting pulseengine-layers.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn a_hub_repos_tag_and_its_payloads_version_can_differ() {
+        let env = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"with-device\"\nrepo=\"pulseengine/jess\"\n\
+binary=\"with-device\"\nrelease=\"v0.7.2\"\nversion=\"0.2.2\"\n\
+asset=\"with-device-%V-%T.tar.gz\"\n"
+        ))
+        .expect("a hub repo's payload must be expressible");
+        assert_eq!(
+            env.layer_tools, "pulseengine/jess:v0.7.2:with-device:with-device-%V-%T.tar.gz:0.2.2",
+            "the tag is fetched, the payload version is recorded"
+        );
+    }
+
+    /// The fifth field is POSITIONAL, so it cannot be carried past an absent
+    /// binary or template — that would shift the template into the binary slot
+    /// and fetch nonsense.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn a_payload_version_cannot_skip_the_positional_fields_before_it() {
+        // `name` matches the basename here, so the name guard cannot fire and
+        // this isolates the positional one.
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"jess\"\nrepo=\"pulseengine/jess\"\n\
+release=\"v0.7.2\"\nversion=\"0.2.2\"\n"
+        ))
+        .expect_err("must refuse");
+        assert!(
+            matches!(e, LayerSpecError::ReleaseNeedsBinaryAndAsset { .. }),
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("positional"), "{e}");
+
+        // EITHER one missing is enough, and this is the case that actually
+        // corrupts: with `binary` set and `asset` absent, appending the payload
+        // version would put it in the TEMPLATE slot, and the assembler would
+        // look for an asset literally named "0.2.2".
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"jess\"\nrepo=\"pulseengine/jess\"\n\
+binary=\"with-device\"\nrelease=\"v0.7.2\"\nversion=\"0.2.2\"\n"
+        ))
+        .expect_err("binary without asset must still refuse");
+        assert!(
+            matches!(e, LayerSpecError::ReleaseNeedsBinaryAndAsset { .. }),
+            "{e:?}"
+        );
+
+        // ...and the mirror case.
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"jess\"\nrepo=\"pulseengine/jess\"\n\
+asset=\"a-%T.tar.gz\"\nrelease=\"v0.7.2\"\nversion=\"0.2.2\"\n"
+        ))
+        .expect_err("asset without binary must still refuse");
+        assert!(
+            matches!(e, LayerSpecError::ReleaseNeedsBinaryAndAsset { .. }),
+            "{e:?}"
+        );
+    }
+
+    /// Clause 5. Every existing entry translates to exactly what it did before.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn an_ordinary_entry_is_unchanged() {
+        let env = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"rivet\"\nversion=\"v0.35.0\"\n"
+        ))
+        .expect("parses");
+        assert_eq!(env.layer_tools, "rivet:v0.35.0");
+    }
+
+    /// Clause 4. The property the old guard protected survives: a payload that
+    /// would land under a name nobody asked for is still refused — a consumer
+    /// looking for it finds nothing in a layer that deposited and verified.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn a_name_the_encoding_would_silently_discard_is_still_refused() {
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"zephyr-sdk\"\nrepo=\"zephyrproject-rtos/sdk-ng\"\n\
+version=\"v1.0.1\"\n"
+        ))
+        .expect_err("no binary means the shell deposits under the basename");
+        assert!(
+            matches!(e, LayerSpecError::RepoNameMismatch { .. }),
+            "{e:?}"
+        );
+    }
+
+    /// Two payloads that would land under ONE deposited name is still a
+    /// collision — the check moved, it did not go away.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn two_payloads_under_one_deposited_name_still_collide() {
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"dup\"\nrepo=\"pulseengine/a\"\nbinary=\"dup\"\n\
+version=\"v1\"\nasset=\"a-%T.tar.gz\"\n\n[[tool]]\nname=\"dup\"\nrepo=\"pulseengine/b\"\n\
+binary=\"dup\"\nversion=\"v2\"\nasset=\"b-%T.tar.gz\"\n"
+        ))
+        .expect_err("must refuse");
+        assert!(matches!(e, LayerSpecError::Duplicate { .. }), "{e:?}");
+    }
+
+    /// A layout the encoding cannot carry must stop at the boundary rather
+    /// than arrive at the shell as something else.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn an_sdk_entry_refuses_to_translate_into_the_env_encoding() {
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"zephyr-sdk\"\nrepo=\"zephyrproject-rtos/sdk-ng\"\n\
+binary=\"zephyr-sdk\"\nversion=\"v1.0.1\"\nlayout=\"sdk\"\n\
+asset=\"toolchain_gnu_%U_arm-zephyr-eabi.tar.xz\"\n"
+        ))
+        .expect_err("must refuse");
+        let msg = e.to_string();
+        assert!(msg.contains("none for a LAYOUT"), "{msg}");
+        assert!(msg.contains("varve-producer deposit"), "{msg}");
     }
 }

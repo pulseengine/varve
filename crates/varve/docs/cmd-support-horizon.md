@@ -29,13 +29,19 @@ value looks plausible. So the horizon comes from the channel:
 
 | channel | window |
 |---|---|
-| `rolling` | 6 months |
+| `rolling` | **1 month** |
 | `qualified` | 24 months |
 
-`rolling` is short deliberately. It makes no qualification promise and moves
-continuously; a long window would imply a stability it does not have.
-`qualified` is where a long horizon belongs, because that is the channel an
-assessor is pointed at.
+`rolling` is one month, and that is not a placeholder to be grown later. The
+rolling line ships monthly, so a layer is superseded roughly a month after it
+is issued, and **nobody has undertaken to publish advisories or fixes for a
+superseded rolling layer**. The first value written here was six months, which
+promised five months of attention no one had agreed to give. A support window
+is a commitment; stating one longer than the commitment is the same class of
+untruth as stating none while the docs promise one.
+
+`qualified` is where a long horizon belongs — that is the channel an assessor
+is pointed at, and the one whose contents are deliberately frozen.
 
 An unknown channel is refused rather than given a default. A horizon nobody
 decided is a promise nobody made, and it would be signed with the realm's root.
@@ -51,7 +57,7 @@ not write anything. The caller puts the result in the status document, and
 `varve status` reports where the pinned layer stands, not just the date:
 
 ```
-layer 2026.09.1 is supported until 2027-03-03 (181 days)
+layer 2026.09.1 is supported until 2026-10-06 (30 days)
 ```
 
 and past the window:

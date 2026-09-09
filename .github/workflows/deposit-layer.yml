@@ -1,4 +1,19 @@
-name: Deposit layer
+name: Deposit layer (LEGACY — old realm only)
+
+# SUPERSEDED. The pulseengine realm is now deposited by pulseengine-layers,
+# which owns its own registry package (DD-028). This workflow remains only to
+# serve the OLD realm — the one rooted at 4e771dc6..., retired in v0.32.1 —
+# whose layers live at ghcr.io/pulseengine/varve/layers and which consumers
+# who have not migrated still resolve against.
+#
+# It deliberately still points at the OLD path. Repointing it at
+# ghcr.io/pulseengine/layers would recreate, in reverse, exactly the problem
+# that move solves: a package owned by pulseengine-layers, pushed from varve,
+# needing a cross-repo grant. One repository publishes a realm.
+#
+# Do not deposit new layers here. Remove this file once pulseengine-layers has
+# published successfully at least once — deleting the only working depositor
+# before its replacement has ever run is how a realm goes dark.
 
 # The bundle assembler (REQ-DEPOSIT-001, the produce half of the #157
 # architecture): download the pinned per-tool releases, VERIFY each one

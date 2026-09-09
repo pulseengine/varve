@@ -112,6 +112,20 @@ pub fn payload_key(name: &str, platform: Option<&str>) -> String {
     }
 }
 
+/// The two names a payload has (REQ-PAYLOADID-001).
+///
+/// `deposited` is what it is CALLED in the layer — what a consumer resolves.
+/// `binary` is what the executable is called INSIDE the archive. Usually the
+/// same string, and one variable served both until a repository needed to
+/// contribute two payloads: a payload could then only ever be deposited under
+/// the name of the file found in its own tarball, so one repository meant one
+/// payload.
+#[derive(Debug, Clone, Copy)]
+pub struct Names<'a> {
+    pub deposited: &'a str,
+    pub binary: &'a str,
+}
+
 /// Stage one resolved payload and describe it.
 pub fn stage_one<R: CommandRunner>(
     runner: &R,
@@ -120,13 +134,14 @@ pub fn stage_one<R: CommandRunner>(
     stage_root: &Path,
     downloads: &Path,
     scratch: &Path,
-    binary_name: &str,
+    names: Names<'_>,
 ) -> anyhow::Result<ToolOut> {
-    let rel = stage::staged_path(
+    let rel = stage::staged_path_for(
         r.plan.kind,
-        binary_name,
+        names.deposited,
         version,
         r.plan.platform.as_deref(),
+        stage::archive_ext(&r.plan.asset),
     );
     let dest = stage_root.join(&rel);
     let archive = downloads.join(&r.plan.asset);
@@ -138,12 +153,57 @@ pub fn stage_one<R: CommandRunner>(
                 r.plan.name,
                 r.plan.platform.as_deref().unwrap_or("any")
             ));
-            let bin = stage::extract_binary(runner, &r.plan.asset, &archive, &ex, binary_name)?;
+            let bin = stage::extract_binary(runner, &r.plan.asset, &archive, &ex, names.binary)?;
             stage::place(&bin, &dest, true)?;
         }
         PayloadKind::RawPerPlatform => stage::place(&archive, &dest, true)?,
         // Never unpacked: the extension IS the payload.
         PayloadKind::Vsix => stage::place(&archive, &dest, false)?,
+        // Never unpacked either, and for a stronger reason: the whole TREE is
+        // the payload (REQ-SDKDEPOSIT-001). Stored exactly as upstream
+        // published it — unpacking and re-packing would break the digest that
+        // upstream's own sums cover, and relocation is export-sdk's job on the
+        // consumer's machine (REQ-SDK-001 clause 3).
+        PayloadKind::Sdk => {
+            stage::place(&archive, &dest, false)?;
+            // Clause 5: shape, not architecture. A tree cannot be
+            // arch-checked, but it CAN be opened, and the failure that catches
+            // is concrete — a 14 GB download that turns out to be an HTML
+            // error page hashes and signs perfectly well, and would install
+            // and verify before failing on someone's machine.
+            //
+            // Uses varve's own reader, so the producer proves the payload can
+            // be opened by exactly the code the consumer will open it with,
+            // rather than by a second implementation that might disagree.
+            if let Some(want) = r.plan.contains.as_deref() {
+                let bytes = std::fs::read(&dest)?;
+                let members = varve_core::sdkexport::read_members(&bytes).map_err(|e| {
+                    anyhow::anyhow!(
+                        "{}: the sdk payload cannot be opened by the code that will \
+                         export it: {e}",
+                        r.plan.name
+                    )
+                })?;
+                if !members
+                    .iter()
+                    .any(|m| m.path == want || m.path.starts_with(want))
+                {
+                    let mut saw: Vec<&str> =
+                        members.iter().take(8).map(|m| m.path.as_str()).collect();
+                    saw.sort();
+                    anyhow::bail!(
+                        "{}: the sdk payload does not contain {want:?}.\n\n\
+                         {} member(s) were read and none matched. This is the \
+                         shape check (REQ-SDKDEPOSIT-001 clause 5): the bytes \
+                         hash and verify, so what is wrong is not integrity but \
+                         content — a truncated upstream, a renamed layout, or \
+                         the wrong asset for this platform.\n  first members: {saw:?}",
+                        r.plan.name,
+                        members.len()
+                    );
+                }
+            }
+        }
     }
 
     // The architecture check reads the staged file, not the archive — what
@@ -151,19 +211,24 @@ pub fn stage_one<R: CommandRunner>(
     // platform installs cleanly and fails on first use, on someone else's
     // machine.
     if let Some(platform) = r.plan.platform.as_deref()
-        && r.plan.kind != PayloadKind::Vsix
+        // Not applied to a tree (clause 4): an SDK holds executables for
+        // several architectures, so checking the archive's first ELF proves
+        // nothing and would refuse a correct cross-toolchain for containing a
+        // cross-compiler.
+        && !matches!(r.plan.kind, PayloadKind::Vsix | PayloadKind::Sdk)
     {
         let bytes = std::fs::read(&dest)?;
         binfmt::check_platform(&rel, &bytes, platform)?;
     }
 
     Ok(ToolOut {
-        name: binary_name.to_string(),
+        name: names.deposited.to_string(),
         version: version.to_string(),
         platform: r.plan.platform.clone(),
         path: rel,
         kind: match r.plan.kind {
             PayloadKind::Vsix => Some("vsix".to_string()),
+            PayloadKind::Sdk => Some("sdk".to_string()),
             _ => None,
         },
         source: SourceOut {
@@ -275,6 +340,8 @@ mod tests {
     fn resolved(kind: PayloadKind, asset: &str, platform: Option<&str>) -> Resolved {
         Resolved {
             plan: crate::plan::PayloadPlan {
+                upstream_sums: None,
+                contains: None,
                 name: "rivet".into(),
                 repo: "o/r".into(),
                 version: "v0.34.0".into(),
@@ -318,7 +385,10 @@ mod tests {
             &root,
             &dl,
             &root.join("extract"),
-            "rivet",
+            Names {
+                deposited: "rivet",
+                binary: "rivet",
+            },
         )
         .expect_err("must refuse");
         let msg = e.to_string();
@@ -344,13 +414,169 @@ mod tests {
             &root,
             &dl,
             &root.join("extract"),
-            "rivet",
+            Names {
+                deposited: "rivet",
+                binary: "rivet",
+            },
         )
         .expect("stages");
         assert_eq!(t.path, "tools/rivet-x86_64-unknown-linux-gnu");
         assert_eq!(t.kind, None, "a tool must not be labelled a vsix");
         assert!(root.join(&t.path).exists());
         assert_eq!(t.source.proof.as_deref(), Some("cosign-sums"));
+    }
+
+    /// REQ-SDKDEPOSIT-001. A tree is stored whole, not mined for a binary, and
+    /// is NOT arch-checked — an SDK holds executables for several
+    /// architectures, so checking its first ELF would refuse a correct
+    /// cross-toolchain for containing a cross-compiler.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn an_sdk_is_stored_whole_and_not_arch_checked() {
+        use std::io::Write;
+        let root = scratch("sdkwhole");
+        let dl = root.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        // A real tar.gz holding a path we will assert on.
+        let mut tar = tar::Builder::new(Vec::new());
+        let body = b"not an elf at all";
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o755);
+        h.set_cksum();
+        tar.append_data(&mut h, "arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc", &body[..])
+            .unwrap();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&tar.into_inner().unwrap()).unwrap();
+        std::fs::write(dl.join("sdk.tar.gz"), enc.finish().unwrap()).unwrap();
+
+        let mut r = resolved(PayloadKind::Sdk, "sdk.tar.gz", Some("aarch64-apple-darwin"));
+        r.plan.name = "zephyr-sdk".into();
+        r.plan.contains = Some("arm-zephyr-eabi/bin".into());
+        let t = stage_one(
+            &Unpacker,
+            &r,
+            "1.0.1",
+            &root,
+            &dl,
+            &root.join("x"),
+            Names {
+                deposited: "zephyr-sdk",
+                binary: "zephyr-sdk",
+            },
+        )
+        .expect("an sdk must not be arch-checked");
+        assert_eq!(t.kind.as_deref(), Some("sdk"), "must be recorded as an sdk");
+        assert!(t.path.starts_with("sdk/"), "{}", t.path);
+        assert!(
+            t.path.ends_with(".tar.gz"),
+            "the extension must survive: {}",
+            t.path
+        );
+        // Stored WHOLE: the staged bytes are the archive, not a file from it.
+        let staged = std::fs::read(root.join(&t.path)).unwrap();
+        assert_eq!(staged, std::fs::read(dl.join("sdk.tar.gz")).unwrap());
+    }
+
+    /// Clause 5. The failure this catches is a download that hashes and signs
+    /// perfectly and is not the thing it claims to be.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn an_sdk_missing_the_path_it_claims_to_contain_is_refused() {
+        use std::io::Write;
+        let root = scratch("sdkshape");
+        let dl = root.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(b"<html>404 Not Found</html>").unwrap();
+        std::fs::write(dl.join("sdk.tar.gz"), enc.finish().unwrap()).unwrap();
+
+        let mut r = resolved(PayloadKind::Sdk, "sdk.tar.gz", Some("aarch64-apple-darwin"));
+        r.plan.name = "zephyr-sdk".into();
+        r.plan.contains = Some("arm-zephyr-eabi/bin".into());
+        let e = stage_one(
+            &Unpacker,
+            &r,
+            "1.0.1",
+            &root,
+            &dl,
+            &root.join("x"),
+            Names {
+                deposited: "zephyr-sdk",
+                binary: "zephyr-sdk",
+            },
+        )
+        .expect_err("an HTML error page must not deposit as an SDK");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("cannot be opened") || msg.contains("does not contain"),
+            "{msg}"
+        );
+    }
+
+    /// `contains` may name a FILE, not only a directory prefix. Matching only
+    /// by prefix would accept a payload where the named file is absent but
+    /// something happens to share its leading path.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn contains_matches_an_exact_member_as_well_as_a_prefix() {
+        use std::io::Write;
+        let root = scratch("sdkexact");
+        let dl = root.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        let mut tar = tar::Builder::new(Vec::new());
+        let body = b"x";
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o755);
+        h.set_cksum();
+        tar.append_data(&mut h, "sysroots/x86_64/usr/bin/gcc", &body[..])
+            .unwrap();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&tar.into_inner().unwrap()).unwrap();
+        std::fs::write(dl.join("sdk.tar.gz"), enc.finish().unwrap()).unwrap();
+
+        let mk = |want: &str| {
+            let mut r = resolved(
+                PayloadKind::Sdk,
+                "sdk.tar.gz",
+                Some("x86_64-unknown-linux-gnu"),
+            );
+            r.plan.name = "yocto-sdk".into();
+            r.plan.contains = Some(want.to_string());
+            r
+        };
+        // The exact member path.
+        stage_one(
+            &Unpacker,
+            &mk("sysroots/x86_64/usr/bin/gcc"),
+            "5.0",
+            &root,
+            &dl,
+            &root.join("x"),
+            Names {
+                deposited: "yocto-sdk",
+                binary: "yocto-sdk",
+            },
+        )
+        .expect("an exact member path must satisfy contains");
+        // A path that is NOT present, but shares a prefix with one that is.
+        assert!(
+            stage_one(
+                &Unpacker,
+                &mk("sysroots/x86_64/usr/bin/gcc-14"),
+                "5.0",
+                &root,
+                &dl,
+                &root.join("x"),
+                Names {
+                    deposited: "yocto-sdk",
+                    binary: "yocto-sdk"
+                },
+            )
+            .is_err(),
+            "an absent file must not be satisfied by a sibling"
+        );
     }
 
     /// A vsix is a zip. Arch-checking one would refuse every extension the
@@ -372,7 +598,10 @@ mod tests {
             &root,
             &dl,
             &root.join("extract"),
-            "ext",
+            Names {
+                deposited: "ext",
+                binary: "ext",
+            },
         )
         .expect("a vsix is not arch-checked");
         assert_eq!(
@@ -409,7 +638,10 @@ mod tests {
             &root,
             &dl,
             &root.join("extract"),
-            "wsc",
+            Names {
+                deposited: "wsc",
+                binary: "wsc",
+            },
         )
         .expect("stages");
         assert_eq!(t.path, "tools/wsc-aarch64-unknown-linux-gnu");
@@ -426,7 +658,10 @@ mod tests {
                 &root,
                 &dl,
                 &root.join("extract"),
-                "wsc"
+                Names {
+                    deposited: "wsc",
+                    binary: "wsc"
+                },
             )
             .is_err(),
             "a raw asset must be arch-checked too"
@@ -565,6 +800,8 @@ mod tests {
     #[test]
     fn planned_payloads_that_had_no_build_are_reported_by_name() {
         let p = |name: &str, plat: &str, asset: &str| crate::plan::PayloadPlan {
+            upstream_sums: None,
+            contains: None,
             name: name.into(),
             repo: "o/r".into(),
             version: "v1".into(),

@@ -60,7 +60,7 @@ A realm binds a name to a trust root and one or more sources:
 
 ```toml
 [realm.pulseengine]
-registry   = "oci://ghcr.io/pulseengine/varve/layers"
+registry   = "oci://ghcr.io/pulseengine/layers"
 # Optional: additional sources, tried IN ORDER after `registry` when it cannot
 # be reached (REQ-MIRROR-001).
 mirrors    = ["oci://registry.example/pulseengine/layers"]

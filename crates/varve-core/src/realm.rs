@@ -45,6 +45,50 @@ pub struct Realm {
     /// the check. Defaults to false so every existing realm keeps working:
     /// failing closed by default would break all of them at once.
     pub signed_index: bool,
+    /// Roots this realm has RETIRED (REQ-ROTATE-002).
+    ///
+    /// Documentation, never authority. Nothing verifies against these — they
+    /// exist so that a signature failure can be EXPLAINED rather than merely
+    /// reported, because nothing otherwise distinguishes "signed by a root
+    /// this realm retired last week" from "signed by a stranger", and the
+    /// consumer cannot deduce which.
+    ///
+    /// This is not a rotation mechanism and must not be read as one. varve
+    /// still has no succession: nothing signs "this new root replaces the old
+    /// one", and no consumer would check such a statement. See
+    /// `varve docs threat-model`.
+    pub retired_roots: Vec<RetiredRoot>,
+}
+
+/// A root a realm used to sign with and has since retired (REQ-ROTATE-002).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredRoot {
+    /// Raw ed25519 public key bytes of the retired root. Held so a failing
+    /// signature can be ATTRIBUTED to it; never handed to a verifier.
+    pub key: Vec<u8>,
+    /// The date it was retired, as the realm states it.
+    pub retired: String,
+    /// The last layer it signed, when the realm says. Turns "your pin does
+    /// not verify" into "layers up to this one used the old root".
+    pub last_layer: Option<String>,
+}
+
+impl RetiredRoot {
+    /// The key as the realms file writes it — for messages, so a human can
+    /// match it against what they have.
+    pub fn hex(&self) -> String {
+        self.key.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The store partition this root's layers were installed under — computed
+    /// exactly as `Realm::fingerprint`, because it must name the SAME
+    /// directory a consumer already has on disk.
+    pub fn fingerprint(&self) -> String {
+        crate::store::manifest_digest(&self.key)
+            .strip_prefix("sha256:")
+            .expect("digest shape")[..16]
+            .to_string()
+    }
 }
 
 impl Realm {
@@ -56,6 +100,72 @@ impl Realm {
             .strip_prefix("sha256:")
             .expect("digest shape")[..16]
             .to_string()
+    }
+
+    /// A human label for a store-partition fingerprint, if this realm
+    /// explains it (REQ-ROTATE-002 clause 5).
+    ///
+    /// `Some(name)` for the live partition. For one a retired root left
+    /// behind, the name plus when it was retired — otherwise `varve list`
+    /// shows a bare hex string and the consumer's first symptom, their tools
+    /// apparently vanishing, has no stated cause. `None` when this realm has
+    /// nothing to say about the fingerprint, so an unrelated partition is
+    /// never misattributed to it.
+    pub fn partition_label(&self, fingerprint: &str) -> Option<String> {
+        if self.fingerprint() == fingerprint {
+            return Some(self.name.clone());
+        }
+        self.retired_roots
+            .iter()
+            .find(|r| r.fingerprint() == fingerprint)
+            .map(|r| {
+                format!(
+                    "{} (retired root, {} — layers here do not verify against the realm's \
+                     current root)",
+                    self.name, r.retired
+                )
+            })
+    }
+
+    /// If `envelope` verifies against a root this realm has RETIRED, an
+    /// explanation naming it (REQ-ROTATE-002 clause 3). `None` otherwise.
+    ///
+    /// This NEVER changes a verdict. The caller has already decided the
+    /// signature does not verify against the live root and is rejecting; this
+    /// only says why the bytes look the way they do. A retired root is
+    /// documentation, not authority — if this function's result ever gated
+    /// acceptance, a rotation would become a way to keep honouring the key you
+    /// rotated away from.
+    ///
+    /// It matters that an UNKNOWN signer returns `None`. If every unverifiable
+    /// signature got the sympathetic "that root was retired" message, the
+    /// diagnostic would tell an operator a rotation happened while they were
+    /// in fact being attacked — worse than the bare error it replaces.
+    pub fn explain_retired_signature(&self, envelope: &[u8], payload_type: &str) -> Option<String> {
+        let retired = self
+            .retired_roots
+            .iter()
+            .find(|r| crate::verify::dsse_verify_typed(envelope, payload_type, &r.key).is_ok())?;
+
+        let live: String = self.trust_root.iter().map(|b| format!("{b:02x}")).collect();
+        let mut why = format!(
+            "this signature verifies against a root the realm '{}' RETIRED on {} ({}), \
+             not against its current trust-root ({live}).",
+            self.name,
+            retired.retired,
+            retired.hex(),
+        );
+        if let Some(last) = &retired.last_layer {
+            why.push_str(&format!(
+                " Layers up to and including {last} were signed by the retired root."
+            ));
+        }
+        why.push_str(
+            " This is not a forgery and not a mistake on your part: the realm changed its \
+             root. Move your pin to a layer signed by the current root — the old layers \
+             are not recoverable under the new root, by design.",
+        );
+        Some(why)
     }
 
     /// The per-realm effective root under which core/state/status live.
@@ -125,6 +235,18 @@ struct RawRealm {
     /// consumers must not accept an unauthenticated listing for it.
     #[serde(rename = "signed-index", default)]
     signed_index: bool,
+    /// Roots this realm has retired (REQ-ROTATE-002). Diagnostic only.
+    #[serde(rename = "retired-roots", default)]
+    retired_roots: Vec<RawRetiredRoot>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRetiredRoot {
+    key: String,
+    retired: String,
+    #[serde(rename = "last-layer", default)]
+    last_layer: Option<String>,
 }
 
 /// Find the realms file by walking up from `start`.
@@ -216,6 +338,40 @@ pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex_key[i..i + 2], 16).expect("checked hex"))
         .collect();
+    // Retired roots are parsed with the SAME strictness as the live one: a
+    // malformed key here would produce a diagnostic naming nonsense, and a
+    // diagnostic nobody can act on is worse than the bare error it replaced.
+    let mut retired_roots = Vec::with_capacity(def.retired_roots.len());
+    for raw in &def.retired_roots {
+        let hex = raw.key.trim().to_ascii_lowercase();
+        if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(bad(format!(
+                "retired root {:?} is not a 64-hex-char ed25519 public key",
+                raw.key
+            )));
+        }
+        let key: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("checked hex"))
+            .collect();
+        // The live root listed as retired. No legitimate use, and precisely
+        // the mistake a half-finished rotation makes: update one field, paste
+        // the same value into the other. Refused rather than tolerated,
+        // because the realms file is the one place a rotation is written down
+        // twice and the two copies disagreeing is the whole failure mode.
+        if key == trust_root {
+            return Err(bad(format!(
+                "the realm's live trust-root {hex} is also listed in retired-roots — \
+                 a root cannot be both current and retired; remove it from one"
+            )));
+        }
+        retired_roots.push(RetiredRoot {
+            key,
+            retired: raw.retired.clone(),
+            last_layer: raw.last_layer.clone(),
+        });
+    }
+
     Ok(Realm {
         name: name.to_string(),
         registry: def.registry.clone(),
@@ -224,6 +380,7 @@ pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
             .collect(),
         trust_root,
         signed_index: def.signed_index,
+        retired_roots,
     })
 }
 
@@ -235,6 +392,287 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(REALMS_FILE), content).unwrap();
         tmp
+    }
+
+    const NEW: &str = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0";
+    const OLD: &str = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973";
+
+    fn realm_with_retired(retired: &str) -> String {
+        format!(
+            "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{NEW}\"\n\
+             retired-roots = [{retired}]\n"
+        )
+    }
+
+    /// A realm can say which roots it has retired, so a signature failure can
+    /// be explained instead of merely reported.
+    // rivet: verifies REQ-ROTATE-002
+    #[test]
+    fn a_realm_can_declare_the_roots_it_has_retired() {
+        let dir = realms_dir(&realm_with_retired(&format!(
+            "{{ key = \"{OLD}\", retired = \"2026-09-07\", last-layer = \"2026.09.1\" }}"
+        )));
+        let realm = resolve_realm(dir.path(), "r").unwrap();
+        assert_eq!(realm.retired_roots.len(), 1);
+        let r = &realm.retired_roots[0];
+        assert_eq!(r.hex(), OLD);
+        assert_eq!(r.retired, "2026-09-07");
+        assert_eq!(r.last_layer.as_deref(), Some("2026.09.1"));
+        assert_ne!(
+            r.key, realm.trust_root,
+            "a retired root is not the live one"
+        );
+    }
+
+    /// THE LINE THIS MUST NOT CROSS. A retired root is documentation, not
+    /// authority. If declaring one ever widened what verifies, this feature
+    /// would be far worse than the confusing error it replaces — it would turn
+    /// a rotation into a way to keep accepting the key you rotated away from.
+    // rivet: verifies REQ-ROTATE-002
+    #[test]
+    fn a_retired_root_is_never_a_key_anything_verifies_against() {
+        let dir = realms_dir(&realm_with_retired(&format!(
+            "{{ key = \"{OLD}\", retired = \"2026-09-07\" }}"
+        )));
+        let realm = resolve_realm(dir.path(), "r").unwrap();
+
+        // The ONLY key the realm offers a verifier is the live root.
+        let live: Vec<u8> = (0..64)
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&NEW[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(realm.trust_root, live);
+        // And the store partition is the live root's, so declaring a retired
+        // root cannot silently reunite a consumer with the old partition.
+        let expected = Realm {
+            retired_roots: Vec::new(),
+            ..realm.clone()
+        };
+        assert_eq!(
+            realm.fingerprint(),
+            expected.fingerprint(),
+            "retired roots must not change the store namespace"
+        );
+    }
+
+    /// Listing the live root as retired has no legitimate use and is exactly
+    /// the mistake a half-finished rotation makes — updating one field and
+    /// pasting the same value into the other.
+    // rivet: verifies REQ-ROTATE-002
+    #[test]
+    fn declaring_the_live_root_as_retired_is_refused() {
+        let dir = realms_dir(&realm_with_retired(&format!(
+            "{{ key = \"{NEW}\", retired = \"2026-09-07\" }}"
+        )));
+        let err = resolve_realm(dir.path(), "r").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("retired") && msg.contains("trust-root"),
+            "the error must say the live root is listed as retired, got: {msg}"
+        );
+    }
+
+    /// Both halves of the key check, each exercised ALONE. "not-a-key" fails
+    /// length AND alphabet at once, so it cannot tell `||` from `&&` — a
+    /// mutation survivor found exactly that. A 64-char non-hex string and a
+    /// short all-hex string each trip one condition only, so a weakened check
+    /// accepts them.
+    // rivet: verifies REQ-ROTATE-002
+    #[test]
+    fn a_retired_root_that_is_not_a_key_is_refused() {
+        for (key, why) in [
+            ("not-a-key", "fails both length and alphabet"),
+            (
+                "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+                "right LENGTH, not hex",
+            ),
+            ("abcdef", "hex, wrong LENGTH"),
+            (
+                "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd997",
+                "hex, one char SHORT",
+            ),
+        ] {
+            let dir = realms_dir(&realm_with_retired(&format!(
+                "{{ key = \"{key}\", retired = \"2026-09-07\" }}"
+            )));
+            let err = resolve_realm(dir.path(), "r")
+                .expect_err(&format!("must refuse a retired root that {why}: {key}"))
+                .to_string();
+            assert!(
+                err.contains("64-hex"),
+                "a malformed retired root ({why}) must be refused like a malformed live one, \
+                 got: {err}"
+            );
+        }
+    }
+
+    /// A retired root's fingerprint must name the SAME store directory the
+    /// consumer already has on disk — it is looked up against partitions
+    /// written when that root was live. Asserting only that it DIFFERS from
+    /// the live one lets a constant stand in for it, which mutation testing
+    /// duly proved.
+    // rivet: verifies REQ-ROTATE-002
+    #[test]
+    fn a_retired_roots_fingerprint_is_the_one_its_partition_was_written_under() {
+        use crate::verify::generate_root_keypair;
+        let (_sk, old_pk) = generate_root_keypair();
+        let (_sk2, new_pk) = generate_root_keypair();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+
+        // The realm as it was BEFORE the rotation: the old key is the live
+        // root, so this is literally the fingerprint its partition was created
+        // under.
+        let before = realms_dir(&format!(
+            "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{}\"\n",
+            hex(&old_pk)
+        ));
+        let was_live = resolve_realm(before.path(), "r").unwrap().fingerprint();
+
+        // The realm AFTER, with the old key declared retired.
+        let after = realms_dir(&format!(
+            "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{}\"\n\
+             retired-roots = [{{ key = \"{}\", retired = \"2026-09-07\" }}]\n",
+            hex(&new_pk),
+            hex(&old_pk)
+        ));
+        let realm = resolve_realm(after.path(), "r").unwrap();
+
+        assert_eq!(
+            realm.retired_roots[0].fingerprint(),
+            was_live,
+            "a retired root must fingerprint to the partition it wrote, or `varve list` \
+             looks for a directory that does not exist"
+        );
+        assert_eq!(was_live.len(), 16, "the store namespace is 16 hex chars");
+        assert!(was_live.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// Clause 6: every realms file written before this feature keeps working,
+    /// unchanged, with no retired roots.
+    // rivet: verifies REQ-ROTATE-002
+    #[test]
+    fn a_realm_file_without_retired_roots_is_unchanged() {
+        let dir = realms_dir(&format!(
+            "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{NEW}\"\n"
+        ));
+        let realm = resolve_realm(dir.path(), "r").unwrap();
+        assert!(realm.retired_roots.is_empty());
+    }
+
+    /// Clause 5. "My tools vanished" is the symptom a consumer notices before
+    /// any error message, because the store partitions by root fingerprint and
+    /// the old partition is no longer named by any realm — so `varve list`
+    /// shows it as a bare hex string. Naming it costs nothing and turns a
+    /// mystery into a fact.
+    // rivet: verifies REQ-ROTATE-002
+    #[test]
+    fn a_partition_left_behind_by_a_retired_root_is_named_as_such() {
+        use crate::verify::generate_root_keypair;
+        let (_old_sk, old_pk) = generate_root_keypair();
+        let (_new_sk, new_pk) = generate_root_keypair();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let dir = realms_dir(&format!(
+            "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{}\"\n\
+             retired-roots = [{{ key = \"{}\", retired = \"2026-09-07\" }}]\n",
+            hex(&new_pk),
+            hex(&old_pk)
+        ));
+        let realm = resolve_realm(dir.path(), "r").unwrap();
+
+        // The live partition is named plainly.
+        assert_eq!(
+            realm.partition_label(&realm.fingerprint()).as_deref(),
+            Some("r")
+        );
+
+        // The partition the retired root left behind is named AND dated, so a
+        // human can tell it apart from the live one at a glance.
+        let old_fp = realm.retired_roots[0].fingerprint();
+        assert_ne!(old_fp, realm.fingerprint());
+        let label = realm
+            .partition_label(&old_fp)
+            .expect("a retired root's partition must be recognised");
+        assert!(label.contains('r'), "names the realm: {label}");
+        assert!(label.contains("retired"), "says it is retired: {label}");
+        assert!(label.contains("2026-09-07"), "says when: {label}");
+
+        // An unrelated partition stays unrecognised rather than being
+        // misattributed to this realm.
+        assert_eq!(realm.partition_label("0123456789abcdef"), None);
+    }
+
+    /// Clause 3. The whole point: a consumer whose pin was signed by the
+    /// retired root gets told WHICH root, WHEN it was retired, what replaced
+    /// it, and what to do — instead of "No valid signatures", which is
+    /// indistinguishable from a forgery by a stranger.
+    // rivet: verifies REQ-ROTATE-002
+    #[test]
+    fn a_signature_from_a_retired_root_is_attributed_not_merely_rejected() {
+        use crate::verify::generate_root_keypair;
+        let (old_sk, old_pk) = generate_root_keypair();
+        let (_new_sk, new_pk) = generate_root_keypair();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+
+        let dir = realms_dir(&format!(
+            "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{}\"\n\
+             retired-roots = [{{ key = \"{}\", retired = \"2026-09-07\", \
+             last-layer = \"2026.09.1\" }}]\n",
+            hex(&new_pk),
+            hex(&old_pk)
+        ));
+        let realm = resolve_realm(dir.path(), "r").unwrap();
+
+        // Something the OLD root signed — a layer deposited before rotation.
+        let envelope = crate::verify::dsse_sign_typed(b"{}", "application/x.test", &old_sk, "k")
+            .expect("sign with the retired root");
+
+        let why = realm
+            .explain_retired_signature(envelope.as_bytes(), "application/x.test")
+            .expect("a signature from a declared retired root must be attributed");
+        assert!(why.contains("2026-09-07"), "must say WHEN: {why}");
+        assert!(
+            why.contains(&hex(&old_pk)),
+            "must name the retired root: {why}"
+        );
+        assert!(
+            why.contains("2026.09.1"),
+            "must say which layers used it: {why}"
+        );
+        assert!(
+            why.to_lowercase().contains("pin"),
+            "must say the fix is to move the pin: {why}"
+        );
+    }
+
+    /// A forgery by a stranger must stay a forgery. If any unverifiable
+    /// signature got the sympathetic "this realm retired that root" message,
+    /// the diagnostic would be actively misleading — telling an operator a
+    /// rotation happened when they are being attacked.
+    // rivet: verifies REQ-ROTATE-002
+    #[test]
+    fn a_signature_from_an_unknown_key_is_not_blamed_on_a_rotation() {
+        use crate::verify::generate_root_keypair;
+        let (_old_sk, old_pk) = generate_root_keypair();
+        let (_new_sk, new_pk) = generate_root_keypair();
+        let (stranger_sk, _stranger_pk) = generate_root_keypair();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+
+        let dir = realms_dir(&format!(
+            "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{}\"\n\
+             retired-roots = [{{ key = \"{}\", retired = \"2026-09-07\" }}]\n",
+            hex(&new_pk),
+            hex(&old_pk)
+        ));
+        let realm = resolve_realm(dir.path(), "r").unwrap();
+        let envelope =
+            crate::verify::dsse_sign_typed(b"{}", "application/x.test", &stranger_sk, "k")
+                .expect("sign with a stranger key");
+        assert!(
+            realm
+                .explain_retired_signature(envelope.as_bytes(), "application/x.test")
+                .is_none(),
+            "an unknown signer must not be explained away as a rotation"
+        );
     }
 
     // rivet: verifies REQ-STORE-001
@@ -262,7 +700,7 @@ mod tests {
 
     const TWO_REALMS: &str = r#"
 [realm.pulseengine]
-registry = "oci://ghcr.io/pulseengine/varve/layers"
+registry = "oci://ghcr.io/pulseengine/layers"
 trust-root = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 [realm.acme]
