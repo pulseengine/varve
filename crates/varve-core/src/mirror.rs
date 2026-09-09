@@ -221,6 +221,12 @@ mod tests {
         manifest: Option<Vec<u8>>,
         err: Option<SourceError>,
         status: Option<Option<Vec<u8>>>,
+        /// The document published under the line's OWN tag, separately from
+        /// the baseline carried beside a layer (REQ-POSTDEPOSIT-001). Fake did
+        /// not model this at all, so every source fell through to the trait
+        /// default `Ok(None)` and four mutants on the Mirrors delegation were
+        /// indistinguishable from the real thing.
+        published: Option<Option<Vec<u8>>>,
         calls: Rc<Cell<usize>>,
     }
 
@@ -229,6 +235,7 @@ mod tests {
             manifest: Some(bytes.to_vec()),
             err: None,
             status: Some(Some(bytes.to_vec())),
+            published: Some(Some(bytes.to_vec())),
             calls: Rc::new(Cell::new(0)),
         })
     }
@@ -237,6 +244,7 @@ mod tests {
             manifest: None,
             err: Some(SourceError::Transport(msg.into())),
             status: None,
+            published: None,
             calls: Rc::new(Cell::new(0)),
         })
     }
@@ -245,6 +253,7 @@ mod tests {
             manifest: None,
             err: Some(SourceError::NotFound("layer".into())),
             status: Some(None),
+            published: Some(None),
             calls: Rc::new(Cell::new(0)),
         })
     }
@@ -261,6 +270,15 @@ mod tests {
         fn fetch_blob(&self, _d: &str) -> Result<Vec<u8>, SourceError> {
             self.fetch_manifest(&LayerRef::Digest("x".into()))
         }
+        fn fetch_published_line_status(&self, _l: &str) -> Result<Option<Vec<u8>>, SourceError> {
+            self.calls.set(self.calls.get() + 1);
+            match (&self.published, &self.err) {
+                (Some(s), _) => Ok(s.clone()),
+                (None, Some(e)) => Err(clone_err(e)),
+                (None, None) => Ok(None),
+            }
+        }
+
         fn fetch_line_status(&self, _l: &LayerRef) -> Result<Option<Vec<u8>>, SourceError> {
             self.calls.set(self.calls.get() + 1);
             match (&self.status, &self.err) {
@@ -474,6 +492,43 @@ mod tests {
             .fetch_line_status(&LayerRef::Digest("d".into()))
             .expect_err("must not report absence");
         assert!(e.to_string().contains("could be reached"), "{e}");
+    }
+
+    /// A mirror carrying a CORRECTION the primary is missing must be reached.
+    /// That asymmetry is the reason a yank can be suppressed by one registry
+    /// and still arrive, so an explicit None has to keep looking rather than
+    /// end the search.
+    // rivet: verifies REQ-POSTDEPOSIT-001
+    #[test]
+    fn a_mirror_carrying_a_correction_is_reached_past_one_that_has_none() {
+        let m = mirrors(vec![("a", empty()), ("b", ok(b"correction"))]);
+        assert_eq!(
+            m.fetch_published_line_status("2026.09").unwrap(),
+            Some(b"correction".to_vec())
+        );
+        assert_eq!(m.served_by().as_deref(), Some("b"));
+    }
+
+    /// Nobody reachable is not "there is no correction". Reporting absence
+    /// here would let a network fault look exactly like a line with nothing
+    /// to say — and a suppressed yank is the difference.
+    // rivet: verifies REQ-POSTDEPOSIT-001
+    #[test]
+    fn a_correction_nobody_could_be_asked_about_is_not_reported_as_absent() {
+        let m = mirrors(vec![("a", down("no such host")), ("b", down("503"))]);
+        let e = m
+            .fetch_published_line_status("2026.09")
+            .expect_err("must not report absence");
+        assert!(e.to_string().contains("could be reached"), "{e}");
+    }
+
+    /// A line with genuinely nothing published is `Ok(None)` — distinct from
+    /// both of the above.
+    // rivet: verifies REQ-POSTDEPOSIT-001
+    #[test]
+    fn a_line_with_no_correction_published_is_absent_not_an_error() {
+        let m = mirrors(vec![("a", empty()), ("b", empty())]);
+        assert_eq!(m.fetch_published_line_status("2026.09").unwrap(), None);
     }
 
     /// A source that carries the status is preferred over one that does not,

@@ -268,9 +268,17 @@ pub fn relocate_bytes(
             .map(|p| p + 1)
             .unwrap_or(0);
         let Some(end) = out[hit..].iter().position(|b| *b == 0).map(|p| hit + p) else {
-            // No terminator before end of file — not a field we can pad.
-            cursor = hit + built.len();
-            continue;
+            // No terminator between here and the end of the file — so there is
+            // none for any LATER occurrence either, since every later one
+            // searches a suffix of this same range. Nothing after this point
+            // can be a padded field, so stop rather than advance a cursor.
+            //
+            // This was `cursor = hit + built.len(); continue;`, which scanned
+            // on to find nothing. Mutation testing left `hit * built.len()`
+            // alive here and it was right to: any advance past `hit` reaches
+            // the same conclusion, so the arithmetic could not be observed.
+            // The arithmetic was the thing that did not need to exist.
+            break;
         };
         // Capacity is the string PLUS its NUL padding: exactly the `p_filesz`
         // the script compares against.
@@ -822,6 +830,220 @@ mod tests {
         assert!(check_destination_fits("/opt/poky", "/opt/abcd/").is_ok());
     }
 
+    /// `matches!(c, '/' | '\\' | '\0') || c.is_control()` — the OR is what makes
+    /// this catch two different families. Narrowed to AND, only a character
+    /// that is BOTH a separator AND a control character is refused, which is
+    /// almost none of them: a component containing `/` sails through, and so
+    /// does a newline.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn a_component_is_refused_for_a_separator_or_for_a_control_character() {
+        // A separator, which is not a control character.
+        assert!(
+            super::component_fault("a/b").is_some(),
+            "a component containing a separator must be refused"
+        );
+        assert!(super::component_fault("a\\b").is_some());
+        // A control character, which is not a separator.
+        assert!(
+            super::component_fault("a\nb").is_some(),
+            "a control character must be refused even though it is not a separator"
+        );
+        assert!(super::component_fault("a\tb").is_some());
+        // And an ordinary name is still fine, or the check would refuse the world.
+        assert!(super::component_fault("libc.so.6").is_none());
+    }
+
+    /// `""` and `"."` contribute NO depth. Delete that arm and they count as
+    /// real components, so an escape that leans on them stops being detected —
+    /// `./..` climbs out of the export root while looking like it went nowhere.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn empty_and_dot_components_add_no_depth_to_the_escape_check() {
+        let r = super::resolve_link_target("m", "./..", "/opt/poky", "/opt/sdk");
+        assert!(
+            r.is_err(),
+            "`./..` climbs above the export root and must be refused, got {r:?}"
+        );
+        // `.//..` is still one step above the root — the empty and dot
+        // components must contribute nothing. (`a//./..` is NOT an escape: it
+        // resolves to `a/..`, which lands back at the root, and asserting
+        // otherwise was my error, caught by this test failing.)
+        let r = super::resolve_link_target("m", ".//..", "/opt/poky", "/opt/sdk");
+        assert!(r.is_err(), "empty and dot components must not fund a climb");
+    }
+
+    /// The ABSOLUTE branch walks its remainder too, and the two mutants that
+    /// survived my first attempt were there — I tested the relative branch and
+    /// assumed it covered both. Being under the build prefix is not the same as
+    /// staying under it: `<built>/../../tmp/x` starts with the prefix and lands
+    /// outside the export, which is the hole this walk was added to close.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn an_absolute_target_under_the_prefix_is_walked_not_merely_prefix_matched() {
+        let built = "/opt/poky";
+        // Empty and dot components contribute NO depth, so a climb that leans
+        // on them is still a climb.
+        for target in ["/opt/poky/./..", "/opt/poky/.//..", "/opt/poky/../.."] {
+            assert!(
+                super::resolve_link_target("m", target, built, "/opt/sdk").is_err(),
+                "{target} climbs out of the export root and must be refused"
+            );
+        }
+        // …and stepping down and back up is NOT an escape, so the test is
+        // `depth < 0` rather than `<= 0`. A real SDK is full of these.
+        let (t, _) = super::resolve_link_target("m", "/opt/poky/lib/..", built, "/opt/sdk")
+            .expect("returning to the root stays inside it");
+        assert_eq!(t, "/opt/sdk/lib/..");
+        super::resolve_link_target("m", "/opt/poky/usr/../lib/libc.so", built, "/opt/sdk")
+            .expect("an ordinary absolute SDK symlink must not be refused");
+    }
+
+    /// The escape test is `depth < 0`, not `<= 0`. Relaxed, a link that steps
+    /// down and back up to the root — `lib/../lib` and its kin, which are
+    /// everywhere in a real SDK — is refused as an escape and the export fails
+    /// on a correct tree.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn returning_to_the_root_is_not_an_escape() {
+        let (target, _) = super::resolve_link_target("m", "a/..", "/opt/poky", "/opt/sdk")
+            .expect("stepping down and back up stays inside the root");
+        assert_eq!(target, "a/..");
+        super::resolve_link_target("m", "lib/../lib/libc.so", "/opt/poky", "/opt/sdk")
+            .expect("a normal SDK symlink must not be refused");
+        // One step further out IS an escape.
+        assert!(super::resolve_link_target("m", "a/../..", "/opt/poky", "/opt/sdk").is_err());
+    }
+
+    /// The neighbouring string must survive byte-for-byte.
+    ///
+    /// Every arithmetic mutant in `relocate_bytes` — the `== 0` that finds the
+    /// previous NUL, the `p + 1` that steps past it, the `hit + p` that finds
+    /// the terminator, the `pad_end - start` that measures capacity — preserves
+    /// the file's LENGTH while moving where the patch lands. Asserting on
+    /// length and on counts cannot see any of them; only the bytes can. The
+    /// mutation gate found seven survivors here, and this is what they had in
+    /// common.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn patching_one_string_leaves_the_string_before_it_untouched() {
+        // Two NUL-terminated strings. The prefix appears mid-way through the
+        // SECOND, so `start` has to be found by walking back to the previous
+        // NUL — not by starting at the occurrence, and not by running into the
+        // first string.
+        let mut buf = b"KEEP-ME-EXACTLY ".to_vec();
+        let head = buf.len();
+        let field = format!("LD_LIBRARY_PATH={BUILT}/sysroots/lib");
+        buf.extend_from_slice(&nul_field(&field, field.len() + 1 + SLACK));
+
+        let r = relocate_bytes("libc.so", &buf, BUILT, "/opt/sdk").unwrap();
+
+        assert_eq!(r.bytes.len(), buf.len(), "in-place patch preserves length");
+        assert_eq!(
+            &r.bytes[..head],
+            b"KEEP-ME-EXACTLY\0",
+            "the preceding string was corrupted — `start` walked past its own \
+             string boundary"
+        );
+        let patched = &r.bytes[head..];
+        let text = &patched[..patched.iter().position(|b| *b == 0).unwrap()];
+        assert_eq!(
+            text,
+            b"LD_LIBRARY_PATH=/opt/sdk/sysroots/lib",
+            "the patched field is wrong: {}",
+            String::from_utf8_lossy(text)
+        );
+        assert!(
+            patched[text.len()..].iter().all(|b| *b == 0),
+            "everything past the terminator must be NUL padding"
+        );
+        assert_eq!(r.fields, 1);
+    }
+
+    /// A prefix occurrence with NO terminator after it is not a field that can
+    /// be padded, so relocation steps over it. The cursor advance in that
+    /// branch had no test at all: leave it un-advanced and the same occurrence
+    /// is found forever.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn an_unterminated_occurrence_is_stepped_over_rather_than_scanned_forever() {
+        // NUL first so the member is treated as a binary, then the prefix
+        // running to the end of the buffer with nothing to terminate it.
+        let mut buf = vec![0u8];
+        buf.extend_from_slice(BUILT.as_bytes());
+
+        let r = relocate_bytes("weird.bin", &buf, BUILT, "/opt/sdk").unwrap();
+        assert_eq!(
+            r.fields, 0,
+            "an unterminated occurrence is not a padded field and must not be patched"
+        );
+        assert_eq!(r.bytes, buf, "and nothing about it may be rewritten");
+    }
+
+    /// Capacity is `pad_end - start`, and it decides whether a destination
+    /// FITS. Getting it wrong does not corrupt anything visibly — it accepts a
+    /// path that does not fit, or refuses one that does, and the SDK breaks
+    /// later on someone else's machine.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn capacity_is_measured_from_the_string_start_not_from_the_occurrence() {
+        // A field whose string begins BEFORE the prefix occurrence. If capacity
+        // were measured from the occurrence rather than the string start, this
+        // would appear to have more room than it has.
+        let field = format!("PATH={BUILT}");
+        // A PRECEDING string, so `start` is non-zero. With start == 0,
+        // `pad_end - start` and `pad_end + start` are the same number and the
+        // capacity arithmetic cannot be observed at all — which is why the
+        // first version of this test left that mutant alive.
+        let head = b"PRECEDING\0";
+        let mut buf = head.to_vec();
+        // Exactly enough room for the string, its NUL, and nothing else.
+        buf.extend_from_slice(&nul_field(&field, field.len() + 1));
+
+        // A destination the same length as the built prefix always fits.
+        let same = "/x".repeat(BUILT.len() / 2);
+        let r = relocate_bytes("x", &buf, BUILT, &same).unwrap();
+        assert_eq!(r.bytes.len(), buf.len());
+
+        // One byte longer than the built prefix does NOT fit in a field with
+        // no slack, and must be refused rather than truncated.
+        let longer = format!("{same}Z");
+        let err = relocate_bytes("x", &buf, BUILT, &longer).unwrap_err();
+        let msg = err.to_string();
+        // The refusal names both numbers, which is what makes it actionable —
+        // and what pins the capacity arithmetic: a wrongly-measured field
+        // would report a different pair.
+        assert!(
+            msg.contains(&format!("needs {} bytes", field.len() + 2)),
+            "must say how much the destination needs: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("the field holds {}", buf.len() - head.len())),
+            "the field is measured from the STRING START, not from the buffer \
+             start — a capacity that included the preceding string would accept \
+             a destination that does not fit and overrun the field: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("at offset {}", head.len())),
+            "and the offset reported is the string start: {msg}"
+        );
+    }
+
+    /// `find_sub` guards with `haystack.len() < needle.len()`. Relaxed to
+    /// `<=`, a needle that is exactly the whole haystack stops being found —
+    /// and a prefix that fills its field entirely is the realistic case, since
+    /// the built prefix is padded to be as long as the field allows.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn a_needle_exactly_as_long_as_the_haystack_is_still_found() {
+        assert_eq!(super::find_sub(b"abc", b"abc", 0), Some(0));
+        assert_eq!(super::find_sub(b"abc", b"abcd", 0), None);
+        assert_eq!(super::find_sub(b"xabc", b"abc", 0), Some(1));
+        // And the `from` cursor is respected rather than ignored.
+        assert_eq!(super::find_sub(b"abcabc", b"abc", 1), Some(3));
+        assert_eq!(super::find_sub(b"abc", b"", 0), None);
+    }
+
     // rivet: verifies REQ-SDK-001
     #[test]
     fn a_nul_padded_field_is_patched_in_place_and_the_file_length_is_preserved() {
@@ -926,6 +1148,23 @@ mod tests {
         let signed_binary = fake_binary();
 
         let report = export_members(&members, BUILT, &out).unwrap();
+        // `dirs` was the one field this assertion block never checked, so
+        // `report.dirs += 1` survived mutation as `*= 1` — the counter stuck at
+        // zero while every directory was still created. A report is evidence:
+        // "created 0 directories" and "created 40 000" look identical on disk,
+        // which is what the struct's own doc comment says.
+        let expected_dirs = members
+            .iter()
+            .filter(|m| matches!(m.body, MemberBody::Dir))
+            .count();
+        assert!(
+            expected_dirs > 0,
+            "the fixture must contain directories or this asserts nothing"
+        );
+        assert_eq!(
+            report.dirs, expected_dirs,
+            "every directory in the tree is created AND counted"
+        );
         assert_eq!(report.files, 2);
         assert_eq!(report.symlinks, 1);
         assert_eq!(report.relocated_symlinks, 1);
