@@ -6,9 +6,8 @@
 //! and pushes to a registry. Keeping them apart keeps that claim true.
 
 use clap::{Parser, Subcommand};
-use varve_producer::gh::CommandRunner;
 use varve_producer::{
-    asset, binfmt, deposit, forge::Forge, gh, immutable, ingest, orchestrate, plan, registry, scan,
+    asset, binfmt, deposit, forge::Forge, immutable, ingest, orchestrate, plan, registry, scan,
     source,
 };
 
@@ -363,24 +362,13 @@ fn main() -> anyhow::Result<()> {
             let text = std::fs::read_to_string(&manifest)?;
             let m = varve_core::layerspec::parse_layer_manifest(&text)?;
 
-            // Ask every upstream, collecting failures rather than stopping at
-            // the first: an operator fixing access wants the whole list.
-            let mut answers = std::collections::BTreeMap::new();
-            for t in &m.tools {
-                let repo = scan::repo_of(&t.name, t.repo.as_deref());
-                if answers.contains_key(&repo) {
-                    continue;
-                }
-                let d = source::Spawn.run("gh", &gh::latest_release_argv(&repo), &[]);
-                let answer = if d.code == 127 {
-                    Err("gh is not on PATH".to_string())
-                } else if !d.ok() {
-                    Err(d.stderr.trim().chars().take(160).collect())
-                } else {
-                    gh::parse_latest_release(&d.stdout).map_err(|e| e.to_string())
-                };
-                answers.insert(repo, answer);
-            }
+            // Through the FORGE, so `GH_HOST` reaches every lookup. The first
+            // version of this loop lived here and passed an empty environment,
+            // which silently targeted github.com whatever the forge said. On an
+            // enterprise instance that fails everywhere — or, worse, succeeds
+            // against a same-named repository on the public forge.
+            let forge = forge_from_env();
+            let answers = scan::latest_releases(&source::Spawn, &forge, &m);
 
             match scan::compare(&m, &answers) {
                 Ok(moved) => {

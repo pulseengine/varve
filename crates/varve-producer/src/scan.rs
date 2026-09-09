@@ -111,6 +111,45 @@ pub fn compare(
     Ok(moved)
 }
 
+/// Ask every repository the manifest pins what it has most recently published.
+///
+/// Lives here rather than in `main` so the ENTERPRISE property is testable: the
+/// forge's environment must reach every `gh` invocation, and the first version
+/// of this loop passed an empty environment. That silently targeted github.com
+/// no matter what `GH_HOST` said — on an enterprise instance every lookup would
+/// have failed, or worse, answered about a different repository of the same
+/// name on the public forge.
+///
+/// One query per REPOSITORY, not per payload: several payloads can come from
+/// one repo (varve ships `varve` and `varve-producer`), and asking twice would
+/// double the rate-limit cost of every scan for no new information.
+pub fn latest_releases<R: crate::gh::CommandRunner>(
+    runner: &R,
+    forge: &crate::forge::Forge,
+    manifest: &LayerManifest,
+) -> BTreeMap<String, Result<String, String>> {
+    let env = crate::gh::forge_env(forge);
+    let mut out: BTreeMap<String, Result<String, String>> = BTreeMap::new();
+    for t in &manifest.tools {
+        let repo = repo_of(&t.name, t.repo.as_deref());
+        if out.contains_key(&repo) {
+            continue;
+        }
+        let d = runner.run("gh", &crate::gh::latest_release_argv(&repo), &env);
+        let answer = if d.code == 127 {
+            // Named separately: "gh is missing" and "gh said no" send an
+            // operator to completely different places.
+            Err("gh is not on PATH".to_string())
+        } else if !d.ok() {
+            Err(d.stderr.trim().chars().take(160).collect())
+        } else {
+            crate::gh::parse_latest_release(&d.stdout).map_err(|e| e.to_string())
+        };
+        out.insert(repo, answer);
+    }
+    out
+}
+
 /// Autonomous deposit is permitted only for a channel that makes no
 /// qualification promise (REQ-SCAN-001 clause 5).
 ///
@@ -270,6 +309,119 @@ mod tests {
             repo_of("x", Some("bytecodealliance/wasm-tools")),
             "bytecodealliance/wasm-tools"
         );
+    }
+
+    /// A recording runner, so what the producer ASKS can be asserted rather
+    /// than inferred from what it answers.
+    /// One recorded invocation: the argv, and the environment it carried.
+    type Call = (Vec<String>, Vec<(String, String)>);
+
+    struct Recorder {
+        calls: std::cell::RefCell<Vec<Call>>,
+        stdout: String,
+        code: i32,
+    }
+
+    impl crate::gh::CommandRunner for Recorder {
+        fn run(
+            &self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+        ) -> crate::gh::RunOutput {
+            assert_eq!(program, "gh");
+            self.calls.borrow_mut().push((args.to_vec(), env.to_vec()));
+            crate::gh::RunOutput {
+                code: self.code,
+                stdout: self.stdout.clone(),
+                stderr: String::new(),
+            }
+        }
+    }
+
+    fn recorder(stdout: &str, code: i32) -> Recorder {
+        Recorder {
+            calls: std::cell::RefCell::new(Vec::new()),
+            stdout: stdout.to_string(),
+            code,
+        }
+    }
+
+    /// ENTERPRISE. `GH_HOST` must reach every lookup. The first version of this
+    /// loop passed an empty environment, which silently targeted github.com
+    /// whatever the forge said — on an enterprise instance every lookup fails,
+    /// or answers about a same-named repository on the PUBLIC forge, which is
+    /// worse because it succeeds.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn every_lookup_carries_the_enterprise_host() {
+        let r = recorder(r#"{"tagName":"v9.9.9"}"#, 0);
+        let forge = crate::forge::Forge::enterprise("github.acme.example");
+        latest_releases(&r, &forge, &manifest(TWO, "rolling"));
+
+        let calls = r.calls.borrow();
+        assert_eq!(calls.len(), 2, "one query per repository");
+        for (args, env) in calls.iter() {
+            assert!(args.contains(&"view".to_string()), "{args:?}");
+            assert!(
+                env.iter()
+                    .any(|(k, v)| k == "GH_HOST" && v == "github.acme.example"),
+                "every gh call must carry GH_HOST on an enterprise forge, got {env:?}"
+            );
+        }
+    }
+
+    /// …and public GitHub must NOT get a GH_HOST, because setting it there is
+    /// how a working setup starts failing for a reason nobody can see.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn public_github_is_asked_without_an_overridden_host() {
+        let r = recorder(r#"{"tagName":"v9.9.9"}"#, 0);
+        latest_releases(
+            &r,
+            &crate::forge::Forge::github_com(),
+            &manifest(TWO, "rolling"),
+        );
+        for (_, env) in r.calls.borrow().iter() {
+            assert!(
+                env.is_empty(),
+                "public github needs no host override: {env:?}"
+            );
+        }
+    }
+
+    /// One query per REPOSITORY. varve ships two payloads from one repo, and
+    /// asking twice doubles the rate-limit cost of every scan — at four scans
+    /// an hour that is the difference between comfortable and throttled.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn two_payloads_from_one_repository_are_asked_about_once() {
+        let two_from_one = "[[tool]]\nname = \"varve\"\nrepo = \"pulseengine/varve\"\nversion = \"v0.33.0\"\n\n\
+                            [[tool]]\nname = \"varve-producer\"\nrepo = \"pulseengine/varve\"\nversion = \"v0.33.0\"\n";
+        let r = recorder(r#"{"tagName":"v0.33.0"}"#, 0);
+        let seen = latest_releases(
+            &r,
+            &crate::forge::Forge::github_com(),
+            &manifest(two_from_one, "rolling"),
+        );
+        assert_eq!(r.calls.borrow().len(), 1, "asked more than once");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen["pulseengine/varve"], Ok("v0.33.0".to_string()));
+    }
+
+    /// A missing `gh` is its own answer, not a registry problem.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn a_missing_gh_is_named_rather_than_reported_as_upstream_silence() {
+        let r = recorder("", 127);
+        let seen = latest_releases(
+            &r,
+            &crate::forge::Forge::github_com(),
+            &manifest(TWO, "rolling"),
+        );
+        for (_, v) in seen {
+            assert_eq!(v, Err("gh is not on PATH".to_string()));
+        }
     }
 
     /// CLAUSE 5. Rolling promises nothing, so an unattended deposit is
