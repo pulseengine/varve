@@ -1,5 +1,118 @@
 # Changelog
 
+## v0.33.0 — 2026-09-09
+
+*SDKs, payload identity, corrections after publication, and a rotation that
+explains itself.*
+
+| | before | now |
+|---|---|---|
+| an `sdk` payload | a tree varve could not carry | deposited whole, exported relocated |
+| a payload's identity | its repository's name | its own name and version |
+| `.tar.xz` / `.tar.bz2` | opened by neither half | opened by both |
+| upstream sums nobody signed | `unverified`, or nothing | `upstream-sums`, a named rung |
+| a published layer | could not be spoken about | corrected under the line's own tag |
+| a rotated root | `No valid signatures` | says which root, when, and what to do |
+| asking varve from Rust | absence and failure looked alike | seven distinct types |
+| carry-forward | decided, then inert | fetched from the destination registry |
+
+### Saying something about a layer after it is published
+
+A yank, an advisory and a support-window correction are one act, and varve
+could perform none of them. The baseline lives as a blob inside a **layer's**
+manifest, so correcting it means re-pushing that manifest with a different blob
+— the republish `deposit` refuses. **Yanking a layer must not require mutating
+it.**
+
+Corrections now go under `line-status-<line>`, mirroring `line-index-<line>`.
+The load-bearing rule is **verify first, rank second**: ranking two documents by
+counter before checking signatures would let whoever serves the tag pick the
+winner by writing a large number. A stale tag document cannot walk a consumer
+backwards, an unverifiable one is discarded rather than fatal, and an
+**equal-counter** document cannot displace the baseline — that last one is a
+yank-suppression vector, found by mutation testing.
+
+Clause 5 — publishing the line index — is deliberately not done. Deriving its
+layer list from the registry's own tag listing would be *vacuous*: a hiding
+registry omits the layer from both, they agree, and nothing is reported. It
+lands where deposits now live (DD-027).
+
+### A retired root explains itself
+
+Measured the day after the v0.32.1 rotation. A consumer who took the new realms
+file without moving their pin got `No valid signatures` — indistinguishable
+from a forgery — while their installed layers lost their realm name in `varve
+list`. Two symptoms, neither naming the cause.
+
+A realm may now declare `retired-roots`, and **varve's own realms file declares
+the root it just retired**. It changes the message, never the verdict: a
+stranger's signature still gets the plain error, and listing the live root as
+retired is refused at parse.
+
+**This is not key rotation.** Nothing signs "this new root replaces the old
+one", and `docs threat-model` still says so. Signed succession was rejected on
+evidence: it requires still holding the old key, and the whole reason v0.32.1
+happened is that ours was unreadable. The lesson, now in `docs root-ceremony`:
+**rotate while you still hold the key** — a root you cannot use is one you have
+already partly lost.
+
+### Asking varve a question from Rust
+
+`varve_core::consumer::payload_status` returns `Verified`, `AbsentFromLayer`,
+`NoEntryForPlatform`, `MissingFromStore`, `DigestMismatch`, `LayerNotAuthentic`
+or `Unreadable`. The trust root is a **parameter**, not a second call — "call
+verify first" is the shell contract wearing types, and forgetting it fails
+open. See `varve docs consumer-api`.
+
+This exists because a consumer reported four failures of the CLI contract in one
+day, every one a *consumption* failure where absence and failure arrived looking
+alike — an `objcopy` that wrote nothing, `[ "" -gt N ]` erroring *and*
+evaluating false, and a script printing `ok` on a file it never parsed.
+
+### The realm moved to its own namespace
+
+`oci://ghcr.io/pulseengine/layers`. The old path was a package owned by the
+**varve** repository while the layers are produced by another, so publishing
+needed a cross-repo grant — and the first deposit failed on exactly that.
+Moving it removes the permission as a concept. Free now and a second migration
+later, because the rotation already requires a new realms file and there are
+zero layers published under the new root. The old realm keeps its old root
+*and* old registry, fully disjoint.
+
+### What the clean-room review found
+
+A cold verifier was asked to refute eleven claims. It confirmed ten and
+**refuted the eleventh: the carry-forward shipped in this release was inert.**
+
+varve's digests are bare hex; an OCI reference needs the algorithm. The bare
+form died at *reference parsing*, before any network call, and every carried
+payload silently became a full upstream download while the operator was told
+"registry blob could not be reused" — blaming the registry for a bug in the
+caller.
+
+213 green tests and zero mutation survivors missed it, because `registry.rs`
+had no test for those functions and every carry-forward test used a fake keyed
+on bare hex: the fakes agreed with the caller and neither agreed with oras. The
+file **was already in the mutation gate.** A mutant can only be killed by a
+test, so *presence in a gate is not coverage by it.*
+
+Fixed, with the tests whose absence let it through. Three further findings from
+the same review — a self-contradictory version error, a test claiming more than
+it proved, and a stale comment — are fixed too.
+
+### Falsification
+
+```sh
+# corrections cannot rewrite a layer
+varve docs attach-status | grep -A2 "on a registry"
+
+# a retired root explains but never accepts
+varve install --from <layer signed by a retired root>   # exit 1, and says why
+
+# the consumer API cannot report tampering as absence
+cargo test -p varve-core a_tampered_payload_is_a_digest_mismatch_and_never_an_absence
+```
+
 ## v0.32.1 — 2026-09-07
 
 *The provisional rolling root is rotated. Every layer published before this
