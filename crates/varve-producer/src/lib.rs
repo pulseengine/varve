@@ -23,6 +23,7 @@ pub mod ingest;
 pub mod orchestrate;
 pub mod plan;
 pub mod registry;
+pub mod scan;
 pub mod source;
 pub mod spec;
 pub mod stage;

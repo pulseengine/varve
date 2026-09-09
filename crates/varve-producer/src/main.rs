@@ -6,8 +6,10 @@
 //! and pushes to a registry. Keeping them apart keeps that claim true.
 
 use clap::{Parser, Subcommand};
+use varve_producer::gh::CommandRunner;
 use varve_producer::{
-    asset, binfmt, deposit, forge::Forge, immutable, ingest, orchestrate, plan, registry, source,
+    asset, binfmt, deposit, forge::Forge, gh, immutable, ingest, orchestrate, plan, registry, scan,
+    source,
 };
 
 #[derive(Parser)]
@@ -33,6 +35,23 @@ enum Cmd {
         manifest: std::path::PathBuf,
         #[arg(long = "platform", value_delimiter = ',')]
         platforms: Vec<String>,
+    },
+    /// Which pinned payloads have a newer upstream release (REQ-SCAN-001)?
+    ///
+    /// Reads pins from the realm manifest and nowhere else. The scanner this
+    /// replaces read them out of a workflow file and broke silently when the
+    /// realm moved — a second place the realm is defined is a place the two
+    /// disagree.
+    ///
+    /// An upstream that cannot be ASKED is an error, never "nothing moved": a
+    /// realm that stops receiving releases while every check stays green is the
+    /// failure nobody notices.
+    Scan {
+        #[arg(long, default_value = "layer.toml")]
+        manifest: std::path::PathBuf,
+        /// Machine-readable result on stdout — the only consumer is a gate.
+        #[arg(long)]
+        format: Option<String>,
     },
     /// Ask the destination registry whether this layer id is already
     /// published, and refuse to replace it with different bytes
@@ -331,6 +350,69 @@ fn main() -> anyhow::Result<()> {
                     .count()
             );
             Ok(())
+        }
+        Cmd::Scan { manifest, format } => {
+            let json = match format.as_deref() {
+                None | Some("text") => false,
+                Some("json") => true,
+                Some(other) => {
+                    eprintln!("error: unknown --format `{other}` (expected `json` or `text`)");
+                    std::process::exit(2);
+                }
+            };
+            let text = std::fs::read_to_string(&manifest)?;
+            let m = varve_core::layerspec::parse_layer_manifest(&text)?;
+
+            // Ask every upstream, collecting failures rather than stopping at
+            // the first: an operator fixing access wants the whole list.
+            let mut answers = std::collections::BTreeMap::new();
+            for t in &m.tools {
+                let repo = scan::repo_of(&t.name, t.repo.as_deref());
+                if answers.contains_key(&repo) {
+                    continue;
+                }
+                let d = source::Spawn.run("gh", &gh::latest_release_argv(&repo), &[]);
+                let answer = if d.code == 127 {
+                    Err("gh is not on PATH".to_string())
+                } else if !d.ok() {
+                    Err(d.stderr.trim().chars().take(160).collect())
+                } else {
+                    gh::parse_latest_release(&d.stdout).map_err(|e| e.to_string())
+                };
+                answers.insert(repo, answer);
+            }
+
+            match scan::compare(&m, &answers) {
+                Ok(moved) => {
+                    if json {
+                        let out: Vec<_> = moved
+                            .iter()
+                            .map(|x| {
+                                serde_json::json!({
+                                    "name": x.name, "repo": x.repo,
+                                    "pinned": x.pinned, "latest": x.latest,
+                                })
+                            })
+                            .collect();
+                        println!(
+                            "{}",
+                            serde_json::json!({ "command": "scan", "moved": out,
+                                                "count": moved.len() })
+                        );
+                    } else if moved.is_empty() {
+                        println!("nothing moved");
+                    } else {
+                        for x in &moved {
+                            println!("{}\t{}\t{}", x.name, x.pinned, x.latest);
+                        }
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
         Cmd::PublishCheck {
             repo,
