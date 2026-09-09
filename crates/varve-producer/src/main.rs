@@ -7,8 +7,8 @@
 
 use clap::{Parser, Subcommand};
 use varve_producer::{
-    asset, binfmt, deposit, forge::Forge, immutable, ingest, orchestrate, plan, registry, scan,
-    source,
+    asset, binfmt, deposit, forge::Forge, gh::CommandRunner, immutable, ingest, nextlayer,
+    orchestrate, plan, registry, scan, source,
 };
 
 #[derive(Parser)]
@@ -49,6 +49,21 @@ enum Cmd {
         #[arg(long, default_value = "layer.toml")]
         manifest: std::path::PathBuf,
         /// Machine-readable result on stdout — the only consumer is a gate.
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// What layer id and counter should the next deposit use (REQ-SCAN-001)?
+    ///
+    /// Read out of the PUBLISHED record, never guessed. Nobody types a layer id
+    /// any more, and one that is wrong is unrecoverable: varve has neither
+    /// revocation nor deletion, so a spent id is spent.
+    NextLayer {
+        /// Destination repository, e.g. `ghcr.io/pulseengine/layers`.
+        #[arg(long)]
+        repo: String,
+        /// The release line. Defaults to the current UTC `YYYY.MM`.
+        #[arg(long)]
+        line: Option<String>,
         #[arg(long)]
         format: Option<String>,
     },
@@ -401,6 +416,90 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+        Cmd::NextLayer { repo, line, format } => {
+            let json = match format.as_deref() {
+                None | Some("text") => false,
+                Some("json") => true,
+                Some(other) => {
+                    eprintln!("error: unknown --format `{other}` (expected `json` or `text`)");
+                    std::process::exit(2);
+                }
+            };
+            let line = line.unwrap_or_else(nextlayer::current_line);
+            let runner = source::Spawn;
+
+            // The listing must be READ, not inferred. A registry that cannot
+            // answer stops this: guessing an id here is signed by whatever runs
+            // next, with nobody in between.
+            let d = runner.run("oras", &registry::tags_argv(&repo), &[]);
+            if d.code == 127 {
+                eprintln!("error: oras is not on PATH — cannot read the published record");
+                std::process::exit(1);
+            }
+            if !d.ok() {
+                eprintln!(
+                    "error: could not list the tags of {repo}: {}\n\
+                     Refusing to derive a layer id from a record this program could not read.",
+                    d.stderr.trim()
+                );
+                std::process::exit(1);
+            }
+            let tags = registry::parse_tags(&d.stdout);
+
+            let layer = match nextlayer::next_layer_id(&tags, &line) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let counter = match nextlayer::highest_published(&tags, &line) {
+                None => nextlayer::next_counter(None),
+                Some((highest, _)) => {
+                    let m =
+                        runner.run("oras", &registry::fetch_manifest_argv(&repo, &highest), &[]);
+                    if !m.ok() {
+                        eprintln!("error: could not fetch the manifest of {highest}");
+                        std::process::exit(1);
+                    }
+                    let digest = match nextlayer::baseline_digest(&m.stdout, &highest) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    let tmp = std::env::temp_dir()
+                        .join(format!("varve-baseline-{}", digest.replace(':', "-")));
+                    let Some(bytes) = registry::fetch_blob(&runner, &repo, &digest, &tmp) else {
+                        eprintln!("error: could not fetch the baseline line-status of {highest}");
+                        std::process::exit(1);
+                    };
+                    let _ = std::fs::remove_file(&tmp);
+                    match nextlayer::counter_in_envelope(&bytes, &highest) {
+                        Ok(c) => nextlayer::next_counter(Some(c)),
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            };
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "command": "next-layer", "line": line,
+                        "layer": layer, "counter": counter
+                    })
+                );
+            } else {
+                println!("{layer}\t{counter}");
+            }
+            Ok(())
         }
         Cmd::PublishCheck {
             repo,

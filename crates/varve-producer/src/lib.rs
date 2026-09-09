@@ -20,6 +20,7 @@ pub mod forge;
 pub mod gh;
 pub mod immutable;
 pub mod ingest;
+pub mod nextlayer;
 pub mod orchestrate;
 pub mod plan;
 pub mod registry;

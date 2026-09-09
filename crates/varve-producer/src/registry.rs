@@ -92,6 +92,16 @@ pub fn fetch_descriptor_argv(repo: &str, tag: &str) -> Vec<String> {
     ]
 }
 
+/// `oras manifest fetch <repo>:<tag>` — the manifest ITSELF, not its
+/// descriptor.
+///
+/// Distinct from `fetch_descriptor_argv`, which asks only for digest and size.
+/// The next-layer derivation needs the manifest body, to find the baseline
+/// line-status by its role annotation.
+pub fn fetch_manifest_argv(repo: &str, tag: &str) -> Vec<String> {
+    vec!["manifest".into(), "fetch".into(), format!("{repo}:{tag}")]
+}
+
 /// `oras repo tags <repo>` — the authoritative listing.
 /// `oras blob fetch --output <file> <repo>@<digest>` — retrieve a blob the
 /// destination registry already holds (REQ-REUSEBLOB-001 clause 1).
@@ -181,6 +191,20 @@ pub fn parse_descriptor(stdout: &str) -> Result<String, LookupError> {
 /// Is `tag` in a SUCCESSFUL listing? One line per tag.
 pub fn tag_is_listed(stdout: &str, tag: &str) -> bool {
     stdout.lines().any(|l| l.trim() == tag)
+}
+
+/// Every tag in a SUCCESSFUL listing, one per line.
+///
+/// Blank lines and surrounding whitespace are dropped; nothing else is
+/// interpreted. A caller deciding what these tags MEAN — which are layers of a
+/// line, which are the index and status tags beside them — does that itself.
+pub fn parse_tags(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Ask the registry what it holds for one layer id.
@@ -383,6 +407,31 @@ mod tests {
             &dir.path().join("never-written"),
         );
         assert_eq!(got, None);
+    }
+
+    /// The manifest body, not the descriptor: `--descriptor` returns digest
+    /// and size, and the baseline is found by a role annotation inside the
+    /// body.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn the_manifest_fetch_asks_for_the_body_not_the_descriptor() {
+        let a = super::fetch_manifest_argv("ghcr.io/o/l", "2026.09.2");
+        assert_eq!(a, vec!["manifest", "fetch", "ghcr.io/o/l:2026.09.2"]);
+        assert!(!a.iter().any(|x| x == "--descriptor"));
+    }
+
+    /// A listing is lines, and only lines. The scanner derives the next layer
+    /// id from this, so a blank line read as a tag would become a layer id of
+    /// its own.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn a_tag_listing_is_lines_with_the_blanks_dropped() {
+        assert_eq!(
+            super::parse_tags("2026.09.1\n2026.09.2\n\n  realm-bootstrap  \n"),
+            vec!["2026.09.1", "2026.09.2", "realm-bootstrap"]
+        );
+        assert!(super::parse_tags("").is_empty());
+        assert!(super::parse_tags("   \n\n").is_empty());
     }
 
     /// The argv shape itself: a blob is a whole payload archive, so it goes to

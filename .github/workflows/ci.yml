@@ -237,6 +237,7 @@ jobs:
             files: >-
               -f crates/varve-producer/src/asset.rs
               -f crates/varve-producer/src/scan.rs
+              -f crates/varve-producer/src/nextlayer.rs
               -f crates/varve-producer/src/attestation.rs
               -f crates/varve-producer/src/binfmt.rs
               -f crates/varve-producer/src/carryforward.rs
