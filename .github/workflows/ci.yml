@@ -218,6 +218,7 @@ jobs:
               -f crates/varve-core/src/realm.rs
               -f crates/varve-core/src/resolve.rs
               -f crates/varve-core/src/consumer.rs
+              -f crates/varve-core/src/mutationscope.rs
               -f crates/varve-core/src/install.rs
               -f crates/varve-core/src/selfverify.rs
               -f crates/varve-core/src/reverify.rs
