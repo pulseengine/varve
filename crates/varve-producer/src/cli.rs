@@ -134,9 +134,13 @@ pub enum Cmd {
         /// Asset name template, e.g. `rivet-v0.34.0-%T.tar.gz`.
         #[arg(long)]
         template: String,
-        /// Release version as written, e.g. `v0.34.0`.
+        /// The payload's own version — what `%V` expands to, e.g. `0.2.2`.
         #[arg(long)]
         version: String,
+        /// The release TAG, when it differs from the version (a hub such as
+        /// `pulseengine/jess`). What `%R` expands to. Defaults to `--version`.
+        #[arg(long)]
+        release: Option<String>,
         /// Asset names the release actually publishes; repeat or comma-separate.
         #[arg(long = "available", value_delimiter = ',')]
         available: Vec<String>,

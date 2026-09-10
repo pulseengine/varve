@@ -195,6 +195,7 @@ pub fn bare_version(version: &str) -> &str {
 pub fn expand(
     template: &str,
     version: &str,
+    release: &str,
     platform: Option<&str>,
     vscode_platform: Option<&str>,
 ) -> Result<String, TemplateError> {
@@ -216,10 +217,12 @@ pub fn expand(
         }
     }
 
-    // %R before %V: both mention the version, and expanding the bare form
-    // first would leave a stray `v` in front of it.
+    // `%R` is the RELEASE tag and `%V` the payload's own version. They are the
+    // same string for almost every tool, and different on a hub: jess tags
+    // `v0.7.2` and ships `with-device` at `0.2.2`. Deriving one from the other
+    // is what left `with-device` unfetchable (REQ-PAYLOADID-001).
     let mut out = template
-        .replace(Placeholder::ReleaseTag.token(), version)
+        .replace(Placeholder::ReleaseTag.token(), release)
         .replace(Placeholder::BareVersion.token(), bare_version(version));
     if let Some(triple) = platform {
         out = out.replace(Placeholder::Triple.token(), triple);
@@ -319,13 +322,14 @@ pub struct Selection {
 pub fn select(
     template: &str,
     version: &str,
+    release: &str,
     platforms: &[&str],
     available: &[String],
 ) -> Result<Selection, TemplateError> {
     let mut matched = Vec::new();
     let mut missing = Vec::new();
     if !is_per_platform(template) {
-        let asset = expand(template, version, None, None)?;
+        let asset = expand(template, version, release, None, None)?;
         if available.iter().any(|a| a == &asset) {
             matched.push((String::new(), asset));
         } else {
@@ -334,7 +338,7 @@ pub fn select(
         return Ok(Selection { matched, missing });
     }
     for platform in platforms {
-        let asset = expand(template, version, Some(platform), None)?;
+        let asset = expand(template, version, release, Some(platform), None)?;
         if available.iter().any(|a| a == &asset) {
             matched.push(((*platform).to_string(), asset));
         } else {
@@ -368,6 +372,7 @@ mod tests {
         let got = expand(
             "wasm-tools-%V-%T.tar.gz",
             "v1.257.1",
+            "v1.257.1",
             Some("aarch64-apple-darwin"),
             None,
         )
@@ -383,6 +388,7 @@ mod tests {
         let got = expand(
             "wasm-tools-%V-%U.tar.gz",
             "v1.257.1",
+            "v1.257.1",
             Some("aarch64-apple-darwin"),
             None,
         )
@@ -397,6 +403,7 @@ mod tests {
     fn a_mistyped_placeholder_is_refused_rather_than_left_unexpanded() {
         let err = expand(
             "rivet-%v-%T.tar.gz",
+            "v0.34.0",
             "v0.34.0",
             Some("x86_64-apple-darwin"),
             None,
@@ -459,6 +466,7 @@ mod tests {
             expand(
                 "wasmtime-%R-%U.tar.xz",
                 "v48.0.1",
+                "v48.0.1",
                 Some("aarch64-apple-darwin"),
                 None
             )
@@ -467,7 +475,7 @@ mod tests {
         );
         // And the bare form still strips it.
         assert_eq!(
-            expand("t-%V.tar.gz", "v48.0.1", None, None).expect("expands"),
+            expand("t-%V.tar.gz", "v48.0.1", "v48.0.1", None, None).expect("expands"),
             "t-48.0.1.tar.gz"
         );
     }
@@ -478,7 +486,7 @@ mod tests {
     #[test]
     fn a_template_using_both_version_forms_expands_each_correctly() {
         assert_eq!(
-            expand("x-%R-y-%V.tar.gz", "v1.2.3", None, None).expect("expands"),
+            expand("x-%R-y-%V.tar.gz", "v1.2.3", "v1.2.3", None, None).expect("expands"),
             "x-v1.2.3-y-1.2.3.tar.gz"
         );
     }
@@ -494,6 +502,7 @@ mod tests {
     fn a_per_platform_vsix_template_selects_the_real_marketplace_names() {
         let sel = select(
             "spar-aadl-%P-%V.vsix",
+            "v0.34.0",
             "v0.34.0",
             DEFAULT_PLATFORMS,
             &avail(&[
@@ -557,7 +566,7 @@ mod tests {
             ("t-%U.tar.gz", "%U"),
             ("t-%P.vsix", "%P"),
         ] {
-            let err = expand(template, "v1.0.0", None, None).expect_err("must refuse");
+            let err = expand(template, "v1.0.0", "v1.0.0", None, None).expect_err("must refuse");
             assert_eq!(
                 err,
                 TemplateError::MissingPlatform {
@@ -576,6 +585,7 @@ mod tests {
         let err = expand(
             "t-%P.vsix",
             "v1.0.0",
+            "v1.0.0",
             Some("riscv64-unknown-linux-gnu"),
             None,
         )
@@ -588,7 +598,7 @@ mod tests {
     // rivet: verifies REQ-PRODUCER-002
     #[test]
     fn a_multibyte_template_is_refused_not_panicked_on() {
-        let err = expand("tool-%\u{00e9}-%V.tar.gz", "v1.0.0", None, None)
+        let err = expand("tool-%\u{00e9}-%V.tar.gz", "v1.0.0", "v1.0.0", None, None)
             .expect_err("must refuse, and must not panic");
         assert!(
             matches!(err, TemplateError::UnknownPlaceholder { .. }),
@@ -600,7 +610,8 @@ mod tests {
     // rivet: verifies REQ-PRODUCER-002
     #[test]
     fn a_trailing_percent_is_refused() {
-        let err = expand("tool-%V.tar.gz%", "v1.0.0", None, None).expect_err("must refuse");
+        let err =
+            expand("tool-%V.tar.gz%", "v1.0.0", "v1.0.0", None, None).expect_err("must refuse");
         assert!(
             matches!(err, TemplateError::UnknownPlaceholder { .. }),
             "{err:?}"
@@ -612,6 +623,7 @@ mod tests {
     fn an_unknown_upstream_triple_is_refused_rather_than_guessed() {
         let err = expand(
             "t-%U.tar.gz",
+            "v1.0.0",
             "v1.0.0",
             Some("riscv64-unknown-linux-gnu"),
             None,
@@ -640,6 +652,7 @@ mod tests {
         let sel = select(
             "rivet-v0.34.0-%T.tar.gz",
             "v0.34.0",
+            "v0.34.0",
             &["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"],
             &avail(&["rivet-v0.34.0-aarch64-apple-darwin.tar.gz"]),
         )
@@ -659,6 +672,7 @@ mod tests {
         let sel = select(
             "rivet-v9.9.9-%T.tar.gz",
             "v9.9.9",
+            "v9.9.9",
             DEFAULT_PLATFORMS,
             &avail(&["rivet-v0.34.0-aarch64-apple-darwin.tar.gz"]),
         )
@@ -672,6 +686,7 @@ mod tests {
     fn a_portable_package_is_selected_once_not_once_per_platform() {
         let sel = select(
             "rivet-sdlc-%V.vsix",
+            "v0.34.0",
             "v0.34.0",
             DEFAULT_PLATFORMS,
             &avail(&["rivet-sdlc-0.34.0.vsix"]),

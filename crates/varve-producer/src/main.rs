@@ -71,6 +71,16 @@ fn main() -> anyhow::Result<()> {
                         ""
                     }
                 );
+                // A hub is fetched under a tag that is not the payload's
+                // version. That divergence was invisible here while nothing
+                // read `release`, so say it out loud rather than leaving an
+                // operator to infer the tag from the version.
+                if i.release != i.version {
+                    println!(
+                        "  {:<14} {:<24} fetched from release {} (payload version {})",
+                        "", "", i.release, i.version
+                    );
+                }
             }
             Ok(())
         }
@@ -543,9 +553,11 @@ fn main() -> anyhow::Result<()> {
         Cmd::Assets {
             template,
             version,
+            release,
             available,
             platforms,
         } => {
+            let release = release.unwrap_or_else(|| version.clone());
             let owned: Vec<String> = if platforms.is_empty() {
                 asset::DEFAULT_PLATFORMS
                     .iter()
@@ -555,7 +567,7 @@ fn main() -> anyhow::Result<()> {
                 platforms
             };
             let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-            let sel = asset::select(&template, &version, &refs, &available)?;
+            let sel = asset::select(&template, &version, &release, &refs, &available)?;
             for (platform, name) in &sel.matched {
                 if platform.is_empty() {
                     println!("match  (portable)  {name}");

@@ -281,7 +281,7 @@ pub fn by_release(plans: &[PayloadPlan]) -> Vec<((String, String), Vec<usize>)> 
     let mut order: Vec<(String, String)> = Vec::new();
     let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (i, p) in plans.iter().enumerate() {
-        let key = (p.repo.clone(), p.version.clone());
+        let key = (p.repo.clone(), p.release.clone());
         if !groups.contains_key(&key) {
             order.push(key.clone());
         }
@@ -431,7 +431,7 @@ pub fn run<S: Source>(
             return Err(RunError::NothingMatched {
                 name: (*name).to_string(),
                 repo: first.repo.clone(),
-                version: first.version.clone(),
+                version: first.release.clone(),
                 tried,
             });
         }
@@ -455,6 +455,7 @@ mod tests {
 
     fn plan(name: &str, repo: &str, version: &str, asset: &str) -> PayloadPlan {
         PayloadPlan {
+            release: version.to_string(),
             upstream_sums: None,
             contains: None,
             name: name.into(),

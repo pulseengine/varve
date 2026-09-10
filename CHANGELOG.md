@@ -5,12 +5,14 @@
 *The release that fixes the gates.*
 
 v0.33.0 shipped four capabilities that were complete, tested and carried by no
-artifact — and a fifth found inside the fix for the fourth. Behind them was one
-pattern: **each gate was real, worked, and had a boundary nothing checked.**
-This release checks the boundaries.
+artifact — a fifth found inside the fix for the fourth, and a **sixth found by
+running the fixed producer against a real realm.** Behind them was one pattern:
+**each gate was real, worked, and had a boundary nothing checked.** This release
+checks the boundaries.
 
 | | before | now |
 |---|---|---|
+| a manifest field | could be written, parsed, and ignored | every optional field must reach the plan |
 | the mutation gate's scope | a hand-kept list | every file gated or declared, with a reason |
 | the docs gate's reach | 1 of 2 shipped binaries | every binary, enumerated |
 | `verified` in rivet | a hand-typed field, warned about | an error if nothing backs it |
@@ -45,6 +47,33 @@ source marker **or** an incoming `verifies` edge — a marker discharges a prope
 of the code, an edge discharges a property of the pipeline that no unit test can
 assert. Demanding a marker for those would push someone to write a fake test.
 
+### A field the manifest accepted and the planner ignored
+
+v0.33.0 gave `[[tool]]` a `release` key so a **hub** — a repository that tags
+`v0.7.2` and ships `with-device` at `0.2.2` — could state the tag to fetch
+separately from the version the payload answers to. The field parsed. It was
+documented with the exact failure it prevents. `REQ-PAYLOADID-001` was marked
+`verified`. **Nothing read it.**
+
+`plan_tool` took the fetch tag, the `%R` expansion, the per-release verification
+grouping and the recorded `source.release` all from `version`. So the realm was
+edited to carry `with-device` again, and the deposit asked `pulseengine/jess`
+for a release tagged `0.2.2`, which does not exist. The payload stayed missing —
+the outcome the requirement exists to prevent, reached through the field added
+to prevent it.
+
+The evidence behind `verified` was real and proved the wrong thing: markers on
+tests that exercised **parsing** the field, never **consuming** it. A capability
+is not shipped when a struct holds it; it is shipped when an artifact carries
+it.
+
+`PayloadPlan` now carries `release` beside `version`, `%R` and `%V` read
+different strings, `varve-producer plan` prints the tag whenever it differs from
+the version, and `assets` takes `--release`. The guard is general rather than
+specific to this field: **`no_optional_manifest_field_is_inert`** sets every
+optional `ManifestTool` field to a distinctive value and asserts each is
+observable in the plan, so a field added without being consumed fails the build.
+
 ### Knowing what moved
 
 `varve-producer scan` and `next-layer` replace a daily shell script that lived in
@@ -76,6 +105,10 @@ python3 tools/trace-gate.py
 
 # every shipped binary has a docs gate
 varve-producer docs check --coverage --strict
+
+# a hub is fetched by its tag, not its version — and no field is inert
+cargo test -p varve-producer --lib a_hub_payload_is_fetched_by_its_release_tag
+cargo test -p varve-producer --lib no_optional_manifest_field_is_inert
 ```
 
 ## v0.33.0 — 2026-09-09

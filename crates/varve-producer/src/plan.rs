@@ -43,7 +43,13 @@ pub struct PayloadPlan {
     pub name: String,
     /// `owner/repo` the release comes from.
     pub repo: String,
+    /// What the payload IS — the number it answers to, and the one signed
+    /// into the layer.
     pub version: String,
+    /// The release tag to ASK the forge for. Equal to `version` for almost
+    /// every tool; different on a hub, where `pulseengine/jess` tags `v0.7.2`
+    /// and ships `with-device` at `0.2.2` (REQ-PAYLOADID-001).
+    pub release: String,
     /// The release asset, template already expanded.
     pub asset: String,
     /// `None` for a platform-independent payload.
@@ -141,6 +147,8 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
     // kilnd); the payload is deposited under THAT name, which is what a
     // consumer dispatches.
     let name = t.binary.clone().unwrap_or_else(|| t.name.clone());
+    // Absent `release`, the version serves as the tag — the ordinary case.
+    let release = t.release.clone().unwrap_or_else(|| t.version.clone());
 
     let mut out = Vec::new();
     if !asset::is_per_platform(&template) {
@@ -148,7 +156,8 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             name,
             repo,
             version: t.version.clone(),
-            asset: asset::expand(&template, &t.version, None, None)?,
+            release: release.clone(),
+            asset: asset::expand(&template, &t.version, &release, None, None)?,
             platform: None,
             kind,
             unverified_reason: t.unverified_reason.clone(),
@@ -163,12 +172,13 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
         // triple; naming the file is exact where inferring it would guess.
         let asset = match t.asset_for.get(*p) {
             Some(explicit) => explicit.clone(),
-            None => asset::expand(&template, &t.version, Some(p), None)?,
+            None => asset::expand(&template, &t.version, &release, Some(p), None)?,
         };
         out.push(PayloadPlan {
             name: name.clone(),
             repo: repo.clone(),
             version: t.version.clone(),
+            release: release.clone(),
             asset,
             platform: Some((*p).to_string()),
             kind,
@@ -189,7 +199,8 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             name: v.name.clone(),
             repo,
             version: v.version.clone(),
-            asset: asset::expand(&v.asset, &v.version, None, None)?,
+            release: v.version.clone(),
+            asset: asset::expand(&v.asset, &v.version, &v.version, None, None)?,
             platform: None,
             kind: PayloadKind::Vsix,
             unverified_reason: None,
@@ -203,7 +214,8 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             name: v.name.clone(),
             repo: repo.clone(),
             version: v.version.clone(),
-            asset: asset::expand(&v.asset, &v.version, Some(p), None)?,
+            release: v.version.clone(),
+            asset: asset::expand(&v.asset, &v.version, &v.version, Some(p), None)?,
             platform: Some((*p).to_string()),
             kind: PayloadKind::Vsix,
             unverified_reason: None,
@@ -234,7 +246,7 @@ pub fn plan(m: &LayerManifest, platforms: &[&str]) -> Result<Vec<PayloadPlan>, P
 pub fn releases(plans: &[PayloadPlan]) -> Vec<(String, String)> {
     let mut seen: Vec<(String, String)> = Vec::new();
     for p in plans {
-        let key = (p.repo.clone(), p.version.clone());
+        let key = (p.repo.clone(), p.release.clone());
         if !seen.contains(&key) {
             seen.push(key);
         }
@@ -390,6 +402,133 @@ mod tests {
             r,
             vec![("pulseengine/rivet".to_string(), "v0.34.0".to_string())]
         );
+    }
+
+    /// EVERY optional field on `ManifestTool` must reach the plan. The unit
+    /// tests above all passed while `release` was parsed, documented with the
+    /// exact failure it prevents, and read by NOTHING — so the deposit asked
+    /// jess for a release tagged `0.2.2` and `with-device` stayed missing from
+    /// the realm. A field the manifest accepts and the planner ignores is worse
+    /// than one that does not exist: the operator writes it, the schema
+    /// validates it, and the behaviour never changes.
+    ///
+    /// This sets every optional field to a distinctive value and asserts each
+    /// one is observable in the resulting plan. Adding a field to
+    /// `ManifestTool` without consuming it fails here.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn no_optional_manifest_field_is_inert() {
+        let m = manifest(
+            "[[tool]]\nname = \"probe\"\nrepo = \"acme/hub\"\nbinary = \"probed\"\n\
+             version = \"1.2.3\"\nrelease = \"v9.9.9\"\n\
+             asset = \"probe-%V-%T.bin\"\nlayout = \"raw-per-platform\"\n\
+             unverified-reason = \"upstream publishes nothing\"\n\
+             upstream-sums = \"sha256.sum\"\n",
+        );
+        let p = plan(&m, PLATFORMS).expect("plans");
+        let f = p.first().expect("at least one payload");
+
+        assert_eq!(f.repo, "acme/hub", "`repo` is inert");
+        assert_eq!(f.name, "probed", "`binary` is inert");
+        assert_eq!(f.version, "1.2.3", "`version` is inert");
+        assert_eq!(f.release, "v9.9.9", "`release` is inert");
+        assert!(f.asset.starts_with("probe-1.2.3-"), "`asset` is inert");
+        assert_eq!(f.kind, PayloadKind::RawPerPlatform, "`layout` is inert");
+        assert_eq!(
+            f.unverified_reason.as_deref(),
+            Some("upstream publishes nothing"),
+            "`unverified-reason` is inert"
+        );
+        assert_eq!(
+            f.upstream_sums.as_deref(),
+            Some("sha256.sum"),
+            "`upstream-sums` is inert"
+        );
+
+        // `contains` and `asset-for` belong to layouts the entry above cannot
+        // also be, so they are exercised on their own manifests.
+        let sdk = manifest(
+            "[[tool]]\nname = \"zsdk\"\nrepo = \"z/sdk\"\nversion = \"0.17.0\"\n\
+             layout = \"sdk\"\nasset = \"zsdk-%V.tar.xz\"\ncontains = \"arm-zephyr-eabi\"\n",
+        );
+        let sp = plan(&sdk, PLATFORMS).expect("plans");
+        assert_eq!(
+            sp[0].contains.as_deref(),
+            Some("arm-zephyr-eabi"),
+            "`contains` is inert"
+        );
+
+        let explicit = manifest(
+            "[[tool]]\nname = \"musl\"\nrepo = \"m/m\"\nversion = \"1.0.0\"\n\
+             layout = \"raw-per-platform\"\nasset = \"m-%T\"\n\
+             [tool.asset-for]\n\"x86_64-unknown-linux-gnu\" = \"m-musl\"\n",
+        );
+        let ep = plan(&explicit, PLATFORMS).expect("plans");
+        assert!(
+            ep.iter().any(|x| x.asset == "m-musl"),
+            "`asset-for` is inert"
+        );
+    }
+
+    /// A HUB tags a release under one number and ships the payload under
+    /// another. The tag is what GitHub is asked for; the version is what the
+    /// binary answers and what gets signed into the layer. Conflating them
+    /// dropped `with-device` out of the pulseengine realm entirely: the
+    /// manifest gained a `release` field to say so, and NOTHING read it, so
+    /// the 2026.09.3 deposit asked jess for a release tagged `0.2.2`.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn a_hub_payload_is_fetched_by_its_release_tag_not_its_version() {
+        let m = manifest(
+            "[[tool]]\nname = \"with-device\"\nrepo = \"pulseengine/jess\"\n\
+             version = \"0.2.2\"\nrelease = \"v0.7.2\"\n\
+             asset = \"with-device-%V-%T.tar.gz\"\n",
+        );
+        let p = plan(&m, PLATFORMS).expect("plans");
+        assert!(!p.is_empty());
+        for x in &p {
+            assert_eq!(x.release, "v0.7.2", "the tag GitHub is asked for");
+            assert_eq!(x.version, "0.2.2", "what the payload IS, and is signed");
+            assert!(
+                x.asset.contains("with-device-0.2.2-"),
+                "%V is the payload version, not the tag: {}",
+                x.asset
+            );
+        }
+        assert_eq!(
+            releases(&p),
+            vec![("pulseengine/jess".to_string(), "v0.7.2".to_string())],
+            "the release fetched and verified is the TAG"
+        );
+    }
+
+    /// Absent `release`, the version serves as the tag — the ordinary case for
+    /// almost every tool, and it must not regress.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn without_a_release_field_the_version_is_still_the_tag() {
+        let m = manifest("[[tool]]\nname = \"rivet\"\nversion = \"v0.37.0\"\n");
+        let p = plan(&m, PLATFORMS).expect("plans");
+        assert!(!p.is_empty());
+        for x in &p {
+            assert_eq!(x.release, "v0.37.0");
+            assert_eq!(x.version, "v0.37.0");
+        }
+    }
+
+    /// `%R` is the tag as written. On a hub that is the RELEASE, not the
+    /// payload version — an upstream that keeps the `v` in its asset names
+    /// would otherwise get a name built from the wrong number entirely.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn percent_r_on_a_hub_is_the_release_tag() {
+        let m = manifest(
+            "[[tool]]\nname = \"with-device\"\nrepo = \"pulseengine/jess\"\n\
+             version = \"0.2.2\"\nrelease = \"v0.7.2\"\n\
+             asset = \"wd-%R-%T.tar.gz\"\n",
+        );
+        let p = plan(&m, PLATFORMS).expect("plans");
+        assert!(p[0].asset.starts_with("wd-v0.7.2-"), "{}", p[0].asset);
     }
 
     /// Distinct versions of one repo are distinct releases — the assembler
