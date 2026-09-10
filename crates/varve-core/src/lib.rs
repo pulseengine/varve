@@ -41,6 +41,7 @@ pub mod lineindex;
 pub mod linestatus;
 pub mod lockpin;
 pub mod manifest;
+pub mod manifestversions;
 pub mod mirror;
 pub mod mutationscope;
 pub mod pin;

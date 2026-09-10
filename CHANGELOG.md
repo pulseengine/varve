@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.34.3 — 2026-09-10
+
+*Two releases never reached crates.io, and the gate that knew ran too late.*
+
+`varve` depends on `varve-core` by path **and** by version:
+
+```toml
+varve-core = { path = "crates/varve-core", version = "0.34.3" }
+```
+
+`cargo package` embeds that requirement, so a stale pin means the published
+crate asks for a `varve-core` it was never built against. `cargo publish`
+refuses — correctly.
+
+A release bumps the workspace `version`, and the pin is easy to leave behind:
+`cargo update -w` does not touch it, because it is a requirement, not a lock
+entry. **v0.34.1 and v0.34.2 both shipped GitHub releases and both failed to
+publish**, leaving crates.io stranded at `0.34.0` while two tags said otherwise.
+The binaries, the signed sums and the layer were all fine; only the registry
+was behind.
+
+The invariant was already checked — in `publish-crates.yml`, which runs **only
+on a tag**. A tag is the point of no return: by the time that gate spoke, the
+version was cut and the binaries were published, and the only remedy was
+another release. The check was right. Where it ran was wrong.
+
+`manifestversions.rs` asserts it with `cargo test`, on every pull request and
+every local run, before a version can be tagged rather than after. The workflow
+keeps its own copy of the tag-vs-workspace half, which no unit test can see.
+
+Note the shape, because it is the fourth time this week: an invariant that was
+real, correct, and enforced somewhere that could not act on it in time.
+
+### Falsification
+
+```sh
+# bump the workspace version without the pin, then:
+cargo test -p varve-core --lib the_workspace_version_and_the_internal_dependency_pin_agree
+```
+
 ## v0.34.2 — 2026-09-10
 
 *Two commands could not reach the realm at all.*
