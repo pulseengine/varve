@@ -12,7 +12,7 @@ checks the boundaries.
 
 | | before | now |
 |---|---|---|
-| a manifest field | could be written, parsed, and ignored | every optional field must reach the plan |
+| a manifest field | implemented in one assembler of two | both must resolve it the same way |
 | the mutation gate's scope | a hand-kept list | every file gated or declared, with a reason |
 | the docs gate's reach | 1 of 2 shipped binaries | every binary, enumerated |
 | `verified` in rivet | a hand-typed field, warned about | an error if nothing backs it |
@@ -51,21 +51,27 @@ assert. Demanding a marker for those would push someone to write a fake test.
 
 v0.33.0 gave `[[tool]]` a `release` key so a **hub** — a repository that tags
 `v0.7.2` and ships `with-device` at `0.2.2` — could state the tag to fetch
-separately from the version the payload answers to. The field parsed. It was
-documented with the exact failure it prevents. `REQ-PAYLOADID-001` was marked
-`verified`. **Nothing read it.**
+separately from the version the payload answers to. The field parsed, was
+documented with the exact failure it prevents, and `REQ-PAYLOADID-001` was
+marked `verified`.
 
-`plan_tool` took the fetch tag, the `%R` expansion, the per-release verification
-grouping and the recorded `source.release` all from `version`. So the realm was
-edited to carry `with-device` again, and the deposit asked `pulseengine/jess`
-for a release tagged `0.2.2`, which does not exist. The payload stayed missing —
-the outcome the requirement exists to prevent, reached through the field added
-to prevent it.
+**varve has two assemblers, and the field was taught to one of them.**
+`varve layer-spec` — which encodes a manifest into the environment the older
+shell assembler reads — implemented `release` completely, fetch tag and the
+fifth positional field both. `varve-producer`, the assembler realms actually
+run, never read it: `plan_tool` took the fetch tag, the `%R` expansion, the
+per-release verification grouping and the recorded `source.release` all from
+`version`.
+
+So the realm was edited to carry `with-device` again, using the field added for
+exactly that, and the deposit asked `pulseengine/jess` for a release tagged
+`0.2.2`, which does not exist. The payload stayed missing — the outcome the
+requirement exists to prevent, reached through the field added to prevent it.
 
 The evidence behind `verified` was real and proved the wrong thing: markers on
-tests that exercised **parsing** the field, never **consuming** it. A capability
-is not shipped when a struct holds it; it is shipped when an artifact carries
-it.
+tests that exercised the encoder and the **parser**, never the planner. A
+capability is not shipped when one path implements it; it is shipped when the
+path in production carries it.
 
 `PayloadPlan` now carries `release` beside `version`, `%R` and `%V` read
 different strings, `varve-producer plan` prints the tag whenever it differs from
@@ -73,6 +79,9 @@ the version, and `assets` takes `--release`. The guard is general rather than
 specific to this field: **`no_optional_manifest_field_is_inert`** sets every
 optional `ManifestTool` field to a distinctive value and asserts each is
 observable in the plan, so a field added without being consumed fails the build.
+And **`both_assemblers_resolve_the_same_fetch_tag`** holds the two assemblers to
+the same answer, because the divergence — not the missing field — is what let a
+correct manifest fail a deposit.
 
 ### Knowing what moved
 
@@ -109,6 +118,9 @@ varve-producer docs check --coverage --strict
 # a hub is fetched by its tag, not its version — and no field is inert
 cargo test -p varve-producer --lib a_hub_payload_is_fetched_by_its_release_tag
 cargo test -p varve-producer --lib no_optional_manifest_field_is_inert
+
+# the two assemblers agree on which tag gets fetched
+cargo test -p varve-producer --lib both_assemblers_resolve_the_same_fetch_tag
 ```
 
 ## v0.33.0 — 2026-09-09

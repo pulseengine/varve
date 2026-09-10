@@ -404,6 +404,52 @@ mod tests {
         );
     }
 
+    /// varve has TWO assemblers for one job: `varve layer-spec`, which encodes
+    /// a manifest into the environment the older shell assembler reads, and
+    /// this planner, which `varve-producer` runs directly. They must resolve
+    /// the same manifest to the same fetch tag.
+    ///
+    /// They did not. `layer-spec` implemented `release` fully — fetch tag AND
+    /// the fifth positional field carrying the payload's own version — while
+    /// `plan_tool` never read it. The capability was taught to the path being
+    /// retired and not to the path in production, and nothing compared them,
+    /// so the realm's own manifest was correct and the deposit still failed.
+    ///
+    /// Whichever assembler is retired first, disagreement between them is a
+    /// defect while both ship.
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn both_assemblers_resolve_the_same_fetch_tag() {
+        let m = manifest(
+            "[[tool]]\nname = \"with-device\"\nrepo = \"pulseengine/jess\"\n\
+             version = \"0.2.2\"\nrelease = \"v0.7.2\"\nbinary = \"with-device\"\n\
+             asset = \"with-device-%V-%T.tar.gz\"\n",
+        );
+        let planned = plan(&m, PLATFORMS).expect("plans");
+        let env = varve_core::layerspec::assembler_env(&m).expect("encodes");
+
+        // `head:fetch_tag:binary:asset[:payload_version]`
+        let entry = env
+            .layer_tools
+            .split_whitespace()
+            .find(|e| e.contains("jess"))
+            .expect("the hub entry is encoded");
+        let fields: Vec<&str> = entry.split(':').collect();
+        let encoded_tag = fields[1];
+
+        assert_eq!(
+            encoded_tag, planned[0].release,
+            "the two assemblers disagree on the tag to fetch: layer-spec says \
+             {encoded_tag}, the planner says {}",
+            planned[0].release
+        );
+        assert_eq!(
+            fields.last().copied(),
+            Some(planned[0].version.trim_start_matches('v')),
+            "and on the payload's own version"
+        );
+    }
+
     /// EVERY optional field on `ManifestTool` must reach the plan. The unit
     /// tests above all passed while `release` was parsed, documented with the
     /// exact failure it prevents, and read by NOTHING — so the deposit asked
