@@ -413,6 +413,32 @@ artifacts:
       - type: verifies
         target: REQ-MUTATE-001
 
+  - id: VER-TRACEGATE-001
+    type: verification
+    title: A verified requirement is connected to its evidence, and the gate can fail
+    status: verified
+    release: v0.34.0
+    fields:
+      method: analysis
+      baseline: >-
+        Measured 2026-09-10 across all 125 requirements: 97 verified, 85 with a
+        source marker, 75 with an incoming verifies edge, 63 with both, 0 with
+        neither, and 0 markers naming a requirement that does not exist. The
+        gate was satisfiable when it was turned on, so it became an error
+        immediately rather than being deferred behind an exception list.
+      falsification: >-
+        Both refusals were exercised rather than reasoned about. A requirement
+        added with status `verified` and no evidence exits 1 and names it. A
+        source marker naming REQ-DOES-NOT-EXIST-999 exits 1 and says the marker
+        verifies nothing. Removing each returns exit 0. A gate proven only by
+        passing is the failure this release exists to fix, so this one was
+        proven by failing first.
+      steps:
+        - run: python3 tools/trace-gate.py
+    links:
+      - type: verifies
+        target: REQ-TRACEGATE-001
+
   - id: VER-CLAIM-001
     type: verification
     title: Claim-check green — every claim's evidence present

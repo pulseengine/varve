@@ -5,129 +5,12 @@
 //! model; this program fetches releases, verifies signatures over the network
 //! and pushes to a registry. Keeping them apart keeps that claim true.
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser};
+use varve_producer::cli::{Cli, Cmd};
 use varve_producer::{
-    asset, binfmt, deposit, forge::Forge, immutable, ingest, orchestrate, plan, registry, source,
+    asset, binfmt, deposit, docs, forge::Forge, gh::CommandRunner, immutable, ingest, nextlayer,
+    orchestrate, plan, registry, scan, source,
 };
-
-#[derive(Parser)]
-#[command(name = "varve-producer", version, about, long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    cmd: Cmd,
-}
-
-#[derive(Subcommand)]
-enum Cmd {
-    /// Report which forge this run would ingest from, and which authority
-    /// would be expected to have signed it. Printed before anything is
-    /// fetched, because a wrong issuer fails closed but confusingly.
-    Forge,
-
-    /// Show the work a deposit would do for a realm manifest, without
-    /// fetching anything. Reads layer.toml directly — there is no
-    /// TARBALL_TOOLS/WSC_VERSION encoding to corrupt, and no limit of one
-    /// raw-per-platform tool.
-    Plan {
-        #[arg(long, default_value = "layer.toml")]
-        manifest: std::path::PathBuf,
-        #[arg(long = "platform", value_delimiter = ',')]
-        platforms: Vec<String>,
-    },
-    /// Ask the destination registry whether this layer id is already
-    /// published, and refuse to replace it with different bytes
-    /// (REQ-IMMUTABLE-001).
-    ///
-    /// Run this BEFORE pushing. `varve deposit` cannot do it: it contacts no
-    /// network by design, and spending that property to fix a publisher's bug
-    /// would be a bad trade.
-    PublishCheck {
-        /// Destination repository, e.g. `ghcr.io/pulseengine/varve-layers`.
-        #[arg(long)]
-        repo: String,
-        /// The layer id being published, e.g. `2026.09.1`.
-        #[arg(long)]
-        layer: String,
-        /// The manifest digest about to be pushed, as `varve deposit --json`
-        /// reports it.
-        #[arg(long)]
-        digest: String,
-        /// Replace a DIFFERENT already-published layer under this id.
-        ///
-        /// Only correct when nobody has consumed the published layer: it does
-        /// not retract what anyone already resolved, and any pin naming this
-        /// layer without a digest breaks. Prefer publishing a new layer id —
-        /// the counter exists so a correction is a new layer, not a rewritten
-        /// one.
-        #[arg(long = "replace-published")]
-        replace_published: bool,
-        /// Machine-readable result.
-        #[arg(long = "format", value_name = "FORMAT")]
-        format: Option<String>,
-    },
-
-    /// Check a staged payload's architecture against the platform it would be
-    /// deposited under, without executing it.
-    Arch {
-        /// The file to inspect.
-        #[arg(long)]
-        file: std::path::PathBuf,
-        /// The target triple it would be filed under.
-        #[arg(long)]
-        platform: String,
-    },
-    /// Show which release assets a template selects, without downloading
-    /// anything. The template language is the part of this pipeline that has
-    /// silently dropped a tool from a published layer, so it is inspectable on
-    /// its own.
-    Assets {
-        /// Asset name template, e.g. `rivet-v0.34.0-%T.tar.gz`.
-        #[arg(long)]
-        template: String,
-        /// Release version as written, e.g. `v0.34.0`.
-        #[arg(long)]
-        version: String,
-        /// Asset names the release actually publishes; repeat or comma-separate.
-        #[arg(long = "available", value_delimiter = ',')]
-        available: Vec<String>,
-        /// Target triples to cover. Defaults to the layer's four.
-        #[arg(long = "platform", value_delimiter = ',')]
-        platforms: Vec<String>,
-    },
-
-    /// Assemble a layer: fetch every payload the manifest names, verify each
-    /// release, stage the bytes, and write the deposit spec `varve deposit`
-    /// consumes.
-    ///
-    /// This is the one subcommand that touches the network. It does NOT
-    /// deposit, sign or publish — those need the signing key, and keeping them
-    /// in a separate step keeps this program runnable by anyone who wants to
-    /// see what a layer would contain.
-    Deposit {
-        #[arg(long, default_value = "layer.toml")]
-        manifest: std::path::PathBuf,
-        /// Where to write `deposit-spec.toml` and the staged payloads.
-        #[arg(long)]
-        stage: std::path::PathBuf,
-        /// The layer id being built, e.g. `2026.09.1`.
-        #[arg(long)]
-        layer: String,
-        /// The layer's monotonic counter.
-        #[arg(long)]
-        counter: u64,
-        #[arg(long = "platform", value_delimiter = ',')]
-        platforms: Vec<String>,
-        /// The deposit spec from the previous layer, for carry-forward.
-        /// Without it every payload is fetched.
-        #[arg(long)]
-        previous: Option<std::path::PathBuf>,
-        /// Digests the registry already holds, one per line. Without it every
-        /// payload is fetched — see the note in `deposit.rs`: assuming
-        /// presence would publish a manifest naming bytes nobody can serve.
-        #[arg(long = "present-digests")]
-        present_digests: Option<std::path::PathBuf>,
-    },
-}
 
 /// `GH_HOST` is what `gh` itself uses to target an instance, so varve reads
 /// the same variable rather than inventing a second one.
@@ -188,6 +71,16 @@ fn main() -> anyhow::Result<()> {
                         ""
                     }
                 );
+                // A hub is fetched under a tag that is not the payload's
+                // version. That divergence was invisible here while nothing
+                // read `release`, so say it out loud rather than leaving an
+                // operator to infer the tag from the version.
+                if i.release != i.version {
+                    println!(
+                        "  {:<14} {:<24} fetched from release {} (payload version {})",
+                        "", "", i.release, i.version
+                    );
+                }
             }
             Ok(())
         }
@@ -332,6 +225,226 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Cmd::Scan { manifest, format } => {
+            let json = match format.as_deref() {
+                None | Some("text") => false,
+                Some("json") => true,
+                Some(other) => {
+                    eprintln!("error: unknown --format `{other}` (expected `json` or `text`)");
+                    std::process::exit(2);
+                }
+            };
+            let text = std::fs::read_to_string(&manifest)?;
+            let m = varve_core::layerspec::parse_layer_manifest(&text)?;
+
+            // Through the FORGE, so `GH_HOST` reaches every lookup. The first
+            // version of this loop lived here and passed an empty environment,
+            // which silently targeted github.com whatever the forge said. On an
+            // enterprise instance that fails everywhere — or, worse, succeeds
+            // against a same-named repository on the public forge.
+            let forge = forge_from_env();
+            let answers = scan::latest_releases(&source::Spawn, &forge, &m);
+
+            match scan::compare(&m, &answers) {
+                Ok(moved) => {
+                    if json {
+                        let out: Vec<_> = moved
+                            .iter()
+                            .map(|x| {
+                                serde_json::json!({
+                                    "name": x.name, "repo": x.repo,
+                                    "pinned": x.pinned, "latest": x.latest,
+                                    "payload_version": x.payload_version,
+                                    "auto_bumpable": x.auto_bumpable(),
+                                })
+                            })
+                            .collect();
+                        println!(
+                            "{}",
+                            serde_json::json!({ "command": "scan", "moved": out,
+                                                "count": moved.len() })
+                        );
+                    } else if moved.is_empty() {
+                        println!("nothing moved");
+                    } else {
+                        for x in &moved {
+                            // A hub payload is marked, because it must not be
+                            // bumped by anything that is not reading upstream's
+                            // release notes.
+                            let note = match &x.payload_version {
+                                Some(v) => format!("\t(hub: payload {v}, NOT auto-bumpable)"),
+                                None => String::new(),
+                            };
+                            println!("{}\t{}\t{}{}", x.name, x.pinned, x.latest, note);
+                        }
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Cmd::Docs {
+            topic,
+            grep,
+            coverage,
+            strict,
+            format,
+        } => {
+            let json = match format.as_deref() {
+                None | Some("text") => false,
+                Some("json") => true,
+                Some(other) => {
+                    eprintln!("error: unknown --format `{other}` (expected `json` or `text`)");
+                    std::process::exit(2);
+                }
+            };
+            if topic.as_deref() == Some("check") && coverage {
+                let gaps = docs::coverage_gaps(&Cli::command());
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "command": "docs", "undocumented": gaps })
+                    );
+                } else if gaps.is_empty() {
+                    println!(
+                        "docs coverage: OK — {} subcommand(s) documented, {} topic(s)",
+                        Cli::command().get_subcommands().count(),
+                        docs::topics().len()
+                    );
+                } else {
+                    for g in &gaps {
+                        eprintln!("undocumented subcommand: {g}");
+                    }
+                }
+                if strict && !gaps.is_empty() {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+            if let Some(q) = grep {
+                for t in docs::grep(&q) {
+                    println!("{:<16} {}", t.slug, t.title);
+                }
+                return Ok(());
+            }
+            match topic {
+                None => {
+                    if json {
+                        let list: Vec<_> = docs::topics()
+                            .iter()
+                            .map(|t| serde_json::json!({"slug": t.slug, "title": t.title}))
+                            .collect();
+                        println!("{}", serde_json::json!({"topics": list}));
+                    } else {
+                        print!("{}", docs::render_list());
+                    }
+                }
+                Some(slug) => match docs::find(&slug) {
+                    Some(t) => {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::json!({"slug": t.slug, "title": t.title, "body": t.body})
+                            );
+                        } else {
+                            print!("{}", t.body);
+                        }
+                    }
+                    None => {
+                        eprintln!("error: no topic {slug:?}. `varve-producer docs` lists them.");
+                        std::process::exit(2);
+                    }
+                },
+            }
+            Ok(())
+        }
+        Cmd::NextLayer { repo, line, format } => {
+            let json = match format.as_deref() {
+                None | Some("text") => false,
+                Some("json") => true,
+                Some(other) => {
+                    eprintln!("error: unknown --format `{other}` (expected `json` or `text`)");
+                    std::process::exit(2);
+                }
+            };
+            let line = line.unwrap_or_else(nextlayer::current_line);
+            let runner = source::Spawn;
+
+            // The listing must be READ, not inferred. A registry that cannot
+            // answer stops this: guessing an id here is signed by whatever runs
+            // next, with nobody in between.
+            let d = runner.run("oras", &registry::tags_argv(&repo), &[]);
+            if d.code == 127 {
+                eprintln!("error: oras is not on PATH — cannot read the published record");
+                std::process::exit(1);
+            }
+            if !d.ok() {
+                eprintln!(
+                    "error: could not list the tags of {repo}: {}\n\
+                     Refusing to derive a layer id from a record this program could not read.",
+                    d.stderr.trim()
+                );
+                std::process::exit(1);
+            }
+            let tags = registry::parse_tags(&d.stdout);
+
+            let layer = match nextlayer::next_layer_id(&tags, &line) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let counter = match nextlayer::highest_published(&tags, &line) {
+                None => nextlayer::next_counter(None),
+                Some((highest, _)) => {
+                    let m =
+                        runner.run("oras", &registry::fetch_manifest_argv(&repo, &highest), &[]);
+                    if !m.ok() {
+                        eprintln!("error: could not fetch the manifest of {highest}");
+                        std::process::exit(1);
+                    }
+                    let digest = match nextlayer::baseline_digest(&m.stdout, &highest) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    let tmp = std::env::temp_dir()
+                        .join(format!("varve-baseline-{}", digest.replace(':', "-")));
+                    let Some(bytes) = registry::fetch_blob(&runner, &repo, &digest, &tmp) else {
+                        eprintln!("error: could not fetch the baseline line-status of {highest}");
+                        std::process::exit(1);
+                    };
+                    let _ = std::fs::remove_file(&tmp);
+                    match nextlayer::counter_in_envelope(&bytes, &highest) {
+                        Ok(c) => nextlayer::next_counter(Some(c)),
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            };
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "command": "next-layer", "line": line,
+                        "layer": layer, "counter": counter
+                    })
+                );
+            } else {
+                println!("{layer}\t{counter}");
+            }
+            Ok(())
+        }
         Cmd::PublishCheck {
             repo,
             layer,
@@ -440,9 +553,11 @@ fn main() -> anyhow::Result<()> {
         Cmd::Assets {
             template,
             version,
+            release,
             available,
             platforms,
         } => {
+            let release = release.unwrap_or_else(|| version.clone());
             let owned: Vec<String> = if platforms.is_empty() {
                 asset::DEFAULT_PLATFORMS
                     .iter()
@@ -452,7 +567,7 @@ fn main() -> anyhow::Result<()> {
                 platforms
             };
             let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-            let sel = asset::select(&template, &version, &refs, &available)?;
+            let sel = asset::select(&template, &version, &release, &refs, &available)?;
             for (platform, name) in &sel.matched {
                 if platform.is_empty() {
                     println!("match  (portable)  {name}");

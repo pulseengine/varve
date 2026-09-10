@@ -209,6 +209,9 @@ pub enum LayerSpecError {
     /// The entry's fields are POSITIONAL, so a payload version cannot be
     /// carried past an absent binary or asset template.
     ReleaseNeedsBinaryAndAsset { tool: String },
+    /// The encoding has no field for the upstream digest manifest, and losing
+    /// it downgrades how the release is verified rather than how it is named.
+    UpstreamSumsNotEncodable { tool: String, asset: String },
     /// An opt-in that states no reason.
     UnverifiedWithoutReason { tool: String },
     /// Two tools from one repository disagree about why it is unverified.
@@ -277,6 +280,18 @@ impl fmt::Display for LayerSpecError {
                  consumer asking for {name:?} would then find no such tool in \
                  a layer that deposited and verified. Rename the entry to \
                  {basename:?}, or set `binary` if only the executable differs."
+            ),
+            LayerSpecError::UpstreamSumsNotEncodable { tool, asset } => write!(
+                f,
+                "tool {tool:?} declares upstream-sums {asset:?}, which the \
+                 environment encoding cannot express. Dropping it would not \
+                 lose a hint: it is the MECHANISM that vouches for the \
+                 release, so the shell assembler would look for a cosign \
+                 bundle and an attestation, find neither, and ingest the \
+                 payload with no proof at all — while every other field \
+                 survives the trip and the entry looks ordinary.\n\n\
+                 Deposit this realm with `varve-producer deposit --manifest \
+                 layer.toml`, which reads the mechanism directly."
             ),
             LayerSpecError::LayoutNotEncodable { tool, layout } => write!(
                 f,
@@ -470,6 +485,16 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
             return Err(LayerSpecError::LayoutNotEncodable {
                 tool: t.name.clone(),
                 layout: "sdk".into(),
+            });
+        }
+        // Same rule, and the reason is stronger: `upstream-sums` is not a name
+        // but an ingestion MECHANISM (REQ-UPSTREAMSUMS-001). Translating it
+        // away leaves an entry that assembles happily with less proof than the
+        // realm asked for, which is the failure the ladder exists to prevent.
+        if let Some(sums) = &t.upstream_sums {
+            return Err(LayerSpecError::UpstreamSumsNotEncodable {
+                tool: t.name.clone(),
+                asset: sums.clone(),
             });
         }
         // The opt-in is per RELEASE, so it is keyed by repository; two tools
@@ -1271,6 +1296,29 @@ asset=\"toolchain_gnu_%U_arm-zephyr-eabi.tar.xz\"\n"
         .expect_err("must refuse");
         let msg = e.to_string();
         assert!(msg.contains("none for a LAYOUT"), "{msg}");
+        assert!(msg.contains("varve-producer deposit"), "{msg}");
+    }
+
+    /// `upstream-sums` names the mechanism that vouches for a release. The
+    /// encoding has no field for it, and dropping it is not a lost hint: the
+    /// shell assembler would look for a cosign bundle and an attestation,
+    /// find neither, and ingest the payload with NO proof — the declared
+    /// verification silently downgraded, with every other field surviving the
+    /// trip so the entry looks perfectly ordinary.
+    ///
+    /// The sdk case above already established the rule: a field the encoding
+    /// cannot carry stops at the boundary. This one was dropped instead.
+    // rivet: verifies REQ-UPSTREAMSUMS-001
+    #[test]
+    fn an_upstream_sums_entry_refuses_rather_than_losing_the_mechanism() {
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"wac\"\nrepo=\"bytecodealliance/wac\"\n\
+binary=\"wac\"\nversion=\"v0.10.1\"\nasset=\"wac-%V-%T.tar.gz\"\n\
+upstream-sums=\"sha256.sum\"\n"
+        ))
+        .expect_err("must refuse");
+        let msg = e.to_string();
+        assert!(msg.contains("upstream-sums"), "{msg}");
         assert!(msg.contains("varve-producer deposit"), "{msg}");
     }
 }

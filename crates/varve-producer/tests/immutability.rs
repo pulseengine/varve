@@ -68,14 +68,18 @@ fn replacing_a_published_layer_requires_saying_so_and_announces_it() {
 // rivet: verifies REQ-IMMUTABLE-001
 #[test]
 fn the_default_is_to_refuse_rather_than_to_replace() {
-    let main = src("src/main.rs");
+    // The CLI moved out of `main.rs` into `cli.rs` so a lib test could
+    // enumerate the subcommands for the documentation gate
+    // (REQ-PRODUCERDOCS-001). The property asserted here is unchanged; only
+    // the file that defines the flag moved, and this test read the old one.
+    let cli = src("src/cli.rs");
     // `replace_published` gates the publish decision, and is a long flag only.
     assert!(
-        main.contains(r#"#[arg(long = "replace-published")]"#),
-        "{main:.0}"
+        cli.contains(r#"#[arg(long = "replace-published")]"#),
+        "the escape hatch must still be spelled as a long flag in cli.rs"
     );
     assert!(
-        !main.contains(r#"short = 'r'"#),
+        !cli.contains(r#"short = 'r'"#),
         "a single keystroke must not replace a published layer"
     );
 }

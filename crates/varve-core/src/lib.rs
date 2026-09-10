@@ -42,6 +42,7 @@ pub mod linestatus;
 pub mod lockpin;
 pub mod manifest;
 pub mod mirror;
+pub mod mutationscope;
 pub mod pin;
 pub mod platform;
 pub mod realm;

@@ -1,5 +1,143 @@
 # Changelog
 
+## v0.34.0 — 2026-09-10
+
+*The release that fixes the gates.*
+
+v0.33.0 shipped four capabilities that were complete, tested and carried by no
+artifact — a fifth found inside the fix for the fourth, and a **sixth found by
+running the fixed producer against a real realm.** Behind them was one pattern:
+**each gate was real, worked, and had a boundary nothing checked.** This release
+checks the boundaries.
+
+| | before | now |
+|---|---|---|
+| a manifest field | implemented in one assembler of two | both must resolve it the same way |
+| an ingestion mechanism the encoding can't carry | silently dropped | refused at the boundary |
+| the mutation gate's scope | a hand-kept list | every file gated or declared, with a reason |
+| the docs gate's reach | 1 of 2 shipped binaries | every binary, enumerated |
+| `verified` in rivet | a hand-typed field, warned about | an error if nothing backs it |
+| what moved upstream | a dead daily script in the wrong repo | `varve-producer scan`, tested |
+
+### The mutation gate covers what it says
+
+The file list lived in `ci.yml` and nothing checked it for completeness, so
+coverage drifted as files gained trust decisions. `linestatus.rs` gained the
+two-document preference in v0.33.0, nobody noticed it was outside the gate, and
+a mutant permitting **yank suppression** survived until someone chose to run the
+tool by hand. Choosing to look is not a control.
+
+Measured properly: **63 source files, 34 gated, 29 not** — the requirement had
+said "16 of 39", having counted one crate. Every file is now gated or declared
+in `mutation-scope.toml` with one of three reasons, and a file that is neither
+**fails**. `not-yet` is deliberately legitimate: honest debt, counted every run
+so it cannot go quiet, capped with a cap that only ratchets down.
+
+### The producer documents itself
+
+`varve-producer` had nine subcommands and zero topics while being the program
+other repositories' CI actually runs. It now carries its own embedded docs and
+its own coverage gate — and the check **enumerates shipped binaries** rather
+than naming the second one, so a third fails the build until it has one.
+
+### `verified` means connected to evidence
+
+`rivet validate` reported a disconnected artifact as a warning among 212, so the
+one that mattered was invisible. An unsupported status now fails. Evidence is a
+source marker **or** an incoming `verifies` edge — a marker discharges a property
+of the code, an edge discharges a property of the pipeline that no unit test can
+assert. Demanding a marker for those would push someone to write a fake test.
+
+### A field the manifest accepted and the planner ignored
+
+v0.33.0 gave `[[tool]]` a `release` key so a **hub** — a repository that tags
+`v0.7.2` and ships `with-device` at `0.2.2` — could state the tag to fetch
+separately from the version the payload answers to. The field parsed, was
+documented with the exact failure it prevents, and `REQ-PAYLOADID-001` was
+marked `verified`.
+
+**varve has two assemblers, and the field was taught to one of them.**
+`varve layer-spec` — which encodes a manifest into the environment the older
+shell assembler reads — implemented `release` completely, fetch tag and the
+fifth positional field both. `varve-producer`, the assembler realms actually
+run, never read it: `plan_tool` took the fetch tag, the `%R` expansion, the
+per-release verification grouping and the recorded `source.release` all from
+`version`.
+
+So the realm was edited to carry `with-device` again, using the field added for
+exactly that, and the deposit asked `pulseengine/jess` for a release tagged
+`0.2.2`, which does not exist. The payload stayed missing — the outcome the
+requirement exists to prevent, reached through the field added to prevent it.
+
+The evidence behind `verified` was real and proved the wrong thing: markers on
+tests that exercised the encoder and the **parser**, never the planner. A
+capability is not shipped when one path implements it; it is shipped when the
+path in production carries it.
+
+`PayloadPlan` now carries `release` beside `version`, `%R` and `%V` read
+different strings, `varve-producer plan` prints the tag whenever it differs from
+the version, and `assets` takes `--release`. The guard is general rather than
+specific to this field: **`no_optional_manifest_field_is_inert`** sets every
+optional `ManifestTool` field to a distinctive value and asserts each is
+observable in the plan, so a field added without being consumed fails the build.
+And **`both_assemblers_resolve_the_same_fetch_tag`** holds the two assemblers to
+the same answer, because the divergence — not the missing field — is what let a
+correct manifest fail a deposit.
+
+Asking that question of the other fields found a second divergence, and a worse
+one. `layer-spec` correctly **refuses** an `sdk` payload, whose layout the
+encoding cannot express — but it silently **dropped** `upstream-sums`, emitting
+an entry byte-identical to one that never declared it. That field is not a name,
+it is the mechanism that vouches for the release: the shell assembler would look
+for a cosign bundle and an attestation, find neither, and ingest the payload with
+no proof at all, while every other field survived the trip and the entry looked
+ordinary. It now refuses, the way the `sdk` case already did. Nothing in CI runs
+`layer-spec` and no realm manifest declares `upstream-sums` today, so this closed
+a live hazard rather than an outage.
+
+### Knowing what moved
+
+`varve-producer scan` and `next-layer` replace a daily shell script that lived in
+the wrong repository, read pins from a legacy workflow's env encoding, and had
+been failing for three days where nobody looks. An upstream that cannot be
+**asked** is an error, never "nothing moved": a realm that stops receiving
+releases while every check stays green is the failure nobody notices.
+
+### What mutation testing found, in this release's own new code
+
+- **The docs gate could not fail.** `coverage_gaps` was replaceable by `vec![]` —
+  the only test asserted the real CLI has no gaps, which an empty list satisfies
+  for everything.
+- **A calendar was smoke-tested.** Hand-rolled date arithmetic covered by a test
+  asserting only the *shape* of the output; twenty-four mutations passed it.
+  Expectations are now known instants cross-checked against `date -u -r`.
+- **The scanner asked github.com whatever the forge said**, and later compared a
+  payload version against a release tag, and walked `tools` but not `vsix` —
+  each found by pointing it at a real manifest rather than a fixture.
+
+### Falsification
+
+```sh
+# a file that is neither gated nor declared fails
+touch crates/varve-core/src/probe.rs && cargo test -p varve-core mutation_scope
+
+# a `verified` requirement with nothing behind it fails
+python3 tools/trace-gate.py
+
+# every shipped binary has a docs gate
+varve-producer docs check --coverage --strict
+
+# a hub is fetched by its tag, not its version — and no field is inert
+cargo test -p varve-producer --lib a_hub_payload_is_fetched_by_its_release_tag
+cargo test -p varve-producer --lib no_optional_manifest_field_is_inert
+
+# the two assemblers agree on which tag gets fetched
+cargo test -p varve-producer --lib both_assemblers_resolve_the_same_fetch_tag
+
+# a verification mechanism the encoding cannot carry stops, rather than vanishing
+varve layer-spec --manifest a-manifest-declaring-upstream-sums.toml
+```
+
 ## v0.33.0 — 2026-09-09
 
 *SDKs, payload identity, corrections after publication, and a rotation that

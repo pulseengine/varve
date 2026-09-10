@@ -233,7 +233,7 @@ pub fn stage_one<R: CommandRunner>(
         },
         source: SourceOut {
             repo: r.plan.repo.clone(),
-            release: r.plan.version.clone(),
+            release: r.plan.release.clone(),
             asset: r.plan.asset.clone(),
             sha256: r.digest.clone(),
             proof: Some(r.accepted.mechanism.as_str().to_string()),
@@ -340,6 +340,7 @@ mod tests {
     fn resolved(kind: PayloadKind, asset: &str, platform: Option<&str>) -> Resolved {
         Resolved {
             plan: crate::plan::PayloadPlan {
+                release: "v1.0.0".into(),
                 upstream_sums: None,
                 contains: None,
                 name: "rivet".into(),
@@ -800,6 +801,7 @@ mod tests {
     #[test]
     fn planned_payloads_that_had_no_build_are_reported_by_name() {
         let p = |name: &str, plat: &str, asset: &str| crate::plan::PayloadPlan {
+            release: "v1.0.0".into(),
             upstream_sums: None,
             contains: None,
             name: name.into(),

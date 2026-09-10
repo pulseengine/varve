@@ -90,6 +90,43 @@ impl fmt::Display for GhError {
 impl std::error::Error for GhError {}
 
 /// `gh release view <version> --repo <repo> --json assets`
+/// `gh release view --repo <repo> --json tagName` — what has this upstream most
+/// recently published (REQ-SCAN-001)?
+///
+/// The LATEST release, which is what a scanner asks about, as distinct from
+/// `release_assets_argv`, which asks about a named one.
+pub fn latest_release_argv(repo: &str) -> Vec<String> {
+    vec![
+        "release".into(),
+        "view".into(),
+        "--repo".into(),
+        repo.into(),
+        "--json".into(),
+        "tagName".into(),
+    ]
+}
+
+/// The tag out of `gh release view --json tagName`.
+///
+/// An empty or absent tag is an ERROR rather than an empty string. A scanner
+/// comparing "" against a pin would report every payload as moved, and an
+/// unattended depositor would act on it.
+pub fn parse_latest_release(stdout: &str) -> Result<String, GhError> {
+    let v: serde_json::Value = serde_json::from_str(stdout).map_err(|e| GhError::Unparseable {
+        program: "gh".into(),
+        detail: format!("release view returned unreadable JSON: {e}"),
+    })?;
+    match v.get("tagName").and_then(|t| t.as_str()) {
+        Some(t) if !t.trim().is_empty() => Ok(t.trim().to_string()),
+        _ => Err(GhError::Unparseable {
+            program: "gh".into(),
+            detail: "release view returned no tagName — a blank tag compared against \
+                     a pin would report every payload as moved"
+                .into(),
+        }),
+    }
+}
+
 pub fn release_assets_argv(repo: &str, version: &str) -> Vec<String> {
     vec![
         "release".into(),
@@ -422,5 +459,63 @@ mod tests {
             said_no.contains("exited 1") && said_no.contains("release not found"),
             "{said_no}"
         );
+    }
+}
+
+#[cfg(test)]
+mod latest_release_tests {
+    use super::*;
+
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn the_latest_release_query_names_the_repository_and_asks_for_the_tag() {
+        let argv = latest_release_argv("pulseengine/meld");
+        assert_eq!(
+            argv,
+            vec![
+                "release",
+                "view",
+                "--repo",
+                "pulseengine/meld",
+                "--json",
+                "tagName"
+            ]
+        );
+    }
+
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn a_tag_is_read_out_of_the_json_and_trimmed() {
+        assert_eq!(
+            parse_latest_release(r#"{"tagName":"v0.55.1"}"#).unwrap(),
+            "v0.55.1"
+        );
+        assert_eq!(
+            parse_latest_release("{\"tagName\":\"  v1.0.0\\n\"}").unwrap(),
+            "v1.0.0"
+        );
+    }
+
+    /// A blank or missing tag must be an ERROR, never an empty string. Compared
+    /// against a pin, "" reports every payload as moved — and an unattended
+    /// depositor would act on that, signing a layer built from a scan that
+    /// found nothing.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn a_blank_tag_is_refused_rather_than_compared() {
+        for bad in [
+            r#"{"tagName":""}"#,
+            r#"{"tagName":"   "}"#,
+            r#"{}"#,
+            r#"{"tagName":null}"#,
+        ] {
+            let e = parse_latest_release(bad)
+                .expect_err(&format!("{bad} must not yield a comparable tag"));
+            assert!(
+                e.to_string().contains("every payload as moved"),
+                "the refusal must say what a blank tag would cause: {e}"
+            );
+        }
+        parse_latest_release("not json").expect_err("unreadable output is not a tag");
     }
 }
