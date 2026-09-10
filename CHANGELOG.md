@@ -97,11 +97,20 @@ a live hazard rather than an outage.
 
 ### Knowing what moved
 
-`varve-producer scan` and `next-layer` replace a daily shell script that lived in
-the wrong repository, read pins from a legacy workflow's env encoding, and had
-been failing for three days where nobody looks. An upstream that cannot be
-**asked** is an error, never "nothing moved": a realm that stops receiving
-releases while every check stays green is the failure nobody notices.
+`varve-producer scan` and `next-layer` are the Rust replacement for a daily
+shell script that lives in the wrong repository, reads pins from a legacy
+workflow's env encoding, and had been failing for three days where nobody looks.
+An upstream that cannot be **asked** is an error, never "nothing moved": a realm
+that stops receiving releases while every check stays green is the failure nobody
+notices.
+
+**The replacement is not yet the incumbent.** `tools/scan-upstream.sh` and
+`.github/workflows/scan-upstream.yml` still exist here and still run on cron,
+still scanning the upstreams named by varve's own legacy `deposit-layer.yml`
+rather than the realm's `layer.toml` — and still failing on a four-field
+`TARBALL_TOOLS` entry they cannot parse. They cannot be deleted yet: the realm
+repository has to take the job over first, or there would be no scanner at all.
+Retiring them belongs to the release that lands the realm-side scanner (varve#142).
 
 ### What mutation testing found, in this release's own new code
 
