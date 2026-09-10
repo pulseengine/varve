@@ -23,6 +23,18 @@ would leave the 12 pipeline requirements with no way to be verified at all.
 Measured before this was written: 97 verified requirements — 85 with a marker,
 75 with an edge, 63 with both, and ZERO with neither. The gate is satisfiable
 today, so it is turned on as an error rather than deferred behind a backlog.
+
+WHY THIS IS PYTHON, and what would change it. Reading the artifacts from Rust
+needs a YAML parser, and the obvious one — `serde_yaml` — is unmaintained
+(0.9.34+deprecated, last published 2024-03-25). Adding it to a supply-chain tool
+to satisfy a test-only need is the wrong trade, so the gate lives here instead
+and varve's dependency graph stays as it is.
+
+That is a stopgap, not a preference. rivet has a rowan-based LOSSLESS YAML CST
+parser with two fuzz targets — it is what lets `rivet modify` rewrite an
+artifact without destroying its comments — and pulseengine/rivet#930 asks for it
+as its own crate. When that lands, this belongs in Rust beside the other gates,
+where `cargo test` runs it without anyone remembering to.
 """
 import os
 import re
