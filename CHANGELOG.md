@@ -1,5 +1,83 @@
 # Changelog
 
+## v0.34.0 — 2026-09-10
+
+*The release that fixes the gates.*
+
+v0.33.0 shipped four capabilities that were complete, tested and carried by no
+artifact — and a fifth found inside the fix for the fourth. Behind them was one
+pattern: **each gate was real, worked, and had a boundary nothing checked.**
+This release checks the boundaries.
+
+| | before | now |
+|---|---|---|
+| the mutation gate's scope | a hand-kept list | every file gated or declared, with a reason |
+| the docs gate's reach | 1 of 2 shipped binaries | every binary, enumerated |
+| `verified` in rivet | a hand-typed field, warned about | an error if nothing backs it |
+| what moved upstream | a dead daily script in the wrong repo | `varve-producer scan`, tested |
+
+### The mutation gate covers what it says
+
+The file list lived in `ci.yml` and nothing checked it for completeness, so
+coverage drifted as files gained trust decisions. `linestatus.rs` gained the
+two-document preference in v0.33.0, nobody noticed it was outside the gate, and
+a mutant permitting **yank suppression** survived until someone chose to run the
+tool by hand. Choosing to look is not a control.
+
+Measured properly: **63 source files, 34 gated, 29 not** — the requirement had
+said "16 of 39", having counted one crate. Every file is now gated or declared
+in `mutation-scope.toml` with one of three reasons, and a file that is neither
+**fails**. `not-yet` is deliberately legitimate: honest debt, counted every run
+so it cannot go quiet, capped with a cap that only ratchets down.
+
+### The producer documents itself
+
+`varve-producer` had nine subcommands and zero topics while being the program
+other repositories' CI actually runs. It now carries its own embedded docs and
+its own coverage gate — and the check **enumerates shipped binaries** rather
+than naming the second one, so a third fails the build until it has one.
+
+### `verified` means connected to evidence
+
+`rivet validate` reported a disconnected artifact as a warning among 212, so the
+one that mattered was invisible. An unsupported status now fails. Evidence is a
+source marker **or** an incoming `verifies` edge — a marker discharges a property
+of the code, an edge discharges a property of the pipeline that no unit test can
+assert. Demanding a marker for those would push someone to write a fake test.
+
+### Knowing what moved
+
+`varve-producer scan` and `next-layer` replace a daily shell script that lived in
+the wrong repository, read pins from a legacy workflow's env encoding, and had
+been failing for three days where nobody looks. An upstream that cannot be
+**asked** is an error, never "nothing moved": a realm that stops receiving
+releases while every check stays green is the failure nobody notices.
+
+### What mutation testing found, in this release's own new code
+
+- **The docs gate could not fail.** `coverage_gaps` was replaceable by `vec![]` —
+  the only test asserted the real CLI has no gaps, which an empty list satisfies
+  for everything.
+- **A calendar was smoke-tested.** Hand-rolled date arithmetic covered by a test
+  asserting only the *shape* of the output; twenty-four mutations passed it.
+  Expectations are now known instants cross-checked against `date -u -r`.
+- **The scanner asked github.com whatever the forge said**, and later compared a
+  payload version against a release tag, and walked `tools` but not `vsix` —
+  each found by pointing it at a real manifest rather than a fixture.
+
+### Falsification
+
+```sh
+# a file that is neither gated nor declared fails
+touch crates/varve-core/src/probe.rs && cargo test -p varve-core mutation_scope
+
+# a `verified` requirement with nothing behind it fails
+python3 tools/trace-gate.py
+
+# every shipped binary has a docs gate
+varve-producer docs check --coverage --strict
+```
+
 ## v0.33.0 — 2026-09-09
 
 *SDKs, payload identity, corrections after publication, and a rotation that
