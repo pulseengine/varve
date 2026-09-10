@@ -187,9 +187,11 @@ fn main() -> anyhow::Result<()> {
                     .unwrap_or_else(|| r.plan.name.clone());
                 let deposited = r.plan.name.clone();
                 let version = asset::bare_version(&r.plan.version).to_string();
-                // The same function the downloader used, not a second copy
-                // of the convention.
-                let dl = source::release_dir(&downloads, &r.plan.repo, &r.plan.version);
+                // The same function the downloader used, AND the same field:
+                // sharing the convention while passing `version` where the
+                // downloader passed the release tag is how a hub's bytes were
+                // written to one directory and read from another.
+                let dl = source::plan_download_dir(&downloads, &r.plan);
                 tools.push(deposit::stage_one(
                     &source::Spawn,
                     r,

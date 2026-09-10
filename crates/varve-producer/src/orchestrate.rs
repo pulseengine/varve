@@ -444,6 +444,56 @@ mod tests {
     use super::*;
     use crate::plan::PayloadKind;
 
+    /// The bytes are downloaded into a directory keyed by the release, because
+    /// the release is what was fetched. Staging must look in THAT directory.
+    ///
+    /// For almost every tool the release and the version are the same string,
+    /// so the two agree by accident and no test noticed they were computed
+    /// from different fields. On a hub they diverge, and the symptom is the
+    /// one `release_dir`'s own doc comment predicts: a missing file, naming
+    /// nothing about the real cause.
+    ///
+    ///   downloads/pulseengine__jess/0.2.2/with-device-0.2.2-…tar.gz
+    ///                               ^ the version; the bytes are under v0.7.2
+    // rivet: verifies REQ-PAYLOADID-001
+    #[test]
+    fn a_hub_is_staged_from_the_directory_its_bytes_were_downloaded_into() {
+        let hub = PayloadPlan {
+            name: "with-device".into(),
+            repo: "pulseengine/jess".into(),
+            version: "0.2.2".into(),
+            release: "v0.7.2".into(),
+            asset: "with-device-0.2.2-aarch64-apple-darwin.tar.gz".into(),
+            platform: Some("aarch64-apple-darwin".into()),
+            kind: PayloadKind::Tarball,
+            unverified_reason: None,
+            contains: None,
+            upstream_sums: None,
+        };
+        let root = std::path::Path::new("/w");
+
+        // Where the downloader put them: `by_release` decides the grouping,
+        // and the group key is what reaches `Source::download`.
+        let ((repo, fetched_as), _) = by_release(std::slice::from_ref(&hub))
+            .into_iter()
+            .next()
+            .expect("one group");
+        let downloaded = crate::source::release_dir(root, &repo, &fetched_as);
+
+        // Where staging looks.
+        let staged = crate::source::plan_download_dir(root, &hub);
+
+        assert_eq!(
+            staged, downloaded,
+            "staging reads a different directory than the downloader wrote"
+        );
+        assert!(
+            staged.to_string_lossy().contains("v0.7.2"),
+            "keyed on the release tag: {}",
+            staged.display()
+        );
+    }
+
     const A: &[u8] = b"the real bytes";
     const B: &[u8] = b"different bytes";
 
