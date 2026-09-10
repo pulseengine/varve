@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.34.1 — 2026-09-10
+
+*The hub fix wrote to one directory and read from another.*
+
+v0.34.0 taught `varve-producer` that a hub's release tag and payload version are
+different strings. It taught the fetch, the `%R` expansion, the per-release
+verification grouping and the recorded provenance — and missed the staging path.
+The bytes were downloaded into a directory named after the release and looked
+for in one named after the version:
+
+```
+Error: unpacking with-device-0.2.2-aarch64-apple-darwin.tar.gz with tar:
+  …/downloads/pulseengine__jess/0.2.2/with-device-0.2.2-aarch64-apple-darwin.tar.gz:
+  Cannot open: No such file or directory
+```
+
+`release_dir`'s own doc comment predicts this failure — "the symptom would be a
+missing file rather than anything naming the real cause" — and the call site
+carried the comment *"the same function the downloader used, not a second copy
+of the convention."* It was the same function. It was passed a different field.
+
+Sharing a convention is not the same as sharing a value, so the fix removes the
+choice rather than correcting it. `source::plan_download_dir(root, plan)` takes
+the **plan** instead of loose strings and decides the field once; `release_dir`
+is now crate-private, so the binary cannot reach the version-keyed form at all.
+Reintroducing the old line fails to compile with `E0603` — verified, not assumed.
+
+Every payload except a hub has `release == version`, which is why this agreed by
+accident everywhere else and no unit test noticed the two were computed from
+different fields. The regression test ties them together explicitly: it asks
+`by_release` what the downloader was given and asserts staging reads that same
+directory.
+
+### Falsification
+
+```sh
+cargo test -p varve-producer --lib a_hub_is_staged_from_the_directory_its_bytes_were_downloaded_into
+```
+
 ## v0.34.0 — 2026-09-10
 
 *The release that fixes the gates.*

@@ -62,9 +62,23 @@ pub const BUNDLE: &str = "SHA256SUMS.txt.cosign.bundle";
 ///
 /// `/` is replaced rather than nested, so two repos whose names share a tail
 /// cannot land in the same directory.
-pub fn release_dir(root: &Path, repo: &str, version: &str) -> PathBuf {
+pub(crate) fn release_dir(root: &Path, repo: &str, release: &str) -> PathBuf {
     root.join(repo.replace('/', "__"))
-        .join(version.replace('/', "__"))
+        .join(release.replace('/', "__"))
+}
+
+/// Where ONE plan's downloaded bytes live.
+///
+/// Keyed on `release`, never on `version`: the release tag is what the forge
+/// was asked for, so it is what the downloader used to name the directory. The
+/// two are the same string for almost every tool, which is exactly why passing
+/// the wrong one went unnoticed — a hub is the only shape where they differ,
+/// and there the failure is a missing file that names nothing about its cause.
+///
+/// Callers take the PLAN rather than loose strings so the choice of field is
+/// made once, here, instead of at every call site.
+pub fn plan_download_dir(root: &Path, plan: &crate::plan::PayloadPlan) -> PathBuf {
+    release_dir(root, &plan.repo, &plan.release)
 }
 
 pub struct GhSource<R: CommandRunner> {
