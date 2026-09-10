@@ -20,8 +20,33 @@ use varve_core::layerspec::LayerManifest;
 pub struct Moved {
     pub name: String,
     pub repo: String,
+    /// What was compared: the RELEASE TAG this payload is fetched from.
     pub pinned: String,
     pub latest: String,
+    /// The payload's own version, when it differs from the release tag.
+    ///
+    /// `None` for the ordinary case, where a repository's tag and its
+    /// payload's version are the same number. `Some` marks a HUB payload —
+    /// `pulseengine/jess` tags `v0.7.2` and ships `with-device` at `0.2.2` —
+    /// and those cannot be bumped automatically. See [`Moved::auto_bumpable`].
+    pub payload_version: Option<String>,
+}
+
+impl Moved {
+    /// May an unattended depositor bump this pin by itself?
+    ///
+    /// No, for a hub payload. The new RELEASE TAG is known; the new PAYLOAD
+    /// VERSION is not, and it cannot be derived — only the upstream's release
+    /// notes say what version of `with-device` `v0.7.2` ships. A scanner that
+    /// bumped `version` to the tag would write `v0.7.2` into a signed manifest
+    /// for a binary that answers `0.2.2`: the layer stating something untrue
+    /// about its own contents, which is the one thing it exists not to do, and
+    /// exactly what REQ-PAYLOADID-001 added the `release` field to prevent.
+    ///
+    /// So it is REPORTED and not acted on. A human reads the release notes.
+    pub fn auto_bumpable(&self) -> bool {
+        self.payload_version.is_none()
+    }
 }
 
 /// Why a scan produced no usable answer.
@@ -74,6 +99,17 @@ pub fn repo_of(name: &str, repo: Option<&str>) -> String {
     }
 }
 
+/// One payload's pin, whichever section of the manifest it came from.
+///
+/// `tools` and `vsix` are different tables carrying the same three facts, and
+/// the scanner has no reason to care which one a payload was written in.
+struct ToolRef<'a> {
+    name: &'a str,
+    repo: Option<&'a str>,
+    version: &'a str,
+    release: Option<&'a str>,
+}
+
 /// Compare the manifest's pins against what each upstream has published.
 ///
 /// `latest` maps repository to either its newest release tag or the reason it
@@ -86,16 +122,53 @@ pub fn compare(
 ) -> Result<Vec<Moved>, ScanError> {
     let mut moved = Vec::new();
     let mut unreachable = Vec::new();
-    for t in &manifest.tools {
-        let repo = repo_of(&t.name, t.repo.as_deref());
+
+    // TOOLS AND VSIX BOTH. The first version walked `tools` only, so the two
+    // vsix payloads were never scanned — `rivet-sdlc` sat at v0.35.0 while the
+    // rivet TOOL moved to v0.37.0, and every scan said "nothing moved". A
+    // scanner blind to a payload kind reports calm about a realm that is
+    // drifting, which is the same silence this module refuses everywhere else.
+    let entries: Vec<(&str, Option<&str>, &str)> = manifest
+        .tools
+        .iter()
+        .map(|t| (t.name.as_str(), t.repo.as_deref(), t.version.as_str()))
+        .chain(
+            manifest
+                .vsix
+                .iter()
+                .map(|v| (v.name.as_str(), v.repo.as_deref(), v.version.as_str())),
+        )
+        .collect();
+    let releases: std::collections::BTreeMap<&str, Option<&str>> = manifest
+        .tools
+        .iter()
+        .map(|t| (t.name.as_str(), t.release.as_deref()))
+        .collect();
+
+    for (name, repo_field, version) in entries {
+        let t = ToolRef {
+            name,
+            repo: repo_field,
+            version,
+            release: releases.get(name).copied().flatten(),
+        };
+        let repo = repo_of(t.name, t.repo);
         match latest.get(&repo) {
             Some(Ok(newest)) => {
-                if newest != &t.version {
+                // Compare against the RELEASE TAG, which is what upstream
+                // publishes and what `latest` holds. For almost every payload
+                // that is also its version; for a hub payload it is not, and
+                // comparing a version against a tag answers a different
+                // question — `0.2.1` is never equal to `v0.7.2`, so such a
+                // payload would report as moved on every scan, forever.
+                let pinned = t.release.unwrap_or(t.version).to_string();
+                if newest != &pinned {
                     moved.push(Moved {
-                        name: t.name.clone(),
+                        name: t.name.to_string(),
                         repo,
-                        pinned: t.version.clone(),
+                        pinned,
                         latest: newest.clone(),
+                        payload_version: t.release.map(|_| t.version.to_string()),
                     });
                 }
             }
@@ -309,6 +382,124 @@ mod tests {
             repo_of("x", Some("bytecodealliance/wasm-tools")),
             "bytecodealliance/wasm-tools"
         );
+    }
+
+    const HUB: &str = "[[tool]]\nname = \"with-device\"\nrepo = \"pulseengine/jess\"\n\
+                       version = \"0.2.1\"\nrelease = \"v0.7.1\"\n\
+                       asset = \"with-device-%V-%T.tar.gz\"\n";
+
+    /// A HUB payload is compared by its RELEASE TAG, not its version.
+    ///
+    /// `pulseengine/jess` tags `v0.7.1` and ships `with-device` at `0.2.1`.
+    /// Comparing `0.2.1` against the latest tag answers a different question —
+    /// they are never equal, so the payload reports as moved on every scan
+    /// forever, and the first version of this function did exactly that.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn a_hub_payload_is_compared_by_its_release_tag_not_its_version() {
+        // Upstream still at the pinned TAG: nothing moved, even though the tag
+        // and the payload version differ.
+        let same = compare(
+            &manifest(HUB, "rolling"),
+            &seen(&[("pulseengine/jess", Ok("v0.7.1"))]),
+        )
+        .expect("complete");
+        assert!(
+            same.is_empty(),
+            "a hub payload at its pinned tag has not moved: {same:?}"
+        );
+    }
+
+    /// …and when the TAG really moves, both numbers are reported, because one
+    /// of them is what a human needs to look up.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn a_moved_hub_payload_reports_the_tag_and_the_payload_version() {
+        let moved = compare(
+            &manifest(HUB, "rolling"),
+            &seen(&[("pulseengine/jess", Ok("v0.7.2"))]),
+        )
+        .expect("complete");
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].pinned, "v0.7.1", "the tag is what was compared");
+        assert_eq!(moved[0].latest, "v0.7.2");
+        assert_eq!(
+            moved[0].payload_version.as_deref(),
+            Some("0.2.1"),
+            "the payload's own version must be carried, not discarded"
+        );
+    }
+
+    /// VSIX payloads are scanned too. The first version walked `tools` only,
+    /// so `rivet-sdlc` sat at v0.35.0 while the rivet TOOL moved to v0.37.0 and
+    /// every scan reported "nothing moved". A scanner blind to a payload kind
+    /// reports calm about a realm that is drifting.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn a_vsix_payload_is_scanned_like_any_other() {
+        let m = manifest(
+            "[[tool]]\nname = \"rivet\"\nversion = \"v0.37.0\"\n\n\
+             [[vsix]]\nname = \"rivet-sdlc\"\nrepo = \"pulseengine/rivet\"\n\
+             version = \"v0.35.0\"\nasset = \"rivet-sdlc-%V.vsix\"\n",
+            "rolling",
+        );
+        let moved = compare(&m, &seen(&[("pulseengine/rivet", Ok("v0.37.0"))])).expect("complete");
+        assert_eq!(
+            moved.len(),
+            1,
+            "the vsix is behind and must be reported: {moved:?}"
+        );
+        assert_eq!(moved[0].name, "rivet-sdlc");
+        assert_eq!(moved[0].pinned, "v0.35.0");
+        assert_eq!(moved[0].latest, "v0.37.0");
+    }
+
+    /// And a vsix whose upstream cannot be asked is an incomplete scan, exactly
+    /// as for a tool — the blindness must not come back as a silent skip.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn an_unreachable_vsix_upstream_is_also_an_incomplete_scan() {
+        let m = manifest(
+            "[[vsix]]\nname = \"spar-aadl\"\nrepo = \"pulseengine/spar\"\n\
+             version = \"v0.40.0\"\nasset = \"spar-aadl-%P-%V.vsix\"\n",
+            "rolling",
+        );
+        compare(&m, &seen(&[("pulseengine/spar", Err("timeout"))]))
+            .expect_err("an unreachable vsix upstream is not 'nothing moved'");
+    }
+
+    /// THE ONE THAT MATTERS. An unattended depositor must not bump a hub
+    /// payload: the new tag is known, the new payload VERSION is not, and it
+    /// cannot be derived — only upstream's release notes say what version of
+    /// `with-device` `v0.7.2` ships.
+    ///
+    /// Writing the tag into `version` would put `v0.7.2` in a signed manifest
+    /// for a binary answering `0.2.2` — the layer stating something untrue
+    /// about its own contents.
+    // rivet: verifies REQ-SCAN-001
+    #[test]
+    fn a_hub_payload_is_reported_but_never_auto_bumped() {
+        let hub = compare(
+            &manifest(HUB, "rolling"),
+            &seen(&[("pulseengine/jess", Ok("v0.7.2"))]),
+        )
+        .expect("complete");
+        assert!(
+            !hub[0].auto_bumpable(),
+            "a hub payload's version is not derivable from its tag"
+        );
+
+        // An ordinary payload, where the tag IS the version, is bumpable.
+        let plain = compare(
+            &manifest(TWO, "rolling"),
+            &seen(&[
+                ("pulseengine/meld", Ok("v0.55.1")),
+                ("pulseengine/loom", Ok("v1.4.1")),
+            ]),
+        )
+        .expect("complete");
+        assert!(plain[0].auto_bumpable());
+        assert_eq!(plain[0].payload_version, None);
     }
 
     /// A recording runner, so what the producer ASKS can be asserted rather

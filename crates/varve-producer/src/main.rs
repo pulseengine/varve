@@ -244,6 +244,8 @@ fn main() -> anyhow::Result<()> {
                                 serde_json::json!({
                                     "name": x.name, "repo": x.repo,
                                     "pinned": x.pinned, "latest": x.latest,
+                                    "payload_version": x.payload_version,
+                                    "auto_bumpable": x.auto_bumpable(),
                                 })
                             })
                             .collect();
@@ -256,7 +258,14 @@ fn main() -> anyhow::Result<()> {
                         println!("nothing moved");
                     } else {
                         for x in &moved {
-                            println!("{}\t{}\t{}", x.name, x.pinned, x.latest);
+                            // A hub payload is marked, because it must not be
+                            // bumped by anything that is not reading upstream's
+                            // release notes.
+                            let note = match &x.payload_version {
+                                Some(v) => format!("\t(hub: payload {v}, NOT auto-bumpable)"),
+                                None => String::new(),
+                            };
+                            println!("{}\t{}\t{}{}", x.name, x.pinned, x.latest, note);
                         }
                     }
                     Ok(())
