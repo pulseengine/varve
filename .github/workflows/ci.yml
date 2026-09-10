@@ -69,6 +69,18 @@ jobs:
         # red here instead of leaving a requirement silently "verified"
         # (REQ-VGATE-001).
         run: rivet check verification-evidence
+      - name: trace-gate (REQ-TRACEGATE-001)
+        # `rivet validate` reports a disconnected artifact as a WARNING, among
+        # 212 of them, so the one that matters is invisible. A status is a
+        # claim; this makes an unsupported one fail the build.
+        #
+        # Evidence is a source marker OR an incoming `verifies` edge, and both
+        # are real: a marker discharges a property of the CODE, an edge
+        # discharges a property of the PIPELINE that no unit test can assert —
+        # that fuzzing runs, that the matrix covers four platforms. Demanding a
+        # marker for those would push someone to write a fake one.
+        run: python3 tools/trace-gate.py
+
       - name: claim-check
         # Load-bearing doc claims must keep their evidence (REQ-CLAIM-001).
         run: python3 tools/claim-check.py
@@ -222,17 +234,34 @@ jobs:
               -f crates/varve-core/src/install.rs
               -f crates/varve-core/src/selfverify.rs
               -f crates/varve-core/src/reverify.rs
-          - shard: varve-core (layers)
+          # SPLIT AGAIN at v0.34.0, BEFORE it cancelled rather than after.
+          # `varve-core (layers)` finished at 54m46s against the 60-minute cap —
+          # five minutes of headroom, on the shard that WAS cancelled at 60:16
+          # two releases ago. REQ-MUTATE-003 declares 22 files `not-yet`, and
+          # every one of them lands in a shard when it is gated, so the next
+          # addition here would have re-run that cancellation.
+          #
+          # Waiting for it would have cost more than splitting: a cancelled
+          # shard does not report a survivor, it reports NOTHING, so
+          # zero-survivor goes unverified while the check looks like it ran.
+          # That is the failure this job has now produced twice.
+          #
+          # Split by size, which is the only proxy available — mutant count and
+          # test time are not knowable before the run. Roughly 2.9k vs 3.1k
+          # lines, grouped so each shard's name means something.
+          - shard: varve-core (export)
             files: >-
-              -f crates/varve-core/src/rollback.rs
-              -f crates/varve-core/src/support.rs
               -f crates/varve-core/src/sdkexport.rs
-              -f crates/varve-core/src/layer.rs
-              -f crates/varve-core/src/platform.rs
-              -f crates/varve-core/src/compose.rs
               -f crates/varve-core/src/exportstamp.rs
+              -f crates/varve-core/src/compose.rs
+              -f crates/varve-core/src/platform.rs
+          - shard: varve-core (lines)
+            files: >-
               -f crates/varve-core/src/layerspec.rs
+              -f crates/varve-core/src/rollback.rs
               -f crates/varve-core/src/mirror.rs
+              -f crates/varve-core/src/support.rs
+              -f crates/varve-core/src/layer.rs
           - shard: varve-producer
             files: >-
               -f crates/varve-producer/src/asset.rs
