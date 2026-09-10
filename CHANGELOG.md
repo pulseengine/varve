@@ -13,6 +13,7 @@ checks the boundaries.
 | | before | now |
 |---|---|---|
 | a manifest field | implemented in one assembler of two | both must resolve it the same way |
+| an ingestion mechanism the encoding can't carry | silently dropped | refused at the boundary |
 | the mutation gate's scope | a hand-kept list | every file gated or declared, with a reason |
 | the docs gate's reach | 1 of 2 shipped binaries | every binary, enumerated |
 | `verified` in rivet | a hand-typed field, warned about | an error if nothing backs it |
@@ -83,6 +84,17 @@ And **`both_assemblers_resolve_the_same_fetch_tag`** holds the two assemblers to
 the same answer, because the divergence — not the missing field — is what let a
 correct manifest fail a deposit.
 
+Asking that question of the other fields found a second divergence, and a worse
+one. `layer-spec` correctly **refuses** an `sdk` payload, whose layout the
+encoding cannot express — but it silently **dropped** `upstream-sums`, emitting
+an entry byte-identical to one that never declared it. That field is not a name,
+it is the mechanism that vouches for the release: the shell assembler would look
+for a cosign bundle and an attestation, find neither, and ingest the payload with
+no proof at all, while every other field survived the trip and the entry looked
+ordinary. It now refuses, the way the `sdk` case already did. Nothing in CI runs
+`layer-spec` and no realm manifest declares `upstream-sums` today, so this closed
+a live hazard rather than an outage.
+
 ### Knowing what moved
 
 `varve-producer scan` and `next-layer` replace a daily shell script that lived in
@@ -121,6 +133,9 @@ cargo test -p varve-producer --lib no_optional_manifest_field_is_inert
 
 # the two assemblers agree on which tag gets fetched
 cargo test -p varve-producer --lib both_assemblers_resolve_the_same_fetch_tag
+
+# a verification mechanism the encoding cannot carry stops, rather than vanishing
+varve layer-spec --manifest a-manifest-declaring-upstream-sums.toml
 ```
 
 ## v0.33.0 — 2026-09-09
