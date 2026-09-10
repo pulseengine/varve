@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.34.2 — 2026-09-10
+
+*Two commands could not reach the realm at all.*
+
+Reported by a user with a correct pin and a correct `varve-realms.toml`:
+
+```
+$ varve self-update
+error: self-update needs the trust root … set VARVE_TRUST_ROOT or pin a realm:
+no trust root configured.
+
+The zero-config path is a realm: add `realm = "pulseengine"` to your varve.toml …
+```
+
+They had. The command advised the fix it does not implement.
+
+`self-update` and `self-verify` resolved the root through `trust_root_bytes()`,
+which reads **only** `VARVE_TRUST_ROOT`. The word "realm" occurs five times in
+that function — every one inside the error string, none in the resolution.
+`install`, `which` and `inspect` were always fine: they go through
+`ctx_root_bytes`, which takes the realm's root when a project pins one. Two code
+paths for one decision, and only one taught the rule — the same shape as the
+two-assembler divergence and the hub staging path in v0.34.1.
+
+`self-update` hid it further by skipping the root entirely when the binary is
+already current, so **the command works right up until it has something to do.**
+It was reported against a stale binary, but the defect is version-independent:
+any realm-only project hits it the moment an update exists.
+
+`root_bytes_here(store)` now serves code that holds no `ProjectCtx`. The
+fallback is deliberately narrow: a **pinned** project resolves through
+`project_ctx` and any failure propagates, because a realm's root is
+authoritative and must not quietly degrade to whatever the ambient environment
+says. A malformed realms file is an error, not an invitation to trust
+`VARVE_TRUST_ROOT`. Only the absence of a pin reaches the environment at all.
+
+### The guard is the class, not the instance
+
+`no_command_resolves_a_trust_root_without_consulting_the_realm` walks `main.rs`,
+attributes every call of the env-only reader to its enclosing function, and
+fails naming any that is not an allowed resolver. **It found `self-verify`,
+which nobody had reported.** A future command that reaches for the env-only
+helper fails the build until it is changed or listed with a reason.
+
+### Falsification
+
+```sh
+# in a project pinning a realm, with VARVE_TRUST_ROOT unset:
+varve self-verify --archive varve-vX.Y.Z-<triple>.tar.gz --envelope SHA256SUMS.txt.dsse.json
+#   before: error: no trust root configured
+#   after:  … verified against the signed release sums
+
+cargo test -p varve --bin varve no_command_resolves_a_trust_root_without_consulting_the_realm
+```
+
 ## v0.34.1 — 2026-09-10
 
 *The hub fix wrote to one directory and read from another.*
