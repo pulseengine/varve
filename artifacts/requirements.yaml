@@ -690,18 +690,9 @@ artifacts:
     title: A pin names its trust universe; realms are isolated by construction
     status: verified
     release: v0.10.0
-    description: >
-      varve.toml may name a realm; a committed varve-realms.toml (discovered
-      by the same walk-up as the pin, so trust travels with the code) defines
-      each realm's registry and trust root (inline hex key or a file relative
-      to the realms file). When a realm is named it is AUTHORITATIVE — the
-      ambient environment cannot substitute a different trust root — and all
-      per-realm state (core, high-water marks, status cache) lives under an
-      effective root namespaced by the trust-root fingerprint, so two realms
-      cannot cross-talk even with identical layer names and counters. One
-      shim directory serves every realm: resolution is per-invocation, so cd
-      between projects of different realms switches tool universes. A pin
-      naming an undefined realm fails closed with the corrective guidance.
+    description: |-
+      varve.toml may name a realm; a committed varve-realms.toml (discovered by the same walk-up as the pin, so trust travels with the code) defines each realm's registry and trust root (inline hex key or a file relative to the realms file). When a realm is named it is AUTHORITATIVE — the ambient environment cannot substitute a different trust root — and all per-realm state (core, high-water marks, status cache) lives under an effective root namespaced by the trust-root fingerprint, so two realms cannot cross-talk even with identical layer names and counters. One shim directory serves every realm: resolution is per-invocation, so cd between projects of different realms switches tool universes. A pin naming an undefined realm fails closed with the corrective guidance.
+       . TWO COMMANDS COULD NOT REACH THE REALM AT ALL (found 2026-09-10, varve#145, reported by a user). self-update and self-verify resolved the trust root through trust_root_bytes(), which reads only VARVE_TRUST_ROOT. The word realm appeared five times in that function and every one was inside the error string; none was in the resolution. So a correctly configured realm user was told to configure a realm, by a command that would never read one. install, which and inspect were fine - they go through ctx_root_bytes, which takes the realm's root when a project pins one. Two code paths for one decision, and only one taught the rule: the same shape as the two-assembler divergence and the hub staging path in v0.34.1. . self-update hid it further by skipping the root entirely when the binary is already current, so the command worked right up until it had something to do. It was reported against a stale binary, but the defect is version-independent: any realm-only project hits it the moment an update exists. . Fixed by root_bytes_here(store) for code holding no ProjectCtx. The fallback is deliberately narrow - a PINNED project resolves through project_ctx and any failure propagates, because a realm's root is authoritative and must not quietly degrade to whatever the ambient environment says; a malformed realms file is an error, not an invitation to trust VARVE_TRUST_ROOT. Only the absence of a pin reaches the environment. . The guard is source-level and covers the class: no_command_resolves_a_trust_root_without_consulting_the_realm walks main.rs, attributes every call of the env-only reader to its enclosing fn, and fails naming any that is not an allowed resolver. It found self-verify, which nobody had reported. Negative-controlled: reverting self-update fails with that function named. Verified end to end - old binary in a realm dir says no trust root configured, the fixed binary in the same directory with the same files and no env var verifies the archive, and outside a project the environment path still applies.
     tags: [core, security]
     links:
       - type: satisfies

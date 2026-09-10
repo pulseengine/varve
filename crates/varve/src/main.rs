@@ -813,8 +813,8 @@ fn run() -> anyhow::Result<Outcome> {
             out,
             json,
         } => sign_sums(&sums, &key, &key_id, &out, json),
-        Cmd::SelfUpdate { check, to } => self_update(check, to.as_deref()),
-        Cmd::SelfVerify { archive, envelope } => self_verify(&archive, &envelope),
+        Cmd::SelfUpdate { check, to } => self_update(&store, check, to.as_deref()),
+        Cmd::SelfVerify { archive, envelope } => self_verify(&store, &archive, &envelope),
         Cmd::Docs {
             topic,
             list,
@@ -1367,7 +1367,7 @@ fn sign_status(
     Ok(())
 }
 
-fn self_update(check: bool, to: Option<&std::path::Path>) -> anyhow::Result<()> {
+fn self_update(store: &Store, check: bool, to: Option<&std::path::Path>) -> anyhow::Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     // The API endpoint decides AVAILABILITY only; acceptance is the signed
     // sums against the pinned root. Overridable for mirrors and tests.
@@ -1390,7 +1390,7 @@ fn self_update(check: bool, to: Option<&std::path::Path>) -> anyhow::Result<()> 
         println!("varve {current} is current");
         return Ok(());
     }
-    let root_pk = trust_root_bytes().context(
+    let root_pk = root_bytes_here(store).context(
         "self-update needs the trust root to confirm a verified update — set VARVE_TRUST_ROOT \
          or pin a realm",
     )?;
@@ -1580,8 +1580,12 @@ fn docs_cmd(
     Ok(Outcome::Ok)
 }
 
-fn self_verify(archive: &std::path::Path, envelope: &std::path::Path) -> anyhow::Result<()> {
-    let root_pk = trust_root_bytes()?;
+fn self_verify(
+    store: &Store,
+    archive: &std::path::Path,
+    envelope: &std::path::Path,
+) -> anyhow::Result<()> {
+    let root_pk = root_bytes_here(store)?;
     let name = archive
         .file_name()
         .context("archive path has no file name")?
@@ -3064,6 +3068,23 @@ fn ctx_root_bytes(ctx: &ProjectCtx) -> anyhow::Result<Vec<u8>> {
     }
 }
 
+/// The trust root for THIS working directory, for code that holds no
+/// `ProjectCtx`: the realm's root when a project pins one, the environment's
+/// only when it does not.
+///
+/// The fallback is deliberately narrow. A PINNED project resolves through
+/// `project_ctx` and any failure there propagates, because a realm's root is
+/// authoritative and must not quietly degrade to whatever `VARVE_TRUST_ROOT`
+/// happens to say — a malformed realms file is an error, not an invitation to
+/// trust the ambient environment. Only the absence of a pin reaches the
+/// environment at all.
+fn root_bytes_here(base: &Store) -> anyhow::Result<Vec<u8>> {
+    match load_pin() {
+        Ok(_) => ctx_root_bytes(&project_ctx(base)?),
+        Err(_) => trust_root_bytes(),
+    }
+}
+
 fn ctx_verifier(ctx: &ProjectCtx) -> anyhow::Result<varve_core::PinnedKeyVerifier> {
     varve_core::PinnedKeyVerifier::from_public_key_bytes(&ctx_root_bytes(ctx)?)
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -4449,5 +4470,70 @@ mod dispatch_tests {
         let got = dispatch_tool_name(Some(OsStr::new("../../etc/passwd")));
         assert_eq!(got, Some("passwd".into()));
         assert!(!got.unwrap().contains('/'));
+    }
+}
+
+#[cfg(test)]
+mod trust_root_reach_tests {
+    /// Every command that needs a trust root must resolve it the SAME way:
+    /// the realm's root when one is pinned, the environment's only when no
+    /// realm is. `varve self-update` did not. It called the env-only helper
+    /// and then, when that failed, printed advice telling the user to pin a
+    /// realm — which it would never read (varve#145).
+    ///
+    /// It hid because `self-update` skips the root entirely when the binary is
+    /// already current, so the command works right up until it has something
+    /// to do.
+    ///
+    /// This is the same shape as the v0.34.1 hub defect and the two-assembler
+    /// divergence before it: two code paths for one decision, and only one of
+    /// them taught the rule. So the guard is a source-level check on the
+    /// class, not another test for this one instance. A new command that
+    /// reaches for the env-only helper fails here until it is either changed
+    /// to the realm-aware path or listed with a reason.
+    ///
+    /// `trust_root_bytes` is the env-only reader. Legitimate callers:
+    ///   - `trust_root`      — the thin verifier wrapper over it
+    ///   - `ctx_root_bytes`  — the realm-aware resolver's no-realm arm
+    ///   - `root_bytes_here` — the same, for code holding no ProjectCtx
+    // rivet: verifies REQ-REALM-001
+    #[test]
+    fn no_command_resolves_a_trust_root_without_consulting_the_realm() {
+        let src = include_str!("main.rs");
+        const ENV_ONLY: &str = "trust_root_bytes()";
+        const ALLOWED: &[&str] = &[
+            "fn trust_root(",
+            "fn ctx_root_bytes(",
+            "fn root_bytes_here(",
+            // its own definition, and this check's own source text
+            "fn trust_root_bytes(",
+            "fn no_command_resolves_a_trust_root_without_consulting_the_realm(",
+        ];
+
+        // Which function does each call site sit in? Walk forward, tracking
+        // the most recent `fn` header, so a new caller is named rather than
+        // just counted.
+        let mut current = "<top level>";
+        let mut offenders: Vec<&str> = Vec::new();
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with("fn ") || t.starts_with("pub fn ") {
+                current = t;
+            }
+            if line.contains(ENV_ONLY)
+                && !t.starts_with("//")
+                && !t.starts_with("///")
+                && !ALLOWED.iter().any(|a| current.starts_with(a))
+            {
+                offenders.push(current);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these call the env-only trust root reader directly, so a realm pin \
+             cannot reach them: {offenders:?}. Use `root_bytes_here` (realm \
+             first, environment only when no realm is pinned), or add the \
+             function to ALLOWED with a reason."
+        );
     }
 }
