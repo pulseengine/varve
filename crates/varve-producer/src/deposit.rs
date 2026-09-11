@@ -159,6 +159,52 @@ pub fn stage_one<R: CommandRunner>(
         PayloadKind::RawPerPlatform => stage::place(&archive, &dest, true)?,
         // Never unpacked: the extension IS the payload.
         PayloadKind::Vsix => stage::place(&archive, &dest, false)?,
+        // Stored exactly as published, like an sdk and for the same reason:
+        // unpacking and re-packing would break the digest upstream's own sums
+        // cover. Materialising it is `export-docs`'s job, on the consumer's
+        // machine (REQ-LAYERDOCS-001).
+        PayloadKind::Docs(format) => {
+            stage::place(&archive, &dest, false)?;
+            // The declared entry point is checked HERE, while it can still be
+            // fixed. A manifest that names an entry the payload does not have
+            // would otherwise be discovered by a reader whose starting link
+            // 404s — and the bytes would hash and verify perfectly on the way
+            // there, because what is wrong is content, not integrity.
+            //
+            // Only a tree has an inside to look in; there is nothing to find
+            // within a PDF.
+            if let (true, Some(want)) = (format.is_tree(), r.plan.contains.as_deref()) {
+                let bytes = std::fs::read(&dest)?;
+                let members = varve_core::sdkexport::read_members(&bytes).map_err(|e| {
+                    anyhow::anyhow!(
+                        "{}: the docs payload cannot be opened by the code that \
+                         will export it: {e}",
+                        r.plan.name
+                    )
+                })?;
+                // ONE implementation of "where is the payload root", shared
+                // with the exporter. A tail match here would accept a bundle
+                // whose declared root entry is missing but which happens to
+                // carry a namesake in a subdirectory — varve's own
+                // traceability bundle has two of those.
+                let paths: Vec<String> = members.iter().map(|m| m.path.clone()).collect();
+                let found = varve_core::layerspec::docs_entry_present(&paths, want);
+                if !found {
+                    let mut saw: Vec<&str> =
+                        members.iter().take(8).map(|m| m.path.as_str()).collect();
+                    saw.sort();
+                    anyhow::bail!(
+                        "{}: the docs payload declares entry {want:?} and does not \
+                         contain it.\n\n{} member(s) were read and none matched. \
+                         The bytes verify, so this is not integrity but content — \
+                         a renamed layout upstream, or an entry that was never \
+                         right.\n  first members: {saw:?}",
+                        r.plan.name,
+                        members.len()
+                    );
+                }
+            }
+        }
         // Never unpacked either, and for a stronger reason: the whole TREE is
         // the payload (REQ-SDKDEPOSIT-001). Stored exactly as upstream
         // published it — unpacking and re-packing would break the digest that

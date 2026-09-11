@@ -131,6 +131,12 @@ pub fn staged_path_for(
     platform: Option<&str>,
     ext: &str,
 ) -> String {
+    // Docs keep their extension for the same reason an sdk does: the bytes
+    // are stored exactly as published, and what they ARE decides how
+    // `export-docs` opens them later.
+    if let PayloadKind::Docs(_) = kind {
+        return format!("docs/{name}-{version}{ext}");
+    }
     if kind == PayloadKind::Sdk {
         return match platform {
             Some(p) => format!("sdk/{name}-{p}-{version}{ext}"),
@@ -146,7 +152,9 @@ pub fn staged_path_for(
             Some(p) => format!("tools/{name}-{p}"),
             None => format!("tools/{name}"),
         },
-        PayloadKind::Sdk => unreachable!("handled above, where the extension is kept"),
+        PayloadKind::Sdk | PayloadKind::Docs(_) => {
+            unreachable!("handled above, where the extension is kept")
+        }
     }
 }
 

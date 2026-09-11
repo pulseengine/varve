@@ -158,6 +158,130 @@ pub struct ManifestVsix {
     pub asset: String,
 }
 
+/// What a `[[docs]]` payload IS, declared rather than inferred.
+///
+/// Never sniffed from the asset's extension. A wrong guess makes varve offer
+/// to open a payload the wrong way, and extension-sniffing is the same class
+/// of mistake as guessing an upstream's digest-manifest name — it looks like
+/// it works until the one case where it does not. It is also the thing a
+/// human filters on: "show me the PDF" is a question about this field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DocsFormat {
+    /// A multi-file site rooted at `entry`. Needs a server for full fidelity:
+    /// the traceability bundle's mermaid loader calls `fetch()`, which is
+    /// CORS-blocked under `file://`, so diagrams degrade silently.
+    Html,
+    /// `cargo doc` output. Its own format rather than `html` because it is
+    /// GENERATED, versions with the crate it documents, and answers a
+    /// different question — "the API" is not "the handbook".
+    Rustdoc,
+    /// One file. Nothing to serve; there is only a path to hand over.
+    Pdf,
+    /// Source text, readable as-is.
+    Markdown,
+    /// ReqIF: an interchange file for a requirements tool, not for a reader.
+    Reqif,
+}
+
+impl DocsFormat {
+    /// Is this format a TREE of files, or a single one?
+    ///
+    /// It decides what `export-docs` produces and whether an `entry` can be
+    /// checked at all — there is nothing inside a PDF to look for. The
+    /// declared format decides it, never the asset's extension.
+    pub fn is_tree(self) -> bool {
+        matches!(self, DocsFormat::Html | DocsFormat::Rustdoc)
+    }
+
+    /// The word a human reads in `varve inspect` and filters on.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DocsFormat::Html => "html",
+            DocsFormat::Rustdoc => "rustdoc",
+            DocsFormat::Pdf => "pdf",
+            DocsFormat::Markdown => "markdown",
+            DocsFormat::Reqif => "reqif",
+        }
+    }
+}
+
+/// Does `entry` name a real member of a docs payload?
+///
+/// Resolved against the payload ROOT, and the root is not always the archive
+/// root: many upstreams wrap everything in a single top-level directory
+/// (`thing-1.2.3/...`) while varve's own traceability bundle does not. So the
+/// wrapper is detected — one top-level directory shared by every member — and
+/// stripped before matching.
+///
+/// The match is then EXACT, deliberately. A tail match (`ends_with("/index.
+/// html")`) looks equivalent and is not: the traceability bundle contains
+/// `eu-ai-act/index.html` and `artifacts/index.html`, so a tail rule accepts a
+/// payload whose declared root entry is missing entirely and reports success
+/// while a reader's first link 404s.
+pub fn docs_entry_present(members: &[String], entry: &str) -> bool {
+    let norm: Vec<&str> = members
+        .iter()
+        .map(|m| m.trim_start_matches("./").trim_end_matches('/'))
+        .filter(|m| !m.is_empty())
+        .collect();
+
+    // One top-level directory shared by everything = a wrapper, not content.
+    let mut tops = norm
+        .iter()
+        .filter_map(|m| m.split('/').next())
+        .collect::<std::collections::BTreeSet<_>>();
+    let wrapper = if tops.len() == 1 {
+        tops.pop_first().map(|t| format!("{t}/"))
+    } else {
+        None
+    };
+
+    let want = entry.trim_start_matches("./");
+    norm.iter().any(|m| {
+        let rel = match &wrapper {
+            Some(w) => m.strip_prefix(w.as_str()).unwrap_or(m),
+            None => m,
+        };
+        rel == want
+    })
+}
+
+/// Documentation carried BY the layer, for the versions the layer pins
+/// (REQ-LAYERDOCS-001).
+///
+/// Held, never dispatched — it is data, like a `vsix`. varve does not render
+/// it; it carries it, verifies it, and says where it is.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestDocs {
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// What this payload IS. Declared; see [`DocsFormat`].
+    pub format: DocsFormat,
+    /// The file inside the payload a reader starts at.
+    ///
+    /// Declared rather than discovered. varve's own traceability bundle
+    /// happens to have exactly one root `index.html`, and "whatever
+    /// index.html we find" is a rule that breaks silently the day an upstream
+    /// ships two — opening the wrong one is worse than refusing.
+    ///
+    /// Absent for a single-file format, where the asset IS the entry.
+    #[serde(default)]
+    pub entry: Option<String>,
+    /// What a human sees when choosing. `name` is the handle a command takes;
+    /// this is the sentence that tells someone which one they want.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Asset template; `%V` bare version, `%R` the release tag.
+    pub asset: String,
+    /// The release tag to fetch, when it differs from the payload's version.
+    #[serde(rename = "release", default)]
+    pub release: Option<String>,
+}
+
 /// The whole manifest. `deny_unknown_fields` throughout is load-bearing: a
 /// mistyped `verison = "v0.34.0"` would otherwise leave the real `version`
 /// missing or stale, and the layer would ship the wrong release under a good
@@ -171,6 +295,8 @@ pub struct LayerManifest {
     pub tools: Vec<ManifestTool>,
     #[serde(default, rename = "vsix")]
     pub vsix: Vec<ManifestVsix>,
+    #[serde(default, rename = "docs")]
+    pub docs: Vec<ManifestDocs>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1281,6 +1407,142 @@ binary=\"dup\"\nversion=\"v2\"\nasset=\"b-%T.tar.gz\"\n"
         ))
         .expect_err("must refuse");
         assert!(matches!(e, LayerSpecError::Duplicate { .. }), "{e:?}");
+    }
+
+    /// The exactness matters and a tail match would not give it. varve's own
+    /// traceability bundle carries `eu-ai-act/index.html` and
+    /// `artifacts/index.html`, so `ends_with("/index.html")` accepts a payload
+    /// whose declared ROOT entry is missing — reporting success while the
+    /// reader's first link 404s.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn a_subdirectory_namesake_does_not_satisfy_a_root_entry() {
+        let members: Vec<String> = ["./", "./eu-ai-act/index.html", "./artifacts/index.html"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(
+            !docs_entry_present(&members, "index.html"),
+            "a namesake in a subdirectory is not the declared root entry"
+        );
+        assert!(docs_entry_present(&members, "eu-ai-act/index.html"));
+    }
+
+    /// The real bundle: many top-level entries, so no wrapper, and the root
+    /// `index.html` is genuinely there.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn the_real_traceability_layout_resolves_its_root_entry() {
+        let members: Vec<String> = [
+            "./",
+            "./_assets/styles.css",
+            "./eu-ai-act/index.html",
+            "./artifacts/REQ-ROLLBACK-001.html",
+            "./index.html",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert!(docs_entry_present(&members, "index.html"));
+    }
+
+    /// Many upstreams wrap everything in one top-level directory. That is
+    /// packaging, not content, so the declared entry is written relative to
+    /// the payload rather than to the tarball.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn a_single_wrapper_directory_is_not_part_of_the_entry_path() {
+        let members: Vec<String> = [
+            "book-1.2.3/",
+            "book-1.2.3/index.html",
+            "book-1.2.3/ch1.html",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert!(docs_entry_present(&members, "index.html"));
+    }
+
+    /// ...but only when it really is a single wrapper. Two top-level
+    /// directories are content, and stripping one would let any file in
+    /// either satisfy the entry.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn two_top_level_directories_are_content_not_a_wrapper() {
+        let members: Vec<String> = ["a/index.html", "b/index.html"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!docs_entry_present(&members, "index.html"));
+        assert!(docs_entry_present(&members, "a/index.html"));
+    }
+
+    /// A `[[docs]]` payload declares what it IS, so a reader can ask for the
+    /// PDF and get a PDF. Sniffing the extension would be a guess that is
+    /// wrong exactly once and silently.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn a_docs_payload_declares_its_format_and_its_entry_point() {
+        let m = parse_layer_manifest(&format!(
+            "{HEAD}\n[[docs]]\nname=\"traceability\"\nrepo=\"pulseengine/varve\"\n\
+version=\"v0.35.0\"\nformat=\"html\"\nentry=\"index.html\"\n\
+title=\"Requirements & traceability\"\n\
+asset=\"varve-%V-traceability-html.tar.gz\"\n"
+        ))
+        .expect("parses");
+        assert_eq!(m.docs.len(), 1);
+        let d = &m.docs[0];
+        assert_eq!(d.format, DocsFormat::Html);
+        assert_eq!(d.entry.as_deref(), Some("index.html"));
+        assert_eq!(d.title.as_deref(), Some("Requirements & traceability"));
+    }
+
+    /// `rustdoc` is not `html`. It is generated rather than authored, it
+    /// versions with the crate it documents, and "show me the API" is a
+    /// different request from "show me the handbook" — which only works if
+    /// they are different values to filter on.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn rustdoc_is_its_own_format_not_merely_html() {
+        let m = parse_layer_manifest(&format!(
+            "{HEAD}\n[[docs]]\nname=\"varve-core-api\"\nrepo=\"pulseengine/varve\"\n\
+version=\"v0.36.0\"\nformat=\"rustdoc\"\nentry=\"varve_core/index.html\"\n\
+asset=\"varve-core-%V-rustdoc.tar.gz\"\n"
+        ))
+        .expect("parses");
+        assert_eq!(m.docs[0].format, DocsFormat::Rustdoc);
+        assert_ne!(m.docs[0].format, DocsFormat::Html);
+    }
+
+    /// A single-file format has no entry INSIDE it — the asset is the entry.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn a_single_file_format_needs_no_entry() {
+        let m = parse_layer_manifest(&format!(
+            "{HEAD}\n[[docs]]\nname=\"handbook\"\nrepo=\"pulseengine/docs\"\n\
+version=\"v1.0.0\"\nformat=\"pdf\"\nasset=\"handbook-%V.pdf\"\n"
+        ))
+        .expect("parses");
+        assert_eq!(m.docs[0].format, DocsFormat::Pdf);
+        assert_eq!(m.docs[0].entry, None);
+    }
+
+    /// An unknown format is REFUSED, not defaulted to html. A realm that
+    /// invents `format = "asciidoc"` must hear about it while it can still be
+    /// fixed, rather than have varve carry it and offer the wrong opener.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn an_unknown_docs_format_is_refused() {
+        let e = parse_layer_manifest(&format!(
+            "{HEAD}\n[[docs]]\nname=\"x\"\nrepo=\"a/b\"\nversion=\"v1\"\n\
+format=\"asciidoc\"\nasset=\"x-%V.adoc\"\n"
+        ))
+        .expect_err("must refuse");
+        assert!(matches!(e, LayerSpecError::Parse(_)), "{e:?}");
+        assert!(
+            e.to_string().contains("asciidoc"),
+            "the refusal must name the bad value: {e}"
+        );
     }
 
     /// A layout the encoding cannot carry must stop at the boundary rather
