@@ -2775,6 +2775,9 @@ fn deposit_cmd(
                 runner: tool.runner,
                 kind,
                 sdk_prefix: tool.sdk_prefix,
+                docs_format: tool.docs_format,
+                docs_entry: tool.docs_entry,
+                docs_title: tool.docs_title,
             });
         }
         let includes = file_spec
@@ -2829,6 +2832,11 @@ fn deposit_cmd(
             runner: None,
             kind: None,
             sdk_prefix: None,
+            // The `--tool NAME@VERSION=PATH` form deposits a plain tool; a
+            // docs payload needs a format, so it comes from a spec file.
+            docs_format: None,
+            docs_entry: None,
+            docs_title: None,
         });
     }
     run_deposit(
