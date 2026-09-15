@@ -349,7 +349,12 @@ fn component_fault(value: &str) -> Option<String> {
 }
 
 /// Validate a member path and return it normalised (no trailing slash).
-fn safe_member_path(raw: &str) -> Result<String, SdkExportError> {
+///
+/// `pub(crate)` so the docs exporter uses THIS rule rather than a second copy
+/// of it. A tree of documentation is written to disk by the same kind of loop
+/// as an SDK, and two implementations of "may this member escape the export
+/// directory" would drift — with a defect in either masked by the other.
+pub(crate) fn safe_member_path(raw: &str) -> Result<String, SdkExportError> {
     let unsafe_member = |why: &str| SdkExportError::UnsafeMember {
         member: raw.to_string(),
         why: why.to_string(),

@@ -194,6 +194,18 @@ impl DocsFormat {
         matches!(self, DocsFormat::Html | DocsFormat::Rustdoc)
     }
 
+    /// The file extension an exported single-file document is written under.
+    ///
+    /// `None` for a tree, which becomes a directory rather than a file.
+    pub fn file_extension(self) -> Option<&'static str> {
+        match self {
+            DocsFormat::Pdf => Some("pdf"),
+            DocsFormat::Markdown => Some("md"),
+            DocsFormat::Reqif => Some("reqif"),
+            DocsFormat::Html | DocsFormat::Rustdoc => None,
+        }
+    }
+
     /// The word a human reads in `varve inspect` and filters on.
     pub fn as_str(self) -> &'static str {
         match self {
