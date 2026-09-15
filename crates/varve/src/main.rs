@@ -330,6 +330,29 @@ enum Cmd {
         #[arg(long, value_name = "NAME")]
         select: Option<String>,
     },
+    /// Materialise the layer's verified `docs` payload — the documentation for
+    /// the versions this layer pins (REQ-LAYERDOCS-001).
+    ///
+    /// The store keeps the archive exactly as its producer signed it; this
+    /// writes a readable copy. To READ without copying anything, use
+    /// `varve-serve`, which serves straight out of the verified store.
+    ///
+    /// With one document the selector is optional: you have already said which
+    /// layer you want by pinning it, and naming the document again is asking
+    /// twice. With several it is required — opening the wrong document
+    /// silently is worse than a question.
+    ExportDocs {
+        /// Layer to export, e.g. `2026.09.3`. Defaults to the resolved project
+        /// pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
+        #[arg(long)]
+        layer: Option<String>,
+        /// Output directory.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// Which document, when the layer carries more than one.
+        #[arg(long, value_name = "NAME")]
+        select: Option<String>,
+    },
     /// Emit an SBOM for a verified layer, transcribed from its SIGNED manifest
     /// rather than scanned from disk — every component, version and hash is
     /// copied from what the trust root anchored (REQ-SBOM-001). Answers "which
@@ -706,6 +729,9 @@ fn run() -> anyhow::Result<Outcome> {
             export_bazel_distdir(&store, layer.as_deref(), &out)
         }
         Cmd::ExportVsix { layer, out } => export_vsix(&store, layer.as_deref(), &out),
+        Cmd::ExportDocs { layer, out, select } => {
+            export_docs(&store, layer.as_deref(), &out, select.as_deref())
+        }
         Cmd::ExportSdk { layer, out, select } => {
             export_sdk(&store, layer.as_deref(), &out, select.as_deref())
         }
@@ -2609,6 +2635,124 @@ fn export_vsix(store: &Store, layer: Option<&str>, out: &std::path::Path) -> any
     }
     write_export_stamp(out, &target.entry, "vsix")?;
     Ok(())
+}
+
+/// `varve export-docs --out D` (REQ-LAYERDOCS-001): write the layer's verified
+/// documentation somewhere readable.
+///
+/// What each document IS comes from its SIGNED annotation, never from the
+/// asset's name. A format inferred from an extension would usually be right,
+/// which is exactly what makes the wrong case arrive as a puzzle rather than
+/// an error.
+fn export_docs(
+    store: &Store,
+    layer: Option<&str>,
+    out: &std::path::Path,
+    select: Option<&str>,
+) -> anyhow::Result<()> {
+    use varve_core::docsexport::DocsPayload;
+
+    let target = export_target(store, layer)?;
+    let layers = composition_for_export(&target)?;
+    report_composition(&layers);
+    let out = &absolute_export_dir(out)?;
+
+    let payloads: Vec<DocsPayload> =
+        collect_verified_payloads(&layers, varve_core::PayloadKind::Docs)?
+            .into_iter()
+            .map(|p| {
+                // `check_docs_metadata` refused a docs payload without a
+                // format at DEPOSIT, so an entry reaching here without one is
+                // not a manifest we should second-guess — it is a layer built
+                // by something that skipped that gate.
+                let raw = p
+                    .annotations
+                    .get(varve_core::deposit::ANN_DOCS_FORMAT)
+                    .map(String::as_str)
+                    .with_context(|| {
+                        format!(
+                            "docs payload {:?} carries no {} annotation — it was deposited \
+                             without the gate that requires one, so varve cannot tell how to \
+                             open it",
+                            p.name,
+                            varve_core::deposit::ANN_DOCS_FORMAT
+                        )
+                    })?;
+                let format = parse_docs_format(raw).with_context(|| {
+                    format!("docs payload {:?} declares an unknown format", p.name)
+                })?;
+                Ok(DocsPayload {
+                    name: p.name,
+                    version: p.version,
+                    format,
+                    entry: p
+                        .annotations
+                        .get(varve_core::deposit::ANN_DOCS_ENTRY)
+                        .cloned(),
+                    title: p
+                        .annotations
+                        .get(varve_core::deposit::ANN_DOCS_TITLE)
+                        .cloned(),
+                    bytes: p.bytes,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let chosen = varve_core::docsexport::select(&payloads, select)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let report =
+        varve_core::docsexport::export(chosen, out).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let label = chosen.title.as_deref().unwrap_or(&chosen.name);
+    println!(
+        "exported {label} {} ({}) to {} — {} file(s), {} director(y/ies)",
+        chosen.version,
+        chosen.format.as_str(),
+        out.display(),
+        report.files,
+        report.dirs
+    );
+    match &report.entry_path {
+        Some(entry) => {
+            println!("  start here: {entry}");
+            // Saying WHY beats leaving someone to discover that half the
+            // diagrams are missing: mermaid fetches its own assets, and
+            // `file://` blocks that.
+            if chosen.format.is_tree() {
+                println!(
+                    "  this document fetches assets at runtime, which file:// blocks — \
+                     serve it rather than opening the file directly:"
+                );
+                println!("    varve-serve --dir {}", out.display());
+            }
+        }
+        None => println!("  (this document declares no entry point)"),
+    }
+    write_export_stamp(out, &target.entry, "docs")?;
+    Ok(())
+}
+
+/// Parse the signed format annotation into the closed vocabulary.
+///
+/// Deliberately not `serde`: this reads a string that a SIGNATURE vouches for,
+/// and the failure mode worth naming is "a layer declares a format this varve
+/// does not implement", which is a version-skew fact rather than a syntax
+/// error.
+fn parse_docs_format(raw: &str) -> anyhow::Result<varve_core::layerspec::DocsFormat> {
+    use varve_core::layerspec::DocsFormat;
+    Ok(match raw {
+        "html" => DocsFormat::Html,
+        "rustdoc" => DocsFormat::Rustdoc,
+        "pdf" => DocsFormat::Pdf,
+        "markdown" => DocsFormat::Markdown,
+        "reqif" => DocsFormat::Reqif,
+        other => bail!(
+            "unknown documentation format {other:?}. This varve knows html, rustdoc, pdf, \
+             markdown and reqif — a layer declaring anything else was deposited by a NEWER \
+             varve, and the document is carried and verified but cannot be opened here. \
+             `varve self-update`."
+        ),
+    })
 }
 
 /// `varve export-sdk --out D` (REQ-SDK-001 clause 3): materialise the layer's
