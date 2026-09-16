@@ -231,13 +231,32 @@ jobs:
               -f crates/varve-core/src/resolve.rs
               -f crates/varve-core/src/consumer.rs
               -f crates/varve-core/src/mutationscope.rs
+              -f crates/varve-core/src/install.rs
+              -f crates/varve-core/src/selfverify.rs
+              -f crates/varve-core/src/reverify.rs
+          # SPLIT AGAIN at v0.35.0, and the third time this job has said the
+          # same thing. REQ-LAYERDOCS-001 added four files to `varve-core
+          # (trust)` — manifestversions, docsexport, and the viewer's two — and
+          # it went to 296 mutants and was KILLED at 23 minutes (exit 143),
+          # under a 60-minute cap. So this one was not even the timeout: the
+          # shard had grown enough to be terminated on resources, which reports
+          # nothing in exactly the same way a cancellation does.
+          #
+          # The comment above still applies verbatim, including its warning
+          # against the tempting fix. Dropping a file would leave it ungated;
+          # raising the cap would not have helped, because the cap was not what
+          # was reached. Splitting is the only response that keeps what the
+          # gate proves unchanged.
+          #
+          # Grouped so the name means something: the documentation payload,
+          # end to end — what varve-core decides about a document, and what the
+          # viewer does with one.
+          - shard: docs payload
+            files: >-
               -f crates/varve-core/src/manifestversions.rs
               -f crates/varve-core/src/docsexport.rs
               -f crates/varve-serve/src/http.rs
               -f crates/varve-serve/src/docs.rs
-              -f crates/varve-core/src/install.rs
-              -f crates/varve-core/src/selfverify.rs
-              -f crates/varve-core/src/reverify.rs
           # SPLIT AGAIN at v0.34.0, BEFORE it cancelled rather than after.
           # `varve-core (layers)` finished at 54m46s against the 60-minute cap —
           # five minutes of headroom, on the shard that WAS cancelled at 60:16
