@@ -100,6 +100,23 @@ pub trait LayerSource {
         Ok(None)
     }
 
+    /// Fetch the line-status document published under the line's OWN tag,
+    /// independent of any layer (REQ-POSTDEPOSIT-001 clause 1).
+    ///
+    /// Distinct from `fetch_line_status`, which returns the BASELINE carried
+    /// inside a layer's artifact manifest. Both may exist and disagree; the
+    /// caller verifies each and keeps the newer by counter (clause 2). Same
+    /// contract otherwise: opaque, untrusted bytes. Ranking before verifying
+    /// would let whoever serves the tag pick the winner by writing a large
+    /// counter, so the caller must verify FIRST and compare second.
+    ///
+    /// A source with no published document returns `Ok(None)`, which is not an
+    /// error: most lines have never been corrected, and a source that cannot
+    /// serve one must not be able to make that look like a failure.
+    fn fetch_published_line_status(&self, _line: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        Ok(None)
+    }
+
     /// Fetch the attestations this source carries beside the layer as
     /// referrer artifacts (REQ-ATTEST-002). Same contract as
     /// `fetch_line_status`: OPAQUE, UNTRUSTED bytes. The source is never
@@ -134,6 +151,7 @@ pub struct MemorySource {
     manifests: Vec<Vec<u8>>,
     blobs: std::collections::BTreeMap<String, Vec<u8>>,
     line_status: Option<Vec<u8>>,
+    published_line_status: Option<Vec<u8>>,
     line_index: Option<Vec<u8>>,
     served: Option<Vec<String>>,
     attestations: Vec<crate::attestcarry::CarriedAttestation>,
@@ -172,6 +190,14 @@ impl MemorySource {
 
     pub fn with_line_status(mut self, envelope: &[u8]) -> Self {
         self.line_status = Some(envelope.to_vec());
+        self
+    }
+
+    /// Carry a line-status document published under the line's own tag
+    /// (REQ-POSTDEPOSIT-001) — a correction, yank, or advisory issued after
+    /// the layer was deposited.
+    pub fn with_published_line_status(mut self, envelope: &[u8]) -> Self {
+        self.published_line_status = Some(envelope.to_vec());
         self
     }
 
@@ -286,6 +312,10 @@ impl LayerSource for MemorySource {
 
     fn fetch_line_status(&self, _layer: &LayerRef) -> Result<Option<Vec<u8>>, SourceError> {
         Ok(self.line_status.clone())
+    }
+
+    fn fetch_published_line_status(&self, _line: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        Ok(self.published_line_status.clone())
     }
 
     fn fetch_attestations(

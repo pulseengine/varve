@@ -513,6 +513,7 @@ mod tests {
         // index and assert that a line contains nothing.
         let (sk, pk) = generate_root_keypair();
         let status = crate::linestatus::LineStatus {
+            min_counter: None,
             line: "2026.08".into(),
             counter: 9,
             issued_at: "2026-08-18T00:00:00Z".into(),
@@ -873,6 +874,7 @@ mod tests {
         // not pick up the status: they are separate artifact types and are
         // kept apart by type, not by luck of ordering.
         let status = crate::linestatus::LineStatus {
+            min_counter: None,
             line: "2026.08".into(),
             counter: 1,
             issued_at: "2026-08-18T00:00:00Z".into(),

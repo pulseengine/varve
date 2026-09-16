@@ -15,6 +15,12 @@ categories = ["development-tools", "development-tools::build-utils", "cryptograp
 [dependencies]
 flate2 = "1.1.9"
 hex = "0.4.3"
+# Pure-Rust xz. The Zephyr SDK and every wasmtime archive are .tar.xz, and a
+# C-linked decoder (xz2/liblzma) would put a C build dependency in the crate
+# every consumer links, which cross-compilation and the air-gap story both pay
+# for. The bytes are digest-verified before they reach a decoder, so decoder
+# maturity buys less here than the pure-Rust property does.
+lzma-rs = "0.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"

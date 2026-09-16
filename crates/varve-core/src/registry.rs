@@ -1002,6 +1002,25 @@ impl RegistrySource {
     /// `lineindex::check`, and a registry must not get to decide it by
     /// answering 404. Opaque, untrusted bytes: the caller verifies them
     /// against the realm's root, and the registry is the party they constrain.
+    /// The line-status document published under its OWN tag
+    /// (REQ-POSTDEPOSIT-001 clause 1), if this registry carries one.
+    ///
+    /// Same absence contract as `line_index_for_tag`: no such tag, or a tag
+    /// carrying no line-status layer, is `Ok(None)`. Opaque untrusted bytes —
+    /// the caller verifies them against the realm root before letting the
+    /// counter inside decide anything.
+    fn line_status_tag_document(&self, tag: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        let manifest = match self.artifact_manifest_for_tag(tag) {
+            Ok(manifest) => manifest,
+            Err(SourceError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        match layer_digest_for_role(&manifest, ROLE_LINE_STATUS) {
+            Some(digest) => self.fetch_blob(&digest).map(Some),
+            None => Ok(None),
+        }
+    }
+
     fn line_index_for_tag(&self, tag: &str) -> Result<Option<Vec<u8>>, SourceError> {
         let manifest = match self.artifact_manifest_for_tag(tag) {
             Ok(manifest) => manifest,
@@ -1143,6 +1162,16 @@ impl LayerSource for RegistrySource {
                 Ok(None)
             }
         }
+    }
+
+    fn fetch_published_line_status(&self, line: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        // Reuses `line_index_for_tag`'s shape deliberately: a MISSING tag is
+        // `Ok(None)`, not an error. Most lines have never been corrected, and
+        // a registry must not be able to turn "nothing to say" into a failed
+        // install by answering 404 — nor into a suppressed yank by answering
+        // one for a line that does have a correction. Absence is reported;
+        // what it MEANS is the caller's call.
+        self.line_status_tag_document(&crate::linestatus::status_tag(line))
     }
 
     fn fetch_line_index(&self, line: &str) -> Result<Option<Vec<u8>>, SourceError> {

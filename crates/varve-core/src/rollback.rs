@@ -27,6 +27,24 @@ pub enum RollbackVerdict {
         presented: u64,
         high_water: u64,
     },
+    /// FIRST CONTACT, below the line's signed floor: rejected
+    /// (REQ-FIRSTCONTACT-001).
+    ///
+    /// A client with no mark for a line used to accept any counter, because
+    /// there was nothing to compare against. That is the one moment when
+    /// anti-rollback — the property this tool exists for — protects nobody,
+    /// and it is exactly the moment an attacker chooses: a brand-new checkout,
+    /// a fresh CI runner, a new machine. Every one of those is a first
+    /// contact, so "first contact is rare" is false in precisely the
+    /// environments varve is built for.
+    ///
+    /// The realm states a floor in its signed line-status, so a consumer with
+    /// no history still has one.
+    BelowFloor {
+        line: String,
+        presented: u64,
+        floor: u64,
+    },
 }
 
 /// Persisted high-water marks, one per release line, stored under the varve
@@ -83,6 +101,26 @@ impl HighWaterMarks {
     /// mark — call [`Self::advance`] after the layer is fully verified and
     /// laid down, so a failed install cannot burn the mark.
     pub fn check(&self, manifest: &LayerManifest) -> RollbackVerdict {
+        self.check_with_floor(manifest, None)
+    }
+
+    /// The check, with the realm's signed per-line floor when one is known
+    /// (REQ-FIRSTCONTACT-001).
+    ///
+    /// `floor` must come from a line-status document that has ALREADY been
+    /// verified against the realm's trust root. An unverified floor would be
+    /// an attacker-chosen number, and a floor of zero from a forged document
+    /// is worse than no floor at all — it looks like protection.
+    ///
+    /// The local mark still wins where it is higher: a consumer who has
+    /// accepted counter 9 must not be walked back to a realm-stated floor of
+    /// 3. The floor raises the bottom for someone who has no history; it never
+    /// lowers it for someone who does.
+    pub fn check_with_floor(
+        &self,
+        manifest: &LayerManifest,
+        floor: Option<u64>,
+    ) -> RollbackVerdict {
         let line = manifest.layer.line().to_string();
         match self.marks.get(&line) {
             Some(&high_water) if manifest.counter < high_water => RollbackVerdict::Rollback {
@@ -90,7 +128,18 @@ impl HighWaterMarks {
                 presented: manifest.counter,
                 high_water,
             },
-            _ => RollbackVerdict::Accept,
+            // A recorded mark at or above the presented counter is the
+            // consumer's own history and is authoritative; the floor has
+            // nothing to add.
+            Some(_) => RollbackVerdict::Accept,
+            None => match floor {
+                Some(floor) if manifest.counter < floor => RollbackVerdict::BelowFloor {
+                    line,
+                    presented: manifest.counter,
+                    floor,
+                },
+                _ => RollbackVerdict::Accept,
+            },
         }
     }
 
@@ -441,5 +490,138 @@ mod tests {
             staleness_warning("2026-08-01T00:00:00Z", "2026-07-10T00:00:00Z", 90),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod first_contact_tests {
+    use super::*;
+
+    use crate::manifest::{LayerManifest, fixtures};
+
+    fn manifest(layer: &str, counter: u64) -> LayerManifest {
+        LayerManifest::parse(&fixtures::manifest(
+            layer,
+            "qualified",
+            counter,
+            "2026-07-31T09:14:00Z",
+        ))
+        .unwrap()
+    }
+
+    /// A fresh client, no marks file, nothing recorded — the state every new
+    /// machine starts in.
+    fn fresh() -> (tempfile::TempDir, HighWaterMarks) {
+        let tmp = tempfile::tempdir().unwrap();
+        let hwm = HighWaterMarks::load(tmp.path()).unwrap();
+        (tmp, hwm)
+    }
+
+    fn with_mark(line: &str, counter: u64) -> (tempfile::TempDir, HighWaterMarks) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut hwm = HighWaterMarks::load(tmp.path()).unwrap();
+        hwm.advance(&manifest(&format!("{line}.{counter}"), counter))
+            .unwrap();
+        (tmp, hwm)
+    }
+
+    /// The hole this closes. A consumer with no history accepted ANY counter,
+    /// because there was nothing to compare against — the one moment the
+    /// anti-rollback property protects nobody, and the moment an attacker
+    /// picks. A fresh checkout, a new CI runner, a new machine: every one is a
+    /// first contact, so "first contact is rare" is false in exactly the
+    /// environments varve is built for.
+    // rivet: verifies REQ-FIRSTCONTACT-001
+    #[test]
+    fn a_first_contact_below_the_signed_floor_is_refused() {
+        let (_t, hwm) = fresh();
+        // No mark for this line at all.
+        assert_eq!(
+            hwm.check(&manifest("2026.07.2", 2)),
+            RollbackVerdict::Accept
+        );
+        // With a realm-stated floor, the same layer is refused.
+        match hwm.check_with_floor(&manifest("2026.07.2", 2), Some(5)) {
+            RollbackVerdict::BelowFloor {
+                line,
+                presented,
+                floor,
+            } => {
+                assert_eq!(line, "2026.07");
+                assert_eq!(presented, 2);
+                assert_eq!(floor, 5);
+            }
+            other => panic!("expected BelowFloor, got {other:?}"),
+        }
+    }
+
+    // rivet: verifies REQ-FIRSTCONTACT-001
+    #[test]
+    fn a_first_contact_at_or_above_the_floor_is_accepted() {
+        let (_t, hwm) = fresh();
+        assert_eq!(
+            hwm.check_with_floor(&manifest("2026.07.5", 5), Some(5)),
+            RollbackVerdict::Accept
+        );
+        assert_eq!(
+            hwm.check_with_floor(&manifest("2026.07.9", 9), Some(5)),
+            RollbackVerdict::Accept
+        );
+    }
+
+    /// The floor raises the bottom for someone with no history. It must never
+    /// LOWER it for someone who has one: a consumer who has accepted counter 9
+    /// cannot be walked back to a realm-stated floor of 3.
+    // rivet: verifies REQ-FIRSTCONTACT-001
+    #[test]
+    fn a_floor_below_a_recorded_mark_does_not_reopen_the_window() {
+        let (_t, hwm) = with_mark("2026.07", 9);
+        match hwm.check_with_floor(&manifest("2026.07.3", 3), Some(3)) {
+            RollbackVerdict::Rollback { high_water, .. } => assert_eq!(high_water, 9),
+            other => panic!("the local mark must still win: {other:?}"),
+        }
+    }
+
+    /// A line with no stated floor behaves exactly as before, so a realm that
+    /// has not adopted this keeps working.
+    // rivet: verifies REQ-FIRSTCONTACT-001
+    #[test]
+    fn a_line_with_no_stated_floor_is_unchanged() {
+        let (_t, hwm) = fresh();
+        assert_eq!(
+            hwm.check_with_floor(&manifest("2026.07.0", 0), None),
+            RollbackVerdict::Accept
+        );
+        assert_eq!(
+            hwm.check(&manifest("2026.07.0", 0)),
+            hwm.check_with_floor(&manifest("2026.07.0", 0), None)
+        );
+    }
+
+    /// A floor of zero is not protection, and must not read as if it were —
+    /// it accepts everything, which is what an attacker would choose if they
+    /// could pick the number. (They cannot: the floor is only read from a
+    /// line-status already verified against the realm root.)
+    // rivet: verifies REQ-FIRSTCONTACT-001
+    #[test]
+    fn a_floor_of_zero_accepts_everything_exactly_as_no_floor_does() {
+        let (_t, hwm) = fresh();
+        assert_eq!(
+            hwm.check_with_floor(&manifest("2026.07.0", 0), Some(0)),
+            RollbackVerdict::Accept
+        );
+    }
+
+    /// The floor is per LINE. A floor learned for one line must not silently
+    /// govern another — lines advance independently.
+    // rivet: verifies REQ-FIRSTCONTACT-001
+    #[test]
+    fn the_floor_applies_to_the_line_it_was_stated_for() {
+        let (_t, hwm) = with_mark("2026.07", 9);
+        // A different line has no mark, so the floor governs it.
+        match hwm.check_with_floor(&manifest("2026.08.1", 1), Some(4)) {
+            RollbackVerdict::BelowFloor { line, .. } => assert_eq!(line, "2026.08"),
+            other => panic!("{other:?}"),
+        }
     }
 }

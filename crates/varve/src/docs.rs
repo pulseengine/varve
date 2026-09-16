@@ -96,6 +96,11 @@ blind to composition; this is not.
 const EMBEDDED_TOPICS: &[Topic] = &[
     // ── concepts ──────────────────────────────────────────────────────
     topic!(
+        "sdk",
+        "sdk — tree-shaped payloads: Zephyr, WASI, Yocto, and why .sh is refused",
+        "concept-sdk-payloads.md"
+    ),
+    topic!(
         "config-reference",
         "Configuration reference — every file, every field",
         "concept-config-reference.md"
@@ -271,6 +276,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "cmd-status.md"
     ),
     topic!(
+        "support-horizon",
+        "support-horizon — derive a layer's support window from its channel (CI)",
+        "cmd-support-horizon.md"
+    ),
+    topic!(
         "sign-attestation",
         "sign-attestation — bind an attestation to a layer (CI)",
         "cmd-sign-attestation.md"
@@ -321,6 +331,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "self-verify",
         "self-verify — verify a release file",
         "cmd-self-verify.md"
+    ),
+    topic!(
+        "consumer-api",
+        "consumer-api — asking varve from Rust instead of from a shell",
+        "concept-consumer-api.md"
     ),
     topic!("docs", "docs — this documentation", "cmd-docs.md"),
     Topic {
@@ -1037,6 +1052,61 @@ mod tests {
         }
     }
 
+    /// CLAUSE 3: every SHIPPED BINARY has a documentation gate, not a named
+    /// one.
+    ///
+    /// varve's gate was real, worked, and covered one of two binaries.
+    /// varve-producer shipped nine subcommands and zero topics while being the
+    /// program other repositories' CI actually runs. Naming the second binary
+    /// here would repeat the mistake one binary later, so this enumerates them.
+    ///
+    /// A binary crate is one with `src/main.rs`. Its gate is a `src/docs.rs`
+    /// carrying a `coverage_gaps` enumerated from its own CLI — the same shape
+    /// this file uses.
+    // rivet: verifies REQ-PRODUCERDOCS-001
+    #[test]
+    fn every_shipped_binary_has_a_documentation_gate() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("crates/varve is two levels below the repo root")
+            .to_path_buf();
+
+        let mut binaries = Vec::new();
+        for e in std::fs::read_dir(root.join("crates"))
+            .expect("crates/")
+            .flatten()
+        {
+            let src = e.path().join("src");
+            if src.join("main.rs").is_file() {
+                binaries.push(e.path());
+            }
+        }
+        assert!(
+            binaries.len() >= 2,
+            "expected at least varve and varve-producer, found {}",
+            binaries.len()
+        );
+
+        let mut ungated = Vec::new();
+        for b in &binaries {
+            let docs = b.join("src/docs.rs");
+            let has_gate = std::fs::read_to_string(&docs)
+                .map(|t| t.contains("fn coverage_gaps"))
+                .unwrap_or(false);
+            if !has_gate {
+                ungated.push(b.file_name().unwrap().to_string_lossy().to_string());
+            }
+        }
+        assert!(
+            ungated.is_empty(),
+            "these shipped binaries have no documentation gate: {ungated:?}\n\
+             Each needs a src/docs.rs with a `coverage_gaps` enumerated from its own \
+             CLI. Documenting a binary inside ANOTHER binary's docs does not count: a \
+             CI job holding one may not hold the other."
+        );
+    }
+
     // rivet: verifies REQ-DOCS-002
     #[test]
     fn a_topic_showing_the_published_realm_shows_the_published_key() {
@@ -1287,8 +1357,23 @@ mod tests {
                 "toml" if block.contains("[varve]") => {
                     let m = varve_core::layerspec::parse_layer_manifest(&block)
                         .expect("the documented layer.toml must parse as a layer manifest");
-                    varve_core::layerspec::assembler_env(&m)
-                        .expect("the documented layer.toml must TRANSLATE, not merely parse");
+                    // It must TRANSLATE — or refuse for the one reason a
+                    // documented manifest is allowed to: it uses a feature the
+                    // env encoding cannot carry. `layout = "sdk"` is that case,
+                    // and the refusal IS the documented behaviour (`varve docs
+                    // sdk`), so accepting it here keeps the check honest rather
+                    // than deleting it. Any OTHER translation failure is still
+                    // a broken example.
+                    match varve_core::layerspec::assembler_env(&m) {
+                        Ok(_) => {}
+                        Err(varve_core::layerspec::LayerSpecError::LayoutNotEncodable {
+                            ..
+                        }) => {}
+                        Err(e) => panic!(
+                            "the documented layer.toml must TRANSLATE, or refuse \
+                             as unencodable: {e}"
+                        ),
+                    }
                     checked += 1;
                 }
                 "toml" if block.contains("[[tool]]") || block.contains("[tool.runner]") => {

@@ -24,6 +24,18 @@ pub const DEFAULT_PLATFORMS: &[&str] = &[
     "x86_64-unknown-linux-gnu",
 ];
 
+/// The same host, OS FIRST — zephyrproject-rtos/sdk-ng's convention
+/// (`toolchain_gnu_macos-aarch64_arm-zephyr-eabi.tar.xz`).
+///
+/// Derived by swapping [`upstream_platform_tag`]'s halves rather than by a
+/// second table: two tables would be two places to add a platform, and the one
+/// nobody remembers to update is the one that silently omits a payload.
+pub fn host_platform_tag(triple: &str) -> Option<String> {
+    let tag = upstream_platform_tag(triple)?;
+    let (arch, os) = tag.split_once('-')?;
+    Some(format!("{os}-{arch}"))
+}
+
 /// The short platform tags used OUTSIDE this organisation.
 ///
 /// bytecodealliance names its assets `<tool>-<version>-aarch64-macos.tar.gz`,
@@ -66,8 +78,19 @@ pub enum Placeholder {
     BareVersion,
     /// `%T` — the Rust target triple.
     Triple,
-    /// `%U` — the short upstream platform tag.
+    /// `%U` — the short upstream platform tag, ARCH FIRST: `aarch64-macos`.
+    /// bytecodealliance spells its assets this way.
     UpstreamTag,
+    /// `%H` — the same host, OS FIRST: `macos-aarch64`.
+    ///
+    /// Not a stylistic variant of `%U`. There is no single "upstream
+    /// convention": bytecodealliance writes `aarch64-macos` and
+    /// zephyrproject-rtos/sdk-ng writes `macos-aarch64`, and a template using
+    /// the wrong one matches nothing. varve had only the first, which is why
+    /// the first attempt to deposit a Zephyr SDK asked for
+    /// `toolchain_gnu_aarch64-macos_arm-zephyr-eabi.tar.xz` against a release
+    /// that publishes `toolchain_gnu_macos-aarch64_arm-zephyr-eabi.tar.xz`.
+    HostTag,
     /// `%P` — the VS Code platform tag.
     VsCodePlatform,
     /// `%R` — the release tag exactly as the manifest writes it, leading `v`
@@ -84,6 +107,7 @@ impl Placeholder {
             Placeholder::BareVersion => "%V",
             Placeholder::Triple => "%T",
             Placeholder::UpstreamTag => "%U",
+            Placeholder::HostTag => "%H",
             Placeholder::VsCodePlatform => "%P",
             Placeholder::ReleaseTag => "%R",
         }
@@ -93,6 +117,7 @@ impl Placeholder {
         Placeholder::BareVersion,
         Placeholder::Triple,
         Placeholder::UpstreamTag,
+        Placeholder::HostTag,
         Placeholder::VsCodePlatform,
         Placeholder::ReleaseTag,
     ];
@@ -170,6 +195,7 @@ pub fn bare_version(version: &str) -> &str {
 pub fn expand(
     template: &str,
     version: &str,
+    release: &str,
     platform: Option<&str>,
     vscode_platform: Option<&str>,
 ) -> Result<String, TemplateError> {
@@ -191,10 +217,12 @@ pub fn expand(
         }
     }
 
-    // %R before %V: both mention the version, and expanding the bare form
-    // first would leave a stray `v` in front of it.
+    // `%R` is the RELEASE tag and `%V` the payload's own version. They are the
+    // same string for almost every tool, and different on a hub: jess tags
+    // `v0.7.2` and ships `with-device` at `0.2.2`. Deriving one from the other
+    // is what left `with-device` unfetchable (REQ-PAYLOADID-001).
     let mut out = template
-        .replace(Placeholder::ReleaseTag.token(), version)
+        .replace(Placeholder::ReleaseTag.token(), release)
         .replace(Placeholder::BareVersion.token(), bare_version(version));
     if let Some(triple) = platform {
         out = out.replace(Placeholder::Triple.token(), triple);
@@ -205,6 +233,13 @@ pub fn expand(
                     triple: triple.to_string(),
                 })?;
             out = out.replace(Placeholder::UpstreamTag.token(), tag);
+        }
+        if out.contains(Placeholder::HostTag.token()) {
+            let tag = host_platform_tag(triple).ok_or_else(|| TemplateError::NoUpstreamTag {
+                template: template.to_string(),
+                triple: triple.to_string(),
+            })?;
+            out = out.replace(Placeholder::HostTag.token(), &tag);
         }
         if out.contains(Placeholder::VsCodePlatform.token()) {
             // Derived from the triple unless the caller named one explicitly:
@@ -250,8 +285,15 @@ pub fn expand(
 /// expanding it per platform would download the same file four times and
 /// deposit four identical payloads.
 pub fn is_per_platform(template: &str) -> bool {
+    // Every placeholder that names a MACHINE must be listed here. A
+    // per-platform token missing from this list does not fail loudly: the
+    // template is treated as one portable asset, expanded once with no
+    // platform, and the payload is reported absent — which is how adding %H
+    // without touching this function made a correct Zephyr template match
+    // nothing.
     template.contains(Placeholder::Triple.token())
         || template.contains(Placeholder::UpstreamTag.token())
+        || template.contains(Placeholder::HostTag.token())
         || template.contains(Placeholder::VsCodePlatform.token())
 }
 
@@ -280,13 +322,14 @@ pub struct Selection {
 pub fn select(
     template: &str,
     version: &str,
+    release: &str,
     platforms: &[&str],
     available: &[String],
 ) -> Result<Selection, TemplateError> {
     let mut matched = Vec::new();
     let mut missing = Vec::new();
     if !is_per_platform(template) {
-        let asset = expand(template, version, None, None)?;
+        let asset = expand(template, version, release, None, None)?;
         if available.iter().any(|a| a == &asset) {
             matched.push((String::new(), asset));
         } else {
@@ -295,7 +338,7 @@ pub fn select(
         return Ok(Selection { matched, missing });
     }
     for platform in platforms {
-        let asset = expand(template, version, Some(platform), None)?;
+        let asset = expand(template, version, release, Some(platform), None)?;
         if available.iter().any(|a| a == &asset) {
             matched.push(((*platform).to_string(), asset));
         } else {
@@ -329,6 +372,7 @@ mod tests {
         let got = expand(
             "wasm-tools-%V-%T.tar.gz",
             "v1.257.1",
+            "v1.257.1",
             Some("aarch64-apple-darwin"),
             None,
         )
@@ -344,6 +388,7 @@ mod tests {
         let got = expand(
             "wasm-tools-%V-%U.tar.gz",
             "v1.257.1",
+            "v1.257.1",
             Some("aarch64-apple-darwin"),
             None,
         )
@@ -358,6 +403,7 @@ mod tests {
     fn a_mistyped_placeholder_is_refused_rather_than_left_unexpanded() {
         let err = expand(
             "rivet-%v-%T.tar.gz",
+            "v0.34.0",
             "v0.34.0",
             Some("x86_64-apple-darwin"),
             None,
@@ -420,6 +466,7 @@ mod tests {
             expand(
                 "wasmtime-%R-%U.tar.xz",
                 "v48.0.1",
+                "v48.0.1",
                 Some("aarch64-apple-darwin"),
                 None
             )
@@ -428,7 +475,7 @@ mod tests {
         );
         // And the bare form still strips it.
         assert_eq!(
-            expand("t-%V.tar.gz", "v48.0.1", None, None).expect("expands"),
+            expand("t-%V.tar.gz", "v48.0.1", "v48.0.1", None, None).expect("expands"),
             "t-48.0.1.tar.gz"
         );
     }
@@ -439,7 +486,7 @@ mod tests {
     #[test]
     fn a_template_using_both_version_forms_expands_each_correctly() {
         assert_eq!(
-            expand("x-%R-y-%V.tar.gz", "v1.2.3", None, None).expect("expands"),
+            expand("x-%R-y-%V.tar.gz", "v1.2.3", "v1.2.3", None, None).expect("expands"),
             "x-v1.2.3-y-1.2.3.tar.gz"
         );
     }
@@ -455,6 +502,7 @@ mod tests {
     fn a_per_platform_vsix_template_selects_the_real_marketplace_names() {
         let sel = select(
             "spar-aadl-%P-%V.vsix",
+            "v0.34.0",
             "v0.34.0",
             DEFAULT_PLATFORMS,
             &avail(&[
@@ -518,7 +566,7 @@ mod tests {
             ("t-%U.tar.gz", "%U"),
             ("t-%P.vsix", "%P"),
         ] {
-            let err = expand(template, "v1.0.0", None, None).expect_err("must refuse");
+            let err = expand(template, "v1.0.0", "v1.0.0", None, None).expect_err("must refuse");
             assert_eq!(
                 err,
                 TemplateError::MissingPlatform {
@@ -537,6 +585,7 @@ mod tests {
         let err = expand(
             "t-%P.vsix",
             "v1.0.0",
+            "v1.0.0",
             Some("riscv64-unknown-linux-gnu"),
             None,
         )
@@ -549,7 +598,7 @@ mod tests {
     // rivet: verifies REQ-PRODUCER-002
     #[test]
     fn a_multibyte_template_is_refused_not_panicked_on() {
-        let err = expand("tool-%\u{00e9}-%V.tar.gz", "v1.0.0", None, None)
+        let err = expand("tool-%\u{00e9}-%V.tar.gz", "v1.0.0", "v1.0.0", None, None)
             .expect_err("must refuse, and must not panic");
         assert!(
             matches!(err, TemplateError::UnknownPlaceholder { .. }),
@@ -561,7 +610,8 @@ mod tests {
     // rivet: verifies REQ-PRODUCER-002
     #[test]
     fn a_trailing_percent_is_refused() {
-        let err = expand("tool-%V.tar.gz%", "v1.0.0", None, None).expect_err("must refuse");
+        let err =
+            expand("tool-%V.tar.gz%", "v1.0.0", "v1.0.0", None, None).expect_err("must refuse");
         assert!(
             matches!(err, TemplateError::UnknownPlaceholder { .. }),
             "{err:?}"
@@ -573,6 +623,7 @@ mod tests {
     fn an_unknown_upstream_triple_is_refused_rather_than_guessed() {
         let err = expand(
             "t-%U.tar.gz",
+            "v1.0.0",
             "v1.0.0",
             Some("riscv64-unknown-linux-gnu"),
             None,
@@ -601,6 +652,7 @@ mod tests {
         let sel = select(
             "rivet-v0.34.0-%T.tar.gz",
             "v0.34.0",
+            "v0.34.0",
             &["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"],
             &avail(&["rivet-v0.34.0-aarch64-apple-darwin.tar.gz"]),
         )
@@ -620,6 +672,7 @@ mod tests {
         let sel = select(
             "rivet-v9.9.9-%T.tar.gz",
             "v9.9.9",
+            "v9.9.9",
             DEFAULT_PLATFORMS,
             &avail(&["rivet-v0.34.0-aarch64-apple-darwin.tar.gz"]),
         )
@@ -633,6 +686,7 @@ mod tests {
     fn a_portable_package_is_selected_once_not_once_per_platform() {
         let sel = select(
             "rivet-sdlc-%V.vsix",
+            "v0.34.0",
             "v0.34.0",
             DEFAULT_PLATFORMS,
             &avail(&["rivet-sdlc-0.34.0.vsix"]),
@@ -649,5 +703,55 @@ mod tests {
             default_tarball_template("rivet", "v0.34.0"),
             "rivet-v0.34.0-%T.tar.gz"
         );
+    }
+}
+
+#[cfg(test)]
+mod host_tag_tests {
+    use super::*;
+
+    /// There is no single "upstream convention". bytecodealliance writes
+    /// `aarch64-macos`; zephyrproject-rtos/sdk-ng writes `macos-aarch64`. A
+    /// template using the wrong one matches nothing, which is how the first
+    /// attempt to deposit a Zephyr SDK asked for
+    /// `toolchain_gnu_aarch64-macos_arm-zephyr-eabi.tar.xz` against a release
+    /// that publishes `toolchain_gnu_macos-aarch64_arm-zephyr-eabi.tar.xz`.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn the_two_upstream_host_conventions_are_both_available_and_differ() {
+        for (triple, arch_first, os_first) in [
+            ("aarch64-apple-darwin", "aarch64-macos", "macos-aarch64"),
+            ("x86_64-apple-darwin", "x86_64-macos", "macos-x86_64"),
+            (
+                "aarch64-unknown-linux-gnu",
+                "aarch64-linux",
+                "linux-aarch64",
+            ),
+            ("x86_64-unknown-linux-gnu", "x86_64-linux", "linux-x86_64"),
+        ] {
+            assert_eq!(upstream_platform_tag(triple), Some(arch_first), "{triple}");
+            assert_eq!(
+                host_platform_tag(triple).as_deref(),
+                Some(os_first),
+                "{triple}"
+            );
+            assert_ne!(arch_first, os_first, "the conventions must actually differ");
+        }
+    }
+
+    /// A template naming a MACHINE must be recognised as per-platform. A token
+    /// missing from `is_per_platform` does not fail loudly — the template is
+    /// expanded once with no platform and the payload reported absent, which
+    /// is exactly what happened when %H was added without it.
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn every_machine_naming_token_marks_a_template_per_platform() {
+        for tok in ["%T", "%U", "%H", "%P"] {
+            assert!(
+                is_per_platform(&format!("tool-{tok}.tar.gz")),
+                "{tok} does not mark a template per-platform"
+            );
+        }
+        assert!(!is_per_platform("tool-%V.tar.gz"), "%V names no machine");
     }
 }

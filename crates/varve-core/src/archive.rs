@@ -793,6 +793,7 @@ mod tests {
         // Something is attached to the archive media afterwards.
         let (sk, _pk) = generate_root_keypair();
         let status = crate::linestatus::LineStatus {
+            min_counter: None,
             line: "2026.07".into(),
             counter: 1,
             issued_at: "2026-08-07T00:00:00Z".into(),
@@ -1379,6 +1380,7 @@ mod tests {
         );
         let envelope = sign_layer_manifest(&payload, &sk, "varve-root-1").unwrap();
         let doc = LineStatus {
+            min_counter: None,
             line: "2026.07".into(),
             counter: 3,
             issued_at: "2026-08-07T00:00:00Z".into(),

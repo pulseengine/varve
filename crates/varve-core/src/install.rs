@@ -91,6 +91,23 @@ pub enum InstallError {
         presented: u64,
         high_water: u64,
     },
+    #[error(
+        "layer on line {line} presents counter {presented}, below the floor of {floor} this \
+         realm signs for the line — refusing.\n\n\
+         This machine has never installed from {line}, so it has no history to compare against. \
+         That is the one moment anti-rollback protects nobody, and the moment it is worth \
+         attacking: a fresh checkout, a new CI runner, a new laptop are all first contacts. The \
+         realm states a floor in its signed line-status so a consumer with no history still has \
+         one.\n\n\
+         Either the pin names a layer the realm has withdrawn from first-contact use, or \
+         something served an old signed layer to a new machine. Both are worth knowing before \
+         installing."
+    )]
+    BelowFloor {
+        line: String,
+        presented: u64,
+        floor: u64,
+    },
     #[error("blob {digest} fetched for tool '{tool}' does not match its signed digest — refusing")]
     BlobDigestMismatch { tool: String, digest: String },
     #[error("manifest entry {digest} is missing the eu.pulseengine.tool annotation")]
@@ -203,18 +220,57 @@ pub fn install(
         }
     }
 
-    // 4. Anti-rollback, before any blob moves.
-    if let RollbackVerdict::Rollback {
-        line,
-        presented,
-        high_water,
-    } = marks.check(&manifest)
+    // REQ-FIRSTCONTACT-001: the realm's signed floor for this line, for a
+    // consumer that has no mark of its own.
+    //
+    // Read from the line-status document, which is already DSSE-signed by the
+    // realm root and already distributed beside the layer — a floor is worth
+    // nothing if whoever serves the bytes can choose it. Verified here against
+    // the same root the index policy carries; a document that does not verify,
+    // or that covers another line, yields NO floor rather than a trusted zero.
+    //
+    // Best-effort, and the residual is worth stating plainly: a source that
+    // simply omits the line-status removes the floor, exactly as it could
+    // before this existed. That is not a regression, and it is not full
+    // protection either — closing it needs the realm to REQUIRE a status the
+    // way `signed-index` requires an index, which is a realm-policy change and
+    // not this requirement.
+    let mut first_contact_floor: Option<u64> = None;
+    if marks.mark(line).is_none()
+        && let Some(index_policy) = &policy.index
+        && let Some(bytes) = source.fetch_line_status(&layer_ref)?
+        && let Ok(doc) =
+            crate::linestatus::LineStatus::verify_and_parse(&bytes, index_policy.root_public_key)
+        && doc.line == line_str
     {
-        return Err(InstallError::Rollback {
+        first_contact_floor = doc.min_counter;
+    }
+
+    // 4. Anti-rollback, before any blob moves.
+    match marks.check_with_floor(&manifest, first_contact_floor) {
+        RollbackVerdict::Rollback {
             line,
             presented,
             high_water,
-        });
+        } => {
+            return Err(InstallError::Rollback {
+                line,
+                presented,
+                high_water,
+            });
+        }
+        RollbackVerdict::BelowFloor {
+            line,
+            presented,
+            floor,
+        } => {
+            return Err(InstallError::BelowFloor {
+                line,
+                presented,
+                floor,
+            });
+        }
+        RollbackVerdict::Accept => {}
     }
 
     // 5. Fetch blobs; each is accepted only if it matches its signed digest.
@@ -1009,6 +1065,155 @@ mod tests {
             .attestation_note
             .expect("the loss must be reported, never swallowed");
         assert!(note.contains("dropped them"), "note: {note}");
+    }
+
+    /// REQ-FIRSTCONTACT-001 end to end, through install().
+    ///
+    /// A machine with no marks file — a fresh checkout, a new CI runner — used
+    /// to accept ANY counter on a line it had never seen, because there was
+    /// nothing to compare against. That is the one moment anti-rollback
+    /// protects nobody, and it is the moment worth attacking.
+    // rivet: verifies REQ-FIRSTCONTACT-001
+    #[test]
+    fn a_new_machine_refuses_a_layer_below_the_realms_signed_floor() {
+        use crate::lineindex::{IndexPolicy, IndexedLayer, LineIndex};
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let (_tmp, store, mut marks) = setup();
+
+        let (bytes, blobs) = july(); // 2026.07.0, counter 1
+        let mut source = MemorySource::new().with_manifest(&bytes);
+        for (d, b) in &blobs {
+            source = source.with_blob(d, b);
+        }
+        let source = source
+            .with_line_index(
+                LineIndex {
+                    line: "2026.07".into(),
+                    counter: 1,
+                    issued_at: "2026-08-07T00:00:00Z".into(),
+                    layers: vec![IndexedLayer {
+                        layer: "2026.07.0".into(),
+                        digest: manifest_digest(&bytes),
+                        channel: "qualified".into(),
+                        counter: 1,
+                    }],
+                }
+                .sign(&sk, "root-1")
+                .unwrap()
+                .as_bytes(),
+            )
+            // The realm signs a floor of 5 for this line; the layer is 1.
+            .with_line_status(
+                crate::linestatus::LineStatus {
+                    line: "2026.07".into(),
+                    counter: 1,
+                    issued_at: "2026-08-07T00:00:00Z".into(),
+                    min_counter: Some(5),
+                    support_until: None,
+                    yanked: Default::default(),
+                    known_problems: Vec::new(),
+                }
+                .sign(&sk, "root-1")
+                .unwrap()
+                .as_bytes(),
+            );
+
+        let policy = InstallPolicy {
+            index: Some(IndexPolicy {
+                realm: "acme",
+                root_public_key: &pk,
+                required: true,
+            }),
+            ..policy()
+        };
+        let err = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy,
+        )
+        .expect_err("a first contact below the signed floor must be refused");
+        match &err {
+            InstallError::BelowFloor {
+                line,
+                presented,
+                floor,
+            } => {
+                assert_eq!(line, "2026.07");
+                assert_eq!(*presented, 1);
+                assert_eq!(*floor, 5);
+            }
+            other => panic!("expected BelowFloor, got {other:?}"),
+        }
+        // And the refusal explains why a NEW machine is the interesting case.
+        assert!(err.to_string().contains("never installed"), "{err}");
+    }
+
+    /// The same layer, same realm, no stated floor: unchanged behaviour, so a
+    /// realm that has not adopted this keeps installing exactly as before.
+    // rivet: verifies REQ-FIRSTCONTACT-001
+    #[test]
+    fn a_line_whose_realm_states_no_floor_installs_as_it_always_did() {
+        use crate::lineindex::{IndexPolicy, IndexedLayer, LineIndex};
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let (_tmp, store, mut marks) = setup();
+
+        let (bytes, blobs) = july();
+        let mut source = MemorySource::new().with_manifest(&bytes);
+        for (d, b) in &blobs {
+            source = source.with_blob(d, b);
+        }
+        let source = source
+            .with_line_index(
+                LineIndex {
+                    line: "2026.07".into(),
+                    counter: 1,
+                    issued_at: "2026-08-07T00:00:00Z".into(),
+                    layers: vec![IndexedLayer {
+                        layer: "2026.07.0".into(),
+                        digest: manifest_digest(&bytes),
+                        channel: "qualified".into(),
+                        counter: 1,
+                    }],
+                }
+                .sign(&sk, "root-1")
+                .unwrap()
+                .as_bytes(),
+            )
+            .with_line_status(
+                crate::linestatus::LineStatus {
+                    line: "2026.07".into(),
+                    counter: 1,
+                    issued_at: "2026-08-07T00:00:00Z".into(),
+                    min_counter: None,
+                    support_until: None,
+                    yanked: Default::default(),
+                    known_problems: Vec::new(),
+                }
+                .sign(&sk, "root-1")
+                .unwrap()
+                .as_bytes(),
+            );
+
+        let policy = InstallPolicy {
+            index: Some(IndexPolicy {
+                realm: "acme",
+                root_public_key: &pk,
+                required: true,
+            }),
+            ..policy()
+        };
+        install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy,
+        )
+        .expect("no stated floor must not change anything");
     }
 
     // rivet: verifies REQ-INDEXAUTH-001

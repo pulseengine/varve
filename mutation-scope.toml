@@ -1,0 +1,57 @@
+# Which files the trust-critical mutation gate covers — decided by a check
+# rather than by a hand-kept list (REQ-MUTATE-003).
+#
+# Every `.rs` file under `crates/*/src` is either named in the gate's shard
+# matrix in `.github/workflows/ci.yml`, or listed HERE with the reason it is
+# not. A file that is neither fails `mutation_scope_is_decided_not_drifted`.
+#
+# The point is not the current split. It is that a NEW file cannot land
+# ungated without someone writing down why — which is exactly how the list
+# drifted before: `linestatus.rs` gained the two-document preference in
+# v0.33.0 and nothing noticed it was outside the gate, so a mutant that
+# permitted yank suppression survived until someone ran the tool by hand.
+#
+# Three reasons are legitimate. Anything else is a fourth reason and should be
+# argued in review:
+#
+#   bin-target   The gate's kill criteria are `--workspace --lib`, so no lib
+#                test can kill a mutant in a binary crate's modules. Gating
+#                these would report survivors nothing could ever kill.
+#   re-export    Declarations only; no behaviour to mutate.
+#   not-yet      Trust-relevant and NOT yet gated. Honest debt, counted by the
+#                check so it cannot hide. Each carries what it would cost.
+
+[bin-target]
+"crates/varve/src/main.rs" = "the CLI itself; `--lib` tests cannot reach it"
+"crates/varve/src/docs.rs" = "docs topics + their 24 tests live in the bin crate, so `--lib` never runs them"
+"crates/varve/src/inspect.rs" = "bin crate module"
+"crates/varve/src/exit.rs" = "bin crate module"
+"crates/varve-producer/src/main.rs" = "the producer CLI; `--lib` tests cannot reach it"
+
+[re-export]
+"crates/varve-core/src/lib.rs" = "module declarations and re-exports"
+"crates/varve-producer/src/lib.rs" = "module declarations"
+
+[not-yet]
+"crates/varve-core/src/linestatus.rs" = "yank + advisory state, a stop-the-build signal. 18 survivors measured 2026-09-07, 5 of them NotFound guards. REQ-MUTATE-003 clause 3 names this file."
+"crates/varve-core/src/lineindex.rs" = "omission detection. REQ-MUTATE-003 clause 3 names this file."
+"crates/varve-core/src/registry.rs" = "what a registry is willing to serve. REQ-MUTATE-003 clause 3 names this file."
+"crates/varve-core/src/store.rs" = "digest computation and lay-down; trust-relevant"
+"crates/varve-core/src/manifest.rs" = "manifest parsing; trust-relevant"
+"crates/varve-core/src/deposit.rs" = "layer signing; trust-relevant"
+"crates/varve-core/src/keys.rs" = "key handling; trust-relevant"
+"crates/varve-core/src/attest.rs" = "attestation signing; trust-relevant"
+"crates/varve-core/src/attestcarry.rs" = "attestation carriage; trust-relevant"
+"crates/varve-core/src/referrers.rs" = "referrer attachment; trust-relevant"
+"crates/varve-core/src/update.rs" = "self-update trust path; trust-relevant"
+"crates/varve-core/src/source.rs" = "the source trait contract; trust-relevant"
+"crates/varve-core/src/ingest.rs" = "the ingest ladder; trust-relevant"
+"crates/varve-core/src/kind.rs" = "payload kinds; trust-relevant"
+"crates/varve-core/src/shadow.rs" = "PATH shadowing detection"
+"crates/varve-core/src/lockpin.rs" = "Cargo lockfile comparison"
+"crates/varve-core/src/discover.rs" = "pin discovery walk"
+"crates/varve-core/src/archive.rs" = "export adapter"
+"crates/varve-core/src/bazel.rs" = "export adapter"
+"crates/varve-core/src/crateexport.rs" = "export adapter"
+"crates/varve-core/src/sbom.rs" = "export adapter"
+"crates/varve-core/src/vsixexport.rs" = "export adapter"

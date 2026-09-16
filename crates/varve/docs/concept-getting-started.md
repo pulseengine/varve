@@ -23,8 +23,8 @@ layer   = "2026.08.2"
 
 ```toml
 [realm.pulseengine]
-registry   = "oci://ghcr.io/pulseengine/varve/layers"
-trust-root = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973"
+registry   = "oci://ghcr.io/pulseengine/layers"
+trust-root = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"
 ```
 
 The canonical file ships as a release asset:

@@ -1,4 +1,19 @@
-name: Deposit layer
+name: Deposit layer (LEGACY — old realm only)
+
+# SUPERSEDED. The pulseengine realm is now deposited by pulseengine-layers,
+# which owns its own registry package (DD-028). This workflow remains only to
+# serve the OLD realm — the one rooted at 4e771dc6..., retired in v0.32.1 —
+# whose layers live at ghcr.io/pulseengine/varve/layers and which consumers
+# who have not migrated still resolve against.
+#
+# It deliberately still points at the OLD path. Repointing it at
+# ghcr.io/pulseengine/layers would recreate, in reverse, exactly the problem
+# that move solves: a package owned by pulseengine-layers, pushed from varve,
+# needing a cross-repo grant. One repository publishes a realm.
+#
+# Do not deposit new layers here. Remove this file once pulseengine-layers has
+# published successfully at least once — deleting the only working depositor
+# before its replacement has ever run is how a realm goes dark.
 
 # The bundle assembler (REQ-DEPOSIT-001, the produce half of the #157
 # architecture): download the pinned per-tool releases, VERIFY each one
@@ -7,6 +22,16 @@ name: Deposit layer
 #
 # Rolling channel only until the root ceremony: signs with the PROVISIONAL
 # rolling root (trust-roots/rolling.pub / secret VARVE_ROLLING_KEY).
+
+# Two runs dispatched for the SAME layer id would both ask the registry, both
+# be told the id is unpublished, and both push — the immutability check is a
+# read, and `oras manifest push` has no if-not-exists. One id would end up
+# naming two digests, which is the very thing this workflow now checks for.
+# Serialising per layer closes the window; it does not need to be clever,
+# because a second deposit of the same id has nothing useful to do anyway.
+concurrency:
+  group: deposit-layer-${{ inputs.layer }}
+  cancel-in-progress: false
 
 on:
   workflow_dispatch:
@@ -32,7 +57,24 @@ env:
   # ordeal rejoined at v0.18.0 — its first cosign-signed release (ordeal#116).
   # Entry shape: repo_tool:version[:binary] — binary defaults to the tool
   # name; kiln ships its CLI as `kilnd`.
-  TARBALL_TOOLS: "rivet:v0.35.0 spar:v0.40.0 synth:v0.60.0 witness:v0.43.0 ordeal:v0.19.0 loom:v1.4.1 meld:v0.52.0 kiln:v0.4.4:kilnd"
+  # varve-producer rides in the layer like any other tool, so a layers
+  # repository gets a PINNED, signature-verified assembler instead of fetching
+  # one ad hoc. Its asset is not `<tool>-<version>-<triple>` — the repo is
+  # `varve` and the binary is `varve-producer` — so the entry spells the binary
+  # and the template out. `v%V` reconstructs the tag from the bare version
+  # rather than repeating it, so a bump is one edit and cannot drift.
+  #
+  # Bootstrapping is not circular: the deposit downloads the released archive
+  # exactly as it does for every other tool. The first assembler comes from the
+  # release; after that a layers repo can pin the one varve signed.
+  #
+  # jess is a HUB: its v0.7.1 release ships `with-device` 0.2.1, so the release
+  # tag and the payload version are different numbers. The fifth field records
+  # the payload's own version, because deriving it from the tag would put
+  # `version = "0.7.1"` in the signed manifest for a binary that answers
+  # `with-device 0.2.1` — the layer stating something untrue about its own
+  # contents, which is the one thing it exists not to do.
+  TARBALL_TOOLS: "rivet:v0.35.0 spar:v0.40.0 synth:v0.61.0 witness:v0.43.0 ordeal:v0.19.0 loom:v1.4.1 meld:v0.53.0 kiln:v0.4.4:kilnd pulseengine/varve:v0.32.0:varve-producer:varve-producer-v%V-%T.tar.gz pulseengine/jess:v0.7.1:with-device:with-device-%V-%T.tar.gz:0.2.1"
   WSC_VERSION: v0.11.0
   # VS Code extensions carried as kind="vsix" payloads (REQ-VSIX-001).
   # Entry shape: repo:version:extension-name:asset-template, where the
@@ -57,7 +99,7 @@ jobs:
       - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1 as of 2026-08-07
 
       - name: Build varve
-        run: cargo build --release -p varve
+        run: cargo build --release -p varve -p varve-producer
 
       - name: Fetch and verify the tools, build the deposit spec
         # The logic is NOT inline any more. It lives in tools/build-deposit-spec.sh
@@ -103,8 +145,16 @@ jobs:
           # counter tracks the deposit counter (advisories issued later carry
           # higher counters). Empty problems/yanked — a clean starting record.
           LINE="${LAYER%.*}"
-          printf '{"line":"%s","counter":%s,"issued-at":"%s"}\n' \
-            "$LINE" "$COUNTER" "$ISSUED_AT" > baseline-status.json
+          # REQ-SUPPORTUNTIL-001: derived from the channel's policy, never
+          # typed here. `support-until` has existed and been signed since
+          # v0.5.0 and this workflow never set it, so every layer varve has
+          # published says "no stated support window" while the docs promise
+          # one. `varve sign-status` now refuses a document without it.
+          SUPPORT_UNTIL="$(./target/release/varve support-horizon \
+            --channel rolling --issued-at "$ISSUED_AT")"
+          echo "::notice::layer $LAYER supported until $SUPPORT_UNTIL (rolling policy)"
+          printf '{"line":"%s","counter":%s,"issued-at":"%s","support-until":"%s"}\n' \
+            "$LINE" "$COUNTER" "$ISSUED_AT" "$SUPPORT_UNTIL" > baseline-status.json
           ./target/release/varve sign-status \
             --file baseline-status.json \
             --key <(printf '%s' "$VARVE_ROLLING_KEY") --key-id varve-rolling-1 \
@@ -149,18 +199,7 @@ jobs:
           ENVELOPE_FILE="../layer-layout/blobs/sha256/${ENVELOPE_DIGEST#sha256:}"
           STATUS_FILE="../layer-layout/blobs/sha256/${STATUS_DIGEST#sha256:}"
 
-          # 1. Push every blob: config, envelope, payload, tools, line-status.
-          printf '{}' > empty-config.json
-          oras blob push "$REPO" empty-config.json
-          oras blob push "$REPO" "$ENVELOPE_FILE"
-          oras blob push "$REPO" "$PAYLOAD_FILE"
-          for digest in $(jq -r '.manifests[].digest' "$PAYLOAD_FILE"); do
-            oras blob push "$REPO" "../layer-layout/blobs/sha256/${digest#sha256:}"
-          done
-          test -n "$STATUS_DIGEST" || { echo "::error::baseline line-status missing from layout"; exit 1; }
-          oras blob push "$REPO" "$STATUS_FILE"
-
-          # 2. Build the artifact manifest — envelope + payload + tools, plus
+          # 1. Build the artifact manifest — envelope + payload + tools, plus
           #    the baseline line-status as a role-annotated layer so
           #    RegistrySource.fetch_line_status finds it.
           jq -n \
@@ -206,8 +245,90 @@ jobs:
             }' > artifact-manifest.json
           head -c 1500 artifact-manifest.json; echo
 
-          # 3. Push the manifest under the layer tag.
-          oras manifest push "$REPO:$LAYER" artifact-manifest.json
+          # 2. REQ-IMMUTABLE-001 — a layer id names one set of bytes, forever.
+          #
+          # Ask the registry what it already carries under this tag before
+          # ANYTHING is written to it. This runs ahead of the blob pushes,
+          # not merely ahead of the manifest push: a refused publish should
+          # not leave blobs behind in the destination. (They are
+          # content-addressed, so they overwrite nothing — but "the check
+          # runs before we touch the registry" should be true rather than
+          # nearly true.)
+          # rolling republished 2026.08.4 overnight (varve#115) and
+          # every name-only pin on it stopped resolving: two digests under one
+          # name means the name identifies nothing, and no amount of
+          # consumer-side care repairs it afterwards.
+          #
+          # This cannot live in `varve deposit`, which contacts no network by
+          # design. varve-producer is the binary that talks to registries, so
+          # it is the one that asks.
+          #
+          # A registry that cannot ANSWER stops the push. "Unreachable" is not
+          # "empty": reading an outage as an empty registry is how you
+          # republish over a layer that exists while believing you are
+          # publishing a new one.
+          # An OCI manifest's digest IS the sha256 of its bytes — verified
+          # against the live registry before relying on it: the descriptor
+          # ghcr.io returns for 2026.09.0 equals sha256sum of the manifest it
+          # serves. (`oras manifest push` has no --dry-run to ask with.)
+          INCOMING="sha256:$(sha256sum artifact-manifest.json | cut -d' ' -f1)"
+          # NOT piped into tee. `cmd | tee` reports tee's exit status, and
+          # `set -euo pipefail` above is the only thing that would save it —
+          # a setting a hundred lines away is a thin thread to hang a refusal
+          # on. Written to a file, exit status checked on its own line.
+          # $GITHUB_WORKSPACE, not ./ — this step runs from `push/` (see the
+          # `cd push` above and the `../layer-layout` paths beside it), so a
+          # workspace-relative ./target resolved to push/target and the binary
+          # was simply not there. Cost a dispatched deposit to find.
+          PRODUCER="$GITHUB_WORKSPACE/target/release/varve-producer"
+          test -x "$PRODUCER" || {
+            echo "::error::$PRODUCER is missing or not executable — the deposit \
+          cannot check whether this layer id is already published, and \
+          publishing without that check is how one id comes to name two sets \
+          of bytes"
+            exit 1
+          }
+          set +e
+          "$PRODUCER" publish-check \
+            --repo "$REPO" --layer "$LAYER" --digest "$INCOMING" \
+            --format json > publish-check.json
+          CHECK_RC=$?
+          set -e
+          cat publish-check.json
+          # 127 is "could not run", not "said no". Both stop the push, and
+          # must: a check that did not run is not a check that passed. But
+          # reporting them identically sends an operator hunting for a
+          # republish that never happened — the same conflation this whole
+          # check exists to prevent, reproduced one level up in its own error
+          # handling.
+          if [ "$CHECK_RC" -eq 127 ]; then
+            echo "::error::publish-check could not run (exit 127) — this is not \
+          a refusal; nothing was checked and nothing was pushed"
+            exit "$CHECK_RC"
+          fi
+          if [ "$CHECK_RC" -ne 0 ]; then
+            echo "::error::publish-check REFUSED this push (exit $CHECK_RC) — \
+          see the output above for which digests disagree"
+            exit "$CHECK_RC"
+          fi
+          VERDICT="$(jq -r .verdict publish-check.json)"
+          # 3. Push every blob: config, envelope, payload, tools, line-status.
+          printf '{}' > empty-config.json
+          oras blob push "$REPO" empty-config.json
+          oras blob push "$REPO" "$ENVELOPE_FILE"
+          oras blob push "$REPO" "$PAYLOAD_FILE"
+          for digest in $(jq -r '.manifests[].digest' "$PAYLOAD_FILE"); do
+            oras blob push "$REPO" "../layer-layout/blobs/sha256/${digest#sha256:}"
+          done
+          test -n "$STATUS_DIGEST" || { echo "::error::baseline line-status missing from layout"; exit 1; }
+          oras blob push "$REPO" "$STATUS_FILE"
+
+          if [ "$VERDICT" = "already-published" ]; then
+            echo "::notice::$LAYER is already published at $INCOMING — skipping the push"
+          else
+            # 4. Push the manifest under the layer tag.
+            oras manifest push "$REPO:$LAYER" artifact-manifest.json
+          fi
 
       - name: Upload the oci-layout (artifact of record)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

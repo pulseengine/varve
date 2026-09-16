@@ -147,6 +147,21 @@ enum Cmd {
         #[arg(trailing_var_arg = true, required = true)]
         tool_and_args: Vec<std::ffi::OsString>,
     },
+    /// (CI) The support horizon for a layer issued now, derived from the
+    /// channel's stated policy (REQ-SUPPORTUNTIL-001).
+    ///
+    /// Derived, not typed: a window a human enters each release is one that
+    /// drifts, and the drift is invisible because every value looks plausible.
+    SupportHorizon {
+        /// `rolling` or `qualified`.
+        #[arg(long)]
+        channel: String,
+        /// The layer's issued-at, RFC 3339.
+        #[arg(long = "issued-at")]
+        issued_at: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Mint a signing key and its public half — the value a realm pins as
     /// `trust-root` (REQ-KEYGEN-001). Without this an organisation cannot
     /// stand up its own realm at all: nothing else in varve emits a public key.
@@ -719,6 +734,27 @@ fn run() -> anyhow::Result<Outcome> {
             &layouts,
             force,
         ),
+        Cmd::SupportHorizon {
+            channel,
+            issued_at,
+            json,
+        } => {
+            let until = varve_core::support::horizon(&issued_at, &channel)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "command": "support-horizon",
+                        "channel": channel,
+                        "issued_at": issued_at,
+                        "support_until": until,
+                    })
+                );
+            } else {
+                println!("{until}");
+            }
+            Ok(())
+        }
         Cmd::Keygen { out, public } => keygen(&out, public.as_deref()),
         Cmd::Pubkey { key } => pubkey(&key),
         Cmd::LayerSpec { manifest, json } => layer_spec(&manifest, json),
@@ -777,8 +813,8 @@ fn run() -> anyhow::Result<Outcome> {
             out,
             json,
         } => sign_sums(&sums, &key, &key_id, &out, json),
-        Cmd::SelfUpdate { check, to } => self_update(check, to.as_deref()),
-        Cmd::SelfVerify { archive, envelope } => self_verify(&archive, &envelope),
+        Cmd::SelfUpdate { check, to } => self_update(&store, check, to.as_deref()),
+        Cmd::SelfVerify { archive, envelope } => self_verify(&store, &archive, &envelope),
         Cmd::Docs {
             topic,
             list,
@@ -1074,6 +1110,10 @@ fn status(
                 "yanked": verdict.yanked_reason.is_some(),
                 "yanked_reason": verdict.yanked_reason,
                 "support_until": verdict.support_until,
+                // REQ-SUPPORTUNTIL-001 clause 3: a date alone makes the reader
+                // do the arithmetic, and a reader who has to compute whether
+                // they are still supported mostly does not.
+                "support_standing": support_standing_json(verdict.support_until.as_deref()),
                 "known_problems": verdict.problems_total,
                 "known_problems_with_workaround": verdict.problems_with_workaround,
                 "exit_code": if verdict.yanked_reason.is_some() {
@@ -1094,7 +1134,15 @@ fn status(
             None => println!("  not yanked"),
         }
         match &verdict.support_until {
-            Some(until) => println!("  supported until {until}"),
+            Some(until) => match varve_core::support::standing(until, &today_rfc3339()) {
+                Ok(st) => println!(
+                    "  {}",
+                    varve_core::support::advisory(&pin.layer.to_string(), until, st)
+                ),
+                // A window that will not parse is a defect in what was signed,
+                // and saying so beats printing it as though it meant something.
+                Err(e) => println!("  support window unusable: {e}"),
+            },
             None => println!("  no stated support window"),
         }
         println!(
@@ -1233,6 +1281,37 @@ fn sign_status(
     // to sign a malformed advisory.
     let doc: varve_core::LineStatus =
         serde_json::from_slice(&bytes).context("status document does not match the schema")?;
+    // REQ-SUPPORTUNTIL-001 clauses 1 and 5. `support-until` shipped in v0.5.0,
+    // signed, round-tripped and printed by `varve status` — and nothing ever
+    // set it, so every published layer carried None while the docs promised a
+    // stated window. A capability nobody populates is worse than a missing one:
+    // the code, the tests and the docs all imply a guarantee no artifact holds.
+    //
+    // It was never PARSED either. The field is a String, so "2028-13-45" would
+    // have signed cleanly and then been unusable by everything downstream —
+    // which is why "warn when the window has passed" was not implementable.
+    //
+    // Refused here rather than defaulted: a horizon this command invented would
+    // be a promise nobody decided to make, signed with the realm's root.
+    match doc.support_until.as_deref() {
+        None => anyhow::bail!(
+            "{} states no support window.\n\n\
+             Every published layer must say how long it is supported. A line \
+             whose window is absent reads to a consumer as \"no stated support \
+             window\" — which is what every layer varve has published so far \
+             says, because this field has never once been set.\n\n\
+             Derive it from the channel rather than typing one:\n\
+             \n    varve support-horizon --channel <rolling|qualified> --issued-at <RFC3339>\n\n\
+             then set \"support-until\" in the document.",
+            file.display()
+        ),
+        Some(raw) => {
+            // Comparing it with itself is enough to establish it parses.
+            varve_core::support::standing(raw, raw).with_context(|| {
+                format!("the support window in {} is not usable", file.display())
+            })?;
+        }
+    }
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
     // Refuse a key that cannot produce verifiable signatures BEFORE signing.
@@ -1288,7 +1367,7 @@ fn sign_status(
     Ok(())
 }
 
-fn self_update(check: bool, to: Option<&std::path::Path>) -> anyhow::Result<()> {
+fn self_update(store: &Store, check: bool, to: Option<&std::path::Path>) -> anyhow::Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     // The API endpoint decides AVAILABILITY only; acceptance is the signed
     // sums against the pinned root. Overridable for mirrors and tests.
@@ -1311,7 +1390,7 @@ fn self_update(check: bool, to: Option<&std::path::Path>) -> anyhow::Result<()> 
         println!("varve {current} is current");
         return Ok(());
     }
-    let root_pk = trust_root_bytes().context(
+    let root_pk = root_bytes_here(store).context(
         "self-update needs the trust root to confirm a verified update — set VARVE_TRUST_ROOT \
          or pin a realm",
     )?;
@@ -1501,8 +1580,12 @@ fn docs_cmd(
     Ok(Outcome::Ok)
 }
 
-fn self_verify(archive: &std::path::Path, envelope: &std::path::Path) -> anyhow::Result<()> {
-    let root_pk = trust_root_bytes()?;
+fn self_verify(
+    store: &Store,
+    archive: &std::path::Path,
+    envelope: &std::path::Path,
+) -> anyhow::Result<()> {
+    let root_pk = root_bytes_here(store)?;
     let name = archive
         .file_name()
         .context("archive path has no file name")?
@@ -2985,6 +3068,23 @@ fn ctx_root_bytes(ctx: &ProjectCtx) -> anyhow::Result<Vec<u8>> {
     }
 }
 
+/// The trust root for THIS working directory, for code that holds no
+/// `ProjectCtx`: the realm's root when a project pins one, the environment's
+/// only when it does not.
+///
+/// The fallback is deliberately narrow. A PINNED project resolves through
+/// `project_ctx` and any failure there propagates, because a realm's root is
+/// authoritative and must not quietly degrade to whatever `VARVE_TRUST_ROOT`
+/// happens to say — a malformed realms file is an error, not an invitation to
+/// trust the ambient environment. Only the absence of a pin reaches the
+/// environment at all.
+fn root_bytes_here(base: &Store) -> anyhow::Result<Vec<u8>> {
+    match load_pin() {
+        Ok(_) => ctx_root_bytes(&project_ctx(base)?),
+        Err(_) => trust_root_bytes(),
+    }
+}
+
 fn ctx_verifier(ctx: &ProjectCtx) -> anyhow::Result<varve_core::PinnedKeyVerifier> {
     varve_core::PinnedKeyVerifier::from_public_key_bytes(&ctx_root_bytes(ctx)?)
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -3034,6 +3134,28 @@ fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
 
 /// Today, day-resolution, RFC 3339 — sampled once here at the CLI boundary;
 /// everything below treats time as data.
+/// Where a layer stands against its stated window, as JSON.
+///
+/// `null` when no window is stated, so a consumer can tell "not supported any
+/// more" from "nobody said" — collapsing those is the whole reason this
+/// requirement exists.
+fn support_standing_json(support_until: Option<&str>) -> serde_json::Value {
+    let Some(until) = support_until else {
+        return serde_json::Value::Null;
+    };
+    match varve_core::support::standing(until, &today_rfc3339()) {
+        Ok(varve_core::support::Standing::Supported { days_left }) => serde_json::json!({
+            "state": "supported",
+            "days_left": days_left,
+        }),
+        Ok(varve_core::support::Standing::Expired { days_ago }) => serde_json::json!({
+            "state": "expired",
+            "days_ago": days_ago,
+        }),
+        Err(e) => serde_json::json!({ "state": "unusable", "detail": e.to_string() }),
+    }
+}
+
 fn today_rfc3339() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3108,7 +3230,32 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
         staleness_threshold_days: 90,
         platform: &platform,
     };
-    let outcome = varve_core::install(pin, source, &verifier, store, &mut marks, &policy)?;
+    let outcome = match varve_core::install(pin, source, &verifier, store, &mut marks, &policy) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // REQ-ROTATE-002 clause 3. "No valid signatures" is
+            // indistinguishable from a forgery by a stranger, and the one
+            // thing the consumer cannot deduce is which they are looking at.
+            // If the realm declares the root that DID sign these bytes as one
+            // it retired, say so. Re-fetching the manifest here is cheap
+            // because we are already failing, and it keeps the diagnostic out
+            // of the success path entirely.
+            //
+            // This does not, and must not, change the verdict: `e` is still
+            // returned. A retired root explains a rejection; it never lifts
+            // one.
+            if let Some(realm) = ctx.realm.as_ref()
+                && !realm.retired_roots.is_empty()
+                && let Ok(bytes) =
+                    source.fetch_manifest(&varve_core::source::LayerRef::Name(pin.layer.clone()))
+                && let Some(why) =
+                    realm.explain_retired_signature(&bytes, varve_core::verify::LAYER_PAYLOAD_TYPE)
+            {
+                return Err(anyhow::Error::new(e).context(why));
+            }
+            return Err(e.into());
+        }
+    };
     // Clause 4: REPORT what the realm asserts the line contains, beside what
     // this install accepted. Reported and NOT enforced, deliberately — raising
     // the anti-rollback mark to the newest counter that merely EXISTS would
@@ -4164,14 +4311,17 @@ fn held_payload(
 fn realm_name_for(fingerprint: &str) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let names = varve_core::realm::realm_names(&cwd).ok()?;
-    for name in names {
-        if let Ok(realm) = varve_core::resolve_realm(&cwd, &name)
-            && realm.fingerprint() == fingerprint
-        {
-            return Some(name);
-        }
+    // Live partitions first: a realm that currently owns the fingerprint gets
+    // the plain name, and no retired root can shadow it.
+    let realms: Vec<_> = names
+        .iter()
+        .filter_map(|name| varve_core::resolve_realm(&cwd, name).ok())
+        .collect();
+    if let Some(realm) = realms.iter().find(|r| r.fingerprint() == fingerprint) {
+        return Some(realm.name.clone());
     }
-    None
+    // Then partitions a retired root left behind (REQ-ROTATE-002 clause 5).
+    realms.iter().find_map(|r| r.partition_label(fingerprint))
 }
 
 #[cfg(test)]
@@ -4320,5 +4470,70 @@ mod dispatch_tests {
         let got = dispatch_tool_name(Some(OsStr::new("../../etc/passwd")));
         assert_eq!(got, Some("passwd".into()));
         assert!(!got.unwrap().contains('/'));
+    }
+}
+
+#[cfg(test)]
+mod trust_root_reach_tests {
+    /// Every command that needs a trust root must resolve it the SAME way:
+    /// the realm's root when one is pinned, the environment's only when no
+    /// realm is. `varve self-update` did not. It called the env-only helper
+    /// and then, when that failed, printed advice telling the user to pin a
+    /// realm — which it would never read (varve#145).
+    ///
+    /// It hid because `self-update` skips the root entirely when the binary is
+    /// already current, so the command works right up until it has something
+    /// to do.
+    ///
+    /// This is the same shape as the v0.34.1 hub defect and the two-assembler
+    /// divergence before it: two code paths for one decision, and only one of
+    /// them taught the rule. So the guard is a source-level check on the
+    /// class, not another test for this one instance. A new command that
+    /// reaches for the env-only helper fails here until it is either changed
+    /// to the realm-aware path or listed with a reason.
+    ///
+    /// `trust_root_bytes` is the env-only reader. Legitimate callers:
+    ///   - `trust_root`      — the thin verifier wrapper over it
+    ///   - `ctx_root_bytes`  — the realm-aware resolver's no-realm arm
+    ///   - `root_bytes_here` — the same, for code holding no ProjectCtx
+    // rivet: verifies REQ-REALM-001
+    #[test]
+    fn no_command_resolves_a_trust_root_without_consulting_the_realm() {
+        let src = include_str!("main.rs");
+        const ENV_ONLY: &str = "trust_root_bytes()";
+        const ALLOWED: &[&str] = &[
+            "fn trust_root(",
+            "fn ctx_root_bytes(",
+            "fn root_bytes_here(",
+            // its own definition, and this check's own source text
+            "fn trust_root_bytes(",
+            "fn no_command_resolves_a_trust_root_without_consulting_the_realm(",
+        ];
+
+        // Which function does each call site sit in? Walk forward, tracking
+        // the most recent `fn` header, so a new caller is named rather than
+        // just counted.
+        let mut current = "<top level>";
+        let mut offenders: Vec<&str> = Vec::new();
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with("fn ") || t.starts_with("pub fn ") {
+                current = t;
+            }
+            if line.contains(ENV_ONLY)
+                && !t.starts_with("//")
+                && !t.starts_with("///")
+                && !ALLOWED.iter().any(|a| current.starts_with(a))
+            {
+                offenders.push(current);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these call the env-only trust root reader directly, so a realm pin \
+             cannot reach them: {offenders:?}. Use `root_bytes_here` (realm \
+             first, environment only when no realm is pinned), or add the \
+             function to ALLOWED with a reason."
+        );
     }
 }

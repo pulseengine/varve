@@ -34,7 +34,7 @@ version = "v0.28.0"        # the varve release that builds this layer
 [realm]
 name     = "pulseengine"
 channel  = "rolling"
-registry = "oci://ghcr.io/pulseengine/varve/layers"
+registry = "oci://ghcr.io/pulseengine/layers"
 
 [[tool]]
 name    = "rivet"

@@ -1,5 +1,743 @@
 # Changelog
 
+## v0.34.3 — 2026-09-10
+
+*Two releases never reached crates.io, and the gate that knew ran too late.*
+
+`varve` depends on `varve-core` by path **and** by version:
+
+```toml
+varve-core = { path = "crates/varve-core", version = "0.34.3" }
+```
+
+`cargo package` embeds that requirement, so a stale pin means the published
+crate asks for a `varve-core` it was never built against. `cargo publish`
+refuses — correctly.
+
+A release bumps the workspace `version`, and the pin is easy to leave behind:
+`cargo update -w` does not touch it, because it is a requirement, not a lock
+entry. **v0.34.1 and v0.34.2 both shipped GitHub releases and both failed to
+publish**, leaving crates.io stranded at `0.34.0` while two tags said otherwise.
+The binaries, the signed sums and the layer were all fine; only the registry
+was behind.
+
+The invariant was already checked — in `publish-crates.yml`, which runs **only
+on a tag**. A tag is the point of no return: by the time that gate spoke, the
+version was cut and the binaries were published, and the only remedy was
+another release. The check was right. Where it ran was wrong.
+
+`manifestversions.rs` asserts it with `cargo test`, on every pull request and
+every local run, before a version can be tagged rather than after. The workflow
+keeps its own copy of the tag-vs-workspace half, which no unit test can see.
+
+Note the shape, because it is the fourth time this week: an invariant that was
+real, correct, and enforced somewhere that could not act on it in time.
+
+### Falsification
+
+```sh
+# bump the workspace version without the pin, then:
+cargo test -p varve-core --lib the_workspace_version_and_the_internal_dependency_pin_agree
+```
+
+## v0.34.2 — 2026-09-10
+
+*Two commands could not reach the realm at all.*
+
+Reported by a user with a correct pin and a correct `varve-realms.toml`:
+
+```
+$ varve self-update
+error: self-update needs the trust root … set VARVE_TRUST_ROOT or pin a realm:
+no trust root configured.
+
+The zero-config path is a realm: add `realm = "pulseengine"` to your varve.toml …
+```
+
+They had. The command advised the fix it does not implement.
+
+`self-update` and `self-verify` resolved the root through `trust_root_bytes()`,
+which reads **only** `VARVE_TRUST_ROOT`. The word "realm" occurs five times in
+that function — every one inside the error string, none in the resolution.
+`install`, `which` and `inspect` were always fine: they go through
+`ctx_root_bytes`, which takes the realm's root when a project pins one. Two code
+paths for one decision, and only one taught the rule — the same shape as the
+two-assembler divergence and the hub staging path in v0.34.1.
+
+`self-update` hid it further by skipping the root entirely when the binary is
+already current, so **the command works right up until it has something to do.**
+It was reported against a stale binary, but the defect is version-independent:
+any realm-only project hits it the moment an update exists.
+
+`root_bytes_here(store)` now serves code that holds no `ProjectCtx`. The
+fallback is deliberately narrow: a **pinned** project resolves through
+`project_ctx` and any failure propagates, because a realm's root is
+authoritative and must not quietly degrade to whatever the ambient environment
+says. A malformed realms file is an error, not an invitation to trust
+`VARVE_TRUST_ROOT`. Only the absence of a pin reaches the environment at all.
+
+### The guard is the class, not the instance
+
+`no_command_resolves_a_trust_root_without_consulting_the_realm` walks `main.rs`,
+attributes every call of the env-only reader to its enclosing function, and
+fails naming any that is not an allowed resolver. **It found `self-verify`,
+which nobody had reported.** A future command that reaches for the env-only
+helper fails the build until it is changed or listed with a reason.
+
+### Falsification
+
+```sh
+# in a project pinning a realm, with VARVE_TRUST_ROOT unset:
+varve self-verify --archive varve-vX.Y.Z-<triple>.tar.gz --envelope SHA256SUMS.txt.dsse.json
+#   before: error: no trust root configured
+#   after:  … verified against the signed release sums
+
+cargo test -p varve --bin varve no_command_resolves_a_trust_root_without_consulting_the_realm
+```
+
+## v0.34.1 — 2026-09-10
+
+*The hub fix wrote to one directory and read from another.*
+
+v0.34.0 taught `varve-producer` that a hub's release tag and payload version are
+different strings. It taught the fetch, the `%R` expansion, the per-release
+verification grouping and the recorded provenance — and missed the staging path.
+The bytes were downloaded into a directory named after the release and looked
+for in one named after the version:
+
+```
+Error: unpacking with-device-0.2.2-aarch64-apple-darwin.tar.gz with tar:
+  …/downloads/pulseengine__jess/0.2.2/with-device-0.2.2-aarch64-apple-darwin.tar.gz:
+  Cannot open: No such file or directory
+```
+
+`release_dir`'s own doc comment predicts this failure — "the symptom would be a
+missing file rather than anything naming the real cause" — and the call site
+carried the comment *"the same function the downloader used, not a second copy
+of the convention."* It was the same function. It was passed a different field.
+
+Sharing a convention is not the same as sharing a value, so the fix removes the
+choice rather than correcting it. `source::plan_download_dir(root, plan)` takes
+the **plan** instead of loose strings and decides the field once; `release_dir`
+is now crate-private, so the binary cannot reach the version-keyed form at all.
+Reintroducing the old line fails to compile with `E0603` — verified, not assumed.
+
+Every payload except a hub has `release == version`, which is why this agreed by
+accident everywhere else and no unit test noticed the two were computed from
+different fields. The regression test ties them together explicitly: it asks
+`by_release` what the downloader was given and asserts staging reads that same
+directory.
+
+### Falsification
+
+```sh
+cargo test -p varve-producer --lib a_hub_is_staged_from_the_directory_its_bytes_were_downloaded_into
+```
+
+## v0.34.0 — 2026-09-10
+
+*The release that fixes the gates.*
+
+v0.33.0 shipped four capabilities that were complete, tested and carried by no
+artifact — a fifth found inside the fix for the fourth, and a **sixth found by
+running the fixed producer against a real realm.** Behind them was one pattern:
+**each gate was real, worked, and had a boundary nothing checked.** This release
+checks the boundaries.
+
+| | before | now |
+|---|---|---|
+| a manifest field | implemented in one assembler of two | both must resolve it the same way |
+| an ingestion mechanism the encoding can't carry | silently dropped | refused at the boundary |
+| the mutation gate's scope | a hand-kept list | every file gated or declared, with a reason |
+| the docs gate's reach | 1 of 2 shipped binaries | every binary, enumerated |
+| `verified` in rivet | a hand-typed field, warned about | an error if nothing backs it |
+| what moved upstream | a dead daily script in the wrong repo | `varve-producer scan`, tested |
+
+### The mutation gate covers what it says
+
+The file list lived in `ci.yml` and nothing checked it for completeness, so
+coverage drifted as files gained trust decisions. `linestatus.rs` gained the
+two-document preference in v0.33.0, nobody noticed it was outside the gate, and
+a mutant permitting **yank suppression** survived until someone chose to run the
+tool by hand. Choosing to look is not a control.
+
+Measured properly: **63 source files, 34 gated, 29 not** — the requirement had
+said "16 of 39", having counted one crate. Every file is now gated or declared
+in `mutation-scope.toml` with one of three reasons, and a file that is neither
+**fails**. `not-yet` is deliberately legitimate: honest debt, counted every run
+so it cannot go quiet, capped with a cap that only ratchets down.
+
+### The producer documents itself
+
+`varve-producer` had nine subcommands and zero topics while being the program
+other repositories' CI actually runs. It now carries its own embedded docs and
+its own coverage gate — and the check **enumerates shipped binaries** rather
+than naming the second one, so a third fails the build until it has one.
+
+### `verified` means connected to evidence
+
+`rivet validate` reported a disconnected artifact as a warning among 212, so the
+one that mattered was invisible. An unsupported status now fails. Evidence is a
+source marker **or** an incoming `verifies` edge — a marker discharges a property
+of the code, an edge discharges a property of the pipeline that no unit test can
+assert. Demanding a marker for those would push someone to write a fake test.
+
+### A field the manifest accepted and the planner ignored
+
+v0.33.0 gave `[[tool]]` a `release` key so a **hub** — a repository that tags
+`v0.7.2` and ships `with-device` at `0.2.2` — could state the tag to fetch
+separately from the version the payload answers to. The field parsed, was
+documented with the exact failure it prevents, and `REQ-PAYLOADID-001` was
+marked `verified`.
+
+**varve has two assemblers, and the field was taught to one of them.**
+`varve layer-spec` — which encodes a manifest into the environment the older
+shell assembler reads — implemented `release` completely, fetch tag and the
+fifth positional field both. `varve-producer`, the assembler realms actually
+run, never read it: `plan_tool` took the fetch tag, the `%R` expansion, the
+per-release verification grouping and the recorded `source.release` all from
+`version`.
+
+So the realm was edited to carry `with-device` again, using the field added for
+exactly that, and the deposit asked `pulseengine/jess` for a release tagged
+`0.2.2`, which does not exist. The payload stayed missing — the outcome the
+requirement exists to prevent, reached through the field added to prevent it.
+
+The evidence behind `verified` was real and proved the wrong thing: markers on
+tests that exercised the encoder and the **parser**, never the planner. A
+capability is not shipped when one path implements it; it is shipped when the
+path in production carries it.
+
+`PayloadPlan` now carries `release` beside `version`, `%R` and `%V` read
+different strings, `varve-producer plan` prints the tag whenever it differs from
+the version, and `assets` takes `--release`. The guard is general rather than
+specific to this field: **`no_optional_manifest_field_is_inert`** sets every
+optional `ManifestTool` field to a distinctive value and asserts each is
+observable in the plan, so a field added without being consumed fails the build.
+And **`both_assemblers_resolve_the_same_fetch_tag`** holds the two assemblers to
+the same answer, because the divergence — not the missing field — is what let a
+correct manifest fail a deposit.
+
+Asking that question of the other fields found a second divergence, and a worse
+one. `layer-spec` correctly **refuses** an `sdk` payload, whose layout the
+encoding cannot express — but it silently **dropped** `upstream-sums`, emitting
+an entry byte-identical to one that never declared it. That field is not a name,
+it is the mechanism that vouches for the release: the shell assembler would look
+for a cosign bundle and an attestation, find neither, and ingest the payload with
+no proof at all, while every other field survived the trip and the entry looked
+ordinary. It now refuses, the way the `sdk` case already did. Nothing in CI runs
+`layer-spec` and no realm manifest declares `upstream-sums` today, so this closed
+a live hazard rather than an outage.
+
+### Knowing what moved
+
+`varve-producer scan` and `next-layer` are the Rust replacement for a daily
+shell script that lives in the wrong repository, reads pins from a legacy
+workflow's env encoding, and had been failing for three days where nobody looks.
+An upstream that cannot be **asked** is an error, never "nothing moved": a realm
+that stops receiving releases while every check stays green is the failure nobody
+notices.
+
+**The replacement is not yet the incumbent.** `tools/scan-upstream.sh` and
+`.github/workflows/scan-upstream.yml` still exist here and still run on cron,
+still scanning the upstreams named by varve's own legacy `deposit-layer.yml`
+rather than the realm's `layer.toml` — and still failing on a four-field
+`TARBALL_TOOLS` entry they cannot parse. They cannot be deleted yet: the realm
+repository has to take the job over first, or there would be no scanner at all.
+Retiring them belongs to the release that lands the realm-side scanner (varve#142).
+
+### What mutation testing found, in this release's own new code
+
+- **The docs gate could not fail.** `coverage_gaps` was replaceable by `vec![]` —
+  the only test asserted the real CLI has no gaps, which an empty list satisfies
+  for everything.
+- **A calendar was smoke-tested.** Hand-rolled date arithmetic covered by a test
+  asserting only the *shape* of the output; twenty-four mutations passed it.
+  Expectations are now known instants cross-checked against `date -u -r`.
+- **The scanner asked github.com whatever the forge said**, and later compared a
+  payload version against a release tag, and walked `tools` but not `vsix` —
+  each found by pointing it at a real manifest rather than a fixture.
+
+### Falsification
+
+```sh
+# a file that is neither gated nor declared fails
+touch crates/varve-core/src/probe.rs && cargo test -p varve-core mutation_scope
+
+# a `verified` requirement with nothing behind it fails
+python3 tools/trace-gate.py
+
+# every shipped binary has a docs gate
+varve-producer docs check --coverage --strict
+
+# a hub is fetched by its tag, not its version — and no field is inert
+cargo test -p varve-producer --lib a_hub_payload_is_fetched_by_its_release_tag
+cargo test -p varve-producer --lib no_optional_manifest_field_is_inert
+
+# the two assemblers agree on which tag gets fetched
+cargo test -p varve-producer --lib both_assemblers_resolve_the_same_fetch_tag
+
+# a verification mechanism the encoding cannot carry stops, rather than vanishing
+varve layer-spec --manifest a-manifest-declaring-upstream-sums.toml
+```
+
+## v0.33.0 — 2026-09-09
+
+*SDKs, payload identity, corrections after publication, and a rotation that
+explains itself.*
+
+| | before | now |
+|---|---|---|
+| an `sdk` payload | a tree varve could not carry | deposited whole, exported relocated |
+| a payload's identity | its repository's name | its own name and version |
+| `.tar.xz` / `.tar.bz2` | opened by neither half | opened by both |
+| upstream sums nobody signed | `unverified`, or nothing | `upstream-sums`, a named rung |
+| a published layer | could not be spoken about | corrected under the line's own tag |
+| a rotated root | `No valid signatures` | says which root, when, and what to do |
+| asking varve from Rust | absence and failure looked alike | seven distinct types |
+| carry-forward | decided, then inert | fetched from the destination registry |
+
+### Saying something about a layer after it is published
+
+A yank, an advisory and a support-window correction are one act, and varve
+could perform none of them. The baseline lives as a blob inside a **layer's**
+manifest, so correcting it means re-pushing that manifest with a different blob
+— the republish `deposit` refuses. **Yanking a layer must not require mutating
+it.**
+
+Corrections now go under `line-status-<line>`, mirroring `line-index-<line>`.
+The load-bearing rule is **verify first, rank second**: ranking two documents by
+counter before checking signatures would let whoever serves the tag pick the
+winner by writing a large number. A stale tag document cannot walk a consumer
+backwards, an unverifiable one is discarded rather than fatal, and an
+**equal-counter** document cannot displace the baseline — that last one is a
+yank-suppression vector, found by mutation testing.
+
+Clause 5 — publishing the line index — is deliberately not done. Deriving its
+layer list from the registry's own tag listing would be *vacuous*: a hiding
+registry omits the layer from both, they agree, and nothing is reported. It
+lands where deposits now live (DD-027).
+
+### A retired root explains itself
+
+Measured the day after the v0.32.1 rotation. A consumer who took the new realms
+file without moving their pin got `No valid signatures` — indistinguishable
+from a forgery — while their installed layers lost their realm name in `varve
+list`. Two symptoms, neither naming the cause.
+
+A realm may now declare `retired-roots`, and **varve's own realms file declares
+the root it just retired**. It changes the message, never the verdict: a
+stranger's signature still gets the plain error, and listing the live root as
+retired is refused at parse.
+
+**This is not key rotation.** Nothing signs "this new root replaces the old
+one", and `docs threat-model` still says so. Signed succession was rejected on
+evidence: it requires still holding the old key, and the whole reason v0.32.1
+happened is that ours was unreadable. The lesson, now in `docs root-ceremony`:
+**rotate while you still hold the key** — a root you cannot use is one you have
+already partly lost.
+
+### Asking varve a question from Rust
+
+`varve_core::consumer::payload_status` returns `Verified`, `AbsentFromLayer`,
+`NoEntryForPlatform`, `MissingFromStore`, `DigestMismatch`, `LayerNotAuthentic`
+or `Unreadable`. The trust root is a **parameter**, not a second call — "call
+verify first" is the shell contract wearing types, and forgetting it fails
+open. See `varve docs consumer-api`.
+
+This exists because a consumer reported four failures of the CLI contract in one
+day, every one a *consumption* failure where absence and failure arrived looking
+alike — an `objcopy` that wrote nothing, `[ "" -gt N ]` erroring *and*
+evaluating false, and a script printing `ok` on a file it never parsed.
+
+### The realm moved to its own namespace
+
+`oci://ghcr.io/pulseengine/layers`. The old path was a package owned by the
+**varve** repository while the layers are produced by another, so publishing
+needed a cross-repo grant — and the first deposit failed on exactly that.
+Moving it removes the permission as a concept. Free now and a second migration
+later, because the rotation already requires a new realms file and there are
+zero layers published under the new root. The old realm keeps its old root
+*and* old registry, fully disjoint.
+
+### What the clean-room review found
+
+A cold verifier was asked to refute eleven claims. It confirmed ten and
+**refuted the eleventh: the carry-forward shipped in this release was inert.**
+
+varve's digests are bare hex; an OCI reference needs the algorithm. The bare
+form died at *reference parsing*, before any network call, and every carried
+payload silently became a full upstream download while the operator was told
+"registry blob could not be reused" — blaming the registry for a bug in the
+caller.
+
+213 green tests and zero mutation survivors missed it, because `registry.rs`
+had no test for those functions and every carry-forward test used a fake keyed
+on bare hex: the fakes agreed with the caller and neither agreed with oras. The
+file **was already in the mutation gate.** A mutant can only be killed by a
+test, so *presence in a gate is not coverage by it.*
+
+Fixed, with the tests whose absence let it through. Three further findings from
+the same review — a self-contradictory version error, a test claiming more than
+it proved, and a stale comment — are fixed too.
+
+### Falsification
+
+```sh
+# corrections cannot rewrite a layer
+varve docs attach-status | grep -A2 "on a registry"
+
+# a retired root explains but never accepts
+varve install --from <layer signed by a retired root>   # exit 1, and says why
+
+# the consumer API cannot report tampering as absence
+cargo test -p varve-core a_tampered_payload_is_a_digest_mismatch_and_never_an_absence
+```
+
+## v0.32.1 — 2026-09-07
+
+*The provisional rolling root is rotated. Every layer published before this
+release stops verifying against it, on purpose.*
+
+**Read this before upgrading `varve-realms.toml`.** The code in this release is
+unchanged from v0.32.0 — no behaviour, no CLI, no format. What changed is the
+key the `pulseengine` realm names, and that is a bigger event than the version
+number suggests. The patch number describes the tool; this section describes
+the break.
+
+| | before | now |
+|---|---|---|
+| rolling trust root | `4e771dc6…` | `7d3b892e…` |
+| store namespace | `realms/…` under the old root | `realms/a8ca9eb8fec663e6` |
+| layers 2026.08.0 – 2026.09.1 | verify | **do not verify against the new root** |
+| the two committed copies of the root | never compared | compared, in a test that fails the build |
+
+### Why the root was rotated rather than recovered
+
+It existed only as a write-only GitHub Actions secret in this repository,
+created 2026-08-07, never copied anywhere. GitHub secrets cannot be read back
+by anyone, including the org owner — so nobody held it and nobody could move
+it. That is [#110](https://github.com/pulseengine/varve/issues/110), filed
+three weeks earlier as a risk, and collected here as a fact: it blocked
+`pulseengine-layers`, which needs the same key to deposit, and there was no way
+to give it one.
+
+`varve-realms.toml` has always said this root is **provisional until the v1.0
+ceremony**, so this is the planned event happening sooner, not a promise
+broken. The alternative — a workflow that decrypts the secret out to its owner
+— would have manufactured a durable copy and a reusable exfiltration path in
+order to postpone a rotation that was already scheduled.
+
+The new key was generated by the maintainer, offline. Only its public half is
+published.
+
+### What you have to do
+
+Nothing, if you keep the realms file you already have. An old pin against an
+old realm keeps working; nothing you have installed is corrupted, and because
+the store partitions by root the new realm lands in its own namespace and
+cannot collide with it.
+
+If you take the new `varve-realms.toml`, you must **also move your pin to a
+layer signed by the new root, in the same change**. Taking the new file alone
+leaves you pinned to a layer your realm can no longer verify, and you will get:
+
+```
+error: manifest signature verification failed: … No valid signatures
+```
+
+The first layer signed by the new root is `2026.09.2`. Until it is published,
+the correct action for a consumer is to do nothing.
+
+### The gap the rotation exposed — REQ-ROTATE-001
+
+varve commits the rolling root **twice**: as key material in
+`trust-roots/rolling.pub`, shipped as a release asset and used by
+`deposit-layer.yml` as `VARVE_TRUST_ROOT`, and as a fingerprint in
+`varve-realms.toml`, which consumers download and which outranks the
+environment. **Nothing compared them.**
+
+A half-finished rotation fails in the worst available way: CI signs a deposit
+against the key *file* and verifies it against that same file, so the deposit
+passes green — while every consumer resolving the *realm* rejects the identical
+layer as unsigned. The failure surfaces downstream, in someone else's
+repository, after the release has shipped.
+
+This release adds the missing oracle. It runs the real realm parser over the
+real committed file, so it checks what a consumer would load rather than what a
+string search suggests is present. It was confirmed red against a realms file
+rotated on its own, and green only when both halves agree.
+
+A third copy — the key quoted in the documentation — has been pinned since
+REQ-DOCS-002, which exists because that copy drifted once: a review found a
+docs topic teaching a fabricated 64-hex value under a heading promising every
+file was literal. The realm copy had drifted zero times and had zero tests.
+Those are not the same thing, and this release stops treating them as if they
+were.
+
+### The lesson
+
+Not "rotate keys". It is that **a root which cannot be backed up or moved is a
+root you will eventually lose** — and that the issue predicting exactly this
+sat open while the thing it predicted happened.
+
+## v0.32.0 — 2026-09-05
+
+*A layer id means one thing, from more than one place, for a stated time.*
+
+Three of these came from real incidents rather than a wish list, and two of
+them close gaps where a capability already existed and quietly promised
+something no artifact carried.
+
+| | before | now |
+|---|---|---|
+| a layer id | could be published twice, under different bytes | one set of bytes, enforced before the push |
+| a realm | exactly one registry; an outage meant nobody could install | an ordered list of sources |
+| a support window | signed, printed, and **never once set** | derived from the channel, refused if absent |
+| a fresh machine | accepted any counter on a line it had never seen | refuses below the realm's signed floor |
+| the assembler | shipped, but obtainable only by improvising | documented, verified-before-extract, with its own SBOM |
+
+### The layer id that named two things
+
+`rolling` republished `2026.08.4` overnight and every name-only pin on it
+stopped resolving — gale's shimmed tools failed with *"installed more than once
+under different digests"*. varve's **consumer** side behaved correctly and is
+why it was caught; once two digests exist under one name, no consumer-side care
+repairs it.
+
+Measured before writing anything: the same deposit spec, deposited twice with
+`issued-at` one second apart, yields two different manifest digests; with the
+same `issued-at` it reproduces exactly. The deposit was already deterministic
+*given its inputs* — nothing stopped an id being **published** twice. So
+`varve-producer publish-check` asks the registry before any write, and refuses.
+
+The check lives in the producer, not in `varve deposit`, because deposit
+contacts no network by design and buying a publisher-side fix with that
+property would be a bad trade. A test asserts the deposit path gained no HTTP
+client.
+
+### A support window that was signed and never populated
+
+`support-until` shipped **verified** in v0.5.0 — DSSE-signed, round-tripped,
+printed by `varve status`. Nothing ever set it, so every layer varve published
+said *"no stated support window"* while the docs promised one. It was never
+parsed either, so `"2028-13-45"` would have signed cleanly — which is why
+"warn when the window has passed" was not implementable.
+
+A capability nobody populates is worse than a missing one: the code, the tests
+and the documentation all imply a guarantee no artifact carries.
+
+Now derived from the channel (`rolling` 6 months, `qualified` 24) rather than
+typed per release, `sign-status` refuses a document without one, and `varve
+status` reports where the layer **stands**. Past the window varve **warns and
+does not refuse** — the bytes verify exactly as before; what changed is that
+nobody has undertaken to publish advisories. A tool that bricks a working build
+over a date gets removed from the build, and then it protects nobody.
+
+### First contact
+
+A machine with no high-water mark accepted any counter on a line it had never
+seen. That is the one moment anti-rollback protects nobody, and the moment
+worth attacking — a fresh checkout, a new CI runner and a new laptop are each a
+first contact, so "first contact is rare" is false in exactly the environments
+varve is built for. The realm now signs a per-line floor.
+
+### Added
+
+- **`varve-producer publish-check`** (`REQ-IMMUTABLE-001`) — refuses to
+  republish a layer id under different bytes; an idempotent no-op when the
+  digest matches, so a re-run is safe rather than lucky.
+- **`mirrors` in `varve-realms.toml`** (`REQ-MIRROR-001`) — ordered sources per
+  realm. Safe by construction, and that is the point: a layer is accepted
+  because its manifest verifies against the realm root, so a registry is
+  transport, not authority. A tampered mirror fails the signature check; a
+  truncated one fails the digest check. Availability widens, the trust surface
+  does not.
+- **`varve support-horizon`** (`REQ-SUPPORTUNTIL-001`) and a signed
+  `min-counter` floor (`REQ-FIRSTCONTACT-001`).
+- **A documented, verifying install path for the assembler**
+  (`REQ-PRODUCERGET-001`), its own CycloneDX SBOM, and `build-env.txt` finally
+  covered by `SHA256SUMS.txt`.
+
+### Fixed — found by clean-room review of v0.31.0
+
+- **The release gate's zero-producer diagnostic was dead code.** Under `set
+  -euo pipefail`, `ls <glob> | wc -l` aborts the step when the glob matches
+  nothing, so a release shipping no assembler failed with **no explanation at
+  all**. My own check had run in zsh without `set -e`.
+- **`build-env.txt` was covered by nothing** — written after the checksums, so
+  the one asset describing how everything else was built had no integrity
+  binding. Its `cosign:` line also recorded a row of ASCII-art underscores
+  instead of a version.
+- **One SBOM covered only `varve`** — 172 components, none of them the
+  assembler.
+- **The README told users `cargo install varve` was unavailable**, which it has
+  not been since v0.26.0.
+
+### Fixed — found by clean-room review of this release
+
+- **`publish-check` reported "publish" for registries that never answered.**
+  Absence was inferred from oras's error *text*, and oras echoes the reference
+  and URL it was given — so a port (`:4040`), a repository path (`org/b-404`)
+  or a layer id (`2026.09.404`) containing `404` turned an unreachable registry
+  into "nothing is published here". A Go TCP error quotes the local ephemeral
+  port, so roughly one connection reset in two hundred would have hit it.
+  Absence is now **established** by an authoritative tag listing, never
+  inferred; no error text is parsed anywhere.
+- The `denied` veto was GHCR-specific: Harbor and Artifactory answer a bare
+  `NAME_UNKNOWN` for repositories a token cannot see.
+- `--digest ""` reached `verdict: publish` (an unset shell variable arrives as
+  an empty string); `--format YAML` silently produced human output; blobs were
+  pushed **before** the check, so a refused publish still left bytes behind;
+  and two dispatches of one layer id would both push.
+
+### Changed
+
+- The mutation gate is **sharded by crate**. 705 mutants in one serial job had
+  been silently hitting the 60-minute cap — which reports *nothing* rather than
+  reporting a survivor, so zero-survivor went unverified while the check looked
+  like it had gone red for a reason. The name the branch ruleset requires now
+  sits on an aggregator, so resharding cannot orphan the required check.
+
+### Verification
+
+- 4 new modules at zero mutation survivors; the required gate covers **34**
+  files across two shards.
+- `publish-check` exercised live against `ghcr.io/pulseengine/varve/layers` —
+  identical digest, different digest, absent id, unresolvable host, unreadable
+  repository — not fixtures.
+- The README's verification command is negative-controlled: appending a byte
+  makes it exit 1.
+
+### Deferred, deliberately
+
+`REQ-REUSEBLOB-001` moves to v0.33.0. Scoping it surfaced a conflict rather than
+an implementation detail: `REQ-CARRYFORWARD-001` clause 6 promises that
+re-depositing an unchanged `layer.toml` fetches **no payload bytes**, but the
+deposit layout contains every payload blob and is uploaded as the artifact of
+record. No download means no bytes means an incomplete layout. That wants
+deciding together with `REQ-ARCHIVE-002`, not settled quietly by whichever was
+implemented first.
+
+## v0.31.0 — 2026-09-02
+
+The release that makes `varve-producer` an assembler rather than an inspector,
+and then actually ships it. v0.30.0 ported the pipeline out of bash into ten
+Rust modules — but every subcommand was inspection-only, the crate was
+`publish = false`, and `release.yml` built `-p varve` alone. So a layers
+repository had a well-tested library it could not obtain and could not run.
+
+That, not a signing key, is what blocked REQ-LAYERREPO-001. A key matters for
+signing; it is not what stops a repository running a program it does not have.
+This session mis-stated that blocker twice before writing the requirement down
+forced the correction.
+
+| | before | now |
+|---|---|---|
+| `varve-producer` | four inspection-only subcommands | `deposit` walks a manifest end to end |
+| the release | `-p varve` only | a signed, attested `varve-producer-<version>-<target>.tar.gz` per platform |
+| a release with no assembler | shipped quietly | refused by a gate, per platform |
+| the proof over a sums file | verified, then a digest computed from the download | the two are compared, and the proof's digest is what gets recorded |
+| an asset absent from a signed list | recorded as proven | refused as outside the proof |
+| an unsigned published asset | skipped with the same notice as an unbuilt one | refused |
+
+### Added
+
+- **`varve-producer deposit`** — plan, verify each release once, fetch what
+  changed, unpack, arch-check, stage, and write the deposit spec `varve
+  deposit` consumes. It still does not deposit, sign or publish: those need the
+  signing key, and keeping them separate means anyone can run this and see what
+  a layer would contain without holding anything secret.
+- **The assembler ships through the signed release track** (`REQ-PRODUCERSHIP-001`)
+  — its digests enter `SHA256SUMS.txt` before cosign signs it, and SLSA build
+  provenance covers its archives. In its **own** archive: `install.sh` installs
+  varve's tarball, and putting a binary that fetches over the network inside
+  the archive of the tool whose "contacts no network" claim is load-bearing
+  would hand every user an assembler they never asked for.
+
+### Fixed — defects found by building it
+
+- **A verified sums file was never compared to the bytes.** The ingest ladder
+  has always printed, into every spec it accepts, *"this payload's recorded
+  asset digest is transcribed from it"*. A signature over a sums file proves
+  that file came from an identity; it proves nothing about the bytes in the
+  staging directory until someone compares them. Every field of the resulting
+  spec was individually true while the sentence they formed was false.
+- **An asset absent from a signed list was treated as covered by it.** The
+  proof is a signature over a *list*; being absent from that list is being
+  outside the proof, however valid the signature over the list is.
+- **"No build for this platform" and "nobody signed it" were the same
+  notice.** The shell asked only the sums file, so an asset a release published
+  but did not sign was skipped exactly like one that was never built. loom
+  genuinely ships no `aarch64-apple-darwin`; an artifact built, uploaded and
+  left unvouched-for is the case the whole ladder exists to catch.
+- **Carry-forward could answer a darwin question with a linux record.** One
+  layer carries the same tool for four platforms, and previous entries were
+  keyed by payload name alone.
+- **`gh attestation verify` was not bound to a repository.** Without `--repo`
+  it accepts an attestation issued by *any* repository for those bytes — the
+  entire binding between a payload and who built it. Found by mutation testing;
+  nothing had asserted the flag was present.
+- **The previous-spec reader could not read the specs this program writes.**
+  It deserialised a `tools` key while `SpecOut` serialises `tool`, and serde
+  ignores unknown fields — so every real spec parsed to an *empty history*,
+  indistinguishable from a first run, and every payload was silently
+  re-fetched. The unit test passed because its fixture was hand-written with
+  the wrong key: it tested the fixture, not the program. Found by running a
+  live deposit. The test now round-trips through the real writer, and the
+  reader denies unknown fields so a misnamed section is an error rather than
+  an empty history.
+- **Rung 2 was probed even when rung 1 had settled the release.** Probing an
+  attestation means downloading an asset, and every repo in the pulseengine
+  realm publishes cosign sums — so this would have fetched one asset per repo
+  on every run and quietly broken the promise that re-depositing an unchanged
+  `layer.toml` fetches nothing.
+
+### Changed
+
+- `AttestationProbe` gains a fourth state, `NotProbed`, and rung 2 **fails** on
+  it rather than reading it as absence. Skipping a probe is not a finding about
+  a release, and an ordering error that silently continues to a weaker
+  mechanism is worse than one that stops.
+- `ReleaseProbe` now carries the release's published asset names alongside the
+  digests a proof covers — deliberately two fields, because collapsing them is
+  the bug above.
+- Staging never follows symlinks out of an extraction, and refuses to guess an
+  unpacker from an unknown extension.
+- `varve-producer` no longer compiles for non-unix targets. The only available
+  fallback was to report every file as executable, which does not weaken the
+  binary-selection check so much as make it vacuous — answering "is this the
+  binary?" with yes for the README.
+
+### Known gap
+
+- **`REQ-CARRYFORWARD-001` clause 6 is not met** ([#124](https://github.com/pulseengine/varve/issues/124)).
+  The producer resolves an unchanged payload to *reuse* and skips the upstream
+  download correctly — but `varve`'s deposit spec requires a `path` for every
+  tool, with no way to say *"these bytes are already the registry's blob at
+  this digest"*, even though clause 4 already presupposes it. So the producer
+  fetches everything and says so. Reporting a saving that did not happen, or
+  failing on a payload it chose to reuse, would both be worse than doing the
+  work. The reuse logic stays tested and in place, unused, so closing #124 is
+  a wiring change rather than a rewrite.
+
+### Verification
+
+- 177 unit tests plus 5 release-track tests; the mutation gate covers **15**
+  producer modules at zero survivors.
+- Exercised live against `pulseengine/rivet` v0.34.0, not only fixtures:
+  cosign verified, the recorded digest equals both the upstream signed sums and
+  the bytes held, and the staged payload is a real Mach-O arm64. Substituting
+  the archive is refused with both digests named and exit 1. Both defects above
+  were found this way and by no test.
+- The release-track tests are negative-controlled: deleting the gate, bundling
+  the producer into varve's archive, or weakening the leg-drop check each fail
+  a named test.
+
+`REQ-PRODUCERSHIP-001` is `implemented`, not `verified`. Its last clause is
+discharged by a layers **repository** publishing with this binary — another
+repo's run, and not ours to claim.
+
 ## v0.30.0 — 2026-09-01
 
 The release a five-way review produced. A design concept went to a security

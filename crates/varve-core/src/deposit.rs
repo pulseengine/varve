@@ -322,7 +322,7 @@ pub enum DepositError {
         "payload '{name}' from {repo} carries ingestion-proof detail ({detail}) but declares no \
          `proof` mechanism — the detail would be signed into the layer with nothing saying HOW \
          it was established, which makes it attributable and believed rather than checkable. \
-         Declare `proof = \"cosign-sums\" | \"build-provenance\" | \"unverified\"`, or drop the \
+         Declare `proof = \"cosign-sums\" | \"build-provenance\" | \"upstream-sums\" | \"unverified\"`, or drop the \
          detail."
     )]
     ProofDetailWithoutMechanism {
@@ -758,6 +758,7 @@ mod producer_tests {
         // Evidence attached after the deposit — the append-only half of the
         // producer pipeline.
         let status = crate::linestatus::LineStatus {
+            min_counter: None,
             line: "2026.08".into(),
             counter: 1,
             issued_at: "2026-08-07T00:00:00Z".into(),
@@ -1010,6 +1011,10 @@ mod tests {
                 }
                 crate::ingest::IngestProof::BuildProvenance => {
                     "built from source commit deadbeef".to_string()
+                }
+                crate::ingest::IngestProof::UpstreamSums => {
+                    "transcribed from sha256.sum, which upstream publishes and                      does not sign"
+                        .to_string()
                 }
                 crate::ingest::IngestProof::Unverified => {
                     "NOTHING — operator opt-in: needed for the 2026.09 bring-up".to_string()

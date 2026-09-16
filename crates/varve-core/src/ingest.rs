@@ -26,7 +26,7 @@
 //!
 //! # The three states, and the fourth
 //!
-//! `cosign-sums`, `build-provenance` and `unverified` are the mechanisms an
+//! `cosign-sums`, `build-provenance`, `upstream-sums` and `unverified` are the mechanisms an
 //! entry can DECLARE. The fourth state is the ABSENT annotation, and it is
 //! deliberately not any of them: every layer published before this requirement
 //! carries no proof annotation, and reading that as "verified" would silently
@@ -68,6 +68,15 @@ pub enum IngestProof {
     BuildProvenance,
     /// Nothing vouched for these bytes. Only reachable through an explicit,
     /// recorded operator opt-in; the reason travels in `ANN_PROOF_ASSERTS`.
+    /// A digest list the upstream published beside its assets and NOBODY
+    /// SIGNED (REQ-UPSTREAMSUMS-001).
+    ///
+    /// Between `build-provenance` and `unverified`, and the name has to keep
+    /// saying which. It establishes that the bytes are the bytes that list
+    /// names — catching a corrupted or truncated download, which for a 90 MB
+    /// toolchain is the failure that actually happens — and nothing about who
+    /// produced them, because the same host serves the list and the bytes.
+    UpstreamSums,
     Unverified,
 }
 
@@ -77,6 +86,7 @@ impl IngestProof {
         match self {
             IngestProof::CosignSums => "cosign-sums",
             IngestProof::BuildProvenance => "build-provenance",
+            IngestProof::UpstreamSums => "upstream-sums",
             IngestProof::Unverified => "unverified",
         }
     }

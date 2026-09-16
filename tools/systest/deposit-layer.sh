@@ -154,7 +154,9 @@ ISSUED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   --issued-at "$ISSUED_AT" \
   --key "$WORK/root.key" --key-id systest-deposit-1 \
   --out "$WORK/layer-layout"
-printf '{"line":"%s","counter":%s,"issued-at":"%s"}\n' "${LAYER%.*}" "$COUNTER" "$ISSUED_AT" \
+SUPPORT_UNTIL="$("$VARVE" support-horizon --channel rolling --issued-at "$ISSUED_AT")"
+printf '{"line":"%s","counter":%s,"issued-at":"%s","support-until":"%s"}\n' \
+  "${LAYER%.*}" "$COUNTER" "$ISSUED_AT" "$SUPPORT_UNTIL" \
   > "$WORK/baseline-status.json"
 "$VARVE" sign-status --file "$WORK/baseline-status.json" \
   --key "$WORK/root.key" --key-id systest-deposit-1 \

@@ -62,6 +62,16 @@ pub enum FetchReason {
     AssetChanged,
     /// Digests agree, but the blob is no longer in the destination registry.
     BlobAbsent,
+    /// The blob was reported present and could not be retrieved — the fetch
+    /// failed, or the bytes it returned did not hash to the digest asked for
+    /// (REQ-REUSEBLOB-001 clauses 3 and 4).
+    ///
+    /// Distinct from `BlobAbsent` on purpose. Absence is a garbage collection
+    /// racing a presence check, which is ordinary. Bytes that do not match the
+    /// digest they were fetched by is a registry serving something other than
+    /// what was asked for, and an operator should not have to read those two
+    /// as one line of output.
+    ReuseUnusable,
 }
 
 impl FetchReason {
@@ -71,6 +81,7 @@ impl FetchReason {
             FetchReason::ReleaseChanged => "release changed",
             FetchReason::AssetChanged => "asset name changed",
             FetchReason::BlobAbsent => "blob absent from the registry",
+            FetchReason::ReuseUnusable => "registry blob could not be reused",
         }
     }
 }

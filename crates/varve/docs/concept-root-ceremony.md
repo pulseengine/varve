@@ -178,7 +178,23 @@ states the same list from the consumer's side.
 
 * **No key rotation.** There is one root per realm and no mechanism to succeed
   it. Nothing signs "this new root replaces the old one", and no consumer would
-  check such a statement if you produced it.
+  check such a statement if you produced it. Replacing a root means every
+  consumer edits their own `varve-realms.toml`, and every layer the old root
+  signed stops verifying for anyone who does.
+
+  A realm may list the roots it has retired (`retired-roots`, see
+  `varve docs config-reference`), which makes that failure **explain itself**
+  rather than reading as a forgery. It is diagnostic only: nothing verifies
+  against a retired root, and declaring one changes no verdict. It is not
+  succession, and this limit is unchanged by it.
+
+  **Rotate while you still hold the key.** The last useful act of a retiring
+  root is to sign something saying it is retiring — and that is only possible
+  while you can still use it. The pulseengine rolling root was rotated in
+  v0.32.1 precisely because it could NOT be used: it existed only as a
+  write-only CI secret, unreadable by anyone including the org owner, so there
+  was no way to sign a handover, hand it to a second repository, or back it up
+  (varve#110). A root you cannot use is a root you have already partly lost.
 * **No revocation.** There is no revocation channel, no CRL, no kill switch.
   A leaked key stays valid for every consumer until each of them edits their
   own `varve-realms.toml`.
