@@ -1,0 +1,32 @@
+# Dependency updates, configured so there is nothing to keep in step by hand.
+#
+# The previous attempt (varve#2) enumerated crate directories — `/`,
+# `/crates/varve-core`, `/crates/varve` — and was already wrong when it was
+# opened: `varve-producer` had shipped and was missing. A hand-maintained list
+# of crates is the drift this repository gates against everywhere else, so this
+# does not keep one.
+version: 2
+updates:
+  # ONE entry for the workspace. varve is a Cargo workspace with a single root
+  # Cargo.lock; per-crate entries would raise duplicate and conflicting PRs
+  # against that one lockfile, and would need adding to whenever a crate is.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5
+
+  # The one that actually matters here. Every workflow pins its actions by full
+  # commit SHA — `actions/checkout@3d3c42e5…` — which is the right thing for a
+  # repository whose subject is supply-chain integrity, and which means they go
+  # stale SILENTLY: there is no version constraint anywhere for anything to
+  # notice. Dependabot understands the SHA-plus-comment form and keeps it
+  # pinned while moving it forward.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
