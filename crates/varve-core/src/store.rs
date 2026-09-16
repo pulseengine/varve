@@ -490,6 +490,135 @@ pub fn manifest_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
+/// Buffer size for [`digest_file`]. Large enough that syscall overhead is
+/// negligible against a GB-scale payload, small enough that the memory a
+/// digest costs is a constant rather than the size of the thing being checked.
+pub const DIGEST_BUFFER: usize = 1 << 16;
+
+/// The digest of a file, computed from a stream in bounded memory
+/// (REQ-VERIFYSTREAM-001 clause 1).
+///
+/// `manifest_digest(&std::fs::read(path)?)` gives the same answer, and it is
+/// what verify used to do — which made checking a 2 GB SDK a 2 GB heap
+/// allocation per payload, one at a time, reported from real use as ~9 seconds
+/// with nothing printed (varve#141). The answer does not change; only what it
+/// costs to reach it.
+///
+/// No hand-rolled cursor, deliberately. `io::copy` drives the loop and decides
+/// when it ends, so there is no `pos += n` for a mutant to turn into a loop
+/// that never advances — the shape that killed a CI job outright in v0.35.0.
+pub fn digest_file(path: &Path) -> std::io::Result<String> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::with_capacity(DIGEST_BUFFER, file);
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut reader, &mut HashWriter(&mut hasher))?;
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+/// Feeds whatever `io::copy` writes straight into a hasher.
+///
+/// A local adapter rather than enabling a `sha2` feature: a dependency's
+/// feature set inside a verification crate is a thing to keep small. Mutating
+/// the reported length is caught rather than hidden — `Ok(0)` makes `copy`
+/// fail with `WriteZero`, and a short count makes it re-send bytes already
+/// hashed, so the digest disagrees with `manifest_digest` at every size the
+/// differential test checks.
+struct HashWriter<'a>(&'a mut Sha256);
+
+impl std::io::Write for HashWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod digest_file_tests {
+    use super::*;
+
+    /// The streaming digest must be BYTE-FOR-BYTE the digest of the whole
+    /// file. Asserted against `manifest_digest` rather than against a
+    /// hard-coded hash, so the oracle is the implementation that has always
+    /// been trusted, and the new one has to agree with it.
+    ///
+    /// The sizes are where a chunked reader goes wrong: empty, a single
+    /// byte, one short of the buffer, exactly the buffer, one past it, and
+    /// several buffers with a ragged tail. A reader that drops a final partial
+    /// chunk, or double-counts one at a boundary, is right on most of these
+    /// and wrong on exactly one.
+    // rivet: verifies REQ-VERIFYSTREAM-001
+    #[test]
+    fn a_streamed_digest_equals_the_whole_file_digest_at_every_boundary() {
+        let dir = std::env::temp_dir().join(format!("varve-digest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let b = DIGEST_BUFFER;
+        for len in [0, 1, b - 1, b, b + 1, 3 * b + 7] {
+            // Not all zeros: a pattern that changes with position, so a chunk
+            // read out of order would hash differently.
+            let bytes: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let path = dir.join(format!("payload-{len}"));
+            std::fs::write(&path, &bytes).expect("write fixture");
+            assert_eq!(
+                digest_file(&path).expect("streams"),
+                manifest_digest(&bytes),
+                "streaming and whole-file digests disagree at {len} bytes"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE CLASS GUARD. The paths that answer "does this installed payload
+    /// still match its signed digest" must digest it through `digest_file`,
+    /// never through `manifest_digest(&std::fs::read(..))`.
+    ///
+    /// A blanket "no fs::read" would be wrong — reverify legitimately reads
+    /// the small signed envelope and manifest. The precise invariant is that
+    /// their production code calls `manifest_digest` NOT AT ALL, so the only
+    /// way to hash a payload there is the streaming one.
+    ///
+    /// Two files, not one, and that is the point: `reverify` is varve's own
+    /// verify, `consumer` is the check other repositories call. Fixing only the
+    /// first would stream varve's answer while every consumer still allocated a
+    /// 2 GB SDK to ask the same question.
+    // rivet: verifies REQ-VERIFYSTREAM-001
+    #[test]
+    fn no_payload_check_digests_a_whole_file_read() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for rel in ["src/reverify.rs", "src/consumer.rs"] {
+            let src = std::fs::read_to_string(root.join(rel)).expect("readable");
+            let prod = match src.find("#[cfg(test)]") {
+                Some(i) => &src[..i],
+                None => &src[..],
+            };
+            assert!(
+                !prod.contains("manifest_digest("),
+                "{rel} digests with `manifest_digest` in production code. A payload \
+                 check must stream through `digest_file`; hashing a whole-file read \
+                 allocates the entire payload, which is 2 GB for an SDK (varve#141)."
+            );
+            assert!(
+                prod.contains("digest_file("),
+                "{rel} no longer calls `digest_file` at all — the payload check has \
+                 moved or vanished, and this guard would pass vacuously"
+            );
+        }
+    }
+
+    /// A missing file is an error the caller can name, not a digest of
+    /// nothing. Hashing an absent file to the empty-string digest would be a
+    /// silent pass for any entry whose signed digest happened to be that.
+    // rivet: verifies REQ-VERIFYSTREAM-001
+    #[test]
+    fn a_missing_file_is_an_error_not_the_empty_digest() {
+        let missing = std::env::temp_dir().join("varve-digest-definitely-absent-0");
+        assert!(digest_file(&missing).is_err());
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod fixtures {
     /// A minimal, valid layer manifest for tests.

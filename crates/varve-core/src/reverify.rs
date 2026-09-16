@@ -9,7 +9,7 @@
 
 use crate::install::{ManifestVerifier, VerifyError};
 use crate::manifest::{LayerManifest, ManifestError};
-use crate::store::{InstalledLayer, Store, StoreError, manifest_digest};
+use crate::store::{InstalledLayer, Store, StoreError};
 
 /// The file the install pipeline retains alongside `layer.json` so the
 /// signature verdict stays reproducible offline.
@@ -118,8 +118,11 @@ pub fn verify_installed(
                 tool: named(entry, tool),
             });
         };
-        let bytes = std::fs::read(&path).map_err(|e| io(&path, e))?;
-        if manifest_digest(&bytes) != entry.digest {
+        // Streamed, in bounded memory (REQ-VERIFYSTREAM-001). The bytes are
+        // only ever needed to HASH here, so reading a 2 GB SDK whole to do it
+        // was a 2 GB allocation per payload for nothing (varve#141).
+        let found = crate::store::digest_file(&path).map_err(|e| io(&path, e))?;
+        if found != entry.digest {
             return Err(ReverifyError::ToolDigestMismatch {
                 tool: named(entry, tool),
                 digest: entry.digest.clone(),
@@ -159,6 +162,7 @@ mod tests {
     use crate::pin::Pin;
     use crate::rollback::HighWaterMarks;
     use crate::source::MemorySource;
+    use crate::store::manifest_digest;
     use crate::verify::{PinnedKeyVerifier, generate_root_keypair, sign_layer_manifest};
 
     struct Installed {
