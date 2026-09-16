@@ -30,6 +30,7 @@ pub mod consumer;
 pub mod crateexport;
 pub mod deposit;
 pub mod discover;
+pub mod docsexport;
 pub mod exportstamp;
 pub mod ingest;
 pub mod install;

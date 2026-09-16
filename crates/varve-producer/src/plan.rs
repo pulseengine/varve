@@ -20,7 +20,7 @@
 //! a tool, so three is not a special case; it is just three.
 
 use crate::asset::{self, TemplateError};
-use varve_core::layerspec::{LayerManifest, ManifestTool, ManifestVsix};
+use varve_core::layerspec::{DocsFormat, LayerManifest, ManifestDocs, ManifestTool, ManifestVsix};
 
 /// What kind of payload a plan item produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +34,15 @@ pub enum PayloadKind {
     /// A TREE: the archive is the payload (REQ-SDKDEPOSIT-001). Not mined for
     /// a binary, not architecture-checked as though it were one.
     Sdk,
+    /// Documentation the layer carries for the versions it pins
+    /// (REQ-LAYERDOCS-001). HELD, never dispatched — it is data, like a
+    /// `vsix`, and varve does not render it.
+    ///
+    /// One manifest kind, two storage shapes, decided by the declared format:
+    /// `html` and `rustdoc` are TREES (a site is not one file), while `pdf`,
+    /// `markdown` and `reqif` are single files. The format decides it, not
+    /// the extension of whatever the upstream happened to name the asset.
+    Docs(DocsFormat),
 }
 
 /// One asset to fetch, verify and stage.
@@ -69,6 +78,12 @@ pub struct PayloadPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
     Template(TemplateError),
+    /// Documentation describes the layer, not a machine, so a per-platform
+    /// template would expand to several identical payloads under one name.
+    DocsIsNotPerPlatform {
+        name: String,
+        asset: String,
+    },
     /// A tool declares a layout this planner does not implement.
     UnknownLayout {
         tool: String,
@@ -80,6 +95,15 @@ impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PlanError::Template(e) => write!(f, "{e}"),
+            PlanError::DocsIsNotPerPlatform { name, asset } => write!(
+                f,
+                "docs {name:?} uses a per-platform template {asset:?}. \
+                 Documentation describes the LAYER, not a machine — the same \
+                 pages are true on every platform — so a `%T` here would \
+                 deposit several identical payloads under one name and make \
+                 `varve export-docs {name}` ambiguous. Name the asset without \
+                 a platform placeholder."
+            ),
             PlanError::UnknownLayout { tool, layout } => write!(
                 f,
                 "tool {tool:?} declares layout = {layout:?}. Known layouts are \
@@ -123,6 +147,7 @@ fn template_of(t: &ManifestTool, kind: PayloadKind) -> String {
         // `wasi-sdk-34.0-arm64-linux.tar.gz`. Neither follows from the tool
         // name, so the manifest states it and `plan` refuses without one.
         PayloadKind::Sdk => unreachable!("an sdk carries its template"),
+        PayloadKind::Docs(_) => unreachable!("a docs entry carries its template"),
     }
 }
 
@@ -226,6 +251,41 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
     Ok(out)
 }
 
+/// Expand one documentation entry.
+///
+/// Documentation is not built per platform — the same HTML describes the
+/// layer on every machine — so unlike a tool or an extension there is no
+/// platform loop here. A `%T` in the template would therefore expand to
+/// nothing meaningful, and is refused rather than silently producing four
+/// identical payloads.
+pub fn plan_docs(d: &ManifestDocs) -> Result<Vec<PayloadPlan>, PlanError> {
+    if asset::is_per_platform(&d.asset) {
+        return Err(PlanError::DocsIsNotPerPlatform {
+            name: d.name.clone(),
+            asset: d.asset.clone(),
+        });
+    }
+    let release = d.release.clone().unwrap_or_else(|| d.version.clone());
+    Ok(vec![PayloadPlan {
+        name: d.name.clone(),
+        repo: repo_of(&d.repo, &d.name),
+        version: d.version.clone(),
+        release: release.clone(),
+        asset: asset::expand(&d.asset, &d.version, &release, None, None)?,
+        platform: None,
+        kind: PayloadKind::Docs(d.format),
+        unverified_reason: None,
+        // The declared entry point IS a shape check — `contains` already
+        // means "a path that must exist inside this payload". Reusing it
+        // makes `entry` verified at deposit rather than decorative: a
+        // manifest that names an entry the payload does not have fails while
+        // it can still be fixed, instead of being discovered by a reader
+        // whose link 404s.
+        contains: d.entry.clone(),
+        upstream_sums: None,
+    }])
+}
+
 /// The whole manifest as work items.
 pub fn plan(m: &LayerManifest, platforms: &[&str]) -> Result<Vec<PayloadPlan>, PlanError> {
     let mut out = Vec::new();
@@ -234,6 +294,9 @@ pub fn plan(m: &LayerManifest, platforms: &[&str]) -> Result<Vec<PayloadPlan>, P
     }
     for v in &m.vsix {
         out.extend(plan_vsix(v, platforms)?);
+    }
+    for d in &m.docs {
+        out.extend(plan_docs(d)?);
     }
     Ok(out)
 }
@@ -514,6 +577,69 @@ mod tests {
             ep.iter().any(|x| x.asset == "m-musl"),
             "`asset-for` is inert"
         );
+    }
+
+    /// Documentation is planned once, not once per platform: the same pages
+    /// describe the layer on every machine.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn documentation_is_planned_once_not_per_platform() {
+        let m = manifest(
+            "[[docs]]\nname = \"traceability\"\nrepo = \"pulseengine/varve\"\n\
+             version = \"v0.35.0\"\nformat = \"html\"\nentry = \"index.html\"\n\
+             asset = \"varve-%V-traceability-html.tar.gz\"\n",
+        );
+        let p = plan(&m, PLATFORMS).expect("plans");
+        assert_eq!(p.len(), 1, "one payload, not one per platform");
+        assert_eq!(p[0].platform, None);
+        assert_eq!(p[0].asset, "varve-0.35.0-traceability-html.tar.gz");
+        assert_eq!(p[0].kind, PayloadKind::Docs(DocsFormat::Html));
+    }
+
+    /// The declared entry point travels as the shape check, so a manifest
+    /// naming an entry the payload lacks fails at deposit rather than at a
+    /// reader's 404.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn the_declared_entry_point_becomes_the_shape_check() {
+        let m = manifest(
+            "[[docs]]\nname = \"api\"\nrepo = \"pulseengine/varve\"\n\
+             version = \"v0.36.0\"\nformat = \"rustdoc\"\n\
+             entry = \"varve_core/index.html\"\nasset = \"varve-core-%V-rustdoc.tar.gz\"\n",
+        );
+        let p = plan(&m, PLATFORMS).expect("plans");
+        assert_eq!(p[0].contains.as_deref(), Some("varve_core/index.html"));
+    }
+
+    /// A `%T` in a docs template would deposit four identical payloads under
+    /// one name and make `export-docs <name>` ambiguous.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn a_per_platform_docs_template_is_refused() {
+        let m = manifest(
+            "[[docs]]\nname = \"book\"\nrepo = \"a/b\"\nversion = \"v1.0.0\"\n\
+             format = \"html\"\nasset = \"book-%V-%T.tar.gz\"\n",
+        );
+        let e = plan(&m, PLATFORMS).expect_err("must refuse");
+        assert!(matches!(e, PlanError::DocsIsNotPerPlatform { .. }), "{e:?}");
+        assert!(e.to_string().contains("describes the LAYER"), "{e}");
+    }
+
+    /// A hub ships documentation too: the tag and the payload version differ,
+    /// and the same rule applies as for a tool.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn a_docs_payload_honours_its_release_tag() {
+        let m = manifest(
+            "[[docs]]\nname = \"handbook\"\nrepo = \"pulseengine/jess\"\n\
+             version = \"0.2.2\"\nrelease = \"v0.7.2\"\nformat = \"pdf\"\n\
+             asset = \"handbook-%V.pdf\"\n",
+        );
+        let p = plan(&m, PLATFORMS).expect("plans");
+        assert_eq!(p[0].release, "v0.7.2", "fetched by the tag");
+        assert_eq!(p[0].version, "0.2.2", "signed as what it is");
+        assert_eq!(p[0].asset, "handbook-0.2.2.pdf");
+        assert_eq!(p[0].contains, None, "a pdf has no inside to check");
     }
 
     /// A HUB tags a release under one number and ships the payload under
