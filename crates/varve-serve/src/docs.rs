@@ -161,6 +161,43 @@ mod tests {
         assert!(coverage_gaps(&probe).is_empty());
     }
 
+    /// The list is what `--docs` with no argument prints, so it has to name
+    /// every topic — a listing that silently omits one sends a reader looking
+    /// for documentation that exists.
+    // rivet: verifies REQ-PRODUCERDOCS-001
+    #[test]
+    fn the_listing_names_every_topic() {
+        let list = render_list();
+        for t in topics() {
+            assert!(list.contains(t.slug), "the listing omits {:?}", t.slug);
+            assert!(
+                list.contains(t.title),
+                "the listing omits the title of {:?}",
+                t.slug
+            );
+        }
+        assert!(list.contains("varve-serve --docs"), "{list}");
+    }
+
+    /// `--docs <topic>` must find a real topic and refuse an unknown one by
+    /// NAMING what exists — a reader who typo'd needs the right handle, not a
+    /// bare "not found".
+    // rivet: verifies REQ-PRODUCERDOCS-001
+    #[test]
+    fn an_unknown_topic_is_refused_and_names_the_real_ones() {
+        assert!(show("serve").is_ok());
+        assert!(show("security").is_ok());
+        assert!(show("").is_ok(), "no argument lists the topics");
+
+        let e = show("secrity").expect_err("a typo must be refused");
+        let msg = e.to_string();
+        assert!(msg.contains("secrity"), "{msg}");
+        assert!(
+            msg.contains("security"),
+            "the refusal must name the real topic: {msg}"
+        );
+    }
+
     /// The security posture is the reason this is a separate binary, so it is
     /// not optional prose. A reader deciding whether to run a listening
     /// process needs the answer in the program, not in a commit message.

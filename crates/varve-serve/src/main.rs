@@ -90,7 +90,12 @@ fn main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    http::serve(&site, cli.port)
+    let listener = http::bind(cli.port)?;
+    println!(
+        "  http://127.0.0.1:{}  — ctrl-c to stop",
+        listener.local_addr()?.port()
+    );
+    http::accept_loop(&site, &listener)
 }
 
 /// Every `docs` payload of the pinned layer, verified, with what the producer

@@ -204,17 +204,11 @@ fn handle(site: &Site, stream: &mut TcpStream) -> std::io::Result<()> {
     }
 }
 
-/// Serve until interrupted. Returns the bound port, then blocks.
-pub fn serve(site: &Site, port: u16) -> anyhow::Result<()> {
-    let listener = bind(port)?;
-    println!(
-        "  http://127.0.0.1:{}  — ctrl-c to stop",
-        listener.local_addr()?.port()
-    );
-    accept_loop(site, &listener)
-}
-
-/// Bind loopback. Separated so a test can take the port before serving.
+/// Bind loopback.
+///
+/// `127.0.0.1`, never `0.0.0.0`, and there is no flag to change it: a pinned
+/// document is a local artefact, and serving one to the whole network by
+/// default would be a surprising thing for a tool adjacent to verification.
 pub fn bind(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind((Ipv4Addr::LOCALHOST, port))
 }
@@ -370,18 +364,26 @@ mod tests {
         let listener = bind(0).expect("loopback binds");
         let port = listener.local_addr().expect("addr").port();
         let s = site();
+        // Drives `accept_loop`, not `handle` directly: a mutant that empties
+        // the loop must fail this test, and it can only do that if the test
+        // actually goes through it.
         std::thread::spawn(move || {
-            // One connection is enough for this test; take it and answer.
-            if let Ok((mut stream, _)) = listener.accept() {
-                let _ = handle(&s, &mut stream);
-            }
+            let _ = accept_loop(&s, &listener);
         });
 
         let mut c = TcpStream::connect(("127.0.0.1", port)).expect("connects");
+        // A read with no deadline turns any server-side defect into a HANG
+        // rather than a failure, and `cargo test` has no per-test timeout —
+        // so one bad change would wedge CI instead of reporting. Mutation
+        // testing showed this concretely: two mutants of `requested_path`
+        // came back as 120s timeouts rather than as kills.
+        c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .expect("a deadline can be set");
         c.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .expect("writes");
         let mut got = String::new();
-        c.read_to_string(&mut got).expect("reads");
+        c.read_to_string(&mut got)
+            .expect("the server answered within the deadline");
 
         assert!(got.starts_with("HTTP/1.1 200 OK"), "{got}");
         assert!(got.contains("Content-Type: text/html"), "{got}");
