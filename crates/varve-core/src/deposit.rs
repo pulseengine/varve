@@ -98,6 +98,26 @@ pub struct DepositTool {
     /// has one — see `check_identities` for why depositing it on anything else
     /// is refused rather than ignored.
     pub sdk_prefix: Option<String>,
+    /// What a `docs` payload IS — `html|rustdoc|pdf|markdown|reqif` — signed
+    /// into the manifest as `eu.pulseengine.varve.docs.format`
+    /// (REQ-LAYERDOCS-001).
+    ///
+    /// Signed rather than inferred because it decides how the payload is
+    /// OPENED. A consumer that guessed from the file name could be handed a
+    /// tarball of HTML and told it was a PDF; worse, the guess would usually
+    /// be right, so the one case where it is not would arrive as a puzzle.
+    /// Only a `docs` payload has one, and depositing it on anything else is
+    /// refused rather than ignored — an annotation nothing reads is how a
+    /// field goes inert.
+    pub docs_format: Option<String>,
+    /// The file inside a `docs` payload a reader starts at, signed as
+    /// `eu.pulseengine.varve.docs.entry`. Absent for a single-file format,
+    /// where the payload IS the entry.
+    pub docs_entry: Option<String>,
+    /// The human label shown when choosing between documents, signed as
+    /// `eu.pulseengine.varve.docs.title`. Optional: `name` is always the
+    /// handle a command takes.
+    pub docs_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -211,6 +231,18 @@ pub struct SpecTool {
     /// is no relocation budget, so `varve export-sdk` has nothing to patch.
     #[serde(rename = "sdk-prefix", default)]
     pub sdk_prefix: Option<String>,
+    /// `docs-format` — what this documentation IS (REQ-LAYERDOCS-001).
+    /// Required to make a `docs` payload exportable at all: without it
+    /// `varve export-docs` does not know whether it is unpacking a site or
+    /// handing over one file.
+    #[serde(rename = "docs-format", default)]
+    pub docs_format: Option<String>,
+    /// `docs-entry` — the starting file inside a tree-shaped document.
+    #[serde(rename = "docs-entry", default)]
+    pub docs_entry: Option<String>,
+    /// `docs-title` — the label a human reads when choosing.
+    #[serde(rename = "docs-title", default)]
+    pub docs_title: Option<String>,
 }
 
 pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositError> {
@@ -286,6 +318,26 @@ pub enum DepositError {
          and believed. Drop it, or deposit this payload as kind = \"sdk\"."
     )]
     SdkPrefixOnNonTree { name: String, kind: String },
+    #[error(
+        "payload '{name}' is kind {kind} and carries `docs-format` — only a `docs` payload is \
+         opened by format, so it would be signed into the manifest, read by nothing, and \
+         believed. Drop it, or deposit this payload as kind = \"docs\"."
+    )]
+    DocsFormatOnNonDocs { name: String, kind: String },
+    #[error(
+        "docs '{name}' version {version} declares no `docs-format` — what the payload IS. \
+         Without it `varve export-docs` cannot tell a site from a single file, so the layer \
+         would install and verify and the document could never be opened. Add \
+         `docs-format = \"html\"` (or rustdoc|pdf|markdown|reqif) to the [[tool]] table."
+    )]
+    DocsFormatMissing { name: String, version: String },
+    #[error(
+        "docs '{name}' declares format '{format}', which varve does not know. The vocabulary is \
+         closed on purpose: a format varve cannot open is one no consumer can act on, and \
+         signing the claim anyway would put a promise in the manifest that nothing keeps. \
+         Known: html, rustdoc, pdf, markdown, reqif."
+    )]
+    DocsFormatUnknown { name: String, format: String },
     #[error(
         "sdk '{name}' version {version} declares no `sdk-prefix` — the absolute path it was \
          BUILT for. Without it `varve export-sdk` has no relocation budget and no path to \
@@ -395,6 +447,60 @@ fn check_identities(tools: &[&DepositTool]) -> Result<(), DepositError> {
 /// an `sdk` without one installs and verifies and can never be exported, which
 /// the consumer discovers on the far side of an air gap. Neither is repairable
 /// without re-depositing, because the annotation lives inside the signature.
+/// Signed annotations for a `docs` payload (REQ-LAYERDOCS-001).
+pub const ANN_DOCS_FORMAT: &str = "eu.pulseengine.varve.docs.format";
+pub const ANN_DOCS_ENTRY: &str = "eu.pulseengine.varve.docs.entry";
+pub const ANN_DOCS_TITLE: &str = "eu.pulseengine.varve.docs.title";
+
+/// A docs payload must say what it is, and nothing else may.
+///
+/// Both directions are refused, for the same reason `sdk-prefix` is. A `docs`
+/// payload with no format cannot be exported — the exporter would not know
+/// whether to unpack a site or hand over one file — so the absence is caught
+/// while the manifest can still be fixed. And a format on a payload that is
+/// not documentation is an annotation nothing will ever read, which is
+/// precisely how a field ships inert.
+fn check_docs_metadata(tools: &[&DepositTool]) -> Result<(), DepositError> {
+    for tool in tools {
+        let is_docs = tool.kind == Some(crate::kind::PayloadKind::Docs);
+        match (&tool.docs_format, is_docs) {
+            (Some(_), false) => {
+                return Err(DepositError::DocsFormatOnNonDocs {
+                    name: tool.name.clone(),
+                    kind: tool.kind.unwrap_or_default().as_str().to_string(),
+                });
+            }
+            (None, true) => {
+                return Err(DepositError::DocsFormatMissing {
+                    name: tool.name.clone(),
+                    version: tool.version.clone(),
+                });
+            }
+            (Some(f), true) => {
+                // The vocabulary is closed. A format varve does not know is
+                // one it cannot open, and accepting it would sign a claim
+                // about the payload that no consumer can act on.
+                const KNOWN: &[&str] = &["html", "rustdoc", "pdf", "markdown", "reqif"];
+                if !KNOWN.contains(&f.as_str()) {
+                    return Err(DepositError::DocsFormatUnknown {
+                        name: tool.name.clone(),
+                        format: f.clone(),
+                    });
+                }
+            }
+            _ => {}
+        }
+        // An entry on a non-docs payload is the same inert-annotation problem.
+        if tool.docs_entry.is_some() && !is_docs {
+            return Err(DepositError::DocsFormatOnNonDocs {
+                name: tool.name.clone(),
+                kind: tool.kind.unwrap_or_default().as_str().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn check_sdk_prefixes(tools: &[&DepositTool]) -> Result<(), DepositError> {
     for tool in tools {
         let is_tree = tool.kind == Some(crate::kind::PayloadKind::Sdk);
@@ -523,6 +629,7 @@ pub fn deposit_with_options(
     });
     check_identities(&tools)?;
     check_sdk_prefixes(&tools)?;
+    check_docs_metadata(&tools)?;
     check_ingest_proofs(&tools)?;
 
     // Assemble the payload deterministically: sorted tools, fixed key order
@@ -606,6 +713,20 @@ pub fn deposit_with_options(
                     crate::sdkexport::ANN_SDK_PREFIX.into(),
                     prefix.clone().into(),
                 );
+            }
+            // What this document IS and where a reader starts, inside the
+            // signature (REQ-LAYERDOCS-001). `check_docs_metadata` has
+            // already refused a format on a payload that is not
+            // documentation, and refused a docs payload without one, so an
+            // entry carrying these is one `export-docs` can act on.
+            if let Some(format) = &tool.docs_format {
+                annotations.insert(ANN_DOCS_FORMAT.into(), format.clone().into());
+            }
+            if let Some(entry) = &tool.docs_entry {
+                annotations.insert(ANN_DOCS_ENTRY.into(), entry.clone().into());
+            }
+            if let Some(title) = &tool.docs_title {
+                annotations.insert(ANN_DOCS_TITLE.into(), title.clone().into());
             }
             if let Some(runner) = &tool.runner {
                 annotations.insert(crate::bazel::ANN_RUNNER.into(), runner.tool.clone().into());
@@ -868,6 +989,9 @@ mod tests {
                     runner: None,
                     kind: None,
                     sdk_prefix: None,
+                    docs_format: None,
+                    docs_entry: None,
+                    docs_title: None,
                 },
                 DepositTool {
                     name: "rivet".into(),
@@ -878,6 +1002,9 @@ mod tests {
                     runner: None,
                     kind: None,
                     sdk_prefix: None,
+                    docs_format: None,
+                    docs_entry: None,
+                    docs_title: None,
                 },
             ],
         }
@@ -1208,6 +1335,9 @@ mod tests {
             runner: None,
             kind,
             sdk_prefix: None,
+            docs_format: None,
+            docs_entry: None,
+            docs_title: None,
         }
     }
 

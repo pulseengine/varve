@@ -349,7 +349,12 @@ fn component_fault(value: &str) -> Option<String> {
 }
 
 /// Validate a member path and return it normalised (no trailing slash).
-fn safe_member_path(raw: &str) -> Result<String, SdkExportError> {
+///
+/// `pub(crate)` so the docs exporter uses THIS rule rather than a second copy
+/// of it. A tree of documentation is written to disk by the same kind of loop
+/// as an SDK, and two implementations of "may this member escape the export
+/// directory" would drift — with a defect in either masked by the other.
+pub(crate) fn safe_member_path(raw: &str) -> Result<String, SdkExportError> {
     let unsafe_member = |why: &str| SdkExportError::UnsafeMember {
         member: raw.to_string(),
         why: why.to_string(),
@@ -360,6 +365,18 @@ fn safe_member_path(raw: &str) -> Result<String, SdkExportError> {
         ));
     }
     let trimmed = raw.trim_end_matches('/');
+    // `./x` is how GNU tar writes a member when the archive was created from
+    // `.` — varve's own traceability bundle is entirely `./index.html`,
+    // `./_assets/…`. It denotes the archive root, not a traversal, and
+    // refusing it means neither `export-docs` nor `export-sdk` can open such
+    // an archive at all. Stripped in a loop so `././x` normalises too; a `.`
+    // or `..` anywhere ELSE still falls through to the component check below,
+    // which is the rule that actually prevents an escape. `./../x` therefore
+    // becomes `../x` and is still refused.
+    let mut trimmed = trimmed;
+    while let Some(rest) = trimmed.strip_prefix("./") {
+        trimmed = rest;
+    }
     if trimmed.is_empty() {
         return Err(unsafe_member("empty"));
     }
@@ -677,6 +694,39 @@ pub fn export_members(
         }
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod safe_path_probe {
+    /// `./x` is the ordinary GNU tar prefix — `tar czf a.tgz ./file` writes it,
+    /// and varve's OWN traceability bundle is full of it. Refusing it as a
+    /// "relative path element" means neither `export-docs` nor `export-sdk`
+    /// can open such an archive at all.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn a_leading_dot_slash_is_tar_convention_not_traversal() {
+        assert_eq!(
+            super::safe_member_path("./index.html").expect("the tar root prefix is not an escape"),
+            "index.html"
+        );
+        assert_eq!(
+            super::safe_member_path("./a/b.html").expect("nested under the tar root"),
+            "a/b.html"
+        );
+    }
+
+    /// …but only as the LEADING component. A `.` or `..` anywhere else is the
+    /// thing the rule exists for, and one member is enough to escape.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn an_interior_relative_element_is_still_refused() {
+        for bad in ["a/./b", "a/../b", "../escape", "a/..", "./../x"] {
+            assert!(
+                super::safe_member_path(bad).is_err(),
+                "{bad:?} must still be refused"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

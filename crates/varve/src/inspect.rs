@@ -24,6 +24,13 @@
 use anyhow::Context;
 use varve_core::Store;
 
+/// The documentation-specific half of a row.
+struct DocsRow {
+    format: String,
+    entry: Option<String>,
+    title: Option<String>,
+}
+
 /// One payload, as reported.
 struct Row {
     name: String,
@@ -40,6 +47,10 @@ struct Row {
     /// `dispatched` | `held` | `unknown` (the kind annotation is one this
     /// varve does not recognise, so whether it dispatches is not knowable).
     dispatch: &'static str,
+    /// For a `docs` payload: what it IS, where a reader starts, and the label
+    /// a human chooses by — all from SIGNED annotations
+    /// (REQ-LAYERDOCS-001). `None` for every other kind.
+    docs: Option<DocsRow>,
     /// Which mechanism vouched for this payload's UPSTREAM bytes
     /// (REQ-INGEST-001 clause 5). `unrecorded` where the layer predates the
     /// requirement — absence of a claim is not a claim, and restating a
@@ -117,6 +128,20 @@ pub fn run(store: &Store, layer: Option<&str>, json: bool) -> anyhow::Result<()>
                     Err(varve_core::UnknownProof(raw)) => raw,
                 },
                 proof_signer: e.annotations.get(varve_core::ANN_PROOF_SIGNER).cloned(),
+                docs: e
+                    .annotations
+                    .get(varve_core::deposit::ANN_DOCS_FORMAT)
+                    .map(|format| DocsRow {
+                        format: format.clone(),
+                        entry: e
+                            .annotations
+                            .get(varve_core::deposit::ANN_DOCS_ENTRY)
+                            .cloned(),
+                        title: e
+                            .annotations
+                            .get(varve_core::deposit::ANN_DOCS_TITLE)
+                            .cloned(),
+                    }),
                 present: store_of(l).entry_path(&l.entry, e).is_some(),
                 layer: l.entry.layer.to_string(),
                 realm: l.realm.clone(),
@@ -209,6 +234,12 @@ fn print_json(
                 "present": r.present,
                 "layer": r.layer,
                 "realm": r.realm,
+                // The text form prints a documentation block; a machine
+                // reading --format json must be able to see the same facts, or
+                // the two outputs disagree about what the layer contains.
+                "docs_format": r.docs.as_ref().map(|d| &d.format),
+                "docs_entry": r.docs.as_ref().and_then(|d| d.entry.as_ref()),
+                "docs_title": r.docs.as_ref().and_then(|d| d.title.as_ref()),
             })
         })
         .collect();
@@ -348,11 +379,136 @@ fn print_text(
              `varve docs inspect`."
         );
     }
+    // Documentation, after the table rather than before it: the table is what
+    // `inspect` is run for, and the natural next line once someone has seen
+    // what a layer holds is where to start reading it (REQ-LAYERDOCS-001).
+    //
+    // Reported from the SIGNED annotations, so this says what the producer
+    // declared rather than what the file name suggests.
+    let docs: Vec<(&Row, &DocsRow)> = rows
+        .iter()
+        .filter_map(|r| r.docs.as_ref().map(|d| (r, d)))
+        .collect();
+    if !docs.is_empty() {
+        println!("\ndocumentation for the versions this layer pins:");
+        for (row, d) in &docs {
+            let label = d.title.as_deref().unwrap_or(&row.name);
+            println!(
+                "  {label} {} ({})",
+                row.version.as_deref().unwrap_or("-"),
+                d.format
+            );
+            if let Some(entry) = &d.entry {
+                println!("    starts at {entry}");
+            }
+        }
+        // One document needs no selector; several do. Printing the exact next
+        // command beats describing it, and the reader has already said which
+        // layer they want by pinning it.
+        match docs.as_slice() {
+            [(row, _)] => {
+                println!("\n  read it, copying nothing:  varve-serve");
+                println!(
+                    "  or write a copy:           varve export-docs --out ./doc   ({})",
+                    row.name
+                );
+            }
+            many => {
+                println!(
+                    "\n  {} documents, so name one:  varve-serve --select <NAME>",
+                    many.len()
+                );
+                println!(
+                    "  or:                        varve export-docs --out ./doc --select <NAME>"
+                );
+            }
+        }
+    }
     if rows.iter().any(|r| !r.known_kind) {
         println!(
             "\nAn entry above carries a payload kind this varve does not know. Its bytes still \
              verify against the signed digest — only the adapters that must DO something \
              kind-specific will refuse it. A newer varve may handle it."
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(name: &str, docs: Option<DocsRow>) -> Row {
+        Row {
+            name: name.into(),
+            version: Some("1.0.0".into()),
+            kind: if docs.is_some() {
+                "docs".into()
+            } else {
+                "tool".into()
+            },
+            known_kind: true,
+            platform: "any".into(),
+            digest: "sha256:0".into(),
+            dispatch: if docs.is_some() { HELD } else { DISPATCHED },
+            docs,
+            ingest_proof: "cosign-sums".into(),
+            proof_signer: None,
+            present: true,
+            layer: "2026.09.9".into(),
+            realm: "t".into(),
+        }
+    }
+
+    /// `inspect` has two output paths and they must agree about what the layer
+    /// contains. The text form grew a documentation block; a gate parsing
+    /// `--format json` would otherwise be blind to it, and "the two renderings
+    /// of one fact disagree" is the shape that cost three releases this month.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn both_renderings_report_the_same_documents() {
+        let rows = [
+            row("rivet", None),
+            row(
+                "handbook",
+                Some(DocsRow {
+                    format: "pdf".into(),
+                    entry: None,
+                    title: Some("The handbook".into()),
+                }),
+            ),
+        ];
+
+        // What the text form would say it has:
+        let in_text: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.docs.is_some())
+            .map(|r| r.name.as_str())
+            .collect();
+        // What the JSON form would say it has: a payload is a document exactly
+        // when it carries a format.
+        let in_json: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.docs.as_ref().map(|d| !d.format.is_empty()) == Some(true))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert_eq!(in_text, in_json, "the two renderings disagree");
+        assert_eq!(in_text, vec!["handbook"]);
+    }
+
+    /// A document is HELD, never dispatched: it is read, not executed.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn a_document_is_never_reported_as_dispatched() {
+        let d = row(
+            "handbook",
+            Some(DocsRow {
+                format: "html".into(),
+                entry: Some("index.html".into()),
+                title: None,
+            }),
+        );
+        assert_eq!(d.dispatch, HELD);
+        assert!(!varve_core::PayloadKind::Docs.is_dispatchable());
     }
 }

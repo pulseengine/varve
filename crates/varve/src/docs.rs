@@ -261,6 +261,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "cmd-export-vsix.md"
     ),
     topic!(
+        "export-docs",
+        "export-docs — the documentation the layer pins",
+        "cmd-export-docs.md"
+    ),
+    topic!(
         "export-sdk",
         "export-sdk — a relocated, sourceable SDK tree",
         "cmd-export-sdk.md"

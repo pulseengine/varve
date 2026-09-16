@@ -48,6 +48,14 @@ pub enum PayloadKind {
     /// tree-shaped store — and it is DATA handed to `code`, never executed
     /// by varve, so it is not dispatchable and carries no execute bit.
     Vsix,
+    /// Documentation for the versions this layer pins (REQ-LAYERDOCS-001),
+    /// consumed via `export-docs`. HELD, never dispatched: it is data handed
+    /// to a reader, never executed, so it carries no execute bit.
+    ///
+    /// What it IS — html, rustdoc, pdf, markdown, reqif — travels beside it
+    /// as a signed annotation rather than being inferred from the asset's
+    /// name, because that is what decides how it is opened.
+    Docs,
     /// Another LAYER, composed into this one (REQ-COMPOSE-001). The digest is
     /// that layer's signed manifest; it is not a blob to lay down.
     Layer,
@@ -77,6 +85,7 @@ impl PayloadKind {
             PayloadKind::Sdk => "sdk",
             PayloadKind::WasmComponent => "wasm-component",
             PayloadKind::Vsix => "vsix",
+            PayloadKind::Docs => "docs",
             PayloadKind::Layer => "layer",
         }
     }
@@ -108,6 +117,7 @@ impl FromStr for PayloadKind {
             "sdk" => Ok(PayloadKind::Sdk),
             "wasm-component" => Ok(PayloadKind::WasmComponent),
             "vsix" => Ok(PayloadKind::Vsix),
+            "docs" => Ok(PayloadKind::Docs),
             "layer" => Ok(PayloadKind::Layer),
             other => Err(UnknownKind(other.to_string())),
         }
@@ -129,6 +139,7 @@ mod tests {
         PayloadKind::Sdk,
         PayloadKind::WasmComponent,
         PayloadKind::Vsix,
+        PayloadKind::Docs,
         PayloadKind::Layer,
     ];
 
@@ -144,7 +155,8 @@ mod tests {
             PayloadKind::Sdk => 4,
             PayloadKind::WasmComponent => 5,
             PayloadKind::Vsix => 6,
-            PayloadKind::Layer => 7,
+            PayloadKind::Docs => 7,
+            PayloadKind::Layer => 8,
         }
     }
 

@@ -27,10 +27,13 @@
 "crates/varve/src/inspect.rs" = "bin crate module"
 "crates/varve/src/exit.rs" = "bin crate module"
 "crates/varve-producer/src/main.rs" = "the producer CLI; `--lib` tests cannot reach it"
+"crates/varve-serve/src/main.rs" = "the viewer's entry point; everything with a decision in it was moved into the lib so the gate CAN reach it"
 
 [re-export]
 "crates/varve-core/src/lib.rs" = "module declarations and re-exports"
 "crates/varve-producer/src/lib.rs" = "module declarations"
+"crates/varve-serve/src/lib.rs" = "module declarations"
+"crates/varve-serve/src/cli.rs" = "clap derive; the flags themselves are gated by the docs check that enumerates them"
 
 [not-yet]
 "crates/varve-core/src/linestatus.rs" = "yank + advisory state, a stop-the-build signal. 18 survivors measured 2026-09-07, 5 of them NotFound guards. REQ-MUTATE-003 clause 3 names this file."
