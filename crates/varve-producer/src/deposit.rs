@@ -182,25 +182,30 @@ pub fn stage_one<R: CommandRunner>(
                         r.plan.name
                     )
                 })?;
-                // ONE implementation of "where is the payload root", shared
-                // with the exporter. A tail match here would accept a bundle
-                // whose declared root entry is missing but which happens to
-                // carry a namesake in a subdirectory — varve's own
+                // The DECISION lives in varve-core, where a `--lib` test can
+                // reach it. Deciding inline here is what let `cargo mutants`
+                // delete the `!` from `if !found` with nothing noticing: the
+                // only thing exercising this branch was a system test, which
+                // the mutation gate cannot run.
+                //
+                // It is also one implementation of "where is the payload
+                // root", shared with the exporter. A tail match would accept a
+                // bundle whose declared root entry is missing but which
+                // carries a namesake in a subdirectory — varve's own
                 // traceability bundle has two of those.
                 let paths: Vec<String> = members.iter().map(|m| m.path.clone()).collect();
-                let found = varve_core::layerspec::docs_entry_present(&paths, want);
-                if !found {
-                    let mut saw: Vec<&str> =
-                        members.iter().take(8).map(|m| m.path.as_str()).collect();
-                    saw.sort();
+                if let Err(miss) = varve_core::layerspec::check_docs_entry(&paths, Some(want), true)
+                {
                     anyhow::bail!(
-                        "{}: the docs payload declares entry {want:?} and does not \
+                        "{}: the docs payload declares entry {:?} and does not \
                          contain it.\n\n{} member(s) were read and none matched. \
                          The bytes verify, so this is not integrity but content — \
                          a renamed layout upstream, or an entry that was never \
-                         right.\n  first members: {saw:?}",
+                         right.\n  first members: {:?}",
                         r.plan.name,
-                        members.len()
+                        miss.entry,
+                        miss.members,
+                        miss.saw
                     );
                 }
             }

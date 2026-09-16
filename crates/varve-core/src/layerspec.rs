@@ -259,6 +259,47 @@ pub fn docs_entry_present(members: &[String], entry: &str) -> bool {
     })
 }
 
+/// Why a docs payload's declared entry is not acceptable.
+///
+/// Returned rather than bailed so the DECISION is reachable by a `--lib` test.
+/// The first version of this lived inline in the producer's staging loop, and
+/// `cargo mutants` deleted the `!` from its `if !found` with nothing noticing:
+/// the only thing exercising that branch was a system test, which the mutation
+/// gate cannot run. A check whose logic only the systest reaches is a check
+/// the gate cannot defend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocsEntryMissing {
+    pub entry: String,
+    /// A few member paths, for an error that helps rather than only refuses.
+    pub saw: Vec<String>,
+    pub members: usize,
+}
+
+/// Is a tree document's declared entry actually in it?
+///
+/// `Ok(())` when there is nothing to check — a single-file format has no
+/// inside, and a payload that declares no entry has made no claim to break.
+pub fn check_docs_entry(
+    members: &[String],
+    entry: Option<&str>,
+    is_tree: bool,
+) -> Result<(), DocsEntryMissing> {
+    let Some(want) = entry else { return Ok(()) };
+    if !is_tree {
+        return Ok(());
+    }
+    if docs_entry_present(members, want) {
+        return Ok(());
+    }
+    let mut saw: Vec<String> = members.iter().take(8).cloned().collect();
+    saw.sort();
+    Err(DocsEntryMissing {
+        entry: want.to_string(),
+        saw,
+        members: members.len(),
+    })
+}
+
 /// Documentation carried BY the layer, for the versions the layer pins
 /// (REQ-LAYERDOCS-001).
 ///
@@ -1419,6 +1460,93 @@ binary=\"dup\"\nversion=\"v2\"\nasset=\"b-%T.tar.gz\"\n"
         ))
         .expect_err("must refuse");
         assert!(matches!(e, LayerSpecError::Duplicate { .. }), "{e:?}");
+    }
+
+    /// Every `DocsFormat` helper, for every variant. These survived mutation
+    /// as `true`, `None`, `Some("")` and `"xyzzy"` because nothing asserted
+    /// them directly — they were only ever exercised through code that did not
+    /// care which answer came back.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn every_format_states_what_it_is() {
+        // is_tree decides whether there is an inside to look in at all.
+        assert!(DocsFormat::Html.is_tree());
+        assert!(DocsFormat::Rustdoc.is_tree());
+        assert!(!DocsFormat::Pdf.is_tree());
+        assert!(!DocsFormat::Markdown.is_tree());
+        assert!(!DocsFormat::Reqif.is_tree());
+
+        // A tree becomes a directory, so it names no extension; a single file
+        // must name one, or the export has nothing to call it.
+        assert_eq!(DocsFormat::Html.file_extension(), None);
+        assert_eq!(DocsFormat::Rustdoc.file_extension(), None);
+        assert_eq!(DocsFormat::Pdf.file_extension(), Some("pdf"));
+        assert_eq!(DocsFormat::Markdown.file_extension(), Some("md"));
+        assert_eq!(DocsFormat::Reqif.file_extension(), Some("reqif"));
+
+        // The word a human filters on, and what the signed annotation holds.
+        assert_eq!(DocsFormat::Html.as_str(), "html");
+        assert_eq!(DocsFormat::Rustdoc.as_str(), "rustdoc");
+        assert_eq!(DocsFormat::Pdf.as_str(), "pdf");
+        assert_eq!(DocsFormat::Markdown.as_str(), "markdown");
+        assert_eq!(DocsFormat::Reqif.as_str(), "reqif");
+
+        // A tree never names an extension and a single file always does —
+        // stated as the invariant, so a new variant cannot half-answer.
+        for f in [
+            DocsFormat::Html,
+            DocsFormat::Rustdoc,
+            DocsFormat::Pdf,
+            DocsFormat::Markdown,
+            DocsFormat::Reqif,
+        ] {
+            assert_eq!(
+                f.is_tree(),
+                f.file_extension().is_none(),
+                "{} disagrees with itself about being a tree",
+                f.as_str()
+            );
+            assert!(!f.as_str().is_empty());
+        }
+    }
+
+    /// The staging check, as a decision rather than a branch inside an I/O
+    /// loop. Both directions, because a mutant that inverts it must fail here.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn a_declared_entry_must_be_in_the_payload() {
+        let has: Vec<String> = ["./index.html", "./sub/index.html"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        assert_eq!(check_docs_entry(&has, Some("index.html"), true), Ok(()));
+
+        let e = check_docs_entry(&has, Some("missing.html"), true)
+            .expect_err("a declared entry that is absent must be refused");
+        assert_eq!(e.entry, "missing.html");
+        assert_eq!(e.members, 2);
+        assert!(!e.saw.is_empty(), "the refusal must show what IS there");
+
+        // Nothing claimed, nothing to break.
+        assert_eq!(check_docs_entry(&has, None, true), Ok(()));
+        // A single file has no inside, so an entry on one is not checked here.
+        assert_eq!(check_docs_entry(&has, Some("whatever"), false), Ok(()));
+        // A namesake one directory down does NOT satisfy a root entry —
+        // but only where that directory is CONTENT. With two top-level
+        // directories nothing is stripped, so neither `a/` nor `b/` can
+        // stand in for the root.
+        let two_tops: Vec<String> = ["a/index.html", "b/index.html"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(check_docs_entry(&two_tops, Some("index.html"), true).is_err());
+
+        // With a SINGLE top-level directory the rule is the opposite, and
+        // deliberately so: that is packaging, not content, and upstreams wrap
+        // constantly. Asserted here so the two cases cannot be conflated.
+        let wrapped: Vec<String> = vec!["book-1.0/index.html".to_string()];
+        assert_eq!(check_docs_entry(&wrapped, Some("index.html"), true), Ok(()));
     }
 
     /// The exactness matters and a tail match would not give it. varve's own

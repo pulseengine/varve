@@ -299,6 +299,19 @@ mod tests {
         let mut tar_bytes = Vec::new();
         {
             let mut b = tar::Builder::new(&mut tar_bytes);
+            // An explicit directory member, so `report.dirs` counts something
+            // real. Without one the counter was never incremented and its
+            // mutants survived — a fixture that cannot reach a branch is why
+            // the branch looked tested.
+            {
+                let mut d = tar::Header::new_gnu();
+                d.set_size(0);
+                d.set_mode(0o755);
+                d.set_entry_type(tar::EntryType::Directory);
+                d.set_cksum();
+                b.append_data(&mut d, "./sub/", std::io::empty())
+                    .expect("append dir");
+            }
             for (path, body) in [
                 ("./index.html", "<h1>root</h1>"),
                 ("./eu-ai-act/index.html", "<h1>not the root</h1>"),
@@ -330,6 +343,12 @@ mod tests {
         let report = export(&doc, &dir).expect("exports");
 
         assert_eq!(report.files, 2);
+        // `dirs` had no assertion, so `report.dirs += 1` survived mutation to
+        // `-=` and `*=`. A count nobody reads is a count nobody can trust.
+        assert_eq!(
+            report.dirs, 1,
+            "the tar carries one directory entry (./sub/), and it must be counted"
+        );
         let entry = report.entry_path.expect("names an entry");
         assert!(entry.ends_with("index.html"), "{entry}");
         assert_eq!(
