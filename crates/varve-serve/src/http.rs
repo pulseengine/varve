@@ -91,21 +91,48 @@ pub fn requested_path(request_line: &str) -> Option<String> {
 
 /// Decode `%XX` escapes. rustdoc emits paths with `%20` and friends, and a
 /// page whose name contains a space is otherwise unreachable.
+///
+/// **No hand-rolled index arithmetic**, and this codebase has paid for that
+/// rule twice now. `asset.rs` carries the first telling: a byte cursor whose
+/// `i += 2` `cargo mutants` turned into `i *= 2`, hanging the suite. The first
+/// version of THIS function repeated the shape, and the mutant was worse than
+/// a hang — `i *= 1` never advances while the loop still pushes a byte every
+/// iteration, so the output grows without bound. Locally the 120s timeout
+/// fires first and it reports as a clean TIMEOUT; on a CI runner the memory
+/// goes first and the kernel kills the whole job, which arrives as exit 143
+/// and NO summary at all. A gate that reports nothing is the failure mode this
+/// job exists to avoid.
+///
+/// Splitting on `%` terminates by construction: the iterator is finite and
+/// nothing decides when to advance.
 fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
-            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
+    let mut parts = s.as_bytes().split(|&b| b == b'%');
+    // Everything before the first `%` is literal.
+    if let Some(first) = parts.next() {
+        out.extend_from_slice(first);
+    }
+    for part in parts {
+        // Each remaining part FOLLOWED a `%`, so its first two bytes are the
+        // escape — when there are two, and when they are hex.
+        let decoded = part
+            .get(..2)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match decoded {
+            Some(v) => {
                 out.push(v);
-                i += 3;
-                continue;
+                out.extend_from_slice(&part[2..]);
+            }
+            // Malformed or truncated: keep it verbatim rather than dropping
+            // it. A path that varve cannot decode is still a path that does
+            // not match a page, which is a 404 — silently losing bytes would
+            // make it a DIFFERENT 404.
+            None => {
+                out.push(b'%');
+                out.extend_from_slice(part);
             }
         }
-        out.push(b[i]);
-        i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
 }
@@ -416,8 +443,16 @@ mod tests {
         // A truncated escape at the very end must not read past the string.
         assert_eq!(percent_decode("/a%2"), "/a%2");
         assert_eq!(percent_decode("/a%"), "/a%");
-        // Consecutive escapes, so an off-by-one in the cursor shows up.
+        // Consecutive escapes, so an off-by-one shows up.
         assert_eq!(percent_decode("%41%42%43"), "ABC");
         assert_eq!(percent_decode(""), "");
+        // A literal tail after an escape must survive, and a bare `%` at the
+        // start must not eat the byte after it.
+        assert_eq!(percent_decode("%20tail"), " tail");
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%%41"), "%A");
+        assert_eq!(percent_decode("a%2Fb"), "a/b");
+        // Nothing to decode is returned unchanged rather than rebuilt wrong.
+        assert_eq!(percent_decode("/plain/path.html"), "/plain/path.html");
     }
 }
