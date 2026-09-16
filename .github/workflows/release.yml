@@ -115,6 +115,17 @@ jobs:
         if: matrix.cross
         run: cross build --release --locked --target ${{ matrix.target }} -p varve-producer
 
+      # The viewer ships through the same track, for the same reason. It is a
+      # separate binary precisely so a realm can choose to carry it — and a
+      # realm cannot carry what the release does not publish.
+      - name: Build varve-serve (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p varve-serve
+
+      - name: Build varve-serve (cross)
+        if: matrix.cross
+        run: cross build --release --locked --target ${{ matrix.target }} -p varve-serve
+
       - name: Assert built binary reports the tag version (REQ-RELVER-001)
         # The artifact-level twin of the version-guard job: run the freshly
         # built binary and confirm `--version` == the tag. This is the exact
@@ -156,11 +167,34 @@ jobs:
             exit 1
           fi
 
+      - name: Assert varve-serve reports the tag version (REQ-RELVER-001)
+        # Same oracle, third binary. Enumerating them here rather than trusting
+        # that someone remembers is the same discipline the docs gate applies:
+        # a binary that mis-reports its own version cannot appear in evidence.
+        if: ${{ !matrix.cross }}
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          REPORTED=$("target/${{ matrix.target }}/release/varve-serve" --version | awk '{print $2}')
+          NAME=$("target/${{ matrix.target }}/release/varve-serve" --version | awk '{print $1}')
+          echo "tag=${VERSION#v}  binary --version=$NAME $REPORTED"
+          if [ "$NAME" != "varve-serve" ]; then
+            echo "::error::the viewer reports its name as '$NAME', not varve-serve"
+            exit 1
+          fi
+          if [ "${VERSION#v}" != "$REPORTED" ]; then
+            echo "::error::varve-serve reports '$REPORTED' but the release tag is $VERSION"
+            exit 1
+          fi
+
       - name: Strip binary
         if: ${{ !matrix.cross }}
         run: |
           strip "target/${{ matrix.target }}/release/varve" 2>/dev/null || true
           strip "target/${{ matrix.target }}/release/varve-producer" 2>/dev/null || true
+          strip "target/${{ matrix.target }}/release/varve-serve" 2>/dev/null || true
 
       - name: Package archive
         env:
@@ -192,6 +226,17 @@ jobs:
           tar -czf "$PRODUCER" -C staging-producer .
           echo "PRODUCER_ARCHIVE=$PRODUCER" >> "$GITHUB_ENV"
 
+          # The viewer, in its own archive for the same reason the assembler is
+          # in one: a realm carries it or it does not, and a consumer who wants
+          # only the tool should not be made to take a program that listens on
+          # a socket.
+          VIEWER="varve-serve-${VERSION}-${TARGET}.tar.gz"
+          mkdir -p staging-serve
+          cp "target/${TARGET}/release/varve-serve" staging-serve/
+          cp LICENSE staging-serve/ 2>/dev/null || true
+          tar -czf "$VIEWER" -C staging-serve .
+          echo "VIEWER_ARCHIVE=$VIEWER" >> "$GITHUB_ENV"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: binary-${{ matrix.target }}
@@ -202,6 +247,12 @@ jobs:
         with:
           name: producer-${{ matrix.target }}
           path: ${{ env.PRODUCER_ARCHIVE }}
+          retention-days: 7
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: serve-${{ matrix.target }}
+          path: ${{ env.VIEWER_ARCHIVE }}
           retention-days: 7
 
   # ── Create the GitHub Release: checksums, provenance, signing ─────────
@@ -267,6 +318,17 @@ jobs:
           if [ "$prod_n" -ne "$varve_n" ]; then
             echo "::error::$varve_n varve archives but $prod_n varve-producer \
           archives — a build leg dropped its assembler"
+            exit 1
+          fi
+          # Same count, same reasoning, for the viewer. A realm can only carry
+          # what the release published, and a matrix leg that quietly dropped
+          # one platform's archive would leave the layer unbuildable on that
+          # platform with nothing here saying so.
+          serve_n=$(count release-assets/varve-serve-"${VERSION}"-*.tar.gz)
+          echo "varve-serve archives=$serve_n"
+          if [ "$serve_n" -ne "$varve_n" ]; then
+            echo "::error::$varve_n varve archives but $serve_n varve-serve \
+          archives — a build leg dropped the viewer"
             exit 1
           fi
 

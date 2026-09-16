@@ -602,6 +602,119 @@ grep -qF "records no reason" "$WORK/logs/no-refusal-deposit.log" \
 guard is not the one being credited"; }
 echo "   …and the signing end caught it anyway: proof = \"unverified\" recording no reason"
 
+# ── 8. documentation is carried, and reaches a reader (REQ-LAYERDOCS-001) ────
+# A separate, minimal layer rather than a docs entry bolted onto the fixture
+# above: this exercises the whole path — the deposit gate that REQUIRES a
+# format, the signed annotations, install, and `export-docs` — without making
+# the assembler fixture carry a shape it does not otherwise need.
+#
+# The bundle deliberately contains BOTH `index.html` and `sub/index.html`,
+# because varve's own traceability bundle carries `eu-ai-act/index.html` beside
+# its root page. A resolver that matches the tail of a path serves the wrong
+# one and reports success, so the assertion below reads the CONTENT.
+DOCS_SRC="$WORK/docs-src"
+mkdir -p "$DOCS_SRC/sub"
+printf '<h1>root</h1>\n' > "$DOCS_SRC/index.html"
+printf '<h1>not the root</h1>\n' > "$DOCS_SRC/sub/index.html"
+# COPYFILE_DISABLE: macOS tar otherwise adds AppleDouble `._` sidecars, which are a
+# property of the machine running the gate rather than of anything varve does.
+( cd "$DOCS_SRC" && COPYFILE_DISABLE=1 tar czf "$WORK/handbook.tar.gz" ./index.html ./sub/index.html )
+
+cat > "$WORK/docs-spec.toml" <<SPEC
+layer = "2026.09.9"
+channel = "rolling"
+counter = 99
+
+[[tool]]
+name = "handbook"
+version = "1.0.0"
+path = "$WORK/handbook.tar.gz"
+kind = "docs"
+docs-format = "html"
+docs-entry = "index.html"
+docs-title = "The handbook"
+SPEC
+
+"$VARVE" deposit --spec "$WORK/docs-spec.toml" \
+  --issued-at "$ISSUED_AT" \
+  --key "$WORK/root.key" --key-id systest-deposit-1 \
+  --out "$WORK/docs-layout" \
+  >"$WORK/logs/docs-deposit.log" 2>&1 \
+  || { cat "$WORK/logs/docs-deposit.log"; fail "a docs payload could not be deposited"; }
+
+mkdir -p "$WORK/docs-project"
+printf 'manifest-version = 1\n[toolchain]\nchannel = "rolling"\nlayer = "2026.09.9"\n' \
+  > "$WORK/docs-project/varve.toml"
+( cd "$WORK/docs-project" && PATH="$CLEAN_PATH" "$VARVE" install --from "$WORK/docs-layout" ) \
+  >"$WORK/logs/docs-install.log" 2>&1 \
+  || { cat "$WORK/logs/docs-install.log"; fail "the docs layer did not install"; }
+
+# No --select: one document, and a reader has already said which layer they
+# want by pinning it.
+( cd "$WORK/docs-project" && PATH="$CLEAN_PATH" "$VARVE" export-docs --out "$WORK/docs-export" ) \
+  >"$WORK/logs/export-docs.log" 2>&1 \
+  || { cat "$WORK/logs/export-docs.log"; fail "export-docs failed on a layer carrying one document"; }
+
+[ -f "$WORK/docs-export/index.html" ] \
+  || { find "$WORK/docs-export" -type f; fail "export-docs wrote no index.html"; }
+grep -qF "root" "$WORK/docs-export/index.html" \
+  || fail "the exported entry is not the ROOT page — a tail-matching resolver served sub/index.html"
+grep -qF "not the root" "$WORK/docs-export/sub/index.html" \
+  || fail "the rest of the document did not survive the export"
+grep -qF "start here" "$WORK/logs/export-docs.log" \
+  || { cat "$WORK/logs/export-docs.log"; fail "export-docs did not tell the reader where to start"; }
+echo "   documentation deposited, installed and exported; the entry is the root page"
+
+# The deposit gate must REFUSE a docs payload that does not say what it is —
+# otherwise the layer installs and verifies and the document can never be
+# opened. Same spec, format removed.
+sed '/^docs-format/d' "$WORK/docs-spec.toml" > "$WORK/docs-spec-noformat.toml"
+if "$VARVE" deposit --spec "$WORK/docs-spec-noformat.toml" \
+     --issued-at "$ISSUED_AT" \
+     --key "$WORK/root.key" --key-id systest-deposit-1 \
+     --out "$WORK/docs-layout-bad" >"$WORK/logs/docs-noformat.log" 2>&1
+then
+  fail "a docs payload with no declared format was deposited — it would install, verify, \
+and never be openable"
+fi
+grep -qF "docs-format" "$WORK/logs/docs-noformat.log" \
+  || { cat "$WORK/logs/docs-noformat.log"
+       fail "the deposit was refused, but not for the missing format — the refusal being \
+credited is not the one under test"; }
+echo "   …and a document that does not say what it is cannot be deposited at all"
+
+# The viewer reads the STORE, so it must work on a layer that was never
+# exported. `--check` does everything except bind a port, which is the form a
+# gate can run: it resolves the pin, re-verifies the layer, opens the archive
+# and reports what it would serve.
+(cd "$REPO" && cargo build --release -p varve-serve) >/dev/null 2>&1 \
+  || fail "varve-serve does not build"
+SERVE="$REPO/target/release/varve-serve"
+( cd "$WORK/docs-project" && PATH="$CLEAN_PATH" "$SERVE" --check ) \
+  >"$WORK/logs/serve-check.log" 2>&1 \
+  || { cat "$WORK/logs/serve-check.log"
+       fail "varve-serve could not read the document out of the store"; }
+grep -qF "read from the store, nothing copied" "$WORK/logs/serve-check.log" \
+  || { cat "$WORK/logs/serve-check.log"; fail "varve-serve did not report reading from the store"; }
+grep -qF "entry: index.html" "$WORK/logs/serve-check.log" \
+  || { cat "$WORK/logs/serve-check.log"; fail "varve-serve did not resolve the declared entry"; }
+# 2 pages went in; both must be readable without an export having happened.
+grep -qE "2 page\(s\)" "$WORK/logs/serve-check.log" \
+  || { cat "$WORK/logs/serve-check.log"; fail "varve-serve did not index every page"; }
+echo "   the viewer reads the same document out of the store, with nothing exported"
+
+# A layer carrying no documentation must say so plainly rather than fail
+# obscurely — the first project in this gate is exactly that case.
+if ( cd "$WORK/project" && PATH="$CLEAN_PATH" "$SERVE" --check ) \
+     >"$WORK/logs/serve-nodocs.log" 2>&1
+then
+  fail "varve-serve reported success on a layer that carries no documentation"
+fi
+grep -qF "carries no documentation" "$WORK/logs/serve-nodocs.log" \
+  || { cat "$WORK/logs/serve-nodocs.log"
+       fail "the no-documentation case failed, but not with the message that explains it"; }
+echo "   …and a layer with no documentation says so, rather than failing obscurely"
+
 echo "== deposit-layer systest: PASS — layer assembled (cosign-signed AND attested upstreams), \
 deposited, installed, verified and exported; an unproven upstream is refused with the fork named, \
 a reasoned opt-in is recorded in the layer, and the gate goes red when either guard is removed"

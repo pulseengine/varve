@@ -1,5 +1,140 @@
 # Changelog
 
+## v0.35.0 — 2026-09-16
+
+*A layer carries its documentation, and a reader does not pay for a copy.*
+
+A layer pins exact versions and, until now, said nothing about how to use them.
+Tools that embed their own documentation answer for themselves. This release is
+for the documentation **nothing can be asked for** — the handbook, the
+traceability report, the rustdoc for a crate consumed air-gapped.
+
+| | before | now |
+|---|---|---|
+| documentation for a pinned toolchain | not carried at all | a verified payload with a declared format |
+| what a document IS | inferred from a file name, if at all | declared, and signed into the manifest |
+| where a reader starts | whichever `index.html` looked right | declared, and checked at deposit |
+| reading it | export a copy, then serve it yourself | `varve-serve`, copying nothing |
+
+### Not a new idea, and worth saying so
+
+`criticalup doc` shipped in January 2025 and `ferrocene-docs-xxx` installs as a
+first-class package beside the compiler. **Documentation as a pinned,
+version-matching payload is not a category varve invents**, and no claim of
+novelty is made here. What is arguably ours is narrower: a declared format and
+entry point as manifest metadata (no precedent found either way — unproven
+rather than established), OCI as the substrate, documentation reachable without
+a customer login, and multi-tool realms, which criticalup rules out.
+
+The ergonomics were worth copying outright: `criticalup doc` takes no arguments.
+With one document, neither `varve-serve` nor `varve export-docs` needs a
+selector — a reader has already said which layer they want by pinning it, and
+asking again is asking twice. With several, both refuse rather than guess, and
+name what the layer carries.
+
+### Declared, never sniffed
+
+`format` is `html | rustdoc | pdf | markdown | reqif`, stated by the manifest
+and signed into the layer. An extension-based guess is right almost always,
+which is exactly what makes the one wrong case arrive as a puzzle rather than an
+error — and the format is what decides how a document is opened. An unknown
+format is refused, naming the bad value.
+
+`rustdoc` is its own format rather than `html`: generated instead of authored,
+versioned with the crate it documents, and answering a different question. "Show
+me the API" is not "show me the handbook", which only works if they are
+different values to filter on.
+
+The **entry point is declared too, and verified at deposit** — it travels as the
+plan's `contains`, so a manifest naming an entry the payload lacks fails while
+it can still be fixed, rather than as a reader's 404. The bytes would hash and
+verify perfectly on the way to that 404, because what is wrong is content, not
+integrity.
+
+### Reading costs nothing
+
+The store keeps the archive exactly as published and never unpacks it: the
+stored bytes must stay identical to what the signature covers, or `varve verify`
+cannot re-derive the digest. So the saving is on the read path. `varve-serve`
+reads one file out of the archive in place — nothing written, nothing
+duplicated, and nothing to go stale when the pin moves. `varve export-docs`
+remains for when a copy on disk is genuinely wanted, and costs space only then.
+
+### `varve-serve` — a third binary, deliberately
+
+`varve` decides whether a toolchain can be trusted. Giving it a listening socket
+would widen the surface of exactly the thing whose smallness is the argument. So
+the viewer ships beside it — one repository, one release, one signature — and a
+realm carries it or does not.
+
+Two properties are structural rather than careful:
+
+- **Path traversal is impossible, not prevented.** Pages are held in memory,
+  read once at startup; nothing opens a file in response to a request.
+  `/../../etc/passwd` is simply not a page in the document. A test asserts it,
+  so a later change to serving from disk must break that test first.
+- **Loopback only.** `127.0.0.1`, with no flag to change it.
+
+Its security topic states the uncomfortable part outright, because someone
+deciding whether to run a listening process is owed it: a document is not inert
+data. HTML and JavaScript are executed by a browser from a more trusted origin
+than a website. varve verifies the bytes are the ones the realm signed and
+cannot verify what they do — and today one flat root signs both the document and
+the compiler (varve#148).
+
+### What mutation testing changed
+
+Not a test — the design. The first cut of the viewer put the request decision
+and the socket writing in one function, and `cargo mutants` missed **19 of 51**:
+every mutant inside it survived, because nothing could call it without opening a
+socket. Extracting the decision into a pure `resolve_request` took that to zero,
+and immediately exposed a real inconsistency — `Resolution::Page` carried
+`/a/b.css` for a named page and `index.html` for the entry, two spellings of one
+thing, fixed in the code rather than worked around in the test.
+
+The crate is lib+bin for the same reason: the gate's kill criteria are
+`--workspace --lib`, so logic in a binary crate is unreachable by any mutant.
+`http.rs` is the only file in the workspace that parses input arriving over a
+socket, so it lives in the library and is gated.
+
+### The gates that caught this work
+
+Four fired on changes nobody planted, which is the first time that has happened
+at this rate:
+
+- the **docs-coverage** gate demanded a topic for `export-docs`;
+- **mutation-scope** refused each new source file until it was gated or declared;
+- **REQ-SYSTEST-002** refused to let a new export adapter ship without a system
+  test — and that system test then failed immediately on a real defect;
+- the **shipped-binary** gate required `varve-serve` to carry its own
+  documentation gate, which in turn had to enumerate flags rather than
+  subcommands, because a subcommand-shaped gate on a binary with none would pass
+  unconditionally.
+
+That system-test failure is the one worth repeating. `safe_member_path` refused
+any path beginning `./` — but that is how GNU tar writes a member when the
+archive is made from `.`, and **varve's own traceability bundle is entirely
+`./index.html`, `./_assets/…`**. So `export-docs` would have failed on the first
+real artifact it was pointed at, and `export-sdk` carried the same latent defect.
+Every unit test missed it for one repeatable reason: they built member lists by
+hand, and nobody writes `./` by hand.
+
+### Falsification
+
+```sh
+# a document is carried, installed and readable — end to end, against a real layer
+tools/systest/deposit-layer.sh
+
+# the viewer reads the store with nothing exported
+varve-serve --check
+
+# `./x` is tar convention; `./../x` is still an escape
+cargo test -p varve-core --lib safe_path_probe
+
+# both renderings of `inspect` report the same documents
+cargo test -p varve --bin varve both_renderings_report_the_same_documents
+```
+
 ## v0.34.3 — 2026-09-10
 
 *Two releases never reached crates.io, and the gate that knew ran too late.*

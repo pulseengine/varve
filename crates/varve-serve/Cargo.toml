@@ -1,0 +1,19 @@
+[package]
+name = "varve-serve"
+description = "Read the documentation a varve layer carries, straight out of the verified store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version = "1.89"
+publish = false
+
+# Deliberately thin. This binary listens on a socket, which is a surface varve
+# itself does not have and should not grow — that is the whole reason it is a
+# separate program (varve#148). Every dependency here is one more thing inside
+# a process that accepts connections, so the HTTP handling is written against
+# `std::net` rather than pulling in a framework.
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+varve-core.workspace = true
