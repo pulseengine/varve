@@ -683,6 +683,38 @@ grep -qF "docs-format" "$WORK/logs/docs-noformat.log" \
 credited is not the one under test"; }
 echo "   …and a document that does not say what it is cannot be deposited at all"
 
+# The viewer reads the STORE, so it must work on a layer that was never
+# exported. `--check` does everything except bind a port, which is the form a
+# gate can run: it resolves the pin, re-verifies the layer, opens the archive
+# and reports what it would serve.
+(cd "$REPO" && cargo build --release -p varve-serve) >/dev/null 2>&1 \
+  || fail "varve-serve does not build"
+SERVE="$REPO/target/release/varve-serve"
+( cd "$WORK/docs-project" && PATH="$CLEAN_PATH" "$SERVE" --check ) \
+  >"$WORK/logs/serve-check.log" 2>&1 \
+  || { cat "$WORK/logs/serve-check.log"
+       fail "varve-serve could not read the document out of the store"; }
+grep -qF "read from the store, nothing copied" "$WORK/logs/serve-check.log" \
+  || { cat "$WORK/logs/serve-check.log"; fail "varve-serve did not report reading from the store"; }
+grep -qF "entry: index.html" "$WORK/logs/serve-check.log" \
+  || { cat "$WORK/logs/serve-check.log"; fail "varve-serve did not resolve the declared entry"; }
+# 2 pages went in; both must be readable without an export having happened.
+grep -qE "2 page\(s\)" "$WORK/logs/serve-check.log" \
+  || { cat "$WORK/logs/serve-check.log"; fail "varve-serve did not index every page"; }
+echo "   the viewer reads the same document out of the store, with nothing exported"
+
+# A layer carrying no documentation must say so plainly rather than fail
+# obscurely — the first project in this gate is exactly that case.
+if ( cd "$WORK/project" && PATH="$CLEAN_PATH" "$SERVE" --check ) \
+     >"$WORK/logs/serve-nodocs.log" 2>&1
+then
+  fail "varve-serve reported success on a layer that carries no documentation"
+fi
+grep -qF "carries no documentation" "$WORK/logs/serve-nodocs.log" \
+  || { cat "$WORK/logs/serve-nodocs.log"
+       fail "the no-documentation case failed, but not with the message that explains it"; }
+echo "   …and a layer with no documentation says so, rather than failing obscurely"
+
 echo "== deposit-layer systest: PASS — layer assembled (cosign-signed AND attested upstreams), \
 deposited, installed, verified and exported; an unproven upstream is refused with the fork named, \
 a reasoned opt-in is recorded in the layer, and the gate goes red when either guard is removed"
