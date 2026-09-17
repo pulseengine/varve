@@ -180,8 +180,8 @@ fn every_crate_loop_in_the_release_names_the_same_crates() {
         .collect();
     assert_eq!(
         loops.len(),
-        2,
-        "expected the copy loop and the identity loop: {loops:?}"
+        3,
+        "expected the copy loop, the rustdoc loop and the identity loop: {loops:?}"
     );
     for l in &loops {
         assert_eq!(
@@ -190,4 +190,44 @@ fn every_crate_loop_in_the_release_names_the_same_crates() {
             "a crate loop disagrees with the package step"
         );
     }
+}
+
+/// Each published crate's API documentation ships beside it, as a `rustdoc`
+/// docs payload a layer can carry (REQ-LAYERDOCS-001). Before the sums, like
+/// every asset the signature has to cover.
+///
+/// One archive per crate, not one for the workspace: a docs payload is to name
+/// the crate it documents, and a bundle of two crates documents neither. Each
+/// crate is built into its own target directory, because `target/doc` is
+/// shared and a second `cargo doc` would sweep the first crate into its tarball.
+// rivet: partially-verifies REQ-LAYERDOCS-001
+#[test]
+fn each_published_crate_ships_its_rustdoc_before_the_sums() {
+    let w = read(".github/workflows/release.yml");
+    let doc = w
+        .find("- name: Build the API documentation (rustdoc)")
+        .expect("no rustdoc step");
+    let sums = w
+        .find("- name: Generate SHA256 checksums")
+        .expect("the checksum step is gone");
+    assert!(
+        doc < sums,
+        "rustdoc is built after the sums, so nothing signs it"
+    );
+    let step = &w[doc..sums];
+    assert!(step.contains("cargo doc --no-deps --locked"), "{step}");
+    assert!(
+        step.contains(r#"--target-dir "target/rustdoc-$c""#),
+        "crates share a doc directory, so one tarball carries another's pages:\n{step}"
+    );
+    assert!(
+        step.contains(r#"release-assets/${c}-${BARE}-rustdoc.tar.gz"#),
+        "the rustdoc archive never reaches the release assets:\n{step}"
+    );
+    // The entry a layer.toml will declare must exist, or the deposit refuses
+    // it later in someone else's repository.
+    assert!(
+        step.contains("index.html"),
+        "the entry point is not checked:\n{step}"
+    );
 }

@@ -497,6 +497,50 @@ jobs:
           done
           ls -la release-assets/*.crate
 
+      # Each published crate's API documentation, as a `rustdoc` docs payload a
+      # layer can carry beside the crate (REQ-LAYERDOCS-001). Before the sums,
+      # so the signature covers it.
+      #
+      # tar.gz, not zip. Measured 2026-09-17: varve and varve-core document to
+      # 16 MB in 811 files, 3.7 MB compressed, and decompressing all of it takes
+      # about 10 ms — varve-serve does that once at start. Zip's random access
+      # pays off for a document of hundreds of megabytes; at this size it would
+      # only add a dependency to a verification binary.
+      #
+      # One archive per crate, each built in its own target directory: target/doc
+      # is shared, so a second `cargo doc` would sweep the first crate's pages
+      # into its tarball. The entry is checked here because a layer.toml will
+      # declare it, and a missing entry is otherwise found by a deposit in
+      # someone else's repository.
+      - name: Build the API documentation (rustdoc)
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          BARE="${VERSION#v}"
+          for c in varve-core varve; do
+            cargo doc --no-deps --locked -p "$c" --target-dir "target/rustdoc-$c"
+            doc="target/rustdoc-$c/doc"
+            entry="${c//-/_}/index.html"
+            if [ ! -f "$doc/$entry" ]; then
+              echo "::error::rustdoc for $c has no $entry"
+              exit 1
+            fi
+            # `*` and not `.`: rustdoc leaves a `.lock` in the doc directory,
+            # and a leading `./` on every member would make the entry
+            # `./varve_core/index.html` rather than the path a manifest names.
+            ( cd "$doc" && tar -czf "$GITHUB_WORKSPACE/release-assets/${c}-${BARE}-rustdoc.tar.gz" * )
+            # Listed to a file, not piped: `grep -q` exits at the first match,
+            # tar then dies of SIGPIPE, and pipefail fails a correct archive.
+            tar -tzf "release-assets/${c}-${BARE}-rustdoc.tar.gz" > "$RUNNER_TEMP/members-$c"
+            if ! grep -qx "$entry" "$RUNNER_TEMP/members-$c"; then
+              echo "::error::${c}-${BARE}-rustdoc.tar.gz does not contain $entry"
+              exit 1
+            fi
+          done
+          ls -la release-assets/*-rustdoc.tar.gz
+
       - name: Generate SHA256 checksums
         run: |
           set -euo pipefail
