@@ -1,0 +1,68 @@
+# Dependency updates, configured so there is nothing to keep in step by hand.
+#
+# The previous attempt (varve#2) enumerated crate directories — `/`,
+# `/crates/varve-core`, `/crates/varve` — and was already wrong when it was
+# opened: `varve-producer` had shipped and was missing. A hand-maintained list
+# of crates is the drift this repository gates against everywhere else, so this
+# does not keep one.
+#
+# GROUPED, after the first run proved it necessary. Ungrouped, the first run
+# opened eight PRs at once. This repository's ruleset requires a branch to be
+# current before it merges, and its CI runs 30-40 minute mutation shards — so
+# every merge knocked the remaining seven out of date and restarted all of their
+# CI. Eight serial cycles is most of a day of runners for one week's updates.
+#
+# Minor and patch updates are therefore grouped into ONE PR per ecosystem.
+# MAJOR updates are deliberately left ungrouped, one PR each: a breaking change
+# needs its own reading, and bundling it beside twenty patch bumps is how it
+# gets approved without one.
+version: 2
+updates:
+  # ONE entry for the workspace. varve is a Cargo workspace with a single root
+  # Cargo.lock; per-crate entries would raise duplicate and conflicting PRs
+  # against that one lockfile, and would need adding to whenever a crate is.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # The one that actually matters here. Every workflow pins its actions by full
+  # commit SHA — `actions/checkout@3d3c42e5…` — which is the right thing for a
+  # repository whose subject is supply-chain integrity, and which means they go
+  # stale SILENTLY: there is no version constraint anywhere for anything to
+  # notice. Dependabot understands the SHA-plus-comment form and keeps it
+  # pinned while moving it forward.
+  #
+  # READ BEFORE MERGING AN ACTIONS MAJOR. A green PR is weaker evidence here
+  # than for a crate, and for two actions it is no evidence at all:
+  #
+  #   - `setup-oras` is used ONLY by deposit-layer.yml, which runs only on
+  #     workflow_dispatch. PR CI never executes it.
+  #   - `cosign-installer` is exercised on PRs by ci.yml, but its SIGNING use
+  #     lives in release.yml, which runs on a tag. A green PR proves the
+  #     installer installs, not that `cosign sign-blob` still works — and a
+  #     release is the point of no return (varve v0.34.3 is the record of what
+  #     a check that can only speak after the tag costs).
+  #
+  # So a major bump to either needs its release or deposit path exercised
+  # deliberately before it lands, not a green tick on a pipeline that never
+  # reached it.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch
