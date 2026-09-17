@@ -1,4 +1,4 @@
-# varve verify [--all] [--export DIR]...
+# varve verify [--all] [--export DIR]... [--timing]
 
 Re-checks the pinned layer offline — or every installed layer with `--all`.
 
@@ -58,3 +58,32 @@ varve verify
 `--lockfile FILE` also checks a project's Cargo lockfile against the pinned layer's `crate` entries. A package the layer pins must resolve to the same version, and to the same bytes when both record a checksum; a disagreement fails verify. Packages the layer does not pin are ignored — the layer never claimed to cover every dependency.
 
 The boundary is deliberate: varve cannot intercept a Cargo build and cannot guarantee the compiler used the bytes it pins. Provenance for a dependency compiled *into* your artifact is by **asserted agreement** — the lockfile and the layer must say the same thing, mechanically — not by dispatch (REQ-LOCKPIN-001).
+
+## `--timing` — where the time went
+
+```sh
+varve verify --timing
+# timing 2026.09.4: 13 payload(s), 2048.0 MiB — read 0.612 s (3.27 GiB/s),
+#   hash 0.951 s (2.10 GiB/s), signature 0.000 s, manifest 0.001 s;
+#   verify does not decompress
+```
+
+Printed on **stderr**, always, and it changes nothing about what is checked:
+every payload is still digested in full, the verdict and the exit code are the
+same, and stdout is untouched so anything parsing verify keeps working
+(REQ-VERIFYSTREAM-001 clause 3).
+
+It exists because "verify is slow" was answered once with a plan to parallelise
+the hash, and the arithmetic said the hash could not be the cost. The stages are
+now attributed on the real path, so the next change is chosen from a
+measurement.
+
+There is no decompress line. A payload is hashed exactly as its producer signed
+it — that is what makes the digest re-derivable — so an archive is never
+decompressed here, and printing `decompress 0.000 s` would imply a stage that
+had been measured and found free.
+
+Read time is where a cold cache shows up: the same layer verified twice in a row
+reports a much faster read the second time, because the first run left the pages
+in memory. A measurement that matters — is the disk the wall, or the hash? — has
+to say which of the two it was.

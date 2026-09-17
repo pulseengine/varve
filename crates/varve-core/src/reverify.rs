@@ -56,6 +56,27 @@ fn named(entry: &crate::manifest::ManifestEntry, name: &str) -> String {
     }
 }
 
+/// Where `verify` spent its time (REQ-VERIFYSTREAM-001 clause 2).
+///
+/// Attributed by stage so the NEXT change is chosen from a measurement. The
+/// report that started this (varve#141: ~9 s on a layer with a 2 GB SDK) was
+/// answered once with a guess about parallelising the hash, and the arithmetic
+/// said the hash could not be the cost. This is what settles such a question.
+///
+/// No `decompress` stage exists because verify does not decompress: a payload
+/// is hashed exactly as signed, which is what keeps the digest re-derivable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VerifyTiming {
+    /// Verifying the retained DSSE envelope against the trust root.
+    pub signature: std::time::Duration,
+    /// Reading and parsing `layer.json`, and comparing it with the payload.
+    pub manifest: std::time::Duration,
+    /// The payloads: read and hash, summed, with the total bytes.
+    pub payloads: crate::store::StageTiming,
+    /// How many payloads were digested — the denominator for a per-payload rate.
+    pub checked: usize,
+}
+
 /// Re-verify one installed layer against the trust root. Returns the number
 /// of tool binaries checked.
 pub fn verify_installed(
@@ -64,6 +85,21 @@ pub fn verify_installed(
     verifier: &dyn ManifestVerifier,
     platform: &str,
 ) -> Result<usize, ReverifyError> {
+    verify_installed_timed(store, layer, verifier, platform).map(|(checked, _)| checked)
+}
+
+/// [`verify_installed`], reporting where the time went.
+///
+/// The timing rides on the real verification path — the same function every
+/// caller uses — because a number measured by a separate copy of the code is a
+/// number about the copy.
+pub fn verify_installed_timed(
+    store: &Store,
+    layer: &InstalledLayer,
+    verifier: &dyn ManifestVerifier,
+    platform: &str,
+) -> Result<(usize, VerifyTiming), ReverifyError> {
+    let mut timing = VerifyTiming::default();
     let io = |path: &std::path::Path, source: std::io::Error| ReverifyError::Io {
         path: path.display().to_string(),
         source,
@@ -80,9 +116,12 @@ pub fn verify_installed(
         }
         Err(e) => return Err(io(&envelope_path, e)),
     };
+    let t = std::time::Instant::now();
     let payload = verifier.verify(&envelope)?;
+    timing.signature = t.elapsed();
 
     // 2. The verified payload must be byte-identical to the stored manifest.
+    let t = std::time::Instant::now();
     let manifest_path = layer.root.join("layer.json");
     let stored = std::fs::read(&manifest_path).map_err(|e| io(&manifest_path, e))?;
     if payload != stored {
@@ -91,6 +130,7 @@ pub fn verify_installed(
 
     // 3. Every tool the signed manifest names must be present and unaltered.
     let manifest = LayerManifest::parse(&payload)?;
+    timing.manifest = t.elapsed();
     let mut checked = 0;
     for entry in &manifest.entries {
         if !crate::platform::entry_matches(
@@ -121,7 +161,8 @@ pub fn verify_installed(
         // Streamed, in bounded memory (REQ-VERIFYSTREAM-001). The bytes are
         // only ever needed to HASH here, so reading a 2 GB SDK whole to do it
         // was a 2 GB allocation per payload for nothing (varve#141).
-        let found = crate::store::digest_file(&path).map_err(|e| io(&path, e))?;
+        let (found, stage) = crate::store::digest_file_timed(&path).map_err(|e| io(&path, e))?;
+        timing.payloads.add(stage);
         if found != entry.digest {
             return Err(ReverifyError::ToolDigestMismatch {
                 tool: named(entry, tool),
@@ -130,7 +171,8 @@ pub fn verify_installed(
         }
         checked += 1;
     }
-    Ok(checked)
+    timing.checked = checked;
+    Ok((checked, timing))
 }
 
 #[cfg(test)]

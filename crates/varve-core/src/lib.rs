@@ -105,7 +105,7 @@ pub use referrers::{
 };
 pub use registry::{RegistryRef, RegistrySource};
 pub use resolve::{ResolveError, Resolved, RunnerContract, resolve};
-pub use reverify::{ReverifyError, verify_installed};
+pub use reverify::{ReverifyError, VerifyTiming, verify_installed, verify_installed_timed};
 pub use rollback::{HighWaterMarks, RollbackError, RollbackVerdict, staleness_warning};
 pub use sdkexport::{
     ANN_SDK_PREFIX, Member, MemberBody, Relocation, SdkExportError, SdkExportReport,

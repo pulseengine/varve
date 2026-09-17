@@ -101,6 +101,12 @@ enum Cmd {
         /// stale vendored tree cannot slip through.
         #[arg(long = "export", value_name = "DIR")]
         export: Vec<PathBuf>,
+        /// Report where verify spent its time — read, hash, signature,
+        /// manifest — on STDERR (REQ-VERIFYSTREAM-001 clause 2). Nothing is
+        /// checked differently; this only says where the time went, so the
+        /// next optimisation is chosen from a measurement rather than a guess.
+        #[arg(long)]
+        timing: bool,
     },
     /// Extract the core: export an installed layer as a directory-shaped
     /// OCI image layout — the offline artifact of record.
@@ -679,7 +685,8 @@ fn run() -> anyhow::Result<Outcome> {
             all,
             export,
             lockfile,
-        } => verify(&store, all, &export, lockfile.as_deref()),
+            timing,
+        } => verify(&store, all, &export, lockfile.as_deref(), timing),
         Cmd::Archive {
             layer,
             dest,
@@ -3500,6 +3507,7 @@ fn verify(
     all: bool,
     exports: &[PathBuf],
     lockfile: Option<&std::path::Path>,
+    timing: bool,
 ) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
     let verifier = ctx_verifier(&ctx)?;
@@ -3511,15 +3519,22 @@ fn verify(
         // layer in another realm passed with exit 0 (varve#84). The realm
         // boundary is preserved in WHICH KEY verifies WHAT, not in what gets
         // looked at.
-        return verify_every_partition(&ctx);
+        return verify_every_partition(&ctx, timing);
     }
     let layers = vec![varve_core::resolve(&ctx.pin, store)?.layer];
     if layers.is_empty() {
         bail!("nothing to verify — no layers installed");
     }
     for layer in layers {
-        let checked =
-            varve_core::verify_installed(store, &layer, &verifier, &varve_core::host_platform())?;
+        let (checked, spent) = varve_core::verify_installed_timed(
+            store,
+            &layer,
+            &verifier,
+            &varve_core::host_platform(),
+        )?;
+        if timing {
+            report_timing(&layer.layer.to_string(), &spent);
+        }
         println!(
             "layer {} {} verified: signature OK, {checked} tool(s) match their signed digests",
             layer.layer, layer.digest
@@ -3559,6 +3574,42 @@ fn verify(
     Ok(())
 }
 
+/// Where verify spent its time, on STDERR (REQ-VERIFYSTREAM-001 clause 2).
+///
+/// stderr, not stdout: a verdict is what a caller parses, and clause 3 forbids
+/// making verify's machine-readable output depend on whether someone asked for
+/// a measurement.
+///
+/// Reported as rates as well as totals, because "read took 0.9 s" is not
+/// actionable while "read ran at 2.2 GiB/s" says at once whether the disk is
+/// the wall. There is no decompress line: verify hashes each payload exactly as
+/// signed, so there is nothing to decompress, and printing a zero would suggest
+/// a stage that had been measured and found free.
+fn report_timing(layer: &str, t: &varve_core::VerifyTiming) {
+    let rate = |bytes: u64, d: std::time::Duration| {
+        let secs = d.as_secs_f64();
+        if secs <= 0.0 || bytes == 0 {
+            return "-".to_string();
+        }
+        format!(
+            "{:.2} GiB/s",
+            bytes as f64 / secs / (1024.0 * 1024.0 * 1024.0)
+        )
+    };
+    let mib = t.payloads.bytes as f64 / (1024.0 * 1024.0);
+    eprintln!(
+        "timing {layer}: {} payload(s), {mib:.1} MiB — read {:.3} s ({}), hash {:.3} s ({}), \
+         signature {:.3} s, manifest {:.3} s; verify does not decompress",
+        t.checked,
+        t.payloads.read.as_secs_f64(),
+        rate(t.payloads.bytes, t.payloads.read),
+        t.payloads.hash.as_secs_f64(),
+        rate(t.payloads.bytes, t.payloads.hash),
+        t.signature.as_secs_f64(),
+        t.manifest.as_secs_f64(),
+    );
+}
+
 /// `varve verify --all` (REQ-VERIFYALL-001): walk EVERY partition in the store.
 ///
 /// Three properties this must have, each of which the old version lacked:
@@ -3569,7 +3620,7 @@ fn verify(
 ///   * every failure is reported, with layer id AND path, and the scope
 ///     actually covered is printed. It was fail-fast and in one observed run
 ///     the only layer id on screen belonged to a different, healthy layer.
-fn verify_every_partition(ctx: &ProjectCtx) -> anyhow::Result<()> {
+fn verify_every_partition(ctx: &ProjectCtx, timing: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("cannot determine working directory")?;
     // fingerprint -> (realm name, verifier). A partition whose realm is not
     // defined here cannot be checked, and is REPORTED rather than skipped: an
@@ -3619,7 +3670,14 @@ fn verify_every_partition(ctx: &ProjectCtx) -> anyhow::Result<()> {
                 ));
                 continue;
             };
-            match varve_core::verify_installed(&part, &layer, *verifier, &host) {
+            match varve_core::verify_installed_timed(&part, &layer, *verifier, &host).map(
+                |(checked, spent)| {
+                    if timing {
+                        report_timing(&layer.layer.to_string(), &spent);
+                    }
+                    checked
+                },
+            ) {
                 Ok(n) => {
                     checked_layers += 1;
                     println!(
