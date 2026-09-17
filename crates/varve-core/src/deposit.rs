@@ -249,6 +249,41 @@ pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositErr
     toml::from_str(toml_text).map_err(|e| DepositError::Spec(e.to_string()))
 }
 
+impl SpecTool {
+    /// The payload this spec entry describes, with its bytes read from `base`.
+    ///
+    /// The ONE conversion from a spec file to what `deposit` signs. It used to
+    /// live inline in the CLI, which left the producer's own tests unable to
+    /// run the path a spec it wrote would actually take — and a producer that
+    /// wrote no `kind` and no `docs-format` for a document went unnoticed,
+    /// because every test of the deposit fed it a hand-written spec.
+    pub fn into_deposit_tool(self, base: &Path) -> Result<DepositTool, DepositError> {
+        let path = base.join(&self.path);
+        let bytes = std::fs::read(&path).map_err(|e| {
+            DepositError::Spec(format!("cannot read tool binary {}: {e}", path.display()))
+        })?;
+        let kind = self
+            .kind
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|e: crate::kind::UnknownKind| DepositError::Spec(e.to_string()))?;
+        Ok(DepositTool {
+            name: self.name,
+            version: self.version,
+            platform: self.platform,
+            bytes,
+            source: self.source,
+            runner: self.runner,
+            kind,
+            sdk_prefix: self.sdk_prefix,
+            docs_format: self.docs_format,
+            docs_entry: self.docs_entry,
+            docs_title: self.docs_title,
+        })
+    }
+}
+
 impl From<crate::archive::LayoutWriteError> for DepositError {
     fn from(e: crate::archive::LayoutWriteError) -> Self {
         match e {

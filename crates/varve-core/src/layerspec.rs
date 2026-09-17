@@ -335,6 +335,37 @@ pub struct ManifestDocs {
     pub release: Option<String>,
 }
 
+/// A Rust crate carried BY the layer, as the `.crate` file a release publishes
+/// (REQ-CRATEPAYLOAD-001).
+///
+/// Held, never dispatched: `varve run` on a `.crate` was never meaningful. The
+/// consumer half already exists — `export-cargo`, `export-crates-vendor` and
+/// `export-bazel-distdir` read `crate` payloads — and this is what lets a realm
+/// declare one at all.
+///
+/// Ingested from a RELEASE ASSET, not from crates.io, so a crate is proven the
+/// way every other payload of that release is. The bytes are the ones crates.io
+/// serves: `cargo package` is reproducible, and varve's own release checks the
+/// released `.crate` against the index `cksum` on every tag.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestCrate {
+    /// The crate's name — what `Cargo.toml` depends on.
+    pub name: String,
+    /// The crate's own version, bare (`0.36.0`), as the registry index spells it.
+    pub version: String,
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Asset template; defaults to `<name>-%V.crate`, which is what
+    /// `cargo package` writes.
+    #[serde(default)]
+    pub asset: Option<String>,
+    /// The release tag to fetch, when it differs from the version — varve tags
+    /// `v0.36.0` and publishes the crate as `0.36.0`.
+    #[serde(rename = "release", default)]
+    pub release: Option<String>,
+}
+
 /// The whole manifest. `deny_unknown_fields` throughout is load-bearing: a
 /// mistyped `verison = "v0.34.0"` would otherwise leave the real `version`
 /// missing or stale, and the layer would ship the wrong release under a good
@@ -350,6 +381,8 @@ pub struct LayerManifest {
     pub vsix: Vec<ManifestVsix>,
     #[serde(default, rename = "docs")]
     pub docs: Vec<ManifestDocs>,
+    #[serde(default, rename = "crate")]
+    pub crates: Vec<ManifestCrate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

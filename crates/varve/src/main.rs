@@ -2901,28 +2901,7 @@ fn deposit_cmd(
         let base = spec_path.parent().unwrap_or(std::path::Path::new("."));
         let mut deposit_tools = Vec::new();
         for tool in file_spec.tools {
-            let path = base.join(&tool.path);
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("cannot read tool binary {}", path.display()))?;
-            let kind = tool
-                .kind
-                .as_deref()
-                .map(str::parse)
-                .transpose()
-                .map_err(|e: varve_core::UnknownKind| anyhow::anyhow!(e.to_string()))?;
-            deposit_tools.push(varve_core::DepositTool {
-                name: tool.name,
-                version: tool.version,
-                platform: tool.platform,
-                bytes,
-                source: tool.source,
-                runner: tool.runner,
-                kind,
-                sdk_prefix: tool.sdk_prefix,
-                docs_format: tool.docs_format,
-                docs_entry: tool.docs_entry,
-                docs_title: tool.docs_title,
-            });
+            deposit_tools.push(tool.into_deposit_tool(base)?);
         }
         let includes = file_spec
             .includes

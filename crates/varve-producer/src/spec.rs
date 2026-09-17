@@ -45,6 +45,14 @@ pub struct ToolOut {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// What a `docs` payload IS, and where a reader starts — the fields
+    /// `varve deposit` requires of a document and signs into the manifest.
+    #[serde(rename = "docs-format", skip_serializing_if = "Option::is_none")]
+    pub docs_format: Option<String>,
+    #[serde(rename = "docs-entry", skip_serializing_if = "Option::is_none")]
+    pub docs_entry: Option<String>,
+    #[serde(rename = "docs-title", skip_serializing_if = "Option::is_none")]
+    pub docs_title: Option<String>,
     pub source: SourceOut,
 }
 
@@ -121,6 +129,9 @@ mod tests {
             platform: Some("aarch64-apple-darwin".into()),
             path: "tools/rivet-aarch64-apple-darwin".into(),
             kind: None,
+            docs_format: None,
+            docs_entry: None,
+            docs_title: None,
             source: src(),
         }
     }

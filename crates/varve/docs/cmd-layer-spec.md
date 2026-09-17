@@ -56,12 +56,44 @@ name    = "rivet-sdlc"
 repo    = "pulseengine/rivet"
 version = "v0.34.0"
 asset   = "rivet-sdlc-%V.vsix"
+
+[[docs]]
+name    = "varve-trace"
+repo    = "pulseengine/varve"
+version = "0.36.0"
+release = "v0.36.0"
+format  = "reqif"            # html | rustdoc | pdf | markdown | reqif
+asset   = "varve-%V-traceability.reqif"
+
+[[crate]]
+name    = "varve-core"
+repo    = "pulseengine/varve"
+version = "0.36.0"           # the crate's version, as the registry index spells it
+release = "v0.36.0"          # the tag; asset defaults to varve-core-%V.crate
 ```
 
 `repo` defaults to `pulseengine/<name>`, `binary` to `<name>`, `layout` to
 `tarball`. In an `asset` template `%V` is the bare version, `%T` a Rust target
 triple, `%U` a short upstream platform tag, and `%P` a VS Code platform tag; a
 `vsix` template with no `%P` is one portable package.
+
+A `[[docs]]` entry is documentation the layer carries for the versions it pins;
+its `format` is signed into the layer and decides how `varve export-docs` opens
+it. A tree format (`html`, `rustdoc`) names its starting file with `entry`,
+which is checked while the layer is being built.
+
+A `[[crate]]` entry is a `.crate` file taken from a **release asset**, not from
+crates.io, so it is proven by the same signature as everything else in that
+release. The bytes are the ones crates.io serves — `cargo package` is
+reproducible, and varve's release checks its own `.crate` against the registry
+index on every tag — so `varve export-cargo` and `export-crates-vendor` hand
+cargo exactly the checksum it expects. Neither kind is ever run, and neither
+may use a platform placeholder: both are the same bytes on every machine.
+
+Before varve 0.36.0 the producer staged a `[[docs]]` entry and deposited it
+**unlabelled** — signed as a tool, with no format — so `export-docs` found
+nothing in a layer that carried documentation. Build a layer with documents
+using varve-producer 0.36.0 or later.
 
 **The trust root is not in this file.** It is the public half consumers already
 pin, and the secret half is a CI secret, never a committed file — see
