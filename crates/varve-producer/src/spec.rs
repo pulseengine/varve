@@ -53,6 +53,8 @@ pub struct ToolOut {
     pub docs_entry: Option<String>,
     #[serde(rename = "docs-title", skip_serializing_if = "Option::is_none")]
     pub docs_title: Option<String>,
+    #[serde(rename = "docs-documents", skip_serializing_if = "Option::is_none")]
+    pub docs_documents: Option<String>,
     pub source: SourceOut,
 }
 
@@ -132,6 +134,7 @@ mod tests {
             docs_format: None,
             docs_entry: None,
             docs_title: None,
+            docs_documents: None,
             source: src(),
         }
     }

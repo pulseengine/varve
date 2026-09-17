@@ -53,6 +53,16 @@ format  = "html"
 entry   = "index.html"
 asset   = "trace-%V.tar.gz"
 
+[[docs]]
+name      = "varve-core-api"
+repo      = "pulseengine/varve"
+version   = "0.36.0"
+release   = "v0.36.0"
+format    = "rustdoc"
+entry     = "varve_core/index.html"
+documents = "varve-core"
+asset     = "varve-core-%V-rustdoc.tar.gz"
+
 [[crate]]
 name    = "varve-core"
 repo    = "pulseengine/varve"
@@ -129,6 +139,15 @@ fn what_layer_toml_declares_is_what_the_signed_layer_says() {
     // deposited are these bytes, unmodified, because their sha256 is the
     // `cksum` crates.io serves and that `export-cargo` writes into the index.
     let krate = tar_gz(&[("varve-core-0.36.0/Cargo.toml", b"[package]\n")]);
+    // Rustdoc's real top level — the crate directory beside `static.files` and
+    // `crates.js`, as in the archive release.yml builds. A lone `varve_core/`
+    // would read as a wrapper directory and have its root stripped, which is
+    // a shape rustdoc never produces.
+    let api = tar_gz(&[
+        ("crates.js", b"window.ALL_CRATES = [\"varve_core\"];"),
+        ("static.files/rustdoc.css", b"body{}"),
+        ("varve_core/index.html", b"<h1>varve_core</h1>"),
+    ]);
 
     let m = varve_core::layerspec::parse_layer_manifest(MANIFEST).expect("layer.toml");
     let plan = varve_producer::plan::plan(&m, &["x86_64-unknown-linux-gnu"]).expect("plan");
@@ -139,6 +158,7 @@ fn what_layer_toml_declares_is_what_the_signed_layer_says() {
             "handbook" => &pdf,
             "trace" => &site,
             "varve-core" => &krate,
+            "varve-core-api" => &api,
             other => panic!("unplanned payload {other}"),
         };
         std::fs::write(dl.join(&item.asset), bytes).unwrap();
@@ -250,5 +270,21 @@ fn what_layer_toml_declares_is_what_the_signed_layer_says() {
         by_name["varve-core"].digest,
         format!("sha256:{}", sha256(&krate)),
         "the crate's bytes changed between the release and the layer — its digest is the crates.io cksum"
+    );
+
+    // The rustdoc names the crate it documents, and only it does.
+    assert_eq!(kind("varve-core-api"), varve_core::PayloadKind::Docs);
+    assert_eq!(
+        ann("varve-core-api", varve_core::deposit::ANN_DOCS_FORMAT).as_deref(),
+        Some("rustdoc")
+    );
+    assert_eq!(
+        ann("varve-core-api", varve_core::deposit::ANN_DOCS_DOCUMENTS).as_deref(),
+        Some("varve-core"),
+        "a declared `documents` did not reach the signed layer"
+    );
+    assert_eq!(
+        ann("handbook", varve_core::deposit::ANN_DOCS_DOCUMENTS),
+        None
     );
 }

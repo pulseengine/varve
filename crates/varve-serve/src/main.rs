@@ -21,7 +21,6 @@ use varve_serve::{cli::Cli, docs, http};
 use anyhow::{Context, bail};
 use clap::Parser;
 use varve_core::docsexport::DocsPayload;
-use varve_core::layerspec::DocsFormat;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -152,32 +151,10 @@ fn collect() -> anyhow::Result<Vec<DocsPayload>> {
         let Some(path) = store.entry_path(&entry, e) else {
             continue;
         };
-        let raw = e
-            .annotations
-            .get(varve_core::deposit::ANN_DOCS_FORMAT)
-            .context("a docs payload carries no format annotation")?;
-        out.push(DocsPayload {
-            name: e
-                .annotations
-                .get("eu.pulseengine.tool")
-                .cloned()
-                .unwrap_or_else(|| "(unnamed)".into()),
-            version: e
-                .annotations
-                .get("eu.pulseengine.tool.version")
-                .cloned()
-                .unwrap_or_default(),
-            format: parse_format(raw)?,
-            entry: e
-                .annotations
-                .get(varve_core::deposit::ANN_DOCS_ENTRY)
-                .cloned(),
-            title: e
-                .annotations
-                .get(varve_core::deposit::ANN_DOCS_TITLE)
-                .cloned(),
-            bytes: std::fs::read(&path)?,
-        });
+        out.push(
+            DocsPayload::from_signed(&e.annotations, std::fs::read(&path)?)
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+        );
     }
     if out.is_empty() {
         bail!(
@@ -187,21 +164,6 @@ fn collect() -> anyhow::Result<Vec<DocsPayload>> {
         );
     }
     Ok(out)
-}
-
-fn parse_format(raw: &str) -> anyhow::Result<DocsFormat> {
-    Ok(match raw {
-        "html" => DocsFormat::Html,
-        "rustdoc" => DocsFormat::Rustdoc,
-        "pdf" => DocsFormat::Pdf,
-        "markdown" => DocsFormat::Markdown,
-        "reqif" => DocsFormat::Reqif,
-        other => bail!(
-            "this layer declares a documentation format {other:?} that this varve-serve does \
-             not know. The document is carried and verified; it cannot be opened here. A \
-             newer varve-serve may know it."
-        ),
-    })
 }
 
 fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {

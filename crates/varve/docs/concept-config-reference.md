@@ -127,11 +127,17 @@ name     = "rivet"
 version  = "0.32.0"
 path     = "./dist/rivet"      # relative to this file
 platform = "x86_64-unknown-linux-gnu"   # optional; absent = any platform
-kind     = "tool"              # tool | crate | wit | zephyr-module | sdk | wasm-component | vsix
-                               # seven; `vsix` is a VS Code extension package (`varve docs payload-kinds`)
+kind     = "tool"              # tool | crate | wit | zephyr-module | sdk | wasm-component | vsix | docs
+                               # `vsix` is a VS Code extension package (`varve docs payload-kinds`)
 # sdk-prefix = "/opt/poky/4.0.15"   # REQUIRED on kind = "sdk", refused on every other kind:
                                # the absolute path the tree was BUILT for, which is the
                                # relocation budget `varve export-sdk` patches against
+# docs-format    = "rustdoc"   # REQUIRED on kind = "docs", refused on every other kind:
+                               # html | rustdoc | pdf | markdown | reqif
+# docs-entry     = "varve_core/index.html"   # where a reader starts, for a tree format
+# docs-title     = "varve-core API"          # the label shown when choosing
+# docs-documents = "varve-core"  # the payload this documents; must name a non-docs
+                               # payload of THIS deposit, or the deposit is refused
 
 [tool.source]                  # optional upstream provenance
 repo    = "pulseengine/rivet"
@@ -180,7 +186,13 @@ transcribed by hand from a release page inherits nothing from the signature but
 authenticity of transcription. `varve docs payload-kinds` says the same from the
 adapter's side.
 
-**`kind = "crate"` on a `[[tool]]` table is how you deposit a crate** — there is no `[[crate]]`. That is what the export adapters and `verify --lockfile` consume.
+**`kind = "crate"` on a `[[tool]]` table is how you deposit a crate** — the deposit spec has no `[[crate]]`. That is what the export adapters and `verify --lockfile` consume. (A realm's `layer.toml` does have `[[crate]]`; `varve-producer` turns it into exactly this.)
+
+**`docs-documents` is checked against the layer being deposited.** A name that
+matches no payload signs as cleanly as a right one, and would then answer every
+`varve export-docs --for <name>` with nothing, so `varve deposit` refuses it
+while it can still be fixed. A document cannot document another document, and a
+payload in a *composed* layer cannot be named yet — the deposit cannot see it.
 
 `counter` is not checked against previous deposits; the depositor owns monotonicity and clients enforce it.
 

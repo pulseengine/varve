@@ -118,6 +118,15 @@ pub struct DepositTool {
     /// `eu.pulseengine.varve.docs.title`. Optional: `name` is always the
     /// handle a command takes.
     pub docs_title: Option<String>,
+    /// The payload this document documents, by name, signed as
+    /// `eu.pulseengine.varve.docs.documents` (REQ-LAYERDOCS-001 clause 2).
+    ///
+    /// What lets a reader ask for "the rustdoc of varve-core" instead of
+    /// guessing which of several documents that is. `check_docs_metadata`
+    /// refuses a name matching no payload of this layer: a typo signs exactly
+    /// as cleanly as the right name, and would then answer every such question
+    /// with "nothing documents that".
+    pub docs_documents: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -243,6 +252,9 @@ pub struct SpecTool {
     /// `docs-title` — the label a human reads when choosing.
     #[serde(rename = "docs-title", default)]
     pub docs_title: Option<String>,
+    /// `docs-documents` — the payload this document documents, by name.
+    #[serde(rename = "docs-documents", default)]
+    pub docs_documents: Option<String>,
 }
 
 pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositError> {
@@ -280,6 +292,7 @@ impl SpecTool {
             docs_format: self.docs_format,
             docs_entry: self.docs_entry,
             docs_title: self.docs_title,
+            docs_documents: self.docs_documents,
         })
     }
 }
@@ -373,6 +386,25 @@ pub enum DepositError {
          Known: html, rustdoc, pdf, markdown, reqif."
     )]
     DocsFormatUnknown { name: String, format: String },
+    #[error(
+        "docs '{name}' says it documents '{documents}', and this layer carries no payload by \
+         that name that is not itself documentation. It carries: {carried}. A wrong name signs \
+         as cleanly as a right one and would answer every `varve export-docs --for {documents}` \
+         with nothing, so it is refused here, where every payload of the layer is visible. \
+         A document of a payload in a COMPOSED layer cannot be checked at deposit and is not \
+         accepted yet."
+    )]
+    DocsDocumentsDangling {
+        name: String,
+        documents: String,
+        carried: String,
+    },
+    #[error(
+        "payload '{name}' is kind {kind} and carries `docs-documents` — only a `docs` payload \
+         documents something, so it would be signed, read by nothing, and believed. Drop it, \
+         or deposit this payload as kind = \"docs\"."
+    )]
+    DocsDocumentsOnNonDocs { name: String, kind: String },
     #[error(
         "sdk '{name}' version {version} declares no `sdk-prefix` — the absolute path it was \
          BUILT for. Without it `varve export-sdk` has no relocation budget and no path to \
@@ -486,6 +518,7 @@ fn check_identities(tools: &[&DepositTool]) -> Result<(), DepositError> {
 pub const ANN_DOCS_FORMAT: &str = "eu.pulseengine.varve.docs.format";
 pub const ANN_DOCS_ENTRY: &str = "eu.pulseengine.varve.docs.entry";
 pub const ANN_DOCS_TITLE: &str = "eu.pulseengine.varve.docs.title";
+pub const ANN_DOCS_DOCUMENTS: &str = "eu.pulseengine.varve.docs.documents";
 
 /// A docs payload must say what it is, and nothing else may.
 ///
@@ -511,17 +544,14 @@ fn check_docs_metadata(tools: &[&DepositTool]) -> Result<(), DepositError> {
                     version: tool.version.clone(),
                 });
             }
-            (Some(f), true) => {
-                // The vocabulary is closed. A format varve does not know is
-                // one it cannot open, and accepting it would sign a claim
-                // about the payload that no consumer can act on.
-                const KNOWN: &[&str] = &["html", "rustdoc", "pdf", "markdown", "reqif"];
-                if !KNOWN.contains(&f.as_str()) {
-                    return Err(DepositError::DocsFormatUnknown {
-                        name: tool.name.clone(),
-                        format: f.clone(),
-                    });
-                }
+            // The vocabulary is closed. A format varve does not know is one it
+            // cannot open, and accepting it would sign a claim about the
+            // payload that no consumer can act on.
+            (Some(f), true) if crate::layerspec::DocsFormat::parse(f).is_none() => {
+                return Err(DepositError::DocsFormatUnknown {
+                    name: tool.name.clone(),
+                    format: f.clone(),
+                });
             }
             _ => {}
         }
@@ -531,6 +561,38 @@ fn check_docs_metadata(tools: &[&DepositTool]) -> Result<(), DepositError> {
                 name: tool.name.clone(),
                 kind: tool.kind.unwrap_or_default().as_str().to_string(),
             });
+        }
+        if let Some(documents) = &tool.docs_documents {
+            if !is_docs {
+                return Err(DepositError::DocsDocumentsOnNonDocs {
+                    name: tool.name.clone(),
+                    kind: tool.kind.unwrap_or_default().as_str().to_string(),
+                });
+            }
+            // Only a payload that is NOT documentation can be documented —
+            // otherwise a document could satisfy this check by naming itself.
+            let documentable = |t: &DepositTool| t.kind != Some(crate::kind::PayloadKind::Docs);
+            if !tools
+                .iter()
+                .any(|t| documentable(t) && &t.name == documents)
+            {
+                let mut carried: Vec<&str> = tools
+                    .iter()
+                    .filter(|t| documentable(t))
+                    .map(|t| t.name.as_str())
+                    .collect();
+                carried.sort_unstable();
+                carried.dedup();
+                return Err(DepositError::DocsDocumentsDangling {
+                    name: tool.name.clone(),
+                    documents: documents.clone(),
+                    carried: if carried.is_empty() {
+                        "nothing but documentation".to_string()
+                    } else {
+                        carried.join(", ")
+                    },
+                });
+            }
         }
     }
     Ok(())
@@ -762,6 +824,9 @@ pub fn deposit_with_options(
             }
             if let Some(title) = &tool.docs_title {
                 annotations.insert(ANN_DOCS_TITLE.into(), title.clone().into());
+            }
+            if let Some(documents) = &tool.docs_documents {
+                annotations.insert(ANN_DOCS_DOCUMENTS.into(), documents.clone().into());
             }
             if let Some(runner) = &tool.runner {
                 annotations.insert(crate::bazel::ANN_RUNNER.into(), runner.tool.clone().into());
@@ -1027,6 +1092,7 @@ mod tests {
                     docs_format: None,
                     docs_entry: None,
                     docs_title: None,
+                    docs_documents: None,
                 },
                 DepositTool {
                     name: "rivet".into(),
@@ -1040,6 +1106,7 @@ mod tests {
                     docs_format: None,
                     docs_entry: None,
                     docs_title: None,
+                    docs_documents: None,
                 },
             ],
         }
@@ -1373,6 +1440,7 @@ mod tests {
             docs_format: None,
             docs_entry: None,
             docs_title: None,
+            docs_documents: None,
         }
     }
 

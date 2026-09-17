@@ -291,6 +291,7 @@ pub fn stage_one<R: CommandRunner>(
             _ => None,
         },
         docs_title: r.plan.title.clone(),
+        docs_documents: r.plan.documents.clone(),
         source: SourceOut {
             repo: r.plan.repo.clone(),
             release: r.plan.release.clone(),
@@ -403,6 +404,7 @@ mod tests {
                 release: "v1.0.0".into(),
                 upstream_sums: None,
                 title: None,
+                documents: None,
                 contains: None,
                 name: "rivet".into(),
                 repo: "o/r".into(),
@@ -749,6 +751,7 @@ mod tests {
             docs_format: None,
             docs_entry: None,
             docs_title: None,
+            docs_documents: None,
             source: src(asset, sha),
         };
         describe(
@@ -868,6 +871,7 @@ mod tests {
             release: "v1.0.0".into(),
             upstream_sums: None,
             title: None,
+            documents: None,
             contains: None,
             name: name.into(),
             repo: "o/r".into(),

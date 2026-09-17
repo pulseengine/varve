@@ -350,8 +350,12 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
         /// Which document, when the layer carries more than one.
-        #[arg(long, value_name = "NAME")]
+        #[arg(long, value_name = "NAME", conflicts_with = "for_payload")]
         select: Option<String>,
+        /// The documentation OF a payload — the document whose signed
+        /// `documents` names it, e.g. `--for varve-core` for that crate's rustdoc.
+        #[arg(long = "for", value_name = "PAYLOAD")]
+        for_payload: Option<String>,
     },
     /// Emit an SBOM for a verified layer, transcribed from its SIGNED manifest
     /// rather than scanned from disk — every component, version and hash is
@@ -729,9 +733,18 @@ fn run() -> anyhow::Result<Outcome> {
             export_bazel_distdir(&store, layer.as_deref(), &out)
         }
         Cmd::ExportVsix { layer, out } => export_vsix(&store, layer.as_deref(), &out),
-        Cmd::ExportDocs { layer, out, select } => {
-            export_docs(&store, layer.as_deref(), &out, select.as_deref())
-        }
+        Cmd::ExportDocs {
+            layer,
+            out,
+            select,
+            for_payload,
+        } => export_docs(
+            &store,
+            layer.as_deref(),
+            &out,
+            select.as_deref(),
+            for_payload.as_deref(),
+        ),
         Cmd::ExportSdk { layer, out, select } => {
             export_sdk(&store, layer.as_deref(), &out, select.as_deref())
         }
@@ -2649,6 +2662,7 @@ fn export_docs(
     layer: Option<&str>,
     out: &std::path::Path,
     select: Option<&str>,
+    documents_of: Option<&str>,
 ) -> anyhow::Result<()> {
     use varve_core::docsexport::DocsPayload;
 
@@ -2661,45 +2675,16 @@ fn export_docs(
         collect_verified_payloads(&layers, varve_core::PayloadKind::Docs)?
             .into_iter()
             .map(|p| {
-                // `check_docs_metadata` refused a docs payload without a
-                // format at DEPOSIT, so an entry reaching here without one is
-                // not a manifest we should second-guess — it is a layer built
-                // by something that skipped that gate.
-                let raw = p
-                    .annotations
-                    .get(varve_core::deposit::ANN_DOCS_FORMAT)
-                    .map(String::as_str)
-                    .with_context(|| {
-                        format!(
-                            "docs payload {:?} carries no {} annotation — it was deposited \
-                             without the gate that requires one, so varve cannot tell how to \
-                             open it",
-                            p.name,
-                            varve_core::deposit::ANN_DOCS_FORMAT
-                        )
-                    })?;
-                let format = parse_docs_format(raw).with_context(|| {
-                    format!("docs payload {:?} declares an unknown format", p.name)
-                })?;
-                Ok(DocsPayload {
-                    name: p.name,
-                    version: p.version,
-                    format,
-                    entry: p
-                        .annotations
-                        .get(varve_core::deposit::ANN_DOCS_ENTRY)
-                        .cloned(),
-                    title: p
-                        .annotations
-                        .get(varve_core::deposit::ANN_DOCS_TITLE)
-                        .cloned(),
-                    bytes: p.bytes,
-                })
+                DocsPayload::from_signed(&p.annotations, p.bytes)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let chosen = varve_core::docsexport::select(&payloads, select)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let chosen = match documents_of {
+        Some(asked) => varve_core::docsexport::select_for(&payloads, asked),
+        None => varve_core::docsexport::select(&payloads, select),
+    }
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let report =
         varve_core::docsexport::export(chosen, out).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
@@ -2730,29 +2715,6 @@ fn export_docs(
     }
     write_export_stamp(out, &target.entry, "docs")?;
     Ok(())
-}
-
-/// Parse the signed format annotation into the closed vocabulary.
-///
-/// Deliberately not `serde`: this reads a string that a SIGNATURE vouches for,
-/// and the failure mode worth naming is "a layer declares a format this varve
-/// does not implement", which is a version-skew fact rather than a syntax
-/// error.
-fn parse_docs_format(raw: &str) -> anyhow::Result<varve_core::layerspec::DocsFormat> {
-    use varve_core::layerspec::DocsFormat;
-    Ok(match raw {
-        "html" => DocsFormat::Html,
-        "rustdoc" => DocsFormat::Rustdoc,
-        "pdf" => DocsFormat::Pdf,
-        "markdown" => DocsFormat::Markdown,
-        "reqif" => DocsFormat::Reqif,
-        other => bail!(
-            "unknown documentation format {other:?}. This varve knows html, rustdoc, pdf, \
-             markdown and reqif — a layer declaring anything else was deposited by a NEWER \
-             varve, and the document is carried and verified but cannot be opened here. \
-             `varve self-update`."
-        ),
-    })
 }
 
 /// `varve export-sdk --out D` (REQ-SDK-001 clause 3): materialise the layer's
@@ -2960,6 +2922,7 @@ fn deposit_cmd(
             docs_format: None,
             docs_entry: None,
             docs_title: None,
+            docs_documents: None,
         });
     }
     run_deposit(

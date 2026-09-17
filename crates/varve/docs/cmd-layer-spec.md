@@ -70,6 +70,16 @@ name    = "varve-core"
 repo    = "pulseengine/varve"
 version = "0.36.0"           # the crate's version, as the registry index spells it
 release = "v0.36.0"          # the tag; asset defaults to varve-core-%V.crate
+
+[[docs]]
+name      = "varve-core-api"
+repo      = "pulseengine/varve"
+version   = "0.36.0"
+release   = "v0.36.0"
+format    = "rustdoc"
+entry     = "varve_core/index.html"
+documents = "varve-core"     # the payload this documents: `varve export-docs --for varve-core`
+asset     = "varve-core-%V-rustdoc.tar.gz"
 ```
 
 `repo` defaults to `pulseengine/<name>`, `binary` to `<name>`, `layout` to

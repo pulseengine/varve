@@ -470,6 +470,7 @@ mod tests {
             contains: None,
             upstream_sums: None,
             title: None,
+            documents: None,
         };
         let root = std::path::Path::new("/w");
 
@@ -509,6 +510,7 @@ mod tests {
             release: version.to_string(),
             upstream_sums: None,
             title: None,
+            documents: None,
             contains: None,
             name: name.into(),
             repo: repo.into(),

@@ -5,6 +5,7 @@ Where is the documentation for the versions this layer pins?
 ```sh
 varve export-docs --out ./doc                   # one document: no selector needed
 varve export-docs --out ./doc --select handbook # several: name one
+varve export-docs --out ./doc --for varve-core  # the documentation OF a payload
 ```
 
 A layer pins exact versions and, on its own, says nothing about how to use
@@ -37,6 +38,23 @@ wanted by pinning it. With several, the selector is **required** — varve refus
 rather than guessing, because opening the wrong document silently is worse than
 a question. The refusal lists what the layer carries, so your next command has
 the right handle.
+
+## The documentation of something
+
+A document can name the payload it documents — a crate's rustdoc names the
+crate — and that name is signed into the layer. `--for varve-core` answers with
+the document that **says** it documents `varve-core`, never with one that merely
+has a similar name: a handbook called `varve-core-handbook` is not the API of
+the crate, and opening it would be a wrong answer that looks like a right one.
+
+If nothing documents the payload, varve lists what *is* documented. If several
+documents do — a rustdoc and a guide — it lists them and asks for `--select`.
+`varve inspect` shows each document's `documents` beside the command that
+reads it.
+
+The name is checked when the layer is built: `varve deposit` refuses a document
+naming a payload the layer does not carry, so `--for` is never answered by a
+typo that happened to be signed.
 
 ## Format is declared, not guessed
 

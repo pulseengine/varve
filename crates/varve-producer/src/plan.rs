@@ -100,6 +100,9 @@ pub struct PayloadPlan {
     /// The label a human reads when choosing between documents. `None` for
     /// every kind but `docs`.
     pub title: Option<String>,
+    /// The payload a document documents, by name. `None` for every kind but
+    /// `docs`.
+    pub documents: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +234,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
             title: None,
+            documents: None,
         });
         return Ok(out);
     }
@@ -254,6 +258,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
             title: None,
+            documents: None,
         });
     }
     Ok(out)
@@ -276,6 +281,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             contains: None,
             upstream_sums: None,
             title: None,
+            documents: None,
         });
         return Ok(out);
     }
@@ -292,6 +298,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             contains: None,
             upstream_sums: None,
             title: None,
+            documents: None,
         });
     }
     Ok(out)
@@ -330,6 +337,7 @@ pub fn plan_docs(d: &ManifestDocs) -> Result<Vec<PayloadPlan>, PlanError> {
         contains: d.entry.clone(),
         upstream_sums: None,
         title: d.title.clone(),
+        documents: d.documents.clone(),
     }])
 }
 
@@ -361,6 +369,7 @@ pub fn plan_crate(c: &ManifestCrate) -> Result<Vec<PayloadPlan>, PlanError> {
         contains: None,
         upstream_sums: None,
         title: None,
+        documents: None,
     }])
 }
 

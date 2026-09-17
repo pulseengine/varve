@@ -715,6 +715,90 @@ grep -qF "carries no documentation" "$WORK/logs/serve-nodocs.log" \
        fail "the no-documentation case failed, but not with the message that explains it"; }
 echo "   …and a layer with no documentation says so, rather than failing obscurely"
 
+# A document names the payload it documents (REQ-LAYERDOCS-001 clause 2), and a
+# reader asks for the documentation OF something. The layer carries a crate,
+# that crate's rustdoc, and a handbook documenting nothing — and a handbook
+# NAMED like the crate, so a selector matching on names rather than on the
+# signed `documents` would open the wrong one and report success.
+API_SRC="$WORK/api-src"
+mkdir -p "$API_SRC/varve_core" "$API_SRC/static.files"
+printf '<h1>the varve_core API</h1>\n' > "$API_SRC/varve_core/index.html"
+printf 'body{}\n' > "$API_SRC/static.files/rustdoc.css"
+( cd "$API_SRC" && COPYFILE_DISABLE=1 tar czf "$WORK/varve-core-api.tar.gz" varve_core static.files )
+printf 'not a real crate, only bytes with a name\n' > "$WORK/varve-core-0.36.0.crate"
+
+cat > "$WORK/docs-for-spec.toml" <<SPEC
+layer = "2026.09.10"
+channel = "rolling"
+counter = 100
+
+[[tool]]
+name = "varve-core"
+version = "0.36.0"
+path = "$WORK/varve-core-0.36.0.crate"
+kind = "crate"
+
+[[tool]]
+name = "varve-core-api"
+version = "0.36.0"
+path = "$WORK/varve-core-api.tar.gz"
+kind = "docs"
+docs-format = "rustdoc"
+docs-entry = "varve_core/index.html"
+docs-documents = "varve-core"
+
+[[tool]]
+name = "varve-core-handbook"
+version = "1.0.0"
+path = "$WORK/handbook.tar.gz"
+kind = "docs"
+docs-format = "html"
+docs-entry = "index.html"
+SPEC
+
+"$VARVE" deposit --spec "$WORK/docs-for-spec.toml" \
+  --issued-at "$ISSUED_AT" \
+  --key "$WORK/root.key" --key-id systest-deposit-1 \
+  --out "$WORK/docs-for-layout" \
+  >"$WORK/logs/docs-for-deposit.log" 2>&1 \
+  || { cat "$WORK/logs/docs-for-deposit.log"; fail "a document naming its crate could not be deposited"; }
+
+mkdir -p "$WORK/docs-for-project"
+printf 'manifest-version = 1\n[toolchain]\nchannel = "rolling"\nlayer = "2026.09.10"\n' \
+  > "$WORK/docs-for-project/varve.toml"
+( cd "$WORK/docs-for-project" && PATH="$CLEAN_PATH" "$VARVE" install --from "$WORK/docs-for-layout" ) \
+  >"$WORK/logs/docs-for-install.log" 2>&1 \
+  || { cat "$WORK/logs/docs-for-install.log"; fail "the layer with a documented crate did not install"; }
+
+( cd "$WORK/docs-for-project" && PATH="$CLEAN_PATH" "$VARVE" export-docs --for varve-core --out "$WORK/api-export" ) \
+  >"$WORK/logs/export-for.log" 2>&1 \
+  || { cat "$WORK/logs/export-for.log"; fail "export-docs --for could not find the crate's documentation"; }
+grep -qF "the varve_core API" "$WORK/api-export/varve_core/index.html" 2>/dev/null \
+  || { find "$WORK/api-export" -type f; fail "export-docs --for varve-core did not export that crate's rustdoc"; }
+
+( cd "$WORK/docs-for-project" && PATH="$CLEAN_PATH" "$VARVE" inspect ) \
+  >"$WORK/logs/inspect-for.log" 2>&1 || true
+grep -qF "documents varve-core" "$WORK/logs/inspect-for.log" \
+  || { cat "$WORK/logs/inspect-for.log"; fail "inspect does not say which payload the rustdoc documents"; }
+echo "   a crate's rustdoc names the crate, and export-docs --for finds it by that and not by name"
+
+# A name that matches nothing signs as cleanly as a right one. The deposit is
+# the one place that sees every payload, so it has to refuse.
+sed 's/^docs-documents = "varve-core"$/docs-documents = "varve_core"/' "$WORK/docs-for-spec.toml" \
+  > "$WORK/docs-for-dangling.toml"
+grep -qF 'docs-documents = "varve_core"' "$WORK/docs-for-dangling.toml" \
+  || fail "the negative control did not change the spec — it would prove nothing"
+if "$VARVE" deposit --spec "$WORK/docs-for-dangling.toml" \
+     --issued-at "$ISSUED_AT" \
+     --key "$WORK/root.key" --key-id systest-deposit-1 \
+     --out "$WORK/docs-for-bad" >"$WORK/logs/docs-for-dangling.log" 2>&1
+then
+  fail "a document naming a payload the layer does not carry was deposited"
+fi
+grep -qF "varve_core" "$WORK/logs/docs-for-dangling.log" \
+  || { cat "$WORK/logs/docs-for-dangling.log"; fail "the refusal does not name the dangling payload"; }
+echo "   …and a document naming a payload the layer does not carry cannot be deposited"
+
 echo "== deposit-layer systest: PASS — layer assembled (cosign-signed AND attested upstreams), \
 deposited, installed, verified and exported; an unproven upstream is refused with the fork named, \
 a reasoned opt-in is recorded in the layer, and the gate goes red when either guard is removed"

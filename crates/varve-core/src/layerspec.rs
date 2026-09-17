@@ -206,6 +206,25 @@ impl DocsFormat {
         }
     }
 
+    /// The format a signed name denotes, or `None` for a name varve does not
+    /// know.
+    ///
+    /// THE parser. `varve deposit` refuses an unknown format, and `export-docs`
+    /// and `varve-serve` read one back; each used to carry its own list of
+    /// names, so a format added to one would be signed by a deposit that the
+    /// readers then refused, or the reverse.
+    pub fn parse(raw: &str) -> Option<DocsFormat> {
+        [
+            DocsFormat::Html,
+            DocsFormat::Rustdoc,
+            DocsFormat::Pdf,
+            DocsFormat::Markdown,
+            DocsFormat::Reqif,
+        ]
+        .into_iter()
+        .find(|f| f.as_str() == raw)
+    }
+
     /// The word a human reads in `varve inspect` and filters on.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -328,6 +347,11 @@ pub struct ManifestDocs {
     /// this is the sentence that tells someone which one they want.
     #[serde(default)]
     pub title: Option<String>,
+    /// The payload this documents, by name — `documents = "varve-core"` on a
+    /// crate's rustdoc (clause 2). Lets a reader ask for the documentation OF
+    /// something. `varve deposit` refuses a name the layer does not carry.
+    #[serde(default)]
+    pub documents: Option<String>,
     /// Asset template; `%V` bare version, `%R` the release tag.
     pub asset: String,
     /// The release tag to fetch, when it differs from the payload's version.
@@ -1755,5 +1779,37 @@ upstream-sums=\"sha256.sum\"\n"
         let msg = e.to_string();
         assert!(msg.contains("upstream-sums"), "{msg}");
         assert!(msg.contains("varve-producer deposit"), "{msg}");
+    }
+
+    /// One vocabulary. `varve deposit` refuses a format, and both readers
+    /// parse one, and all three used to carry their own list of names.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn every_docs_format_parses_back_from_the_name_it_is_signed_as() {
+        let all = [
+            DocsFormat::Html,
+            DocsFormat::Rustdoc,
+            DocsFormat::Pdf,
+            DocsFormat::Markdown,
+            DocsFormat::Reqif,
+        ];
+        for f in all {
+            assert_eq!(DocsFormat::parse(f.as_str()), Some(f), "{f:?}");
+        }
+        assert_eq!(DocsFormat::parse("epub"), None);
+        // layer.toml reads the same names through serde.
+        #[derive(serde::Deserialize)]
+        struct W {
+            f: DocsFormat,
+        }
+        for f in all {
+            let w: W = toml::from_str(&format!("f = \"{}\"", f.as_str())).expect("serde agrees");
+            assert_eq!(w.f, f);
+        }
+        assert_eq!(
+            DocsFormat::parse("HTML"),
+            None,
+            "the signed names are exact"
+        );
     }
 }
