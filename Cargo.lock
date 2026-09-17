@@ -1096,6 +1096,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
+dependencies = [
+ "base64 0.23.1",
+ "serde_core",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1288,7 +1298,7 @@ version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
 dependencies = [
- "pem",
+ "pem 3.0.6",
  "ring",
  "rustls-pki-types",
  "time",
@@ -1965,7 +1975,7 @@ dependencies = [
  "tar",
  "tempfile",
  "varve-core",
- "wsc-attestation",
+ "wsc-attestation 0.10.0",
 ]
 
 [[package]]
@@ -2285,14 +2295,14 @@ dependencies = [
 
 [[package]]
 name = "wsc"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1647298d7cbd3cbb724dcad4c7c13b0898659418fd9087f9e8635899afde4d41"
+checksum = "a3990e834ddbbc32ecd8506a473f07d931ea71ea4cb2914e01dc517231902a04"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
- "const-oid 0.9.6",
+ "const-oid 0.10.2",
  "ct-codecs",
  "ecdsa",
  "ed25519-compact",
@@ -2302,7 +2312,7 @@ dependencies = [
  "log",
  "maybe-async",
  "p256",
- "pem",
+ "pem 4.0.0",
  "rcgen",
  "regex",
  "rustls",
@@ -2322,7 +2332,8 @@ dependencies = [
  "uuid",
  "wasi 0.14.7+wasi-0.2.4",
  "webpki-roots",
- "wsc-attestation",
+ "wsc-attestation 0.11.0",
+ "wsc-dsse",
  "wsc-verify-core",
  "x509-parser",
  "zeroize",
@@ -2344,10 +2355,37 @@ dependencies = [
 ]
 
 [[package]]
-name = "wsc-verify-core"
-version = "0.10.0"
+name = "wsc-attestation"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c53e03ae57c0660e300d8ea29332bc49d9003809a10c87f7ba94ced87241e0d"
+checksum = "2de5e92c4520478283a9583258e342fb0d71d2b57bc24336cf91429bf7ffbc4f"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "getrandom 0.3.4",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "wsc-dsse"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704cf2dba1c1f413559d7806a778aa0cc3d96ebfff9a60dfdd48f7e9e3edf2ee"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-compact",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "wsc-verify-core"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27e4e744e0f4fd07298ecdfa43f589c27a3643b4309d13258bdc20c516744e77"
 dependencies = [
  "ct-codecs",
  "ed25519-compact",
