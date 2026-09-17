@@ -1975,7 +1975,7 @@ dependencies = [
  "tar",
  "tempfile",
  "varve-core",
- "wsc-attestation 0.10.0",
+ "wsc-attestation",
 ]
 
 [[package]]
@@ -2332,26 +2332,11 @@ dependencies = [
  "uuid",
  "wasi 0.14.7+wasi-0.2.4",
  "webpki-roots",
- "wsc-attestation 0.11.0",
+ "wsc-attestation",
  "wsc-dsse",
  "wsc-verify-core",
  "x509-parser",
  "zeroize",
-]
-
-[[package]]
-name = "wsc-attestation"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aedfcc9a66df51876143d599378dab6fbcf8b390153aaf8797f5c2d508a6adc6"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "getrandom 0.3.4",
- "hex",
- "serde",
- "serde_json",
- "sha2 0.10.9",
 ]
 
 [[package]]
