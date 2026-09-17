@@ -469,6 +469,34 @@ jobs:
           } > release-assets/build-env.txt
           cat release-assets/build-env.txt
 
+      # The crates this release publishes, as release assets (REQ-CRATEPAYLOAD-001
+      # clause 4). The pulseengine layer ingests varve-core from HERE, not from
+      # crates.io, so a crate is proven by cosign over SHA256SUMS.txt like every
+      # other payload instead of acquiring a second trust path. Before the sums,
+      # for the same reason as the SBOM.
+      #
+      # Named crates, never --workspace: that would also package varve-producer
+      # and varve-serve, which are publish = false. --no-verify because the
+      # publish job verifies the same bytes — `cargo package` is reproducible,
+      # which the crate-identity job below re-checks on every tag.
+      - name: Package the published crates
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          BARE="${VERSION#v}"
+          cargo package --locked --no-verify -p varve-core -p varve
+          for c in varve-core varve; do
+            f="target/package/${c}-${BARE}.crate"
+            if [ ! -f "$f" ]; then
+              echo "::error::cargo package produced no $f"
+              exit 1
+            fi
+            cp "$f" release-assets/
+          done
+          ls -la release-assets/*.crate
+
       - name: Generate SHA256 checksums
         run: |
           set -euo pipefail
@@ -587,6 +615,70 @@ jobs:
             } > /tmp/notes.md
             gh release edit "$VERSION" --notes-file /tmp/notes.md
           fi
+
+  # ── The released crate IS the registry's crate (REQ-CRATEPAYLOAD-001) ──
+  # A layer that ingests varve-core from this release is only offering the
+  # crate crates.io serves if the bytes are identical. Measured identical for
+  # v0.35.0 before this job existed; it is re-checked here because it rests on
+  # `cargo package` staying reproducible, which a toolchain change could end.
+  #
+  # Compared against the index `cksum` — what cargo itself checks a download
+  # against — and against the SIGNED sums, so a mismatch in either direction
+  # fails. The publish runs in a separate workflow, so the index is polled.
+  # Skipped when publishing is disabled: there is no registry crate to match.
+  crate-identity:
+    name: The released crates are the crates.io crates
+    needs: [create-release]
+    if: vars.CRATES_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Compare the signed release sums with the crates.io index
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          BARE="${VERSION#v}"
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" \
+            -p SHA256SUMS.txt -p SHA256SUMS.txt.cosign.bundle
+          cosign verify-blob \
+            --bundle SHA256SUMS.txt.cosign.bundle \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            SHA256SUMS.txt
+          index_path() { # sparse-index path for a crate name of 4+ chars
+            echo "$(printf %s "$1" | cut -c1-2)/$(printf %s "$1" | cut -c3-4)/$1"
+          }
+          for c in varve-core varve; do
+            signed=$(awk -v f="./${c}-${BARE}.crate" '$2 == f {print $1}' SHA256SUMS.txt)
+            if [ -z "$signed" ]; then
+              echo "::error::${c}-${BARE}.crate is not in the signed sums"
+              exit 1
+            fi
+            cksum=""
+            for _ in $(seq 1 40); do
+              cksum=$(curl -fsS -H 'User-Agent: pulseengine-varve-release' \
+                        "https://index.crates.io/$(index_path "$c")" 2>/dev/null \
+                      | jq -r --arg v "$BARE" 'select(.vers == $v) | .cksum' || true)
+              [ -n "$cksum" ] && break
+              sleep 45
+            done
+            if [ -z "$cksum" ]; then
+              echo "::error::$c $BARE never appeared in the crates.io index"
+              exit 1
+            fi
+            echo "$c signed=$signed index=$cksum"
+            if [ "$signed" != "$cksum" ]; then
+              echo "::error::the released ${c}-${BARE}.crate is not the crate crates.io serves"
+              exit 1
+            fi
+          done
 
   # ── The bootstrap actually bootstraps (REQ-BOOTSTRAP-001) ─────────────
   # `install.sh` is the one release artifact whose correctness cannot be
