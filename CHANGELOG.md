@@ -1,5 +1,125 @@
 # Changelog
 
+## v0.36.0 — 2026-09-18
+
+*A layer can carry the crate and its documentation; verify says where its time goes.*
+
+v0.35.0 taught a layer to carry documentation. This release makes that reach a
+reader — and fixes the reason it would not have.
+
+| | before | now |
+|---|---|---|
+| a `[[docs]]` entry built by varve-producer | deposited UNLABELLED — signed as a plain tool | signed as documentation, with its format |
+| a realm declaring a crate | impossible: `layer.toml` had no `[[crate]]` | declared, planned, staged, signed as `kind = "crate"` |
+| a crate's bytes | only on crates.io | a release asset under the same cosign signature |
+| API documentation | not published at all | `<crate>-<version>-rustdoc.tar.gz`, per published crate |
+| asking for a crate's docs | guess which document it is | `varve export-docs --for varve-core` |
+| "verify is slow" | a guess about parallelism | measured by stage: 83% is hashing |
+
+### The defect this release exists to fix
+
+`varve-producer` staged a `[[docs]]` entry and then wrote its deposit spec with
+**no kind and no format**. `varve deposit` therefore signed every
+producer-built document as an ordinary tool, and `varve export-docs` found
+nothing in a layer that carried documentation.
+
+Every link in that chain had tests. The system test proved deposit → install →
+export end to end — **from a hand-written spec**. Nothing ever fed a spec the
+producer wrote into a deposit, so the one broken link was the one nothing
+crossed. The gap was found while adding crates, whose kind would have fallen
+through the same `_ => None`.
+
+The fix is one exhaustive mapping, so a new payload kind now fails to compile
+rather than shipping unlabelled, and an end-to-end test that starts at
+`layer.toml` text rather than at a fixture of the producer's output.
+
+Nothing shipped a documentation layer before this, so no published layer is
+affected — but a layer built with varve-producer 0.35.0 would have been.
+
+### A layer can carry a crate
+
+`layer.toml` gains `[[crate]]`, shaped like `[[docs]]`: one
+platform-independent payload, default asset `<name>-%V.crate` (what `cargo
+package` writes), per-platform templates refused. The bytes are stored
+unmodified, because their sha256 is the checksum a Cargo registry index
+records.
+
+The crate is ingested from a **varve release asset**, not from crates.io, so it
+is proven by cosign over `SHA256SUMS.txt` like every other payload rather than
+acquiring a second trust path. That rests on `cargo package` being
+reproducible, which was measured first: packaging tag v0.35.0 on a developer
+machine produced `varve-core` and `varve` tarballs byte-identical to what
+crates.io serves. A `crate-identity` job re-checks it on every tag, comparing
+the signed sums against the registry index.
+
+### Documentation of something
+
+A document can name the payload it documents — `documents = "varve-core"` on a
+crate's rustdoc — and that name is signed into the layer. `varve export-docs
+--for varve-core` answers with the document that *says* it documents the crate,
+never with one that merely has a similar name.
+
+`varve deposit` refuses a `documents` naming no payload of the layer: a typo
+signs exactly as cleanly as the right name, and would then answer every such
+question with nothing. A document cannot document another document or itself.
+
+rustdoc ships as **tar.gz, not zip**, against the earlier recommendation and
+because of a measurement: varve's rustdoc is 16 MB in 811 files, 3.7 MB
+compressed; zip -9 of the same tree is 17% *larger*, and decompressing all of
+it takes about 10 ms, which `varve-serve` pays once at start. Zip's random
+access earns its dependency at hundreds of megabytes, not here, and the format
+is declared — so adding it later is additive.
+
+### verify says where its time went
+
+`varve verify --timing` attributes read, hash, signature and manifest on
+**stderr**, on the real verification path rather than in a benchmark. Nothing is
+checked differently: every payload is still digested in full, and stdout still
+carries only the verdict.
+
+Measured on a 2 GiB payload: **0.89 s total, of which hashing is 0.74 s (83%)**
+at 2.70 GiB/s, reading 0.14 s. So if verify is to get faster, the hash is what
+to parallelise — the opposite of the first guess, and now a measurement.
+
+Two things are stated rather than claimed: no genuinely cold-cache figure was
+obtained (macOS `purge` needs root, and evicting with 20 GiB of unrelated reads
+on a 16 GiB machine did not work — the "cold" run still read at cache speed),
+and the ~9 s of varve#141 remains unexplained by these numbers. The 2 GiB peak
+RSS of the pre-streaming path on a 16 GiB machine is the leading hypothesis,
+unconfirmed.
+
+There is no `decompress` stage because verify never decompresses: a payload is
+hashed exactly as signed, which is what keeps the digest re-derivable.
+
+### Falsification
+
+Each of these would refute a claim above:
+
+- Build a layer with a `[[docs]]` entry using this varve-producer, install it,
+  and find `varve export-docs` reporting no documentation.
+- `cargo package -p varve-core` at tag v0.36.0 and find the sha256 differing
+  from the `cksum` in the crates.io index for 0.36.0.
+- Deposit a document whose `documents` names a payload the layer does not carry
+  and watch it succeed.
+- `varve export-docs --for varve-core` on a layer where a *differently named*
+  document documents that crate, and find the wrong document exported.
+- `varve verify --timing` on a multi-gigabyte layer where read time exceeds hash
+  time — which would make the parallelise-the-hash conclusion wrong for that
+  shape.
+
+### Requirement status, stated honestly
+
+`REQ-VERIFYSTREAM-001` is **verified**. Two are deliberately held at
+**implemented**, because their remaining evidence is not something this
+repository can produce:
+
+- `REQ-LAYERDOCS-001` — no released varve has produced a rustdoc archive yet;
+  that step runs on a tag. "The workflow was green" is not "the artifact
+  exists".
+- `REQ-CRATEPAYLOAD-001` clause 3 — varve's crate is carried by the
+  **pulseengine** layer, which `pulseengine/pulseengine-layers` builds; that
+  pin and merge belong to the maintainer.
+
 ## v0.35.0 — 2026-09-16
 
 *A layer carries its documentation, and a reader does not pay for a copy.*
