@@ -3156,3 +3156,19 @@ artifacts:
       - type: verifies
         target: REQ-ROLLING-001
 
+
+  - id: VER-CRATEPAYLOAD-001
+    type: verification
+    title: The pulseengine layer carries varve-core, and a consumer gets it offline
+    status: accepted
+    description: "Clause 3 is the one clause varve's own repository cannot evidence: it asks for a DEPOSITED layer of the pulseengine realm carrying varve's consumer crate, and that layer is built by pulseengine/pulseengine-layers. This records the check made against the PUBLISHED realm on 2026-09-18, from the consumer side. . WHAT WAS DEPOSITED. pulseengine-layers#16 (the maintainer's merge) pinned varve v0.36.0 and added [[crate]] varve-core 0.36.0 and [[docs]] varve-core-api declaring documents = varve-core. Deposit run 35311453249 published layer 2026.09.4, counter 5, sha256:001480e799f7274248863a89a76deeb333ee475701bc2702f86fe326b527ae6e; its own sanity install reported signature OK, 15 tool(s) match their signed digests -- the 13 the realm already carried, plus the crate and the document. . WHAT A CONSUMER SEES. Checked with the RELEASED varve 0.36.0 binary, a fresh store, a varve.toml pinning realm pulseengine channel rolling layer 2026.09.4, realm definitions and rolling.pub taken from the release assets, and VARVE_TRUST_ROOT unset -- so the realm's own published root did the verifying. `varve install` installed and verified the layer. `varve inspect` lists varve-core as kind crate and varve-core-api as kind docs, both HELD, and prints \"documents varve-core (varve export-docs --for varve-core)\". `varve export-cargo` wrote a local Cargo registry containing varve-core-0.36.0.crate with its generated config.toml. `varve export-docs --for varve-core` exported 669 files and named varve_core/index.html as the starting page. . THE BYTES ARE THE REGISTRY'S BYTES. The crate materialised out of the layer hashes to 9f85301c182005f2bf6d58a876fabb021557c7b49e4b6f2bae5e4eec91d0ac1f, which is the cksum crates.io records for varve-core 0.36.0. The layer does not merely carry something named varve-core: it carries what cargo would have downloaded, provable offline against the realm root. . WHY method IS inspection. Nothing in varve's CI can deposit into the pulseengine realm, and a test that did would publish an immutable layer on every run. The repeatable parts are covered by tests -- the producer's layer.toml-to-signed-layer oracle, and the crate-identity job that compares the released .crate against the registry index on every tag. This artifact records the one step that is a published fact about another repository, with the identifiers to re-check it."
+    fields:
+      method: inspection
+    links:
+      - type: verifies
+        target: REQ-CRATEPAYLOAD-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5
+      timestamp: 2026-09-18T05:46:32Z
+    release: v0.36.0
