@@ -3945,29 +3945,9 @@ artifacts:
   - id: REQ-ROLLING-001
     type: requirement
     title: Upstream movement is noticed automatically; publishing it stays a deliberate act
-    status: verified
+    status: deprecated
     release: v0.29.0
-    description: >
-      A manually-cut layer cannot keep up. Measured 2026-08-21, days after
-      `2026.08.3` was published: rivet had moved v0.33.1 to v0.34.0, spar
-      v0.36.0 to v0.40.0 (FOUR minors), synth v0.55.0 to v0.58.0, witness
-      v0.39.0 to v0.43.0, ordeal v0.18.0 to v0.19.0. A consumer on `rolling`
-      is not getting a rolling toolchain; they are getting whatever was
-      current the last time a human remembered.
-      .
-      Clauses: (1) A scheduled job shall detect upstream releases for every
-      tool a realm carries and open a PULL REQUEST carrying the version diff,
-      not a published layer. (2) That PR shall run the full assembly gate
-      (REQ-SYSTEST-002) so the proposal is known-assemblable before anyone
-      looks at it. (3) The signed deposit shall be triggered by the MERGE, so
-      every signature remains an act a person took — see DD-024. (4) The PR
-      shall show what actually changed: which tools moved, by how much, and
-      which ingestion mechanism vouched for each new artifact
-      (REQ-INGEST-001 clause 2). (5) A tool whose new release cannot be
-      verified shall block that tool, not the whole proposal — one
-      unattested upstream must not freeze the other seven. (6) The job shall
-      be silent when nothing moved; a scheduled task that reports every hour
-      is one people filter out of their inbox.
+    description: "A manually-cut layer cannot keep up. Measured 2026-08-21, days after `2026.08.3` was published: rivet had moved v0.33.1 to v0.34.0, spar v0.36.0 to v0.40.0 (FOUR minors), synth v0.55.0 to v0.58.0, witness v0.39.0 to v0.43.0, ordeal v0.18.0 to v0.19.0. A consumer on `rolling` is not getting a rolling toolchain; they are getting whatever was current the last time a human remembered. . Clauses: (1) A scheduled job shall detect upstream releases for every tool a realm carries and open a PULL REQUEST carrying the version diff, not a published layer. (2) That PR shall run the full assembly gate (REQ-SYSTEST-002) so the proposal is known-assemblable before anyone looks at it. (3) The signed deposit shall be triggered by the MERGE, so every signature remains an act a person took — see DD-024. (4) The PR shall show what actually changed: which tools moved, by how much, and which ingestion mechanism vouched for each new artifact (REQ-INGEST-001 clause 2). (5) A tool whose new release cannot be verified shall block that tool, not the whole proposal — one unattested upstream must not freeze the other seven. (6) The job shall be silent when nothing moved; a scheduled task that reports every hour is one people filter out of their inbox. . DEPRECATED 2026-09-18, and both halves of the title are why. \"Upstream movement is noticed automatically\" is still true and is no longer varve's doing: pulseengine/pulseengine-layers scans its own pins every 15 minutes (REQ-LAYERREPO-001). \"Publishing it stays a deliberate act\" is no longer true at all — that repository deposits and publishes unattended, a choice its maintainer took with the cost stated (DD-030, superseding DD-024, which is what satisfied this requirement). . So this is not a requirement that was met and can be retired quietly. It is a requirement whose second clause was REVERSED by a later decision, and the honest record says so rather than leaving a verified green tick over a property the system no longer has. Marking it verified while varve shipped a scanner that nothing published from would have been the same false claim in the other direction. . The implementation it required — tools/scan-upstream.sh, tools/upstream-mechanism.sh, .github/workflows/scan-upstream.yml, tools/systest/scan-upstream.sh and its fixtures — is deleted in this release (varve#142). Nothing referenced them outside their own set: the one overlap, a deposit-layer systest run inside the scanner's gate job, existed only to gate the scanner's own proposal pull requests, which GITHUB_TOKEN cannot trigger; with no scanner there are no such pull requests, and systest.yml runs that systest on every pull request and push to main anyway. . Where the subject now lives: REQ-LAYERREPO-001 for the arrangement, DD-030 for the decision and what it gives up, and pulseengine-layers' own test job for the evidence."
 
   - id: DD-024
     type: design-decision
