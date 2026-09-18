@@ -322,6 +322,31 @@ pub fn parse_optins(raw: &str) -> BTreeMap<String, String> {
     out
 }
 
+/// Every opt-in in force: the manifest's, plus the environment's.
+///
+/// THE one answer to "is this repository ingested without proof, and why".
+/// `plan` read the reasons from the MANIFEST and printed "opt-in recorded";
+/// `deposit` read only `UNVERIFIED_INGEST` from the environment and refused —
+/// so a `unverified-reason` in layer.toml parsed, displayed, and was ignored
+/// at the one moment it decides anything. A realm that wrote it watched its
+/// deposit fail with a message telling it to set an environment variable
+/// instead, which is the field being inert in the only place it matters.
+///
+/// The manifest wins a conflict: it is the realm's committed, reviewed record,
+/// while the environment is ambient and unreviewable. The environment can still
+/// add a repository the manifest does not mention, which is what the legacy
+/// shell path and one-off recoveries use.
+pub fn optins_in_force(
+    manifest_reasons: impl IntoIterator<Item = (String, String)>,
+    env_raw: &str,
+) -> BTreeMap<String, String> {
+    let mut out = parse_optins(env_raw);
+    for (repo, reason) in manifest_reasons {
+        out.insert(repo, reason);
+    }
+    out
+}
+
 /// Walk the ladder for one release.
 pub fn choose(
     forge: &Forge,
@@ -934,5 +959,48 @@ mod upstream_sums_tests {
         )
         .expect("accepts");
         assert_eq!(a.mechanism, Mechanism::CosignSums, "a signature must win");
+    }
+
+    /// The manifest's reasons must reach the deposit, or the field is inert
+    /// exactly where it decides something.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_manifest_reason_is_an_optin_at_deposit_time() {
+        let from_manifest = [(
+            "bytecodealliance/wac".to_string(),
+            "no provenance upstream; removed when they add attest-build-provenance".to_string(),
+        )];
+        let in_force = optins_in_force(from_manifest, "");
+        assert!(
+            in_force.contains_key("bytecodealliance/wac"),
+            "a layer.toml unverified-reason did not become an opt-in — the deposit would \
+             refuse a realm that has already stated why"
+        );
+    }
+
+    /// The environment still works, for the legacy path and one-off recoveries.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_environment_can_still_name_a_repository_the_manifest_does_not() {
+        let in_force = optins_in_force([], "acme/tool=vendor ships no sums; fork planned");
+        assert_eq!(
+            in_force.get("acme/tool").map(String::as_str),
+            Some("vendor ships no sums; fork planned")
+        );
+    }
+
+    /// Both name it: the committed, reviewed record wins over ambient state.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_manifest_wins_a_conflict_with_the_environment() {
+        let in_force = optins_in_force(
+            [("acme/tool".to_string(), "the manifest's reason".to_string())],
+            "acme/tool=an environment variable nobody reviewed",
+        );
+        assert_eq!(
+            in_force.get("acme/tool").map(String::as_str),
+            Some("the manifest's reason"),
+            "an unreviewable environment variable overrode the realm's committed record"
+        );
     }
 }
