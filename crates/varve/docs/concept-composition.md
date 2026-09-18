@@ -4,7 +4,52 @@ One pin, two trust universes. Your layer holds the tools you qualify; it *compos
 
 ## Producing one
 
-An `[[include]]` in the deposit spec, naming the included layer by the digest of its signed manifest:
+**From a realm's `layer.toml`** — what a layers repository writes, and what
+`varve-producer` turns into a signed layer:
+
+```toml
+[varve]
+version = "v0.37.0"
+
+[realm]
+name     = "covalent"
+channel  = "rolling"
+registry = "oci://ghcr.io/pulseengine/covalent-layers"
+
+[[tool]]
+name    = "ordeal"
+version = "v0.19.0"
+
+# The layers this one composes. Each names another realm's layer by the digest
+# of its SIGNED MANIFEST — not a tag, not a layer id — so the composition is
+# fixed at the moment of signing and cannot drift.
+[[include]]
+digest = "sha256:001480e799f7274248863a89a76deeb333ee475701bc2702f86fe326b527ae6e"
+realm  = "pulseengine"       # whose root verifies it
+layer  = "2026.09.4"         # for error messages before it is fetched
+
+[[include]]
+digest = "sha256:98dbe9189b19f52917138b98eaf4191b20919b693d8d67424368303516299bc9"
+realm  = "pulseengine-wasm"
+layer  = "2026.09.5"
+```
+
+`realm` is optional in the format and required in practice, so the manifest
+parser refuses an include without one: nothing would write the `include.realm`
+annotation, and `verify` would fall back to the **pinning project's** root — the
+layer installs cleanly and fails verification afterwards with nothing tampered,
+or, if the two roots happen to match, verifies while widening trust across the
+boundary realms exist to draw. A digest that is not `sha256:` plus 64 hex
+characters is refused for the same reason: a tag would let the composition move
+after it was signed.
+
+Before varve 0.37.0 a manifest could not say this at all. `[[include]]` existed
+only in the hand-written deposit spec below, so composition was implemented,
+tested and documented while no realm repository could produce a composed layer
+— which is why the feature had no worked example.
+
+**From a deposit spec** — the lower-level form, for anyone assembling a layer
+without a realm manifest:
 
 ```toml
 layer   = "2026.09.0"
