@@ -218,7 +218,7 @@ fn main() -> anyhow::Result<()> {
                 )?);
             }
 
-            let spec = deposit::describe(&layer, &m.realm.channel, counter, tools);
+            let spec = deposit::describe(&layer, &m.realm.channel, counter, tools, &m.includes);
             // render() re-parses with varve's own parser and refuses a spec
             // `varve deposit` could not read — before the signing step, not
             // during it.

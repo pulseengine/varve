@@ -261,6 +261,21 @@ pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositErr
     toml::from_str(toml_text).map_err(|e| DepositError::Spec(e.to_string()))
 }
 
+impl SpecInclude {
+    /// The composed-layer reference this spec entry describes.
+    ///
+    /// Beside `SpecTool::into_deposit_tool` and for the same reason: the CLI
+    /// used to map these inline, so a test could only exercise the mapping by
+    /// copying it — and a copy agrees with itself no matter what the CLI does.
+    pub fn into_deposit_include(self) -> DepositInclude {
+        DepositInclude {
+            digest: self.digest,
+            realm: self.realm,
+            layer: self.layer,
+        }
+    }
+}
+
 impl SpecTool {
     /// The payload this spec entry describes, with its bytes read from `base`.
     ///
