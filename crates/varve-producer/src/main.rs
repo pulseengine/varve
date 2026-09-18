@@ -116,8 +116,20 @@ fn main() -> anyhow::Result<()> {
                 Some(p) => deposit::parse_present_digests(&std::fs::read_to_string(p)?),
                 None => Default::default(),
             };
-            let optins =
-                ingest::parse_optins(&std::env::var("UNVERIFIED_INGEST").unwrap_or_default());
+            // From the MANIFEST first, then the environment. `plan` read the
+            // manifest's `unverified-reason` and printed "opt-in recorded"
+            // while this path read only UNVERIFIED_INGEST, so a realm that
+            // stated its reason in layer.toml — reviewed, committed, signed
+            // into the layer — had its deposit refused with a message telling
+            // it to set an environment variable instead.
+            let optins = ingest::optins_in_force(
+                planned.iter().filter_map(|p| {
+                    p.unverified_reason
+                        .as_ref()
+                        .map(|why| (p.repo.clone(), why.clone()))
+                }),
+                &std::env::var("UNVERIFIED_INGEST").unwrap_or_default(),
+            );
 
             let downloads = stage_root.join("downloads");
             let scratch = stage_root.join("extract");
@@ -206,7 +218,7 @@ fn main() -> anyhow::Result<()> {
                 )?);
             }
 
-            let spec = deposit::describe(&layer, &m.realm.channel, counter, tools);
+            let spec = deposit::describe(&layer, &m.realm.channel, counter, tools, &m.includes);
             // render() re-parses with varve's own parser and refuses a spec
             // `varve deposit` could not read — before the signing step, not
             // during it.
