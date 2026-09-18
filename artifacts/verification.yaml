@@ -3173,3 +3173,28 @@ artifacts:
       model: claude-opus-5
       timestamp: 2026-09-18T05:46:32Z
     release: v0.36.0
+
+  - id: VER-LAYERREPO-001
+    type: verification
+    title: Two realms assemble, sign and publish outside varve
+    status: accepted
+    description: |-
+      Clause 4 asks for something varve's own repository cannot demonstrate from inside itself: that a realm's layers are assembled, signed and published OUTSIDE varve, in that realm's own repository. This records the check made against the two realms that now do it.
+
+      THE FIRST REALM. pulseengine/pulseengine-layers holds layer.toml and the rolling key as its own secret, consumes a RELEASED assembler (varve-producer, pinned in its own manifest and riding in the layer it builds), and deposits on its own authority. Layer 2026.09.4 (counter 5, 15 payloads) was deposited from a dispatch and 2026.09.5 (counter 6) by that repository's own scanner with no person in the loop — the first autonomous deposit, recorded in DD-030 with the control it gives up.
+
+      THE SECOND REALM, which is the stronger evidence, because a pattern one repository follows may be an accident of that repository. pulseengine/wasm-layers stood up from the same tooling in a day: its own manifest, its own root (published as realm-root.pub, since varve's release carries the pulseengine realm's root and not this one), its own key as its own secret. Its deposit refused twice for reasons varve is supposed to refuse for — an upstream that vouches for nothing, and then a producer defect — which is the migration working rather than failing: the realm's own pipeline enforced the ladder without varve's repository being involved at all.
+
+      WHAT WAS RETIRED, and why the retirement is the clause rather than tidying. varve carried tools/scan-upstream.sh (533 lines), tools/upstream-mechanism.sh, .github/workflows/scan-upstream.yml on a daily cron, and a 22 KB system test with fixtures. None of it published anything any more; it was a second implementation of the live pipeline, inside the tool the realm consumes, and every file of it was a place a reader could mistake for the live path. Deleted in varve#168 with the two rivet artifacts that pointed at it (REQ-ROLLING-001 and VER-ROLLING-001, both deprecated rather than quietly dropped — the first because its second clause was reversed by DD-030, not met).
+
+      WHAT THIS DOES NOT CLAIM. The other two realms REQ-REALM2-002 and REQ-COVALENT-001 describe do not exist yet; the bytecodealliance-sourced realm here is pulseengine-wasm, named for who holds the key rather than whose software it carries. Clause 4's gate is met for the realms that exist, not for every realm the roadmap names.
+    fields:
+      method: inspection
+    links:
+      - type: verifies
+        target: REQ-LAYERREPO-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5
+      timestamp: 2026-09-18T17:43:05Z
+    release: v0.37.0
