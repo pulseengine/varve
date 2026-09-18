@@ -231,3 +231,37 @@ fn each_published_crate_ships_its_rustdoc_before_the_sums() {
         "the entry point is not checked:\n{step}"
     );
 }
+
+/// The crates are packaged before anything writes into the working tree.
+///
+/// v0.36.0's first Release run died here, after crates.io had already
+/// published: `cargo cyclonedx` writes `crates/<name>/<name>.cdx.json` into
+/// the tree, and `cargo package` refuses a dirty tree — "1 files in the working
+/// directory contain changes that were not yet committed into git".
+///
+/// The refusal is right, which is why the fix is ORDER and not `--allow-dirty`:
+/// packaging a dirty tree would produce bytes that are not the tag's, and
+/// "these are the bytes crates.io serves" is the whole reason the asset exists.
+/// Asserted against the SBOM step by name rather than against a general notion
+/// of dirtiness, because that step is the one that does it.
+// rivet: partially-verifies REQ-CRATEPAYLOAD-001
+#[test]
+fn the_crates_are_packaged_before_the_sbom_dirties_the_tree() {
+    let w = read(".github/workflows/release.yml");
+    let pkg = w
+        .find("- name: Package the published crates")
+        .expect("the crate packaging step is gone");
+    let cyclonedx = w
+        .find("cargo cyclonedx")
+        .expect("the SBOM step is gone — this guard would pass vacuously");
+    assert!(
+        pkg < cyclonedx,
+        "cargo package runs after cargo cyclonedx, which writes a .cdx.json into the \
+         working tree; `cargo package` then refuses the dirty tree and the release dies \
+         with the crates already published"
+    );
+    assert!(
+        !w[pkg..].contains("--allow-dirty"),
+        "packaging with --allow-dirty would ship bytes that are not the tag's"
+    );
+}
