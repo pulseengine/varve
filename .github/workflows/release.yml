@@ -332,6 +332,57 @@ jobs:
             exit 1
           fi
 
+      # BEFORE the SBOM steps, and that ordering is load-bearing: `cargo
+      # cyclonedx` writes crates/<name>/<name>.cdx.json INTO THE WORKING TREE,
+      # and `cargo package` then refuses — "1 files in the working directory
+      # contain changes that were not yet committed into git". That is exactly
+      # the right refusal: a dirty tree would package bytes that are not the
+      # tag's, so `--allow-dirty` would buy a green run by giving up the
+      # property this asset exists for. v0.36.0's first Release run died here,
+      # after crates.io had already published.
+      # The crates this release publishes, as release assets (REQ-CRATEPAYLOAD-001
+      # clause 4). The pulseengine layer ingests varve-core from HERE, not from
+      # crates.io, so a crate is proven by cosign over SHA256SUMS.txt like every
+      # other payload instead of acquiring a second trust path. Before the sums,
+      # for the same reason as the SBOM.
+      #
+      # Named crates, never --workspace: that would also package varve-producer
+      # and varve-serve, which are publish = false. --no-verify because the
+      # publish job verifies the same bytes — `cargo package` is reproducible,
+      # which the crate-identity job below re-checks on every tag.
+      - name: Package the published crates
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          BARE="${VERSION#v}"
+          cargo package --locked --no-verify -p varve-core -p varve
+          for c in varve-core varve; do
+            f="target/package/${c}-${BARE}.crate"
+            if [ ! -f "$f" ]; then
+              echo "::error::cargo package produced no $f"
+              exit 1
+            fi
+            cp "$f" release-assets/
+          done
+          ls -la release-assets/*.crate
+
+      # Each published crate's API documentation, as a `rustdoc` docs payload a
+      # layer can carry beside the crate (REQ-LAYERDOCS-001). Before the sums,
+      # so the signature covers it.
+      #
+      # tar.gz, not zip. Measured 2026-09-17: varve and varve-core document to
+      # 16 MB in 811 files, 3.7 MB compressed, and decompressing all of it takes
+      # about 10 ms — varve-serve does that once at start. Zip's random access
+      # pays off for a document of hundreds of megabytes; at this size it would
+      # only add a dependency to a verification binary.
+      #
+      # One archive per crate, each built in its own target directory: target/doc
+      # is shared, so a second `cargo doc` would sweep the first crate's pages
+      # into its tarball. The entry is checked here because a layer.toml will
+      # declare it, and a missing entry is otherwise found by a deposit in
+      # someone else's repository.
       # SHA256SUMS so its digest is captured in the checksum manifest;
       # the cosign signature over SHA256SUMS.txt transitively covers it.
       - name: Install cargo-cyclonedx
@@ -469,49 +520,6 @@ jobs:
           } > release-assets/build-env.txt
           cat release-assets/build-env.txt
 
-      # The crates this release publishes, as release assets (REQ-CRATEPAYLOAD-001
-      # clause 4). The pulseengine layer ingests varve-core from HERE, not from
-      # crates.io, so a crate is proven by cosign over SHA256SUMS.txt like every
-      # other payload instead of acquiring a second trust path. Before the sums,
-      # for the same reason as the SBOM.
-      #
-      # Named crates, never --workspace: that would also package varve-producer
-      # and varve-serve, which are publish = false. --no-verify because the
-      # publish job verifies the same bytes — `cargo package` is reproducible,
-      # which the crate-identity job below re-checks on every tag.
-      - name: Package the published crates
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          VERSION="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
-          BARE="${VERSION#v}"
-          cargo package --locked --no-verify -p varve-core -p varve
-          for c in varve-core varve; do
-            f="target/package/${c}-${BARE}.crate"
-            if [ ! -f "$f" ]; then
-              echo "::error::cargo package produced no $f"
-              exit 1
-            fi
-            cp "$f" release-assets/
-          done
-          ls -la release-assets/*.crate
-
-      # Each published crate's API documentation, as a `rustdoc` docs payload a
-      # layer can carry beside the crate (REQ-LAYERDOCS-001). Before the sums,
-      # so the signature covers it.
-      #
-      # tar.gz, not zip. Measured 2026-09-17: varve and varve-core document to
-      # 16 MB in 811 files, 3.7 MB compressed, and decompressing all of it takes
-      # about 10 ms — varve-serve does that once at start. Zip's random access
-      # pays off for a document of hundreds of megabytes; at this size it would
-      # only add a dependency to a verification binary.
-      #
-      # One archive per crate, each built in its own target directory: target/doc
-      # is shared, so a second `cargo doc` would sweep the first crate's pages
-      # into its tarball. The entry is checked here because a layer.toml will
-      # declare it, and a missing entry is otherwise found by a deposit in
-      # someone else's repository.
       - name: Build the API documentation (rustdoc)
         env:
           INPUT_TAG: ${{ inputs.tag }}
