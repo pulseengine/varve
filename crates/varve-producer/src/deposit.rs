@@ -159,6 +159,10 @@ pub fn stage_one<R: CommandRunner>(
         PayloadKind::RawPerPlatform => stage::place(&archive, &dest, true)?,
         // Never unpacked: the extension IS the payload.
         PayloadKind::Vsix => stage::place(&archive, &dest, false)?,
+        // Never unpacked and never made executable: its sha256 is the `cksum`
+        // a Cargo registry index records, so a single changed byte would make
+        // `export-cargo` write an index cargo then refuses to trust.
+        PayloadKind::Crate => stage::place(&archive, &dest, false)?,
         // Stored exactly as published, like an sdk and for the same reason:
         // unpacking and re-packing would break the digest upstream's own sums
         // cover. Materialising it is `export-docs`'s job, on the consumer's
@@ -277,11 +281,17 @@ pub fn stage_one<R: CommandRunner>(
         version: version.to_string(),
         platform: r.plan.platform.clone(),
         path: rel,
-        kind: match r.plan.kind {
-            PayloadKind::Vsix => Some("vsix".to_string()),
-            PayloadKind::Sdk => Some("sdk".to_string()),
+        kind: r.plan.kind.deposit_kind().map(str::to_string),
+        docs_format: match r.plan.kind {
+            PayloadKind::Docs(format) => Some(format.as_str().to_string()),
             _ => None,
         },
+        docs_entry: match r.plan.kind {
+            PayloadKind::Docs(_) => r.plan.contains.clone(),
+            _ => None,
+        },
+        docs_title: r.plan.title.clone(),
+        docs_documents: r.plan.documents.clone(),
         source: SourceOut {
             repo: r.plan.repo.clone(),
             release: r.plan.release.clone(),
@@ -393,6 +403,8 @@ mod tests {
             plan: crate::plan::PayloadPlan {
                 release: "v1.0.0".into(),
                 upstream_sums: None,
+                title: None,
+                documents: None,
                 contains: None,
                 name: "rivet".into(),
                 repo: "o/r".into(),
@@ -736,6 +748,10 @@ mod tests {
             platform: Some(platform.into()),
             path: format!("tools/rivet-{platform}"),
             kind: None,
+            docs_format: None,
+            docs_entry: None,
+            docs_title: None,
+            docs_documents: None,
             source: src(asset, sha),
         };
         describe(
@@ -854,6 +870,8 @@ mod tests {
         let p = |name: &str, plat: &str, asset: &str| crate::plan::PayloadPlan {
             release: "v1.0.0".into(),
             upstream_sums: None,
+            title: None,
+            documents: None,
             contains: None,
             name: name.into(),
             repo: "o/r".into(),

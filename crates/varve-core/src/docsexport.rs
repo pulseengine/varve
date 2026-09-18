@@ -42,8 +42,54 @@ pub struct DocsPayload {
     pub entry: Option<String>,
     /// The human label shown when choosing.
     pub title: Option<String>,
+    /// The payload this documents, by name (clause 2).
+    pub documents: Option<String>,
     /// The archive (or the single file), exactly as signed.
     pub bytes: Vec<u8>,
+}
+
+impl DocsPayload {
+    /// A docs payload, read from the annotations its layer SIGNED.
+    ///
+    /// The one reader of those annotations on the consumer side. `export-docs`
+    /// and `varve-serve` each used to build this by hand, with their own format
+    /// parser, so a field added to one would reach one reader and not the
+    /// other — exactly the shape that shipped `documents` half-read would have.
+    pub fn from_signed(
+        annotations: &std::collections::BTreeMap<String, String>,
+        bytes: Vec<u8>,
+    ) -> Result<DocsPayload, DocsExportError> {
+        let get = |k: &str| annotations.get(k).cloned();
+        let name = get("eu.pulseengine.tool").unwrap_or_else(|| "(unnamed)".into());
+        let format = match annotations.get(crate::deposit::ANN_DOCS_FORMAT) {
+            None => {
+                return Err(DocsExportError::Unreadable {
+                    name,
+                    detail: format!(
+                        "it carries no {} annotation — it was deposited without the gate that \
+                         requires one, so there is no way to tell how to open it",
+                        crate::deposit::ANN_DOCS_FORMAT
+                    ),
+                });
+            }
+            Some(raw) => DocsFormat::parse(raw).ok_or_else(|| DocsExportError::Unreadable {
+                name: name.clone(),
+                detail: format!(
+                    "it declares the documentation format {raw:?}, which this build does not \
+                     know. The document is carried and verified; a newer varve may open it"
+                ),
+            })?,
+        };
+        Ok(DocsPayload {
+            version: get("eu.pulseengine.tool.version").unwrap_or_default(),
+            format,
+            entry: get(crate::deposit::ANN_DOCS_ENTRY),
+            title: get(crate::deposit::ANN_DOCS_TITLE),
+            documents: get(crate::deposit::ANN_DOCS_DOCUMENTS),
+            name,
+            bytes,
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -73,6 +119,22 @@ pub enum DocsExportError {
          a selector is only optional where there is nothing to choose between."
     )]
     Ambiguous { n: usize, carried: String },
+    /// Asked for the documentation of a payload nothing documents.
+    #[error(
+        "nothing in this layer documents {asked:?}. Documented: {documented}. \
+         `varve inspect` shows what each document documents."
+    )]
+    NothingDocuments { asked: String, documented: String },
+    /// Several documents of the one payload.
+    #[error("{n} documents in this layer document {asked:?}: {carried}. Name one with --select.")]
+    AmbiguousFor {
+        asked: String,
+        n: usize,
+        carried: String,
+    },
+    /// A docs payload whose signed annotations cannot be read as a document.
+    #[error("docs payload {name:?} cannot be opened: {detail}")]
+    Unreadable { name: String, detail: String },
 }
 
 /// What an export did. Reported rather than assumed: "wrote 0 files" and
@@ -119,6 +181,50 @@ pub fn select<'a>(
                 carried: carried(),
             }),
         },
+    }
+}
+
+/// Choose the document of a payload: the one whose signed `documents` names it.
+///
+/// Matched on what a document SAYS it documents, never on its own name — a
+/// document called `varve-core` is not thereby the documentation of the
+/// `varve-core` crate, and guessing so would open the wrong thing and report
+/// success.
+pub fn select_for<'a>(
+    payloads: &'a [DocsPayload],
+    asked: &str,
+) -> Result<&'a DocsPayload, DocsExportError> {
+    let hits: Vec<&DocsPayload> = payloads
+        .iter()
+        .filter(|p| p.documents.as_deref() == Some(asked))
+        .collect();
+    match hits.as_slice() {
+        [only] => Ok(only),
+        [] => {
+            let mut documented: Vec<&str> = payloads
+                .iter()
+                .filter_map(|p| p.documents.as_deref())
+                .collect();
+            documented.sort_unstable();
+            documented.dedup();
+            Err(DocsExportError::NothingDocuments {
+                asked: asked.to_string(),
+                documented: if documented.is_empty() {
+                    "nothing — no document in this layer names a payload".to_string()
+                } else {
+                    documented.join(", ")
+                },
+            })
+        }
+        many => {
+            let mut names: Vec<&str> = many.iter().map(|p| p.name.as_str()).collect();
+            names.sort_unstable();
+            Err(DocsExportError::AmbiguousFor {
+                asked: asked.to_string(),
+                n: many.len(),
+                carried: names.join(", "),
+            })
+        }
     }
 }
 
@@ -235,8 +341,128 @@ mod tests {
             format,
             entry: Some("index.html".into()),
             title: None,
+            documents: None,
             bytes: Vec::new(),
         }
+    }
+
+    fn documenting(name: &str, documents: &str) -> DocsPayload {
+        DocsPayload {
+            documents: Some(documents.into()),
+            ..payload(name, DocsFormat::Rustdoc)
+        }
+    }
+
+    /// `--for varve-core` answers with the document that SAYS it documents
+    /// varve-core — not with one that happens to be named like it.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn a_reader_can_ask_for_the_documentation_of_a_payload() {
+        let docs = vec![
+            payload("varve-core", DocsFormat::Html),
+            documenting("varve-core-api", "varve-core"),
+            documenting("varve-api", "varve"),
+        ];
+        assert_eq!(
+            select_for(&docs, "varve-core").expect("selects").name,
+            "varve-core-api"
+        );
+        assert_eq!(
+            select_for(&docs, "varve").expect("selects").name,
+            "varve-api"
+        );
+    }
+
+    /// Nothing documents it: say what IS documented, so the next command is
+    /// not a guess.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn asking_for_an_undocumented_payload_names_what_is_documented() {
+        let docs = vec![
+            payload("handbook", DocsFormat::Pdf),
+            documenting("varve-core-api", "varve-core"),
+        ];
+        let e = select_for(&docs, "serde").expect_err("must refuse");
+        assert!(
+            matches!(e, DocsExportError::NothingDocuments { .. }),
+            "{e:?}"
+        );
+        let msg = e.to_string();
+        assert!(msg.contains("serde"), "{msg}");
+        assert!(msg.contains("varve-core"), "{msg}");
+        assert!(
+            !msg.contains("handbook"),
+            "a document of nothing is not an answer: {msg}"
+        );
+    }
+
+    /// Two documents of one payload — say a rustdoc and a guide — must ask.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn two_documents_of_one_payload_refuse_rather_than_guess() {
+        let docs = vec![
+            documenting("varve-core-api", "varve-core"),
+            documenting("varve-core-guide", "varve-core"),
+        ];
+        let e = select_for(&docs, "varve-core").expect_err("must refuse");
+        assert!(
+            matches!(e, DocsExportError::AmbiguousFor { n: 2, .. }),
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("varve-core-api"), "{e}");
+        assert!(e.to_string().contains("varve-core-guide"), "{e}");
+    }
+
+    /// The consumer reads every docs field from the SIGNED annotations in one
+    /// place. It used to be read twice — by `export-docs` and by `varve-serve`
+    /// — each with its own format parser, so a field added to one reader and
+    /// not the other would ship half-read.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn a_payload_is_read_from_its_signed_annotations() {
+        let mut ann = std::collections::BTreeMap::new();
+        ann.insert(
+            "eu.pulseengine.tool".to_string(),
+            "varve-core-api".to_string(),
+        );
+        ann.insert(
+            "eu.pulseengine.tool.version".to_string(),
+            "0.36.0".to_string(),
+        );
+        ann.insert(
+            crate::deposit::ANN_DOCS_FORMAT.to_string(),
+            "rustdoc".to_string(),
+        );
+        ann.insert(
+            crate::deposit::ANN_DOCS_ENTRY.to_string(),
+            "varve_core/index.html".to_string(),
+        );
+        ann.insert(
+            crate::deposit::ANN_DOCS_TITLE.to_string(),
+            "API".to_string(),
+        );
+        ann.insert(
+            crate::deposit::ANN_DOCS_DOCUMENTS.to_string(),
+            "varve-core".to_string(),
+        );
+        let p = DocsPayload::from_signed(&ann, b"bytes".to_vec()).expect("reads");
+        assert_eq!(p.name, "varve-core-api");
+        assert_eq!(p.version, "0.36.0");
+        assert_eq!(p.format, DocsFormat::Rustdoc);
+        assert_eq!(p.entry.as_deref(), Some("varve_core/index.html"));
+        assert_eq!(p.title.as_deref(), Some("API"));
+        assert_eq!(p.documents.as_deref(), Some("varve-core"));
+        assert_eq!(p.bytes, b"bytes");
+
+        ann.insert(
+            crate::deposit::ANN_DOCS_FORMAT.to_string(),
+            "epub".to_string(),
+        );
+        let e = DocsPayload::from_signed(&ann, Vec::new()).expect_err("unknown format");
+        assert!(e.to_string().contains("epub"), "{e}");
+        ann.remove(crate::deposit::ANN_DOCS_FORMAT);
+        let e = DocsPayload::from_signed(&ann, Vec::new()).expect_err("no format");
+        assert!(e.to_string().contains("varve-core-api"), "{e}");
     }
 
     /// One document and no selector is the common case, and asking the reader
@@ -335,6 +561,7 @@ mod tests {
             format: DocsFormat::Html,
             entry: Some("index.html".into()),
             title: None,
+            documents: None,
             bytes,
         };
 

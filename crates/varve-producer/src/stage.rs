@@ -137,6 +137,11 @@ pub fn staged_path_for(
     if let PayloadKind::Docs(_) = kind {
         return format!("docs/{name}-{version}{ext}");
     }
+    // Named as `cargo package` names it, whatever the asset was called: the
+    // file name is how a registry and a vendor tree find a crate.
+    if kind == PayloadKind::Crate {
+        return format!("crates/{name}-{version}.crate");
+    }
     if kind == PayloadKind::Sdk {
         return match platform {
             Some(p) => format!("sdk/{name}-{p}-{version}{ext}"),
@@ -152,7 +157,7 @@ pub fn staged_path_for(
             Some(p) => format!("tools/{name}-{p}"),
             None => format!("tools/{name}"),
         },
-        PayloadKind::Sdk | PayloadKind::Docs(_) => {
+        PayloadKind::Sdk | PayloadKind::Docs(_) | PayloadKind::Crate => {
             unreachable!("handled above, where the extension is kept")
         }
     }

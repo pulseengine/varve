@@ -6930,3 +6930,34 @@ fn an_unchosen_collision_names_both_realms_and_the_qualified_form() {
         "the advice that cannot work must be gone:\n{stderr}"
     );
 }
+
+/// Clause 3 of REQ-VERIFYSTREAM-001: a measurement must not change what a
+/// caller can parse. `--timing` reports on STDERR, so stdout carries only the
+/// verdict whether or not anyone asked for timings.
+///
+/// A source-level guard rather than a run, because the run needs an installed
+/// layer with a large payload; what can rot here is someone reaching for
+/// `println!` while editing the reporter, and that is visible in the source.
+// rivet: verifies REQ-VERIFYSTREAM-001
+#[test]
+fn the_timing_report_goes_to_stderr_and_not_to_stdout() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+    )
+    .expect("main.rs");
+    let body = src
+        .split("fn report_timing(")
+        .nth(1)
+        .expect("the timing reporter is gone — this guard would pass vacuously");
+    let body = body.split("\nfn ").next().expect("function body");
+    // Counted, not searched: "eprintln!" CONTAINS "println!", so a plain
+    // `!contains("println!")` fails on correct code — it did, first try.
+    let to_stderr = body.matches("eprintln!").count();
+    let to_stdout = body.matches("println!").count() - to_stderr;
+    assert!(to_stderr > 0, "the timing report is not on stderr");
+    assert_eq!(
+        to_stdout, 0,
+        "the timing report writes to stdout, which anything parsing verify would then have \
+         to skip:\n{body}"
+    );
+}

@@ -490,6 +490,269 @@ pub fn manifest_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
+/// Buffer size for [`digest_file`]. Large enough that syscall overhead is
+/// negligible against a GB-scale payload, small enough that the memory a
+/// digest costs is a constant rather than the size of the thing being checked.
+pub const DIGEST_BUFFER: usize = 1 << 16;
+
+/// The digest of a file, computed from a stream in bounded memory
+/// (REQ-VERIFYSTREAM-001 clause 1).
+///
+/// `manifest_digest(&std::fs::read(path)?)` gives the same answer, and it is
+/// what verify used to do — which made checking a 2 GB SDK a 2 GB heap
+/// allocation per payload, one at a time, reported from real use as ~9 seconds
+/// with nothing printed (varve#141). The answer does not change; only what it
+/// costs to reach it.
+///
+/// No hand-rolled cursor, deliberately. `io::copy` drives the loop and decides
+/// when it ends, so there is no `pos += n` for a mutant to turn into a loop
+/// that never advances — the shape that killed a CI job outright in v0.35.0.
+pub fn digest_file(path: &Path) -> std::io::Result<String> {
+    Ok(digest_file_timed(path)?.0)
+}
+
+/// Where the time went while digesting one file (REQ-VERIFYSTREAM-001 clause 2).
+///
+/// Attributed rather than guessed. varve#141 reported ~9 s to verify a layer
+/// with a 2 GB SDK, and the arithmetic said the hash could not account for it:
+/// a claim like that is only settled by measuring the stages separately.
+///
+/// There is no `decompress` field because verify does not decompress. A payload
+/// is hashed exactly as its producer signed it — that is what makes the digest
+/// re-derivable — so an archive's compression costs verify nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StageTiming {
+    /// Time inside the reader: the syscall and whatever the kernel did to serve
+    /// it, which on a cold cache is the disk.
+    pub read: std::time::Duration,
+    /// Time inside SHA-256.
+    pub hash: std::time::Duration,
+    /// Bytes read, which is the file's size — reported so a rate can be
+    /// computed from the same run that produced the times.
+    pub bytes: u64,
+}
+
+impl StageTiming {
+    /// Sum, for attributing a whole layer from its payloads.
+    pub fn add(&mut self, other: StageTiming) {
+        self.read += other.read;
+        self.hash += other.hash;
+        self.bytes += other.bytes;
+    }
+}
+
+/// [`digest_file`], with the read and hash time attributed separately.
+///
+/// The timing rides ON the real digest path rather than living in a benchmark:
+/// a number measured by a copy of the code is a number about the copy. The
+/// clocks are read per buffer, which at a 64 KiB buffer is two `Instant::now()`
+/// calls per 64 KiB — under a millisecond per gigabyte, and measured against
+/// the untimed path in the tests below.
+pub fn digest_file_timed(path: &Path) -> std::io::Result<(String, StageTiming)> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = TimedReader {
+        inner: std::io::BufReader::with_capacity(DIGEST_BUFFER, file),
+        timing: StageTiming::default(),
+    };
+    let mut hasher = Sha256::new();
+    let mut writer = HashWriter {
+        hasher: &mut hasher,
+        hash: std::time::Duration::ZERO,
+    };
+    std::io::copy(&mut reader, &mut writer)?;
+    let hash = writer.hash;
+    let mut timing = reader.timing;
+    timing.hash = hash;
+    Ok((format!("sha256:{}", hex::encode(hasher.finalize())), timing))
+}
+
+/// Times the reads without changing what is read.
+///
+/// A wrapper rather than a hand-written loop, for the reason `io::copy` is used
+/// at all: a loop here would need its own termination condition, and a mutant
+/// that removes it hangs the job instead of failing a test.
+struct TimedReader<R> {
+    inner: R,
+    timing: StageTiming,
+}
+
+impl<R: std::io::Read> std::io::Read for TimedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let t = std::time::Instant::now();
+        let n = self.inner.read(buf)?;
+        self.timing.read += t.elapsed();
+        self.timing.bytes += n as u64;
+        Ok(n)
+    }
+}
+
+/// Feeds whatever `io::copy` writes straight into a hasher.
+///
+/// A local adapter rather than enabling a `sha2` feature: a dependency's
+/// feature set inside a verification crate is a thing to keep small. Mutating
+/// the reported length is caught rather than hidden — `Ok(0)` makes `copy`
+/// fail with `WriteZero`, and a short count makes it re-send bytes already
+/// hashed, so the digest disagrees with `manifest_digest` at every size the
+/// differential test checks.
+struct HashWriter<'a> {
+    hasher: &'a mut Sha256,
+    hash: std::time::Duration,
+}
+
+impl std::io::Write for HashWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let t = std::time::Instant::now();
+        self.hasher.update(buf);
+        self.hash += t.elapsed();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod digest_file_tests {
+    use super::*;
+
+    /// The streaming digest must be BYTE-FOR-BYTE the digest of the whole
+    /// file. Asserted against `manifest_digest` rather than against a
+    /// hard-coded hash, so the oracle is the implementation that has always
+    /// been trusted, and the new one has to agree with it.
+    ///
+    /// The sizes are where a chunked reader goes wrong: empty, a single
+    /// byte, one short of the buffer, exactly the buffer, one past it, and
+    /// several buffers with a ragged tail. A reader that drops a final partial
+    /// chunk, or double-counts one at a boundary, is right on most of these
+    /// and wrong on exactly one.
+    // rivet: verifies REQ-VERIFYSTREAM-001
+    #[test]
+    fn a_streamed_digest_equals_the_whole_file_digest_at_every_boundary() {
+        let dir = std::env::temp_dir().join(format!("varve-digest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let b = DIGEST_BUFFER;
+        for len in [0, 1, b - 1, b, b + 1, 3 * b + 7] {
+            // Not all zeros: a pattern that changes with position, so a chunk
+            // read out of order would hash differently.
+            let bytes: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let path = dir.join(format!("payload-{len}"));
+            std::fs::write(&path, &bytes).expect("write fixture");
+            assert_eq!(
+                digest_file(&path).expect("streams"),
+                manifest_digest(&bytes),
+                "streaming and whole-file digests disagree at {len} bytes"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The timed path and the untimed path must agree about the digest, at
+    /// every buffer boundary: timing must not be able to change the answer,
+    /// and `digest_file` is now implemented BY the timed one.
+    // rivet: verifies REQ-VERIFYSTREAM-001
+    #[test]
+    fn timing_does_not_change_the_digest_at_any_boundary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let b = DIGEST_BUFFER;
+        for size in [0usize, 1, b - 1, b, b + 1, 3 * b + 7] {
+            let path = dir.path().join(format!("f{size}"));
+            let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            std::fs::write(&path, &bytes).expect("write");
+            let (timed, stage) = digest_file_timed(&path).expect("timed digest");
+            assert_eq!(timed, manifest_digest(&bytes), "size {size}");
+            assert_eq!(digest_file(&path).expect("digest"), timed, "size {size}");
+            assert_eq!(stage.bytes, size as u64, "size {size}: bytes read");
+        }
+    }
+
+    /// Both stages are attributed, and the bytes are the file's. The numbers
+    /// this requirement asks to have RECORDED are what a rate is computed
+    /// from, so a stage left silently at zero would make the record a lie.
+    // rivet: verifies REQ-VERIFYSTREAM-001
+    #[test]
+    fn read_and_hash_are_attributed_separately() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("many-buffers");
+        // Enough buffers that neither stage can round to zero on any clock.
+        std::fs::write(&path, vec![7u8; DIGEST_BUFFER * 64]).expect("write");
+        let (_, stage) = digest_file_timed(&path).expect("timed digest");
+        assert_eq!(stage.bytes, (DIGEST_BUFFER * 64) as u64);
+        assert!(stage.read > std::time::Duration::ZERO, "read unattributed");
+        assert!(stage.hash > std::time::Duration::ZERO, "hash unattributed");
+    }
+
+    /// Summing is how a whole layer is attributed from its payloads.
+    // rivet: verifies REQ-VERIFYSTREAM-001
+    #[test]
+    fn stage_timings_sum() {
+        let mut total = StageTiming::default();
+        total.add(StageTiming {
+            read: std::time::Duration::from_millis(3),
+            hash: std::time::Duration::from_millis(5),
+            bytes: 100,
+        });
+        total.add(StageTiming {
+            read: std::time::Duration::from_millis(7),
+            hash: std::time::Duration::from_millis(11),
+            bytes: 23,
+        });
+        assert_eq!(total.read, std::time::Duration::from_millis(10));
+        assert_eq!(total.hash, std::time::Duration::from_millis(16));
+        assert_eq!(total.bytes, 123);
+    }
+
+    /// THE CLASS GUARD. The paths that answer "does this installed payload
+    /// still match its signed digest" must digest it through `digest_file`,
+    /// never through `manifest_digest(&std::fs::read(..))`.
+    ///
+    /// A blanket "no fs::read" would be wrong — reverify legitimately reads
+    /// the small signed envelope and manifest. The precise invariant is that
+    /// their production code calls `manifest_digest` NOT AT ALL, so the only
+    /// way to hash a payload there is the streaming one.
+    ///
+    /// Two files, not one, and that is the point: `reverify` is varve's own
+    /// verify, `consumer` is the check other repositories call. Fixing only the
+    /// first would stream varve's answer while every consumer still allocated a
+    /// 2 GB SDK to ask the same question.
+    // rivet: verifies REQ-VERIFYSTREAM-001
+    #[test]
+    fn no_payload_check_digests_a_whole_file_read() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for rel in ["src/reverify.rs", "src/consumer.rs"] {
+            let src = std::fs::read_to_string(root.join(rel)).expect("readable");
+            let prod = match src.find("#[cfg(test)]") {
+                Some(i) => &src[..i],
+                None => &src[..],
+            };
+            assert!(
+                !prod.contains("manifest_digest("),
+                "{rel} digests with `manifest_digest` in production code. A payload \
+                 check must stream through `digest_file`; hashing a whole-file read \
+                 allocates the entire payload, which is 2 GB for an SDK (varve#141)."
+            );
+            // `digest_file_timed` counts: it IS the streaming path, and
+            // `digest_file` is a thin wrapper over it. What must not appear is
+            // a whole-file read, which the assertion above covers.
+            assert!(
+                prod.contains("digest_file(") || prod.contains("digest_file_timed("),
+                "{rel} no longer streams a payload digest at all — the payload check \
+                 has moved or vanished, and this guard would pass vacuously"
+            );
+        }
+    }
+
+    /// A missing file is an error the caller can name, not a digest of
+    /// nothing. Hashing an absent file to the empty-string digest would be a
+    /// silent pass for any entry whose signed digest happened to be that.
+    // rivet: verifies REQ-VERIFYSTREAM-001
+    #[test]
+    fn a_missing_file_is_an_error_not_the_empty_digest() {
+        let missing = std::env::temp_dir().join("varve-digest-definitely-absent-0");
+        assert!(digest_file(&missing).is_err());
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod fixtures {
     /// A minimal, valid layer manifest for tests.

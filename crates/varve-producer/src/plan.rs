@@ -20,7 +20,9 @@
 //! a tool, so three is not a special case; it is just three.
 
 use crate::asset::{self, TemplateError};
-use varve_core::layerspec::{DocsFormat, LayerManifest, ManifestDocs, ManifestTool, ManifestVsix};
+use varve_core::layerspec::{
+    DocsFormat, LayerManifest, ManifestCrate, ManifestDocs, ManifestTool, ManifestVsix,
+};
 
 /// What kind of payload a plan item produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +45,28 @@ pub enum PayloadKind {
     /// `markdown` and `reqif` are single files. The format decides it, not
     /// the extension of whatever the upstream happened to name the asset.
     Docs(DocsFormat),
+    /// A Rust `.crate`, stored exactly as the release published it
+    /// (REQ-CRATEPAYLOAD-001). HELD, never dispatched; never unpacked, because
+    /// its sha256 is the `cksum` a Cargo registry index records for it.
+    Crate,
+}
+
+impl PayloadKind {
+    /// The kind `varve deposit` signs for this payload, or `None` for a tool.
+    ///
+    /// Exhaustive on purpose. This used to be an inline match ending in
+    /// `_ => None`, so a document was deposited with no kind at all — signed
+    /// as a TOOL — and `export-docs` found nothing in a layer that carried
+    /// one. A new kind now fails to compile here instead of shipping unlabelled.
+    pub fn deposit_kind(self) -> Option<&'static str> {
+        match self {
+            PayloadKind::Tarball | PayloadKind::RawPerPlatform => None,
+            PayloadKind::Vsix => Some("vsix"),
+            PayloadKind::Sdk => Some("sdk"),
+            PayloadKind::Docs(_) => Some("docs"),
+            PayloadKind::Crate => Some("crate"),
+        }
+    }
 }
 
 /// One asset to fetch, verify and stage.
@@ -73,6 +97,12 @@ pub struct PayloadPlan {
     /// one (REQ-UPSTREAMSUMS-001). A property of the RELEASE, so every payload
     /// from one release carries the same value.
     pub upstream_sums: Option<String>,
+    /// The label a human reads when choosing between documents. `None` for
+    /// every kind but `docs`.
+    pub title: Option<String>,
+    /// The payload a document documents, by name. `None` for every kind but
+    /// `docs`.
+    pub documents: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +111,12 @@ pub enum PlanError {
     /// Documentation describes the layer, not a machine, so a per-platform
     /// template would expand to several identical payloads under one name.
     DocsIsNotPerPlatform {
+        name: String,
+        asset: String,
+    },
+    /// A crate is platform-independent source; a per-platform template would
+    /// expand to several payloads claiming one name and version.
+    CrateIsNotPerPlatform {
         name: String,
         asset: String,
     },
@@ -103,6 +139,14 @@ impl std::fmt::Display for PlanError {
                  deposit several identical payloads under one name and make \
                  `varve export-docs {name}` ambiguous. Name the asset without \
                  a platform placeholder."
+            ),
+            PlanError::CrateIsNotPerPlatform { name, asset } => write!(
+                f,
+                "crate {name:?} uses a per-platform template {asset:?}. A \
+                 `.crate` is source — the same bytes on every platform, and \
+                 the same `cksum` in the registry index — so a platform \
+                 placeholder here would deposit several payloads under one \
+                 name and version. Name the asset without one."
             ),
             PlanError::UnknownLayout { tool, layout } => write!(
                 f,
@@ -148,6 +192,7 @@ fn template_of(t: &ManifestTool, kind: PayloadKind) -> String {
         // name, so the manifest states it and `plan` refuses without one.
         PayloadKind::Sdk => unreachable!("an sdk carries its template"),
         PayloadKind::Docs(_) => unreachable!("a docs entry carries its template"),
+        PayloadKind::Crate => unreachable!("a crate is planned by plan_crate"),
     }
 }
 
@@ -188,6 +233,8 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: t.unverified_reason.clone(),
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
+            title: None,
+            documents: None,
         });
         return Ok(out);
     }
@@ -210,6 +257,8 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: t.unverified_reason.clone(),
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
+            title: None,
+            documents: None,
         });
     }
     Ok(out)
@@ -231,6 +280,8 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: None,
             contains: None,
             upstream_sums: None,
+            title: None,
+            documents: None,
         });
         return Ok(out);
     }
@@ -246,6 +297,8 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: None,
             contains: None,
             upstream_sums: None,
+            title: None,
+            documents: None,
         });
     }
     Ok(out)
@@ -283,6 +336,40 @@ pub fn plan_docs(d: &ManifestDocs) -> Result<Vec<PayloadPlan>, PlanError> {
         // whose link 404s.
         contains: d.entry.clone(),
         upstream_sums: None,
+        title: d.title.clone(),
+        documents: d.documents.clone(),
+    }])
+}
+
+/// Expand one crate entry.
+///
+/// No platform loop, for the reason documentation has none: a `.crate` is the
+/// same bytes everywhere. The default asset is what `cargo package` writes.
+pub fn plan_crate(c: &ManifestCrate) -> Result<Vec<PayloadPlan>, PlanError> {
+    let template = c
+        .asset
+        .clone()
+        .unwrap_or_else(|| format!("{}-%V.crate", c.name));
+    if asset::is_per_platform(&template) {
+        return Err(PlanError::CrateIsNotPerPlatform {
+            name: c.name.clone(),
+            asset: template,
+        });
+    }
+    let release = c.release.clone().unwrap_or_else(|| c.version.clone());
+    Ok(vec![PayloadPlan {
+        name: c.name.clone(),
+        repo: repo_of(&c.repo, &c.name),
+        version: c.version.clone(),
+        release: release.clone(),
+        asset: asset::expand(&template, &c.version, &release, None, None)?,
+        platform: None,
+        kind: PayloadKind::Crate,
+        unverified_reason: None,
+        contains: None,
+        upstream_sums: None,
+        title: None,
+        documents: None,
     }])
 }
 
@@ -297,6 +384,9 @@ pub fn plan(m: &LayerManifest, platforms: &[&str]) -> Result<Vec<PayloadPlan>, P
     }
     for d in &m.docs {
         out.extend(plan_docs(d)?);
+    }
+    for c in &m.crates {
+        out.extend(plan_crate(c)?);
     }
     Ok(out)
 }
@@ -614,6 +704,80 @@ mod tests {
     /// A `%T` in a docs template would deposit four identical payloads under
     /// one name and make `export-docs <name>` ambiguous.
     // rivet: verifies REQ-LAYERDOCS-001
+    /// The default asset is what `cargo package` writes and what varve's own
+    /// release uploads, and the release tag is asked for — not the bare
+    /// version, which is no tag at all.
+    // rivet: partially-verifies REQ-CRATEPAYLOAD-001
+    #[test]
+    fn a_crate_defaults_to_the_file_cargo_package_writes() {
+        let m = manifest(
+            "[[crate]]\nname = \"varve-core\"\nrepo = \"pulseengine/varve\"\n\
+             version = \"0.36.0\"\nrelease = \"v0.36.0\"\n",
+        );
+        let p = plan(&m, PLATFORMS).expect("plans");
+        assert_eq!(p.len(), 1, "a crate is one payload, not one per platform");
+        assert_eq!(p[0].kind, PayloadKind::Crate);
+        assert_eq!(p[0].asset, "varve-core-0.36.0.crate");
+        assert_eq!(p[0].release, "v0.36.0");
+        assert_eq!(p[0].version, "0.36.0");
+        assert_eq!(p[0].repo, "pulseengine/varve");
+        assert_eq!(p[0].platform, None);
+    }
+
+    // rivet: partially-verifies REQ-CRATEPAYLOAD-001
+    #[test]
+    fn a_crate_without_a_release_asks_for_its_version() {
+        let m = manifest("[[crate]]\nname = \"serde\"\nversion = \"1.0.0\"\n");
+        let p = plan(&m, PLATFORMS).expect("plans");
+        assert_eq!(p[0].release, "1.0.0");
+        assert_eq!(p[0].repo, "pulseengine/serde");
+    }
+
+    // rivet: partially-verifies REQ-CRATEPAYLOAD-001
+    #[test]
+    fn a_per_platform_crate_template_is_refused() {
+        let m = manifest(
+            "[[crate]]\nname = \"varve-core\"\nversion = \"0.36.0\"\n\
+             asset = \"varve-core-%V-%T.crate\"\n",
+        );
+        let e = plan(&m, PLATFORMS).expect_err("must refuse");
+        assert!(
+            matches!(e, PlanError::CrateIsNotPerPlatform { .. }),
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("varve-core"), "{e}");
+    }
+
+    /// Every planned kind is labelled the way `varve deposit` names it, parsed
+    /// back by varve-core's own kind parser — so a producer label varve does
+    /// not recognise fails here rather than at deposit.
+    // rivet: verifies REQ-LAYERDOCS-001
+    #[test]
+    fn every_payload_kind_is_labelled_with_a_kind_varve_core_parses() {
+        let all = [
+            PayloadKind::Tarball,
+            PayloadKind::RawPerPlatform,
+            PayloadKind::Vsix,
+            PayloadKind::Sdk,
+            PayloadKind::Docs(DocsFormat::Pdf),
+            PayloadKind::Crate,
+        ];
+        for k in all {
+            let core = match k.deposit_kind() {
+                None => varve_core::PayloadKind::Tool,
+                Some(s) => s.parse().unwrap_or_else(|e| panic!("{k:?}: {e}")),
+            };
+            let want = match k {
+                PayloadKind::Tarball | PayloadKind::RawPerPlatform => varve_core::PayloadKind::Tool,
+                PayloadKind::Vsix => varve_core::PayloadKind::Vsix,
+                PayloadKind::Sdk => varve_core::PayloadKind::Sdk,
+                PayloadKind::Docs(_) => varve_core::PayloadKind::Docs,
+                PayloadKind::Crate => varve_core::PayloadKind::Crate,
+            };
+            assert_eq!(core, want, "{k:?}");
+        }
+    }
+
     #[test]
     fn a_per_platform_docs_template_is_refused() {
         let m = manifest(

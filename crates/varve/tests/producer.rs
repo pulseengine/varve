@@ -68,6 +68,7 @@ fn deposit_spec(layer: &str, counter: u64) -> varve_core::DepositSpec {
             docs_format: None,
             docs_entry: None,
             docs_title: None,
+            docs_documents: None,
         }],
     }
 }

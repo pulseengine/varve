@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use crate::install::ManifestVerifier;
 use crate::manifest::LayerManifest;
-use crate::store::{InstalledLayer, Store, manifest_digest};
+use crate::store::{InstalledLayer, Store};
 
 /// This crate's version — so a consumer can record which varve answered.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -216,8 +216,13 @@ pub fn payload_status(
     // was — three surviving mutants on a branch no test could reach. Dead
     // defensive code that cannot be exercised is not caution; it is a place
     // for a defect to hide.
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
+    // Streamed, like `varve verify` (REQ-VERIFYSTREAM-001). This is the check
+    // OTHER repositories call, so leaving it on a whole-file read would have
+    // fixed varve's own verify while every consumer still allocated a 2 GB SDK
+    // to ask one yes-or-no question — two paths deciding one thing, one of
+    // them taught the rule.
+    let found = match crate::store::digest_file(&path) {
+        Ok(d) => d,
         Err(e) => {
             return PayloadStatus::Unreadable {
                 name: name.to_string(),
@@ -226,7 +231,6 @@ pub fn payload_status(
             };
         }
     };
-    let found = manifest_digest(&bytes);
     if found != entry.digest {
         return PayloadStatus::DigestMismatch {
             name: name.to_string(),
@@ -250,6 +254,7 @@ mod tests {
     use crate::pin::Pin;
     use crate::rollback::HighWaterMarks;
     use crate::source::MemorySource;
+    use crate::store::manifest_digest;
     use crate::verify::{PinnedKeyVerifier, generate_root_keypair, sign_layer_manifest};
 
     struct Installed {

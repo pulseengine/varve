@@ -29,6 +29,8 @@ struct DocsRow {
     format: String,
     entry: Option<String>,
     title: Option<String>,
+    /// The payload this documents, by name.
+    documents: Option<String>,
 }
 
 /// One payload, as reported.
@@ -141,6 +143,10 @@ pub fn run(store: &Store, layer: Option<&str>, json: bool) -> anyhow::Result<()>
                             .annotations
                             .get(varve_core::deposit::ANN_DOCS_TITLE)
                             .cloned(),
+                        documents: e
+                            .annotations
+                            .get(varve_core::deposit::ANN_DOCS_DOCUMENTS)
+                            .cloned(),
                     }),
                 present: store_of(l).entry_path(&l.entry, e).is_some(),
                 layer: l.entry.layer.to_string(),
@@ -240,6 +246,7 @@ fn print_json(
                 "docs_format": r.docs.as_ref().map(|d| &d.format),
                 "docs_entry": r.docs.as_ref().and_then(|d| d.entry.as_ref()),
                 "docs_title": r.docs.as_ref().and_then(|d| d.title.as_ref()),
+                "docs_documents": r.docs.as_ref().and_then(|d| d.documents.as_ref()),
             })
         })
         .collect();
@@ -401,6 +408,11 @@ fn print_text(
             if let Some(entry) = &d.entry {
                 println!("    starts at {entry}");
             }
+            // Printed as the command that answers it, because "which document
+            // is the API of varve-core" is the question this field exists for.
+            if let Some(of) = &d.documents {
+                println!("    documents {of}    (varve export-docs --for {of})");
+            }
         }
         // One document needs no selector; several do. Printing the exact next
         // command beats describing it, and the reader has already said which
@@ -474,6 +486,7 @@ mod tests {
                     format: "pdf".into(),
                     entry: None,
                     title: Some("The handbook".into()),
+                    documents: None,
                 }),
             ),
         ];
@@ -506,6 +519,7 @@ mod tests {
                 format: "html".into(),
                 entry: Some("index.html".into()),
                 title: None,
+                documents: None,
             }),
         );
         assert_eq!(d.dispatch, HELD);

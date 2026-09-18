@@ -101,6 +101,12 @@ enum Cmd {
         /// stale vendored tree cannot slip through.
         #[arg(long = "export", value_name = "DIR")]
         export: Vec<PathBuf>,
+        /// Report where verify spent its time — read, hash, signature,
+        /// manifest — on STDERR (REQ-VERIFYSTREAM-001 clause 2). Nothing is
+        /// checked differently; this only says where the time went, so the
+        /// next optimisation is chosen from a measurement rather than a guess.
+        #[arg(long)]
+        timing: bool,
     },
     /// Extract the core: export an installed layer as a directory-shaped
     /// OCI image layout — the offline artifact of record.
@@ -350,8 +356,12 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
         /// Which document, when the layer carries more than one.
-        #[arg(long, value_name = "NAME")]
+        #[arg(long, value_name = "NAME", conflicts_with = "for_payload")]
         select: Option<String>,
+        /// The documentation OF a payload — the document whose signed
+        /// `documents` names it, e.g. `--for varve-core` for that crate's rustdoc.
+        #[arg(long = "for", value_name = "PAYLOAD")]
+        for_payload: Option<String>,
     },
     /// Emit an SBOM for a verified layer, transcribed from its SIGNED manifest
     /// rather than scanned from disk — every component, version and hash is
@@ -675,7 +685,8 @@ fn run() -> anyhow::Result<Outcome> {
             all,
             export,
             lockfile,
-        } => verify(&store, all, &export, lockfile.as_deref()),
+            timing,
+        } => verify(&store, all, &export, lockfile.as_deref(), timing),
         Cmd::Archive {
             layer,
             dest,
@@ -729,9 +740,18 @@ fn run() -> anyhow::Result<Outcome> {
             export_bazel_distdir(&store, layer.as_deref(), &out)
         }
         Cmd::ExportVsix { layer, out } => export_vsix(&store, layer.as_deref(), &out),
-        Cmd::ExportDocs { layer, out, select } => {
-            export_docs(&store, layer.as_deref(), &out, select.as_deref())
-        }
+        Cmd::ExportDocs {
+            layer,
+            out,
+            select,
+            for_payload,
+        } => export_docs(
+            &store,
+            layer.as_deref(),
+            &out,
+            select.as_deref(),
+            for_payload.as_deref(),
+        ),
         Cmd::ExportSdk { layer, out, select } => {
             export_sdk(&store, layer.as_deref(), &out, select.as_deref())
         }
@@ -2649,6 +2669,7 @@ fn export_docs(
     layer: Option<&str>,
     out: &std::path::Path,
     select: Option<&str>,
+    documents_of: Option<&str>,
 ) -> anyhow::Result<()> {
     use varve_core::docsexport::DocsPayload;
 
@@ -2661,45 +2682,16 @@ fn export_docs(
         collect_verified_payloads(&layers, varve_core::PayloadKind::Docs)?
             .into_iter()
             .map(|p| {
-                // `check_docs_metadata` refused a docs payload without a
-                // format at DEPOSIT, so an entry reaching here without one is
-                // not a manifest we should second-guess — it is a layer built
-                // by something that skipped that gate.
-                let raw = p
-                    .annotations
-                    .get(varve_core::deposit::ANN_DOCS_FORMAT)
-                    .map(String::as_str)
-                    .with_context(|| {
-                        format!(
-                            "docs payload {:?} carries no {} annotation — it was deposited \
-                             without the gate that requires one, so varve cannot tell how to \
-                             open it",
-                            p.name,
-                            varve_core::deposit::ANN_DOCS_FORMAT
-                        )
-                    })?;
-                let format = parse_docs_format(raw).with_context(|| {
-                    format!("docs payload {:?} declares an unknown format", p.name)
-                })?;
-                Ok(DocsPayload {
-                    name: p.name,
-                    version: p.version,
-                    format,
-                    entry: p
-                        .annotations
-                        .get(varve_core::deposit::ANN_DOCS_ENTRY)
-                        .cloned(),
-                    title: p
-                        .annotations
-                        .get(varve_core::deposit::ANN_DOCS_TITLE)
-                        .cloned(),
-                    bytes: p.bytes,
-                })
+                DocsPayload::from_signed(&p.annotations, p.bytes)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let chosen = varve_core::docsexport::select(&payloads, select)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let chosen = match documents_of {
+        Some(asked) => varve_core::docsexport::select_for(&payloads, asked),
+        None => varve_core::docsexport::select(&payloads, select),
+    }
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let report =
         varve_core::docsexport::export(chosen, out).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
@@ -2730,29 +2722,6 @@ fn export_docs(
     }
     write_export_stamp(out, &target.entry, "docs")?;
     Ok(())
-}
-
-/// Parse the signed format annotation into the closed vocabulary.
-///
-/// Deliberately not `serde`: this reads a string that a SIGNATURE vouches for,
-/// and the failure mode worth naming is "a layer declares a format this varve
-/// does not implement", which is a version-skew fact rather than a syntax
-/// error.
-fn parse_docs_format(raw: &str) -> anyhow::Result<varve_core::layerspec::DocsFormat> {
-    use varve_core::layerspec::DocsFormat;
-    Ok(match raw {
-        "html" => DocsFormat::Html,
-        "rustdoc" => DocsFormat::Rustdoc,
-        "pdf" => DocsFormat::Pdf,
-        "markdown" => DocsFormat::Markdown,
-        "reqif" => DocsFormat::Reqif,
-        other => bail!(
-            "unknown documentation format {other:?}. This varve knows html, rustdoc, pdf, \
-             markdown and reqif — a layer declaring anything else was deposited by a NEWER \
-             varve, and the document is carried and verified but cannot be opened here. \
-             `varve self-update`."
-        ),
-    })
 }
 
 /// `varve export-sdk --out D` (REQ-SDK-001 clause 3): materialise the layer's
@@ -2901,28 +2870,7 @@ fn deposit_cmd(
         let base = spec_path.parent().unwrap_or(std::path::Path::new("."));
         let mut deposit_tools = Vec::new();
         for tool in file_spec.tools {
-            let path = base.join(&tool.path);
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("cannot read tool binary {}", path.display()))?;
-            let kind = tool
-                .kind
-                .as_deref()
-                .map(str::parse)
-                .transpose()
-                .map_err(|e: varve_core::UnknownKind| anyhow::anyhow!(e.to_string()))?;
-            deposit_tools.push(varve_core::DepositTool {
-                name: tool.name,
-                version: tool.version,
-                platform: tool.platform,
-                bytes,
-                source: tool.source,
-                runner: tool.runner,
-                kind,
-                sdk_prefix: tool.sdk_prefix,
-                docs_format: tool.docs_format,
-                docs_entry: tool.docs_entry,
-                docs_title: tool.docs_title,
-            });
+            deposit_tools.push(tool.into_deposit_tool(base)?);
         }
         let includes = file_spec
             .includes
@@ -2981,6 +2929,7 @@ fn deposit_cmd(
             docs_format: None,
             docs_entry: None,
             docs_title: None,
+            docs_documents: None,
         });
     }
     run_deposit(
@@ -3558,6 +3507,7 @@ fn verify(
     all: bool,
     exports: &[PathBuf],
     lockfile: Option<&std::path::Path>,
+    timing: bool,
 ) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
     let verifier = ctx_verifier(&ctx)?;
@@ -3569,15 +3519,22 @@ fn verify(
         // layer in another realm passed with exit 0 (varve#84). The realm
         // boundary is preserved in WHICH KEY verifies WHAT, not in what gets
         // looked at.
-        return verify_every_partition(&ctx);
+        return verify_every_partition(&ctx, timing);
     }
     let layers = vec![varve_core::resolve(&ctx.pin, store)?.layer];
     if layers.is_empty() {
         bail!("nothing to verify — no layers installed");
     }
     for layer in layers {
-        let checked =
-            varve_core::verify_installed(store, &layer, &verifier, &varve_core::host_platform())?;
+        let (checked, spent) = varve_core::verify_installed_timed(
+            store,
+            &layer,
+            &verifier,
+            &varve_core::host_platform(),
+        )?;
+        if timing {
+            report_timing(&layer.layer.to_string(), &spent);
+        }
         println!(
             "layer {} {} verified: signature OK, {checked} tool(s) match their signed digests",
             layer.layer, layer.digest
@@ -3617,6 +3574,42 @@ fn verify(
     Ok(())
 }
 
+/// Where verify spent its time, on STDERR (REQ-VERIFYSTREAM-001 clause 2).
+///
+/// stderr, not stdout: a verdict is what a caller parses, and clause 3 forbids
+/// making verify's machine-readable output depend on whether someone asked for
+/// a measurement.
+///
+/// Reported as rates as well as totals, because "read took 0.9 s" is not
+/// actionable while "read ran at 2.2 GiB/s" says at once whether the disk is
+/// the wall. There is no decompress line: verify hashes each payload exactly as
+/// signed, so there is nothing to decompress, and printing a zero would suggest
+/// a stage that had been measured and found free.
+fn report_timing(layer: &str, t: &varve_core::VerifyTiming) {
+    let rate = |bytes: u64, d: std::time::Duration| {
+        let secs = d.as_secs_f64();
+        if secs <= 0.0 || bytes == 0 {
+            return "-".to_string();
+        }
+        format!(
+            "{:.2} GiB/s",
+            bytes as f64 / secs / (1024.0 * 1024.0 * 1024.0)
+        )
+    };
+    let mib = t.payloads.bytes as f64 / (1024.0 * 1024.0);
+    eprintln!(
+        "timing {layer}: {} payload(s), {mib:.1} MiB — read {:.3} s ({}), hash {:.3} s ({}), \
+         signature {:.3} s, manifest {:.3} s; verify does not decompress",
+        t.checked,
+        t.payloads.read.as_secs_f64(),
+        rate(t.payloads.bytes, t.payloads.read),
+        t.payloads.hash.as_secs_f64(),
+        rate(t.payloads.bytes, t.payloads.hash),
+        t.signature.as_secs_f64(),
+        t.manifest.as_secs_f64(),
+    );
+}
+
 /// `varve verify --all` (REQ-VERIFYALL-001): walk EVERY partition in the store.
 ///
 /// Three properties this must have, each of which the old version lacked:
@@ -3627,7 +3620,7 @@ fn verify(
 ///   * every failure is reported, with layer id AND path, and the scope
 ///     actually covered is printed. It was fail-fast and in one observed run
 ///     the only layer id on screen belonged to a different, healthy layer.
-fn verify_every_partition(ctx: &ProjectCtx) -> anyhow::Result<()> {
+fn verify_every_partition(ctx: &ProjectCtx, timing: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("cannot determine working directory")?;
     // fingerprint -> (realm name, verifier). A partition whose realm is not
     // defined here cannot be checked, and is REPORTED rather than skipped: an
@@ -3677,7 +3670,14 @@ fn verify_every_partition(ctx: &ProjectCtx) -> anyhow::Result<()> {
                 ));
                 continue;
             };
-            match varve_core::verify_installed(&part, &layer, *verifier, &host) {
+            match varve_core::verify_installed_timed(&part, &layer, *verifier, &host).map(
+                |(checked, spent)| {
+                    if timing {
+                        report_timing(&layer.layer.to_string(), &spent);
+                    }
+                    checked
+                },
+            ) {
                 Ok(n) => {
                     checked_layers += 1;
                     println!(
