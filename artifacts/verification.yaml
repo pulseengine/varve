@@ -3099,7 +3099,8 @@ artifacts:
   - id: VER-ROLLING-001
     type: verification
     title: The scanner proposes; a person signs
-    status: verified
+    status: deprecated
+    description: " . RETIRED 2026-09-18 WITH THE THING IT TESTED. Every step below ran the shell scanner — tools/systest/scan-upstream.sh, a syntax check of tools/scan-upstream.sh, and a grep of .github/workflows/scan-upstream.yml — and all of those are deleted in v0.37.0 (varve#142). A verification artifact whose steps name files that do not exist is worse than none: it reports green forever and nobody notices what it stopped covering. . The function did not disappear, it MOVED. pulseengine/pulseengine-layers scans its own pins and deposits, and its own check job runs 25 tests over those rules on every push and pull request — including the two defects found on 2026-09-18 before that scanner's first tick: it read only [[tool]] sections, and it treated a hub payload's version as a release tag. Evidence for the current arrangement therefore lives in that repository, as REQ-LAYERREPO-001 records. . Kept rather than deleted so the chain stays readable: this artifact says what was tested, when it stopped being tested here, and where the property went."
     release: v0.29.0
     method: test
     fields:
