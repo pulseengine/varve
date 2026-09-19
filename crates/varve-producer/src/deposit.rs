@@ -318,10 +318,29 @@ pub fn parse_present_digests(text: &str) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-/// Fold resolved payloads into a spec.
-pub fn describe(layer: &str, channel: &str, counter: u64, tools: Vec<ToolOut>) -> SpecOut {
+/// Fold resolved payloads, and the layers this one composes, into a spec.
+///
+/// The includes come straight from the manifest: they name bytes by digest and
+/// there is nothing to fetch, resolve or verify here — `varve deposit` puts
+/// them inside the signed payload, and the consumer's `install` refuses a
+/// composition whose includes are absent.
+pub fn describe(
+    layer: &str,
+    channel: &str,
+    counter: u64,
+    tools: Vec<ToolOut>,
+    includes: &[varve_core::layerspec::ManifestInclude],
+) -> SpecOut {
     let mut s = SpecOut::new(layer, channel, counter);
     s.tools = tools;
+    s.includes = includes
+        .iter()
+        .map(|i| crate::spec::IncludeOut {
+            digest: i.digest.clone(),
+            realm: i.realm.clone(),
+            layer: i.layer.clone(),
+        })
+        .collect();
     s
 }
 
@@ -770,6 +789,7 @@ mod tests {
                     "bbbb",
                 ),
             ],
+            &[],
         )
         .render()
         .expect("the writer produces a valid spec")

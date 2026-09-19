@@ -390,6 +390,37 @@ pub struct ManifestCrate {
     pub release: Option<String>,
 }
 
+/// Another realm's layer, composed into this one (REQ-COMPOSE-001).
+///
+/// One pin, two trust universes: this layer holds what the realm qualifies and
+/// REFERENCES a layer it does not control, each keeping its own root, cadence
+/// and qualification claim.
+///
+/// Until v0.37.0 this could only be said in a hand-written deposit spec, never
+/// in a realm's manifest — so composition was implemented, tested and
+/// documented, and no realm repository could produce a composed layer at all.
+/// That is why the feature had no worked example: not an oversight in the
+/// documentation, a gap in what the manifest could express.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestInclude {
+    /// The digest of the included layer's SIGNED MANIFEST — not a tag, not a
+    /// version. A composition names bytes, so it cannot drift after signing.
+    pub digest: String,
+    /// Whose trust root verifies the included layer.
+    ///
+    /// Optional in the format and required in practice: without it `verify`
+    /// falls back to the PINNING project's root, so the layer installs cleanly
+    /// and fails verification afterwards — and if the two realms happened to
+    /// share a root it would silently widen trust instead. `check_manifest`
+    /// refuses an include without one.
+    #[serde(default)]
+    pub realm: Option<String>,
+    /// The included layer's id, used only in messages before it is fetched.
+    #[serde(default)]
+    pub layer: Option<String>,
+}
+
 /// The whole manifest. `deny_unknown_fields` throughout is load-bearing: a
 /// mistyped `verison = "v0.34.0"` would otherwise leave the real `version`
 /// missing or stale, and the layer would ship the wrong release under a good
@@ -407,6 +438,8 @@ pub struct LayerManifest {
     pub docs: Vec<ManifestDocs>,
     #[serde(default, rename = "crate")]
     pub crates: Vec<ManifestCrate>,
+    #[serde(default, rename = "include")]
+    pub includes: Vec<ManifestInclude>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,6 +454,8 @@ pub enum LayerSpecError {
     },
     /// `layout = "..."` is not one the assembler implements.
     UnknownLayout { tool: String, layout: String },
+    /// An `[[include]]` names no realm, or names a digest that is not one.
+    BadInclude { digest: String, why: String },
     /// The assembler carries exactly one raw-per-platform tool, as
     /// `WSC_VERSION`. A second one has nowhere to go.
     ManyRawPerPlatform { first: String, second: String },
@@ -477,6 +512,9 @@ impl fmt::Display for LayerSpecError {
                  implement. Use \"tarball\" (one .tar.gz per target triple) or \
                  \"raw-per-platform\" (bare per-platform binaries)."
             ),
+            LayerSpecError::BadInclude { digest, why } => {
+                write!(f, "[[include]] {digest:?} cannot be used: {why}.")
+            }
             LayerSpecError::ManyRawPerPlatform { first, second } => write!(
                 f,
                 "tools {first:?} and {second:?} both declare \
@@ -642,7 +680,50 @@ impl AssemblerEnv {
 }
 
 pub fn parse_layer_manifest(text: &str) -> Result<LayerManifest, LayerSpecError> {
-    toml::from_str(text).map_err(|e| LayerSpecError::Parse(e.to_string()))
+    let manifest: LayerManifest =
+        toml::from_str(text).map_err(|e| LayerSpecError::Parse(e.to_string()))?;
+    check_includes(&manifest.includes)?;
+    Ok(manifest)
+}
+
+/// A composition must name WHOSE layer it composes, by a digest that is one.
+///
+/// Both refusals are here, at the one place a manifest is read, rather than at
+/// the deposit: the deposit signs what it is given, and by then the error costs
+/// a published layer id that cannot be reused.
+///
+/// The realm is the load-bearing field. Without it nothing writes an
+/// `include.realm` annotation, so `verify` falls back to the PINNING project's
+/// trust root: the layer installs cleanly and fails verification afterwards,
+/// with nothing tampered — or, if the two realms happen to share a root,
+/// verifies while silently widening trust, which is the thing realms exist to
+/// prevent.
+fn check_includes(includes: &[ManifestInclude]) -> Result<(), LayerSpecError> {
+    for i in includes {
+        let hex = i.digest.strip_prefix("sha256:").unwrap_or("");
+        if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(LayerSpecError::BadInclude {
+                digest: i.digest.clone(),
+                why: "a composition names the included layer by the digest of its SIGNED \
+                      MANIFEST — `sha256:` and 64 hex characters. A tag or a layer id would \
+                      let the composition drift after signing, which is the one thing an \
+                      include exists to prevent"
+                    .to_string(),
+            });
+        }
+        if i.realm.as_deref().unwrap_or("").trim().is_empty() {
+            return Err(LayerSpecError::BadInclude {
+                digest: i.digest.clone(),
+                why: "no `realm`. Nothing then writes an include.realm annotation, so verify \
+                      falls back to the PINNING project's trust root: the layer installs and \
+                      fails verification afterwards with nothing tampered, or — if the two \
+                      roots happen to match — verifies while widening trust across a realm \
+                      boundary. Name the realm whose root verifies the included layer"
+                    .to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Reject anything the assembler's encoding cannot carry intact.
@@ -1361,6 +1442,56 @@ asset   = "spar-aadl-%P-%V.vsix"
                 "VARVE_VERSION"
             ]
         );
+    }
+
+    /// A composition must say WHOSE layer it composes.
+    // rivet: verifies REQ-COMPOSE-001
+    #[test]
+    fn an_include_without_a_realm_is_refused_where_it_is_written() {
+        let text = format!(
+            "{}\n[[include]]\ndigest = \"sha256:{}\"\n",
+            REAL,
+            "a".repeat(64)
+        );
+        let e = parse_layer_manifest(&text).expect_err("must refuse");
+        let msg = e.to_string();
+        assert!(matches!(e, LayerSpecError::BadInclude { .. }), "{e:?}");
+        assert!(msg.contains("realm"), "{msg}");
+        // The reason a reader needs is WHY, not that a field is absent.
+        assert!(
+            msg.contains("widening trust") || msg.contains("widening"),
+            "{msg}"
+        );
+    }
+
+    /// A tag or a layer id would let the composition drift after signing.
+    // rivet: verifies REQ-COMPOSE-001
+    #[test]
+    fn an_include_must_name_a_manifest_digest_not_a_version() {
+        for bad in ["2026.09.4", "v0.36.0", "sha256:abc", "sha256:", ""] {
+            let text = format!("{REAL}\n[[include]]\ndigest = \"{bad}\"\nrealm = \"r\"\n");
+            let e = parse_layer_manifest(&text)
+                .expect_err(&format!("{bad:?} must be refused as a digest"));
+            assert!(
+                matches!(e, LayerSpecError::BadInclude { .. }),
+                "{bad:?}: {e:?}"
+            );
+        }
+    }
+
+    /// The shape a realm actually writes.
+    // rivet: verifies REQ-COMPOSE-001
+    #[test]
+    fn a_well_formed_include_parses_with_its_realm_and_layer() {
+        let text = format!(
+            "{}\n[[include]]\ndigest = \"sha256:{}\"\nrealm = \"pulseengine\"\nlayer = \"2026.09.4\"\n",
+            REAL,
+            "b".repeat(64)
+        );
+        let m = parse_layer_manifest(&text).expect("parses");
+        assert_eq!(m.includes.len(), 1);
+        assert_eq!(m.includes[0].realm.as_deref(), Some("pulseengine"));
+        assert_eq!(m.includes[0].layer.as_deref(), Some("2026.09.4"));
     }
 }
 
