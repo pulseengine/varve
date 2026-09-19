@@ -1,5 +1,95 @@
 # Changelog
 
+## v0.37.0 — 2026-09-18
+
+*A realm can say what it composes, and what it ingests without proof.*
+
+Cut early, with two finished items and a waiting consumer, because a second
+realm could not deposit its first layer without them. REQ-SDKTARGET-001, key
+roles and parallel hashing move to v0.38.0 — deferred, not descoped.
+
+| | before | now |
+|---|---|---|
+| a realm declaring a composition | impossible — `[[include]]` existed only in a hand-written deposit spec | `layer.toml` declares it, and the digest is signed into the layer |
+| `unverified-reason` in a manifest | read by `plan`, ignored by `deposit` | an opt-in wherever it decides anything |
+| varve's own upstream scanner | 533 lines, a daily cron, publishing nothing | deleted; the realms scan for themselves |
+
+### Composition had no worked example, and the reason was not documentation
+
+varve has claimed layer composition since early on — one pin, two trust
+universes, each layer keeping its own root and cadence. It was implemented,
+tested and documented. And **a realm's `layer.toml` could not express it at
+all**: `[[include]]` lived only in a hand-written deposit spec, so no layers
+repository could produce a composed layer. The only demonstration was a system
+test that generated two throwaway roots in a temporary directory and deleted
+them.
+
+```toml
+[[include]]
+digest = "sha256:001480e7…"   # the included layer's SIGNED MANIFEST digest
+realm  = "pulseengine"        # whose root verifies it
+layer  = "2026.09.4"          # for messages before it is fetched
+```
+
+Two refusals are enforced where the manifest is read, because by deposit time an
+error costs a published layer id that cannot be reused: an include with **no
+`realm`** (verify would fall back to the *pinning project's* root — installing
+cleanly, failing verification afterwards, or silently widening trust if the two
+roots happen to match), and a **digest that is not one** (a tag would let the
+composition drift after signing, which is the single thing an include prevents).
+
+### A stated reason is an opt-in, not decoration
+
+Depositing the first layer of a new realm, varve refused an upstream that
+publishes no proof — correctly. But `layer.toml` already carried
+`unverified-reason` for it, and `varve-producer plan` had just printed *"3
+release(s) carry NO proof of origin (opt-in recorded)"*.
+
+`plan` read the manifest; `deposit` read only the `UNVERIFIED_INGEST`
+environment variable. The field parsed, displayed, and was **inert at the one
+moment it decides anything** — and a realm that stated its reason in a reviewed,
+committed file, where it gets signed into the layer, was told to set an ambient
+environment variable instead.
+
+`ingest::optins_in_force` is now the single answer. The manifest wins a conflict
+(it is the reviewed record; the environment is unreviewable), and the
+environment can still name a repository the manifest does not.
+
+### The migration finished
+
+`pulseengine-layers` holds the manifest and the key, consumes a released
+assembler, and since 2026-09-18 scans and deposits unattended. So varve's own
+`scan-upstream.sh` (533 lines), `upstream-mechanism.sh`, `scan-upstream.yml` and
+their system test were not a smaller version of that pipeline but an unused copy
+of it, inside the tool the realm consumes. Deleted.
+
+Two rivet artifacts pointed at them and were deprecated rather than dropped:
+**REQ-ROLLING-001**, whose second clause — *"publishing it stays a deliberate
+act"* — was **reversed** by DD-030 rather than met, and **VER-ROLLING-001**,
+every step of which ran a file this release deletes.
+
+### Falsification
+
+Each of these would refute a claim above:
+
+- Put `[[include]]` in a `layer.toml`, deposit it, and find no `layer`-kind
+  entry in the signed manifest.
+- Deposit an include with no `realm` and watch it succeed.
+- Put `unverified-reason` in a manifest, deposit without `UNVERIFIED_INGEST`
+  set, and watch varve still refuse.
+- Find any file in this release that still scans upstreams from varve's own
+  repository.
+
+### Requirement status
+
+`REQ-LAYERREPO-001` is **verified**, on evidence that is deliberately an
+inspection rather than a test: no CI job in this repository can demonstrate that
+two *other* repositories assemble and publish layers. The record names both —
+`pulseengine-layers` (layers 2026.09.4 and 2026.09.5, the second deposited with
+no person in the loop) and `wasm-layers`, which stood up from the same tooling in
+a day and whose deposit refused twice for reasons varve is supposed to refuse
+for.
+
 ## v0.36.0 — 2026-09-18
 
 *A layer can carry the crate and its documentation; verify says where its time goes.*

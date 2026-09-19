@@ -261,6 +261,21 @@ pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositErr
     toml::from_str(toml_text).map_err(|e| DepositError::Spec(e.to_string()))
 }
 
+impl SpecInclude {
+    /// The composed-layer reference this spec entry describes.
+    ///
+    /// Beside `SpecTool::into_deposit_tool` and for the same reason: the CLI
+    /// used to map these inline, so a test could only exercise the mapping by
+    /// copying it — and a copy agrees with itself no matter what the CLI does.
+    pub fn into_deposit_include(self) -> DepositInclude {
+        DepositInclude {
+            digest: self.digest,
+            realm: self.realm,
+            layer: self.layer,
+        }
+    }
+}
+
 impl SpecTool {
     /// The payload this spec entry describes, with its bytes read from `base`.
     ///
@@ -336,7 +351,12 @@ pub enum DepositError {
     /// about this in three topics and guarded nothing.
     #[error(transparent)]
     WouldDestroySignedWork(#[from] crate::referrers::WouldDestroy),
-    #[error("deposit has no tools — an empty layer is not a toolchain")]
+    #[error(
+        "deposit has no tools and composes no layers — an empty layer is not a toolchain. \
+         (A layer that carries only `[[include]]` entries is a COMPOSITION and is accepted: \
+         it says that other realms' layers belong together, which is what a pin naming one \
+         layer needs in order to reach two toolchains.)"
+    )]
     NoTools,
     #[error(
         "tool '{name}' is deposited twice for platform {platform} (versions {first} and \
@@ -714,7 +734,15 @@ pub fn deposit_with_options(
     // refused before a key is even read, rather than after a signature exists
     // for an artifact that will not be written (REQ-NODESTROY-001).
     crate::referrers::guard(dest, options.force)?;
-    if spec.tools.is_empty() {
+    // Empty means EMPTY — no payloads and nothing composed. A layer that
+    // carries only includes is not empty: it is a composition, which is the
+    // whole shape of a realm whose job is to say that two other realms' layers
+    // belong together (REQ-COVALENT-001 clause 1). A pin names exactly one
+    // layer, so composing is the only way one pin reaches two toolchains, and
+    // a composition that also shipped binaries would be a fourth place tools
+    // are defined. Refusing it here made that realm unbuildable while the
+    // manifest, the planner and the docs all described it.
+    if spec.tools.is_empty() && spec.includes.is_empty() {
         return Err(DepositError::NoTools);
     }
     let mut tools: Vec<&DepositTool> = spec.tools.iter().collect();

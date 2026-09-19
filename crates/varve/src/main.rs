@@ -2875,11 +2875,7 @@ fn deposit_cmd(
         let includes = file_spec
             .includes
             .into_iter()
-            .map(|i| varve_core::deposit::DepositInclude {
-                digest: i.digest,
-                realm: i.realm,
-                layer: i.layer,
-            })
+            .map(varve_core::deposit::SpecInclude::into_deposit_include)
             .collect();
         return run_deposit(
             &file_spec.layer,

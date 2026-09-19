@@ -26,7 +26,6 @@ use varve_producer::deposit::{Names, stage_one};
 use varve_producer::gh::{CommandRunner, RunOutput};
 use varve_producer::ingest::{Accepted, Mechanism};
 use varve_producer::orchestrate::Resolved;
-use varve_producer::spec::SpecOut;
 
 const MANIFEST: &str = r#"
 [varve]
@@ -62,6 +61,13 @@ format    = "rustdoc"
 entry     = "varve_core/index.html"
 documents = "varve-core"
 asset     = "varve-core-%V-rustdoc.tar.gz"
+
+# The composition: this layer carries its own payloads AND references another
+# realm's layer by the digest of its signed manifest.
+[[include]]
+digest = "sha256:001480e799f7274248863a89a76deeb333ee475701bc2702f86fe326b527ae6e"
+realm  = "pulseengine"
+layer  = "2026.09.4"
 
 [[crate]]
 name    = "varve-core"
@@ -152,7 +158,7 @@ fn what_layer_toml_declares_is_what_the_signed_layer_says() {
     let m = varve_core::layerspec::parse_layer_manifest(MANIFEST).expect("layer.toml");
     let plan = varve_producer::plan::plan(&m, &["x86_64-unknown-linux-gnu"]).expect("plan");
 
-    let mut spec = SpecOut::new("2026.09.4", "rolling", 5);
+    let mut staged = Vec::new();
     for item in &plan {
         let bytes = match item.name.as_str() {
             "handbook" => &pdf,
@@ -188,8 +194,11 @@ fn what_layer_toml_declares_is_what_the_signed_layer_says() {
             },
         )
         .unwrap_or_else(|e| panic!("staging {}: {e:#}", item.name));
-        spec.tools.push(out);
+        staged.push(out);
     }
+    // Through the producer's own fold, not a hand-built spec: `describe` is
+    // what `varve-producer deposit` calls, and the includes ride with it.
+    let spec = varve_producer::deposit::describe("2026.09.4", "rolling", 5, staged, &m.includes);
 
     let spec_path = stage.join("deposit.toml");
     std::fs::write(&spec_path, spec.render().unwrap()).unwrap();
@@ -204,7 +213,11 @@ fn what_layer_toml_declares_is_what_the_signed_layer_says() {
     let (sk, _pk) = varve_core::generate_root_keypair();
     varve_core::deposit(
         &varve_core::DepositSpec {
-            includes: Vec::new(),
+            includes: file_spec
+                .includes
+                .into_iter()
+                .map(varve_core::deposit::SpecInclude::into_deposit_include)
+                .collect(),
             layer: file_spec.layer.parse().unwrap(),
             channel: file_spec.channel,
             counter: file_spec.counter,
@@ -218,6 +231,38 @@ fn what_layer_toml_declares_is_what_the_signed_layer_says() {
     .expect("the producer's spec deposits");
 
     let signed = signed_manifest(&layout);
+    // The composition must be INSIDE the signature, or it can drift after
+    // signing — which is the one thing an include exists to prevent.
+    let included: Vec<&varve_core::manifest::ManifestEntry> = signed
+        .entries
+        .iter()
+        .filter(|e| e.kind() == Ok(varve_core::PayloadKind::Layer))
+        .collect();
+    assert_eq!(
+        included.len(),
+        1,
+        "a [[include]] in layer.toml did not reach the signed layer — a realm cannot \
+         compose at all, which is why composition has no worked example"
+    );
+    assert_eq!(
+        included[0].digest,
+        "sha256:001480e799f7274248863a89a76deeb333ee475701bc2702f86fe326b527ae6e"
+    );
+    assert_eq!(
+        included[0]
+            .annotations
+            .get(varve_core::compose::ANN_INCLUDE_REALM)
+            .map(String::as_str),
+        Some("pulseengine"),
+        "without the realm, verify falls back to the PINNING project's root — trust widening"
+    );
+    assert_eq!(
+        included[0]
+            .annotations
+            .get(varve_core::compose::ANN_INCLUDE_LAYER)
+            .map(String::as_str),
+        Some("2026.09.4")
+    );
     let by_name: BTreeMap<&str, &varve_core::manifest::ManifestEntry> = signed
         .entries
         .iter()
