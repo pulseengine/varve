@@ -272,3 +272,89 @@ fn the_composition_offers_every_layers_tools_once() {
     assert!(names.contains(&"aeolus"), "{names:?}");
     assert!(names.contains(&"rivet"), "{names:?}");
 }
+
+/// The depth bound, at its edge — both sides of the one comparison.
+///
+/// `cargo mutants` survived two mutations of `ancestors.len() > MAX_DEPTH` in
+/// `walk_one` (`==` and `>=`): the cycle and diamond tests exercise the walk,
+/// and nothing exercised the bound, so a walk that refused a composition one
+/// layer shallower than documented would have passed every test. The pure
+/// `walk` over views has this test; the store-backed walk that install and
+/// varve-serve actually call did not.
+///
+/// One realm, one line, a chain built leaf-first so the counters ascend the
+/// way a real deposit's do.
+// rivet: verifies REQ-COMPOSE-001
+#[test]
+fn a_composition_exactly_max_depth_deep_walks_and_one_deeper_is_refused() {
+    use varve_core::compose::MAX_DEPTH;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root_dir = tmp.path().join("root");
+    let store = Store::at(&root_dir);
+    let bench = Bench {
+        store: store.clone(),
+        root: root_dir.clone(),
+        tmp: tmp.path().to_path_buf(),
+    };
+    let r = realm("deep-realm");
+
+    // `chain[0]` is the leaf; `chain[n]` includes `chain[n - 1]`, so walking
+    // from `chain[n]` visits n + 1 layers. The entry counts toward the bound —
+    // `MAX_DEPTH` is how many layers a composition may have in total, not how
+    // many it may sit above — so `chain[MAX_DEPTH - 1]` is the deepest legal
+    // entry and `chain[MAX_DEPTH]` is one too far.
+    let mut chain: Vec<(String, String)> = Vec::new();
+    for i in 0..=MAX_DEPTH {
+        let id = format!("2026.09.{i}");
+        let includes = match chain.last() {
+            None => Vec::new(),
+            Some((digest, layer)) => vec![DepositInclude {
+                digest: digest.clone(),
+                realm: Some(r.name.clone()),
+                layer: Some(layer.clone()),
+            }],
+        };
+        let digest = deposit_and_install(
+            &bench,
+            &r,
+            &id,
+            i as u64 + 1,
+            vec![tool(&format!("t{i}"))],
+            includes,
+        );
+        chain.push((digest, id));
+    }
+
+    let verifier = PinnedKeyVerifier::from_public_key_bytes(&r.pk).unwrap();
+    let roots: BTreeMap<String, Vec<u8>> = [(r.name.clone(), r.pk.clone())].into_iter().collect();
+    let walk_from = |digest: &str| {
+        let entry = store.get(digest).unwrap().unwrap();
+        varve_core::compose::walk_installed(
+            &store,
+            &entry,
+            &verifier,
+            &r.name,
+            &roots,
+            "test-platform",
+        )
+    };
+
+    // Exactly at the bound: a composition of MAX_DEPTH layers.
+    let deepest_ok = &chain[MAX_DEPTH - 1].0;
+    let layers = walk_from(deepest_ok)
+        .unwrap_or_else(|e| panic!("a composition of exactly {MAX_DEPTH} layers must walk: {e}"));
+    assert_eq!(
+        layers.len(),
+        MAX_DEPTH,
+        "every layer of the chain, entry included"
+    );
+
+    // One layer deeper, and it is refused rather than walked.
+    let too_deep = &chain[MAX_DEPTH].0;
+    let err = walk_from(too_deep).expect_err("one deeper than the bound must be refused");
+    assert!(
+        matches!(err, varve_core::compose::ComposeError::TooDeep),
+        "got: {err}"
+    );
+}
