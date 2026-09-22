@@ -176,7 +176,7 @@ pub fn run(store: &Store, layer: Option<&str>, json: bool) -> anyhow::Result<()>
 
 /// The store partition a composed layer lives in — a cross-realm include lives
 /// under the INCLUDED realm's fingerprint, not the including project's.
-fn store_of(l: &crate::ComposedLayer) -> &Store {
+fn store_of(l: &varve_core::compose::ComposedLayer) -> &Store {
     &l.store
 }
 
@@ -209,7 +209,7 @@ fn store_of(l: &crate::ComposedLayer) -> &Store {
 /// element, the root, flagged `"root": true`.
 fn print_json(
     target: &crate::ExportTarget,
-    layers: &[crate::ComposedLayer],
+    layers: &[varve_core::compose::ComposedLayer],
     rows: &[Row],
     host: &str,
 ) {
@@ -287,7 +287,7 @@ fn print_json(
 
 fn print_text(
     target: &crate::ExportTarget,
-    layers: &[crate::ComposedLayer],
+    layers: &[varve_core::compose::ComposedLayer],
     rows: &[Row],
     host: &str,
 ) {

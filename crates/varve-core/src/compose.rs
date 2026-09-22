@@ -119,6 +119,33 @@ pub enum ComposeError {
     TooDeep,
     #[error("layer manifest could not be read for composition: {0}")]
     Unreadable(String),
+    /// A layer the composition names is not in any store the caller can see.
+    #[error(
+        "layer {layer} composes {missing}, which is not installed — anything reading this \
+         composition would silently omit that layer's payloads. `varve install` it, then \
+         run this again (REQ-COMPOSEEXPORT-001 clause 3)"
+    )]
+    NotInstalled { layer: String, missing: String },
+    /// An include names a realm the caller has no trust root for.
+    #[error(
+        "layer {layer} composes a layer from realm '{realm}', but that realm is not defined \
+         here — add it to varve-realms.toml so its trust root can verify what it vouches for"
+    )]
+    UnknownRealm { layer: String, realm: String },
+    /// An included layer did not verify against the root of the realm its
+    /// include names.
+    #[error(
+        "composed layer {layer} failed verification against realm '{realm}': {detail}. If the \
+         included layer comes from a DIFFERENT realm, this is the expected result of an \
+         `[[include]]` with no `realm =`"
+    )]
+    IncludeUnverified {
+        layer: String,
+        realm: String,
+        detail: String,
+    },
+    #[error("{0}")]
+    Io(String),
     /// A name two layers of one composition both provide, which the pin has
     /// not chosen between (REQ-REALM2-001 clause 4d).
     ///
@@ -953,4 +980,230 @@ mod tests {
         assert_eq!(layers.len(), 1);
         assert_eq!(unchosen(&layers).unwrap().len(), 2);
     }
+}
+
+/// One layer of a composition, with the store holding it and the realm whose
+/// root vouched for it.
+#[derive(Debug, Clone)]
+pub struct ComposedLayer {
+    pub store: crate::store::Store,
+    pub entry: crate::store::InstalledLayer,
+    pub realm: String,
+}
+
+/// One payload of a composition, re-checked against its signed digest.
+#[derive(Debug, Clone)]
+pub struct VerifiedPayload {
+    pub name: String,
+    pub version: String,
+    /// The SIGNED digest, `sha256:<hex>`, re-checked against these bytes.
+    pub digest: String,
+    pub bytes: Vec<u8>,
+    /// The entry's signed annotations, so an adapter reads the producer's
+    /// declarations rather than guessing them.
+    pub annotations: std::collections::BTreeMap<String, String>,
+    /// The realm whose root vouched for the layer this came from, and that
+    /// layer's id. Carried because in a composition "which version" is not
+    /// enough to say where a tool came from — two realms can ship one name.
+    pub realm: String,
+    pub layer: String,
+}
+
+/// Every installed layer of a composition, the pinned one first.
+///
+/// THE walk. `varve export-docs`, `export-cargo`, `export-sdk` and the rest
+/// went through a copy of this in the `varve` binary; `varve-serve` could not
+/// reach it, so it read the pinned layer's manifest alone and answered "layer
+/// … carries no documentation" for a four-layer composition whose docs were in
+/// one of the other three. One walk, in the crate both binaries depend on.
+///
+/// `roots` maps a realm name to its trust root's public key: an included layer
+/// is verified against the root of the realm its include NAMES, never the
+/// composing realm's, because that is the boundary realms exist to draw.
+/// Resolving those roots is the caller's job — varve-core does not read
+/// varve-realms.toml.
+///
+/// Bounded and cycle-guarded: a digest reappearing on its own path is a cycle,
+/// while a digest reachable by two paths is a DIAMOND — two layers sharing a
+/// base, the most ordinary composition there is — and is walked once.
+pub fn walk_installed(
+    store: &crate::store::Store,
+    entry: &crate::store::InstalledLayer,
+    own_verifier: &crate::verify::PinnedKeyVerifier,
+    own_realm: &str,
+    roots: &std::collections::BTreeMap<String, Vec<u8>>,
+    platform: &str,
+) -> Result<Vec<ComposedLayer>, ComposeError> {
+    let mut out = vec![ComposedLayer {
+        store: store.clone(),
+        entry: entry.clone(),
+        realm: own_realm.to_string(),
+    }];
+    let mut ancestors = vec![entry.digest.clone()];
+    walk_one(
+        store,
+        entry,
+        own_verifier,
+        own_realm,
+        roots,
+        platform,
+        &mut ancestors,
+        &mut out,
+    )?;
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_one(
+    store: &crate::store::Store,
+    layer: &crate::store::InstalledLayer,
+    own_verifier: &crate::verify::PinnedKeyVerifier,
+    own_realm: &str,
+    roots: &std::collections::BTreeMap<String, Vec<u8>>,
+    platform: &str,
+    ancestors: &mut Vec<String>,
+    out: &mut Vec<ComposedLayer>,
+) -> Result<(), ComposeError> {
+    if ancestors.len() > MAX_DEPTH {
+        return Err(ComposeError::TooDeep);
+    }
+    let Ok(bytes) = std::fs::read(layer.root.join("layer.json")) else {
+        return Ok(());
+    };
+    let view = view(&bytes)?;
+    for inc in &view.includes {
+        if ancestors.contains(&inc.digest) {
+            return Err(ComposeError::Cycle {
+                digest: layer.digest.clone(),
+                via: inc.digest.clone(),
+            });
+        }
+        let Some((owner, entry)) = store
+            .find_anywhere(&inc.digest)
+            .map_err(|e| ComposeError::Io(e.to_string()))?
+        else {
+            return Err(ComposeError::NotInstalled {
+                layer: layer.layer.to_string(),
+                missing: inc.layer.clone().unwrap_or_else(|| inc.digest.clone()),
+            });
+        };
+        // A layer reachable by two paths is walked once, not refused.
+        if out.iter().any(|c| c.entry.digest == entry.digest) {
+            continue;
+        }
+        // Whose root vouches for this layer? The include names a realm, and
+        // that realm's root is authoritative for it — not ours.
+        let named = match &inc.realm {
+            Some(name) => {
+                let key = roots.get(name).ok_or_else(|| ComposeError::UnknownRealm {
+                    layer: layer.layer.to_string(),
+                    realm: name.clone(),
+                })?;
+                let v = crate::verify::PinnedKeyVerifier::from_public_key_bytes(key)
+                    .map_err(|e| ComposeError::Io(e.to_string()))?;
+                Some((v, name.clone()))
+            }
+            None => None,
+        };
+        let (verifier, realm): (&crate::verify::PinnedKeyVerifier, &str) = match &named {
+            Some((v, name)) => (v, name.as_str()),
+            None => (own_verifier, own_realm),
+        };
+        crate::reverify::verify_installed(&owner, &entry, verifier, platform).map_err(|e| {
+            ComposeError::IncludeUnverified {
+                layer: entry.layer.to_string(),
+                realm: realm.to_string(),
+                detail: e.to_string(),
+            }
+        })?;
+        out.push(ComposedLayer {
+            store: owner.clone(),
+            entry: entry.clone(),
+            realm: realm.to_string(),
+        });
+        ancestors.push(entry.digest.clone());
+        walk_one(
+            &owner, &entry, verifier, realm, roots, platform, ancestors, out,
+        )?;
+        ancestors.pop();
+    }
+    Ok(())
+}
+
+/// Every payload of one kind across a whole composition, deduplicated.
+///
+/// The bytes are re-read from the store and re-checked against the digest the
+/// signed manifest records, so a payload altered on disk after install is
+/// caught here rather than handed to an adapter.
+pub fn payloads_of(
+    layers: &[ComposedLayer],
+    want: crate::kind::PayloadKind,
+    platform: &str,
+) -> Result<Vec<VerifiedPayload>, ComposeError> {
+    let mut offered = Vec::new();
+    for l in layers {
+        let bytes = std::fs::read(l.entry.root.join("layer.json"))
+            .map_err(|e| ComposeError::Io(e.to_string()))?;
+        let manifest = crate::manifest::LayerManifest::parse(&bytes)
+            .map_err(|e| ComposeError::Unreadable(e.to_string()))?;
+        for e in &manifest.entries {
+            if e.kind()
+                .map_err(|err| ComposeError::Unreadable(err.to_string()))?
+                != want
+            {
+                continue;
+            }
+            // Only the payloads THIS host has: install platform-filters what
+            // it lays down, so walking another platform's entry would compare
+            // this machine's bytes against that entry's signed digest and
+            // report tampering for a payload built for another machine.
+            if !crate::platform::entry_matches(
+                e.annotations
+                    .get(crate::platform::ANN_PLATFORM)
+                    .map(String::as_str),
+                platform,
+            ) {
+                continue;
+            }
+            let Some(name) = e.annotations.get("eu.pulseengine.tool") else {
+                continue;
+            };
+            let Some(path) = l.store.entry_path(&l.entry, e) else {
+                continue;
+            };
+            let bytes = std::fs::read(&path).map_err(|err| ComposeError::Io(err.to_string()))?;
+            let found = crate::store::manifest_digest(&bytes);
+            if found != e.digest {
+                return Err(ComposeError::Io(format!(
+                    "payload '{name}' of layer {} does not match its signed digest {} — its                      bytes were altered after install",
+                    l.entry.layer, e.digest
+                )));
+            }
+            let version = crate::store::entry_version(e)
+                .unwrap_or_default()
+                .to_string();
+            offered.push((
+                PayloadOrigin {
+                    name: name.clone(),
+                    version: version.clone(),
+                    digest: e.digest.clone(),
+                    realm: l.realm.clone(),
+                    layer: l.entry.layer.to_string(),
+                },
+                VerifiedPayload {
+                    name: name.clone(),
+                    version,
+                    digest: e.digest.clone(),
+                    bytes,
+                    annotations: e.annotations.clone(),
+                    realm: l.realm.clone(),
+                    layer: l.entry.layer.to_string(),
+                },
+            ));
+        }
+    }
+    Ok(union_payloads(offered)?
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect())
 }

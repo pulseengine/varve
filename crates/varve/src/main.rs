@@ -1879,147 +1879,45 @@ fn ctx_realm_name(ctx: &ProjectCtx) -> String {
     }
 }
 
-/// One layer of a composition, VERIFIED against the trust root of the realm
-/// that vouches for it (REQ-COMPOSEEXPORT-001 clause 1).
-struct ComposedLayer {
-    /// The store partition the layer lives in — a cross-realm include lives
-    /// under the INCLUDED realm's fingerprint, not the including project's.
-    store: Store,
-    entry: varve_core::store::InstalledLayer,
-    /// The realm that vouched for it, for the collision message.
-    realm: String,
-}
-
-/// Every layer an export must cover: the root plus everything it composes,
-/// root first, each verified against its own realm's root.
+/// Every installed layer of the pinned composition, the pinned one first.
 ///
-/// varve#79: `resolve()` already unions composed TOOLS so `which`/`run` see
-/// them, and `verify` already checks each included layer — but every export
-/// adapter read ONE `layer.json`, so an extender composing pulseengine's layer
-/// got only their own crates and no error at all. Trust does not widen here:
-/// each layer is checked against the root of the realm the include names, and
-/// a layer that is not installed is an error naming it (clause 3), never a
-/// quietly shorter export.
-fn composition_for_export(target: &ExportTarget) -> anyhow::Result<Vec<ComposedLayer>> {
-    let mut out = vec![ComposedLayer {
-        store: target.store.clone(),
-        entry: target.entry.clone(),
-        realm: target.realm.clone(),
-    }];
-    let mut ancestors = vec![target.entry.digest.clone()];
-    walk_composition(
+/// The walk itself lives in varve-core (`compose::walk_installed`). It used to
+/// live here, where `varve-serve` could not reach it — so the viewer read the
+/// pinned layer's manifest alone and told a user with a four-layer composition
+/// that their layer "carries no documentation" while `export-docs` found it.
+/// One walk, in the crate both binaries depend on.
+fn composition_for_export(
+    target: &ExportTarget,
+) -> anyhow::Result<Vec<varve_core::compose::ComposedLayer>> {
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    varve_core::compose::walk_installed(
         &target.store,
         &target.entry,
         &target.verifier,
         &target.realm,
-        &mut ancestors,
-        &mut out,
-    )?;
-    Ok(out)
+        &realm_roots(&cwd)?,
+        &varve_core::host_platform(),
+    )
+    .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-/// The recursive half of `composition_for_export`. Bounded and cycle-guarded
-/// for the same reason `verify` is: "refused" and "followed until the process
-/// aborts" are not the same answer.
-///
-/// `ancestors` is a PATH, pushed and popped — a digest reappearing on its own
-/// path is a cycle, while a digest reachable by two paths is a DIAMOND (two
-/// layers sharing a base), the most ordinary composition there is. Conflating
-/// the two is the bug `compose::walk` was fixed for; this walker must not
-/// reintroduce it.
-fn walk_composition(
-    store: &Store,
-    layer: &varve_core::store::InstalledLayer,
-    own_verifier: &varve_core::PinnedKeyVerifier,
-    own_realm: &str,
-    ancestors: &mut Vec<String>,
-    out: &mut Vec<ComposedLayer>,
-) -> anyhow::Result<()> {
-    if ancestors.len() > varve_core::compose::MAX_DEPTH {
-        bail!(
-            "composition is more than {} layers deep while collecting an export — refusing to \
-             walk further",
-            varve_core::compose::MAX_DEPTH
-        );
-    }
-    let Ok(bytes) = std::fs::read(layer.root.join("layer.json")) else {
-        return Ok(());
+/// Every realm this project can name, mapped to its trust root — what the
+/// composition walk verifies each included layer against. varve-core does not
+/// read varve-realms.toml, deliberately: the crate that verifies should have no
+/// opinion about where trust material lives.
+fn realm_roots(
+    cwd: &std::path::Path,
+) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(names) = varve_core::realm::realm_names(cwd) else {
+        return Ok(out);
     };
-    let view = varve_core::compose::view(&bytes)?;
-    if view.includes.is_empty() {
-        return Ok(());
-    }
-    let cwd = std::env::current_dir().context("cannot determine working directory")?;
-    for inc in &view.includes {
-        if ancestors.contains(&inc.digest) {
-            bail!(
-                "composition cycle while collecting an export: layer {} ({}) includes {} , \
-                 which is already on its own path — refusing to follow it",
-                layer.layer,
-                layer.digest,
-                inc.digest
-            );
+    for name in names {
+        if let Ok(realm) = varve_core::resolve_realm(cwd, &name) {
+            out.insert(name, realm.trust_root.clone());
         }
-        // Clause 3: an export that cannot follow the composition SAYS SO. A
-        // missing include is an error naming it and its corrective install,
-        // not a directory that is quietly missing that layer's crates.
-        let Some((owner, entry)) = store.find_anywhere(&inc.digest)? else {
-            bail!(
-                "layer {} composes {}, which is not installed — this export would silently \
-                 omit its payloads. `varve install` it, then re-run the export \
-                 (REQ-COMPOSEEXPORT-001 clause 3)",
-                layer.layer,
-                inc.layer.clone().unwrap_or_else(|| inc.digest.clone())
-            );
-        };
-        // A layer reachable by two paths is exported once, not refused.
-        if out.iter().any(|c| c.entry.digest == entry.digest) {
-            continue;
-        }
-        // Whose root vouches for this layer? The include names a realm, and
-        // that realm's root is authoritative for it — not ours.
-        let named_realm = match &inc.realm {
-            Some(name) => {
-                let realm = varve_core::resolve_realm(&cwd, name).with_context(|| {
-                    format!(
-                        "layer {} composes a layer from realm '{name}', but that realm is not \
-                         defined here — add it to varve-realms.toml so its trust root can \
-                         verify what it vouches for",
-                        layer.layer
-                    )
-                })?;
-                Some((
-                    varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?,
-                    name.clone(),
-                ))
-            }
-            None => None,
-        };
-        let (verifier, realm) = match &named_realm {
-            Some((v, name)) => (v, name.as_str()),
-            None => (own_verifier, own_realm),
-        };
-        varve_core::verify_installed(&owner, &entry, verifier, &varve_core::host_platform())
-            .with_context(|| {
-                format!(
-                    "composed layer {} failed verification against realm '{realm}' — refusing \
-                     to export payloads varve cannot vouch for. If the included layer comes \
-                     from a DIFFERENT realm, this is the expected result of an `[[include]]` \
-                     with no `realm =`",
-                    entry.layer
-                )
-            })?;
-        out.push(ComposedLayer {
-            store: owner.clone(),
-            entry: entry.clone(),
-            realm: realm.to_string(),
-        });
-        ancestors.push(entry.digest.clone());
-        walk_composition(&owner, &entry, verifier, realm, ancestors, out)?;
-        ancestors.pop();
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Bind an export directory to the layer that produced it: write a
@@ -2194,7 +2092,7 @@ fn payloads_of_layer(
 /// (REQ-COMPOSEEXPORT-001 clause 1), applying the payload collision rule —
 /// which is not the tool rule (clause 2).
 fn collect_verified_payloads(
-    layers: &[ComposedLayer],
+    layers: &[varve_core::compose::ComposedLayer],
     want: varve_core::PayloadKind,
 ) -> anyhow::Result<Vec<VerifiedPayload>> {
     let kind = want.as_str();
@@ -2236,7 +2134,7 @@ fn collect_verified_payloads(
 /// Collect the verified `crate`-kind entries of a whole composition as
 /// CrateEntry values — the shared front-half of every Cargo-facing export.
 fn collect_verified_crates(
-    layers: &[ComposedLayer],
+    layers: &[varve_core::compose::ComposedLayer],
 ) -> anyhow::Result<Vec<varve_core::crateexport::CrateEntry>> {
     let mut crates = Vec::new();
     for p in collect_verified_payloads(layers, varve_core::PayloadKind::Crate)? {
@@ -2258,7 +2156,7 @@ fn collect_verified_crates(
 /// One line telling the reader how many layers an export actually covered
 /// (REQ-COMPOSEEXPORT-001 clause 3). A composed export that says nothing is
 /// indistinguishable from an export that silently followed only the root.
-fn report_composition(layers: &[ComposedLayer]) {
+fn report_composition(layers: &[varve_core::compose::ComposedLayer]) {
     if layers.len() < 2 {
         return;
     }
