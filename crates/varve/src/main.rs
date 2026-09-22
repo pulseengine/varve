@@ -79,6 +79,12 @@ enum Cmd {
         /// workflows only; the default is this machine.
         #[arg(long, value_name = "TRIPLE")]
         platform: Option<String>,
+        /// Do not fetch the layers this one composes: require that every
+        /// included layer is already in the store, and refuse naming what is
+        /// missing. For an air-gapped or deterministic install, where bytes
+        /// arriving from another registry is the thing you are preventing.
+        #[arg(long)]
+        no_follow_includes: bool,
     },
     /// Re-check the pinned layer offline: retained signature, the signed
     /// digest of every entry FOR THIS PLATFORM, each composed layer, the
@@ -680,7 +686,11 @@ fn run() -> anyhow::Result<Outcome> {
     match cli.command {
         Cmd::Which { tool } => which(&store, &tool),
         Cmd::List => list(&store),
-        Cmd::Install { from, platform } => install(&store, from.as_deref(), platform),
+        Cmd::Install {
+            from,
+            platform,
+            no_follow_includes,
+        } => install(&store, from.as_deref(), platform, !no_follow_includes),
         Cmd::Verify {
             all,
             export,
@@ -3171,7 +3181,61 @@ fn today_rfc3339() -> String {
     format!("{y:04}-{m:02}-{d:02}T00:00:00Z")
 }
 
-fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyhow::Result<()> {
+/// Fetch one layer a composition names, from the realm that vouches for it.
+///
+/// The realm decides everything: its registry is where the bytes come from,
+/// its trust root is what must have signed them, and its partition is where
+/// they land. The composing project's root is never used for an included layer
+/// — a realm boundary that bent under composition would not be one.
+///
+/// Anti-rollback and the realm's signed-index obligation apply exactly as they
+/// would to a direct install, because this goes through `install_by_digest`,
+/// which goes through `install`. Following a composition is not a way around
+/// the checks (REQ-COMPOSEINSTALL-001 clause 3).
+fn fetch_included_layer(
+    ctx: &ProjectCtx,
+    digest: &str,
+    realm_name: &str,
+    platform: &str,
+    now: &str,
+) -> anyhow::Result<varve_core::store::InstalledLayer> {
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    let realm = varve_core::resolve_realm(&cwd, realm_name).with_context(|| {
+        format!(
+            "this layer composes a layer from realm '{realm_name}', which is not defined              here — add it to varve-realms.toml so its registry says where the bytes come              from and its trust root says whether they are acceptable"
+        )
+    })?;
+    let verifier = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    // That realm's partition, not this project's: a cross-realm include lives
+    // under the INCLUDED realm's fingerprint.
+    let store = Store::at(realm.effective_root(ctx.store.root()));
+    let source = varve_core::RegistrySource::parse(&realm.registry)?;
+    let mut marks = varve_core::HighWaterMarks::load(store.root())?;
+    let index = Some(varve_core::IndexPolicy {
+        realm: &realm.name,
+        root_public_key: &realm.trust_root,
+        required: realm.signed_index,
+    });
+    let policy = varve_core::InstallPolicy {
+        index,
+        now,
+        staleness_threshold_days: 90,
+        platform,
+    };
+    let outcome =
+        varve_core::install_by_digest(digest, &source, &verifier, &store, &mut marks, &policy)?;
+    store
+        .get(&outcome.digest)?
+        .context("the fetched layer is not in the store it was installed into")
+}
+
+fn install(
+    store: &Store,
+    from: Option<&str>,
+    platform: Option<String>,
+    follow_includes: bool,
+) -> anyhow::Result<()> {
     let platform = platform.unwrap_or_else(varve_core::host_platform);
     let ctx = project_ctx(store)?;
     let from = match (from, &ctx.realm) {
@@ -3305,16 +3369,39 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
     // were all present. `verify` walks the whole graph and rejects it at depth
     // 2, while `docs verify` promises "the CI gate and the install agree".
     // They now reach the same verdict.
+    // THE COMPOSITION IS A DAG, and is walked as one. A digest reached twice by
+    // different paths is a DIAMOND — two layers sharing a base, the ordinary
+    // case — and is visited once; a digest reached again on its OWN path is a
+    // cycle and is refused by the walker in varve-core. A composition that
+    // includes another composition is just a longer path: the scan below
+    // re-queues every layer it finds, so a chain root -> mid -> leaf reports a
+    // missing leaf rather than passing because the root's direct includes were
+    // all present (REQ-NOSILENT-001 clause 4).
+    //
+    // Missing layers are FETCHED, not merely named (REQ-COMPOSEINSTALL-001).
+    // An include carries a digest fixed at signing, so a fetch cannot
+    // substitute anything: what arrives hashes to that digest or is refused.
+    // Declining to fetch bought no safety and cost a pinned directory per
+    // layer. What is still refused: an include whose realm this project does
+    // not define, or whose registry cannot be reached — "I could not fetch it"
+    // must never look like "it is not needed".
     let mut composed_count = 0usize;
+    let mut fetched: Vec<String> = Vec::new();
     if let Some(entry) = ctx.store.get(&outcome.digest)? {
         let mut missing: Vec<String> = Vec::new();
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut queue: Vec<varve_core::store::InstalledLayer> = vec![entry];
-        let mut depth = 0usize;
+        // A work bound, and named as one: the cycle and depth limits live in
+        // the walker. This only stops a pathological graph from spinning here.
+        let mut visits = 0usize;
         while let Some(current) = queue.pop() {
-            depth += 1;
-            if depth > varve_core::compose::MAX_DEPTH * 4 {
-                break;
+            visits += 1;
+            if visits > varve_core::compose::MAX_DEPTH * 64 {
+                bail!(
+                    "composition graph has more than {} nodes to visit — refusing to walk \
+                     further; this is a mistake, not a design",
+                    varve_core::compose::MAX_DEPTH * 64
+                );
             }
             let Ok(bytes) = std::fs::read(current.root.join("layer.json")) else {
                 continue;
@@ -3327,18 +3414,35 @@ fn install(store: &Store, from: Option<&str>, platform: Option<String>) -> anyho
                     continue;
                 }
                 composed_count += 1;
-                match ctx.store.find_anywhere(&inc.digest)? {
-                    Some((_, found)) => queue.push(found),
-                    None => {
-                        // Name the realm too: "install it" is not actionable
-                        // without knowing WHOSE layer it is, and a consumer
-                        // composing two realms cannot tell them apart by id.
-                        let name = inc.layer.clone().unwrap_or_else(|| inc.digest.clone());
+                if let Some((_, found)) = ctx.store.find_anywhere(&inc.digest)? {
+                    queue.push(found);
+                    continue;
+                }
+                // Not installed. Fetch it from the realm the include NAMES —
+                // that realm's registry, verified against that realm's root,
+                // laid down in that realm's partition. Never ours: the include
+                // naming a realm is the whole trust boundary.
+                let name = inc.layer.clone().unwrap_or_else(|| inc.digest.clone());
+                let realm_name = match (&inc.realm, follow_includes) {
+                    (Some(r), true) => r.clone(),
+                    _ => {
                         missing.push(match &inc.realm {
                             Some(r) => format!("{name} (realm '{r}')"),
                             None => name,
                         });
+                        continue;
                     }
+                };
+                match fetch_included_layer(&ctx, &inc.digest, &realm_name, &platform, &now) {
+                    Ok(entry) => {
+                        println!(
+                            "  fetched composed layer {} from realm '{realm_name}'",
+                            entry.layer
+                        );
+                        fetched.push(format!("{} (realm '{realm_name}')", entry.layer));
+                        queue.push(entry);
+                    }
+                    Err(e) => missing.push(format!("{name} (realm '{realm_name}'): {e:#}")),
                 }
             }
         }

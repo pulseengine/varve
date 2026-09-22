@@ -4447,3 +4447,17 @@ artifacts:
       model: claude-opus-5
       timestamp: 2026-09-18T06:54:44Z
     release: v0.38.0
+
+  - id: REQ-COMPOSEINSTALL-001
+    type: requirement
+    title: Install fetches what a composition names, from the realm that vouches for it
+    status: proposed
+    description: "REPORTED FROM USE, 2026-09-22, by an operator installing a four-layer composition from one JFrog registry. `varve install` walks the composition, finds three included layers absent, and refuses with instructions to create a separate pinned DIRECTORY for each one, run `varve install` in each, and then re-run the original. Their words: \"why would i need to install the others as well?\" and, on being told why, \"this is really inconvenient\". They are right. . WHAT THE REFUSAL IS ACTUALLY PROTECTING, separated from what it costs. The valuable half is that an included layer is verified against the root of the REALM ITS INCLUDE NAMES, never the composing realm's — that is the boundary realms exist to draw, and nothing here weakens it. The expensive half is that varve then declines to FETCH bytes it can name exactly. An include carries a digest fixed at signing, so a fetch cannot substitute anything: whatever arrives either hashes to that digest or is refused. Declining to fetch buys no safety; it buys four pinned directories per composition. . WHAT MUST STAY MANUAL, and why this is not \"install everything it mentions\". A PIN is a deliberate, committed choice about which layer a project uses, and auto-creating pins would make that choice by accident. Following an include is not pinning: the included layer is installed into the store, addressable by digest, and no varve.toml is written. The distinction is exactly the one between obtaining bytes and choosing them. . Clauses: (1) `varve install` shall fetch the layers its pinned layer composes, transitively, from the realm each include NAMES — using that realm's registry from varve-realms.toml, verifying against that realm's trust root, and laying it down in that realm's store partition. (2) An include whose realm is not defined locally, or whose registry cannot be reached, shall REFUSE as today, naming the layer and its realm — \"I could not fetch it\" must never look like \"it is not needed\". (3) Anti-rollback and the realm's line-index obligation shall apply to each fetched layer exactly as to a pinned one: following a composition is not a way around the checks a direct install would make. (4) Following shall be defeasible — an air-gapped or deterministic install must be able to require that everything is already present — and the flag shall be visible in `--help`, not an environment variable nobody discovers. (5) What was fetched shall be REPORTED, per layer and realm, because bytes arriving from three registries without a word is the opposite of what this tool is for. (6) No varve.toml is written for a followed layer, ever: obtaining is not pinning, and a pin that appeared by itself would be a choice nobody made."
+    links:
+      - type: derives-from
+        target: REQ-COMPOSE-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5
+      timestamp: 2026-09-22T19:25:22Z
+    release: v0.38.0
