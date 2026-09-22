@@ -458,6 +458,18 @@ pub enum DepositError {
         signer: String,
     },
     #[error(
+        "payload '{name}' from {repo} declares proof = \"{proof}\" and a blank proof-signer \
+         ({signer:?}) — the signer is WHO established that proof, and a blank one is signed into \
+         the layer as a verified claim with nobody behind it. Name the identity the mechanism \
+         actually established, or drop the field: an absent signer is absent, not empty."
+    )]
+    ProofSignerBlank {
+        name: String,
+        repo: String,
+        proof: &'static str,
+        signer: String,
+    },
+    #[error(
         "payload '{name}' from {repo} carries ingestion-proof detail ({detail}) but declares no \
          `proof` mechanism — the detail would be signed into the layer with nothing saying HOW \
          it was established, which makes it attributable and believed rather than checkable. \
@@ -688,7 +700,21 @@ fn check_ingest_proofs(tools: &[&DepositTool]) -> Result<(), DepositError> {
                     });
                 }
             }
-            Some(_) => {}
+            // Every other mechanism DID establish something, so it must say
+            // who. A blank identity here is not "unrecorded" — `None` is; this
+            // is a signed claim of provenance with nobody behind it.
+            Some(proof) => {
+                if let Some(signer) = &source.proof_signer
+                    && signer.trim().is_empty()
+                {
+                    return Err(DepositError::ProofSignerBlank {
+                        name: tool.name.clone(),
+                        repo: source.repo.clone(),
+                        proof: proof.as_str(),
+                        signer: signer.clone(),
+                    });
+                }
+            }
             None => {
                 let detail = match (&source.proof_signer, &source.proof_asserts) {
                     (Some(_), Some(_)) => Some("proof-signer and proof-asserts"),
@@ -1390,6 +1416,40 @@ mod tests {
             matches!(&err, DepositError::UnverifiedNamesASigner { name, .. } if name == "wit-bindgen"),
             "got: {err}"
         );
+    }
+
+    /// A blank signer is meaningless under EVERY mechanism, not only under
+    /// `unverified`.
+    ///
+    /// The producer once emitted `proof-signer = ""` for an unverified payload,
+    /// which this check caught only because the unverified branch refuses ANY
+    /// signer. One branch over — a real mechanism with a blank identity — the
+    /// same bytes would have been signed as "cosign verified this, by nobody
+    /// named", and nothing looked. `Some("")` must never read as "unrecorded":
+    /// an absent signer is `None`.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_mechanism_that_names_a_blank_signer_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sk, _pk) = crate::generate_root_keypair();
+        for (n, (proof, blank)) in [
+            (crate::ingest::IngestProof::CosignSums, ""),
+            (crate::ingest::IngestProof::BuildProvenance, "   "),
+            (crate::ingest::IngestProof::UpstreamSums, "\t"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut spec = super::tests::spec();
+            let mut tool = ingested("wit-bindgen", "bytecodealliance/wit-bindgen", proof);
+            tool.source.as_mut().unwrap().proof_signer = Some(blank.into());
+            spec.tools = vec![tool];
+            let err = deposit(&spec, &sk, "k", &tmp.path().join(format!("blank{n}"))).unwrap_err();
+            assert!(
+                matches!(&err, DepositError::ProofSignerBlank { name, .. } if name == "wit-bindgen"),
+                "{proof:?} with signer {blank:?} got: {err}"
+            );
+        }
     }
 
     // rivet: verifies REQ-INGEST-001

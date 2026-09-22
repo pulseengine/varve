@@ -298,7 +298,7 @@ pub fn stage_one<R: CommandRunner>(
             asset: r.plan.asset.clone(),
             sha256: r.digest.clone(),
             proof: Some(r.accepted.mechanism.as_str().to_string()),
-            proof_signer: Some(r.accepted.signer.clone()),
+            proof_signer: r.accepted.signer.clone(),
             proof_asserts: Some(r.accepted.asserts.clone()),
         },
     })
@@ -436,7 +436,7 @@ mod tests {
             digest: "d".into(),
             accepted: crate::ingest::Accepted {
                 mechanism: crate::ingest::Mechanism::CosignSums,
-                signer: "s".into(),
+                signer: Some("s".into()),
                 asserts: "a".into(),
             },
             bytes: None,
@@ -907,7 +907,7 @@ mod tests {
             digest: "d".into(),
             accepted: crate::ingest::Accepted {
                 mechanism: crate::ingest::Mechanism::CosignSums,
-                signer: "s".into(),
+                signer: Some("s".into()),
                 asserts: "a".into(),
             },
             bytes: None,

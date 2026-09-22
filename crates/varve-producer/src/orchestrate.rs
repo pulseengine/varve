@@ -1178,7 +1178,7 @@ mod tests {
             published: Vec::new(),
             accepted: Accepted {
                 mechanism: Mechanism::Unverified,
-                signer: "nobody".into(),
+                signer: Some("nobody".into()),
                 asserts: "no proof was offered".into(),
             },
             sums: None,
