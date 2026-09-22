@@ -33,6 +33,29 @@ struct DocsRow {
     documents: Option<String>,
 }
 
+/// How wide the REALM column must be, or `None` when every payload comes from
+/// one realm and the column would say the same thing on every line.
+///
+/// Reported from use: on a four-realm composition the table gave a version and
+/// a layer id per tool and never named the realm — which is the trust boundary,
+/// and the only thing separating two realms that ship one name at one version.
+fn realm_width(rows: &[Row]) -> Option<usize> {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for r in rows {
+        seen.insert(r.realm.as_str());
+    }
+    if seen.len() < 2 {
+        return None;
+    }
+    Some(
+        seen.iter()
+            .map(|r| r.chars().count())
+            .chain(std::iter::once("REALM".len()))
+            .max()
+            .unwrap_or(5),
+    )
+}
+
 /// One payload, as reported.
 struct Row {
     name: String,
@@ -359,24 +382,44 @@ fn print_text(
         .chain(std::iter::once(7))
         .max()
         .unwrap_or(7);
+    // WHOSE layer each payload came from, whenever more than one realm is in
+    // play. Reported from use on a four-realm composition: the table showed a
+    // version and a layer id for every tool and never said which realm vouched
+    // for it — and the realm is the trust boundary, so "rivet 0.37.0 from
+    // 2026.09.3" leaves the one question a composition raises unanswered. Two
+    // realms can also ship one name at one version; only the realm separates
+    // them. Omitted for a single-realm layer, where the header already says it
+    // and a constant column is noise.
+    let wr = realm_width(rows);
+    let realms = wr.map(|w| (w, "REALM")).unwrap_or((0, ""));
     println!(
-        "  {:<12}{:<wk$}  {:<wn$}  {:<wv$}  {:<wp$}  LAYER",
-        "", "KIND", "NAME", "VERSION", "PLATFORM"
+        "  {:<12}{:<wk$}  {:<wn$}  {:<wv$}  {:<wp$}  {:<rw$}{}LAYER",
+        "",
+        "KIND",
+        "NAME",
+        "VERSION",
+        "PLATFORM",
+        realms.1,
+        if wr.is_some() { "  " } else { "" },
+        rw = realms.0
     );
     for r in rows {
         println!(
-            "  {:<12}{:<wk$}  {:<wn$}  {:<wv$}  {:<wp$}  {}{}",
+            "  {:<12}{:<wk$}  {:<wn$}  {:<wv$}  {:<wp$}  {:<rw$}{}{}{}",
             r.dispatch.to_uppercase(),
             r.kind,
             r.name,
             r.version.as_deref().unwrap_or("-"),
             r.platform,
+            if wr.is_some() { r.realm.as_str() } else { "" },
+            if wr.is_some() { "  " } else { "" },
             r.layer,
             if r.present {
                 ""
             } else {
                 "  (not laid down here)"
             },
+            rw = realms.0,
         );
     }
     if held > 0 {
@@ -507,6 +550,66 @@ mod tests {
 
         assert_eq!(in_text, in_json, "the two renderings disagree");
         assert_eq!(in_text, vec!["handbook"]);
+    }
+
+    /// Reported from use on a four-realm composition: every tool showed a
+    /// version and a layer id, and nothing said WHICH REALM vouched for it.
+    // rivet: verifies REQ-INSPECT-001
+    #[test]
+    fn the_realm_is_shown_when_a_composition_spans_more_than_one() {
+        let mut a = row("rivet", None);
+        a.realm = "pulseengine".into();
+        let mut b = row("wit-bindgen-wrpc", None);
+        b.realm = "ulinc".into();
+        let w = realm_width(&[a, b]).expect("a multi-realm composition needs the column");
+        assert!(
+            w >= "pulseengine".len(),
+            "the column truncates the realm name: {w}"
+        );
+    }
+
+    /// One realm, and the column would repeat the header line on every row.
+    // rivet: verifies REQ-INSPECT-001
+    #[test]
+    fn a_single_realm_layer_gets_no_realm_column() {
+        let a = row("rivet", None);
+        let b = row("spar", None);
+        assert_eq!(realm_width(&[a, b]), None);
+    }
+
+    /// Realms shorter than the word REALM still need a column wide enough for
+    /// the header, or the heading runs into the next one.
+    // rivet: verifies REQ-INSPECT-001
+    #[test]
+    fn the_column_is_never_narrower_than_its_heading() {
+        let mut a = row("rivet", None);
+        a.realm = "ul".into();
+        let mut b = row("spar", None);
+        b.realm = "pe".into();
+        assert_eq!(realm_width(&[a, b]), Some("REALM".len()));
+    }
+
+    /// Two realms shipping ONE name at ONE version is the case the realm column
+    /// exists for: nothing else in the row distinguishes them.
+    // rivet: verifies REQ-INSPECT-001
+    #[test]
+    fn two_realms_shipping_one_name_are_distinguishable() {
+        let mut a = row("wasm-tools", None);
+        a.realm = "pulseengine".into();
+        a.layer = "2026.09.5".into();
+        let mut b = row("wasm-tools", None);
+        b.realm = "pulseengine-wasm".into();
+        b.layer = "2026.09.5".into();
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.version, b.version);
+        assert_eq!(
+            a.layer, b.layer,
+            "same id in two realms — only the realm separates them"
+        );
+        assert!(
+            realm_width(&[a, b]).is_some(),
+            "the one case where every other column is identical shows no realm"
+        );
     }
 
     /// A document is HELD, never dispatched: it is read, not executed.
