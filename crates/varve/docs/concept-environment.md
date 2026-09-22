@@ -64,6 +64,13 @@ HTTP Basic to the **token endpoint only** — never to the registry API, and nev
 across a redirect. A trailing newline is trimmed, so
 `"AWS:$(aws ecr get-login-password …)"` works as written.
 
+**You often do not need this variable at all.** `docker login <registry>` (or
+`podman login`) puts the credential where varve already looks, which is usually
+what you want on a workstation; the variable is for CI and for cloud registries
+whose credential is minted by a command. Either way it is per REGISTRY, not per
+layer: one value covers every `varve install` against that host, and `export`
+reaches the subshells a multi-layer composition is installed from.
+
 Credential precedence, first usable match wins:
 
 1. `$VARVE_REGISTRY_AUTH`
