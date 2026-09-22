@@ -3388,6 +3388,13 @@ fn install(
     let mut composed_count = 0usize;
     let mut fetched: Vec<String> = Vec::new();
     if let Some(entry) = ctx.store.get(&outcome.digest)? {
+        // One list, each entry carrying its OWN reason. A layer we tried to
+        // fetch and could not (credentials, network, a digest the registry
+        // does not hold) and one we never attempted (`--no-follow-includes`,
+        // or an include naming no realm — with no realm there is no registry
+        // and no root, so there is nothing to fetch it FROM) send an operator
+        // to different places, and a single blended paragraph of advice names
+        // credentials at someone whose realm is simply undefined.
         let mut missing: Vec<String> = Vec::new();
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut queue: Vec<varve_core::store::InstalledLayer> = vec![entry];
@@ -3427,8 +3434,13 @@ fn install(
                     (Some(r), true) => r.clone(),
                     _ => {
                         missing.push(match &inc.realm {
-                            Some(r) => format!("{name} (realm '{r}')"),
-                            None => name,
+                            Some(r) => format!(
+                                "{name} (realm '{r}'): not fetched — --no-follow-includes was given"
+                            ),
+                            None => format!(
+                                "{name}: not fetched — the include names no realm, so there is \
+                                 no registry to fetch it from and no root that vouches for it"
+                            ),
                         });
                         continue;
                     }
@@ -3450,19 +3462,29 @@ fn install(
             // Clause 3: REFUSE BEFORE claiming success. This used to print
             // "installed layer X" and THEN error, leaving a layer in
             // `varve list` that no other command would touch.
+            //
+            // The remedy named here has to match what install actually does.
+            // It fetches now, so the old "install each first — a composed
+            // layer does not fetch it" would send an operator whose registry
+            // needs a `docker login` to build a second pinned directory that
+            // fails in exactly the same way. Each entry carries the reason it
+            // failed; the advice below is about what to DO with that reason.
             bail!(
-                "layer {} composes {} layer(s) that are not installed: {}.\n\
-                 Install each first — a composed layer names what it needs by digest, \
-                 but does not fetch it. `install` resolves THIS project's pin, so \
-                 pointing --from at the other source is not enough: give the included \
-                 layer its own pin (a directory whose varve.toml names that realm, \
-                 channel and layer), run `varve install` there, then re-run this one. \
-                 Both land in the same store. The list above is TRANSITIVE — a layer \
+                "layer {} composes {} layer(s) that are not installed:\n  {}\n\
+                 Each included layer is fetched from the registry ITS OWN realm names and \
+                 verified against that realm's trust root. If the reason above is a credential \
+                 or network failure, it is per REGISTRY, not per layer: `docker login <host>` \
+                 (or `podman login`) once per host, or set $VARVE_REGISTRY_AUTH. If it cannot \
+                 be fetched here at all — an air gap, an archive, a realm this machine cannot \
+                 see — install it by hand: give it its own pin (a directory whose varve.toml \
+                 names that realm, channel and layer), run `varve install` there, then re-run \
+                 this one; both land in the same store. To install exactly the pinned layer and \
+                 nothing else, pass --no-follow-includes. The list is TRANSITIVE — a layer \
                  named here may be one this layer composes only indirectly. \
                  See `varve docs composition`.",
                 outcome.layer,
                 missing.len(),
-                missing.join(", ")
+                missing.join("\n  ")
             );
         }
     }

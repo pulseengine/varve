@@ -71,33 +71,36 @@ The include lives inside the signed payload, so the composition itself is signed
 
 ## Installing
 
-Install the included layer first, then the layer that composes it:
-
-`install` resolves **the project's pin** against `--from`, so you cannot install
-two different layers from one project directory by changing `--from` alone. The
-included layer needs its own pin:
+One command. `varve install` walks the composition and fetches every layer it
+reaches:
 
 ```sh
-# 1. a directory pinned to the UPSTREAM layer
-mkdir -p upstream && cd upstream
-cat > varve.toml <<'EOF'
-manifest-version = 1
-
-[toolchain]
-realm   = "bytecodealliance"
-channel = "qualified"
-layer   = "2026.08.0"
-EOF
-varve install --from ../upstream-layout
-
-# 2. back in your own project, pinned to the composing layer
-cd .. && varve install --from ./our-layout
+varve install
 ```
 
-Both land in the same `$VARVE_ROOT`, partitioned by realm, which is why step 2
-then finds what step 1 installed.
+Each included layer is fetched from **its own realm's registry** — the one
+`varve-realms.toml` names for that realm — and verified against **that realm's
+trust root**, never the pinning project's. An included layer passes every check
+a pinned one does: signature, digest match, anti-rollback counter, staleness.
+They land in the same `$VARVE_ROOT`, partitioned by realm.
 
-Order matters: installing a composition whose includes are absent is refused, naming each missing layer and its realm. varve does **not** fetch includes transitively — it names what it needs by digest and leaves obtaining it to you.
+That means credentials are per **registry**, not per layer: if two realms live
+on the same host, one `docker login` covers both; if they live on two hosts, log
+in to each. See [concept-environment](concept-environment.md).
+
+The walk is over a directed acyclic graph, so:
+
+* a layer reached by two different paths (a "diamond") is fetched **once**;
+* a layer that includes itself, directly or through a chain, is a **cycle** and
+  is refused with the path printed;
+* the whole walk is bounded by a maximum depth, and a graph deeper than that is
+  refused rather than followed.
+
+Pass `--no-follow-includes` to install exactly the pinned layer and nothing
+else. Then the composition's other layers must already be present, or the
+install is refused naming each missing layer and its realm — which is also what
+you get for a layer that is genuinely unreachable, for example one whose
+registry this machine cannot see.
 
 ## What verify does
 
@@ -177,8 +180,11 @@ reference itself survives — it is inside the signed payload and cannot be
 dropped — but the included layer's manifest and payloads do not cross.
 Installing the archive on the far side succeeds for the composing layer and
 then fails with `composes 1 layer(s) that are not installed`, naming each
-missing layer and realm. Carry **one archive per layer of the graph** and
-install them included-layers-first, exactly as online:
+missing layer and realm. An archive is a file, not a registry, so there is
+nothing for the walk to fetch from — offline, the transitive install has no
+source and the graph must be carried by hand.
+Carry **one archive per layer of the graph** and install them
+included-layers-first:
 
 ```sh
 varve archive 2026.09.0 ./arch-own       # the composing layer
