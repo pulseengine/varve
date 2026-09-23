@@ -150,7 +150,16 @@ pub enum AttestationProbe {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Accepted {
     pub mechanism: Mechanism,
-    pub signer: String,
+    /// WHO established the proof — `None` when the answer is "nobody".
+    ///
+    /// An `Option`, not an empty string, because this field is signed into the
+    /// layer and a deposit REFUSES an unverified payload that names a signer.
+    /// While "nobody" was spelled `""`, staging wrapped it in `Some("")` and
+    /// the realm's own deposit rejected the layer it had just built: nothing
+    /// vouched for the bytes, and the manifest said somebody had and declined
+    /// to give a name. The empty string was the whole defect; the type now
+    /// cannot express it.
+    pub signer: Option<String>,
     pub asserts: String,
 }
 
@@ -360,7 +369,7 @@ pub fn choose(
         Rung::Accepted { signer, asserts } => {
             return Ok(Accepted {
                 mechanism: Mechanism::CosignSums,
-                signer,
+                signer: Some(signer),
                 asserts,
             });
         }
@@ -378,7 +387,7 @@ pub fn choose(
         Rung::Accepted { signer, asserts } => {
             return Ok(Accepted {
                 mechanism: Mechanism::BuildProvenance,
-                signer,
+                signer: Some(signer),
                 asserts,
             });
         }
@@ -399,7 +408,7 @@ pub fn choose(
         Rung::Accepted { signer, asserts } => {
             return Ok(Accepted {
                 mechanism: Mechanism::UpstreamSums,
-                signer,
+                signer: Some(signer),
                 asserts,
             });
         }
@@ -416,7 +425,7 @@ pub fn choose(
     match optins.get(repo) {
         Some(reason) if !reason.trim().is_empty() => Ok(Accepted {
             mechanism: Mechanism::Unverified,
-            signer: String::new(),
+            signer: None,
             asserts: format!(
                 "NOTHING vouched for these bytes — ingested on an explicit \
                  operator opt-in. Recorded reason: {reason}"
@@ -511,7 +520,10 @@ mod tests {
         )
         .expect("accepts");
         assert_eq!(a.mechanism, Mechanism::CosignSums);
-        assert_eq!(a.signer, "https://github.com/pulseengine/rivet/");
+        assert_eq!(
+            a.signer.as_deref(),
+            Some("https://github.com/pulseengine/rivet/")
+        );
     }
 
     /// A supply-chain tool that only works against one vendor's public host is
@@ -524,7 +536,10 @@ mod tests {
         let f = Forge::enterprise("ghe.example.com");
         let a = choose(&f, "acme/tool", "v1.0.0", &sums_ok(), &no_optins(), None).expect("accepts");
         assert_eq!(a.mechanism, Mechanism::CosignSums);
-        assert_eq!(a.signer, "https://ghe.example.com/acme/tool/");
+        assert_eq!(
+            a.signer.as_deref(),
+            Some("https://ghe.example.com/acme/tool/")
+        );
         assert!(
             a.asserts.contains("https://ghe.example.com/acme/tool/"),
             "{}",
@@ -537,7 +552,8 @@ mod tests {
             a.asserts
         );
         // Nothing from the public instance may leak into an enterprise record.
-        assert!(!a.signer.contains("github.com"), "{}", a.signer);
+        let signer = a.signer.clone().expect("a verified rung names who");
+        assert!(!signer.contains("github.com"), "{signer}");
         assert!(!a.asserts.contains("githubusercontent"), "{}", a.asserts);
     }
 
@@ -731,7 +747,11 @@ mod tests {
         )
         .expect("accepts");
         assert_eq!(a.mechanism, Mechanism::Unverified);
-        assert_eq!(a.signer, "");
+        assert_eq!(
+            a.signer, None,
+            "nobody vouched, so the payload must name nobody — an empty signer is \
+             signed into the layer as an identity and the deposit refuses it"
+        );
         assert!(a.asserts.contains("fork tracked in #77"), "{}", a.asserts);
         assert!(a.asserts.contains("NOTHING vouched"), "{}", a.asserts);
     }

@@ -3451,37 +3451,7 @@ artifacts:
     title: varve ingests what upstream actually publishes, and records which mechanism vouched
     status: verified
     release: v0.29.0
-    description: >
-      The layer assembler accepts exactly ONE proof that an upstream artifact
-      is what it claims: a cosign-signed `SHA256SUMS.txt`. Every PulseEngine
-      repo publishes that, so the constraint was invisible until a second realm
-      was attempted. It does not generalise. Measured 2026-08-21:
-      `bytecodealliance/wasm-tools` publishes NO sums and NO cosign bundle —
-      but DOES publish GitHub build provenance, which verifies
-      (`gh attestation verify` accepts the real artifact and rejects a bogus
-      one, confirmed with a negative control). `bytecodealliance/wit-bindgen`
-      publishes neither. `bytecodealliance/cargo-component` ships no release
-      assets at all.
-      .
-      Build provenance is not a weaker substitute for a sums file — it is
-      STRONGER. A sums file says "these bytes hash to this". An attestation
-      binds the artifact to a workflow, a repository and a source commit
-      (observed: `publish.yml@refs/heads/main`, commit `3ef3cefc…`), which is
-      what `[tool.source]` has always wanted to record and could not.
-      .
-      Clauses: (1) The assembler shall accept build provenance as a
-      first-class ingestion proof alongside cosign-signed sums. (2) It shall
-      record INSIDE the signed layer payload WHICH mechanism vouched for each
-      tool, and what that mechanism asserted — a consumer must be able to tell
-      a cosign-signed tool from an attested one from an unverifiable one
-      without leaving the layer. (3) A tool with NEITHER mechanism shall be
-      refused by default, so "we could not verify this" can never be the
-      silent path; shipping one anyway shall require an explicit, recorded
-      decision. (4) The refusal shall name the alternative that exists — a
-      fork release through this org's signed pipeline — because for
-      `wit-bindgen` that is the actual answer and the operator should not have
-      to infer it. (5) The choice of mechanism shall be visible in
-      `varve inspect`, since a layer mixing both is now the ordinary case.
+    description: "The layer assembler accepts exactly ONE proof that an upstream artifact is what it claims: a cosign-signed `SHA256SUMS.txt`. Every PulseEngine repo publishes that, so the constraint was invisible until a second realm was attempted. It does not generalise. Measured 2026-08-21: `bytecodealliance/wasm-tools` publishes NO sums and NO cosign bundle — but DOES publish GitHub build provenance, which verifies (`gh attestation verify` accepts the real artifact and rejects a bogus one, confirmed with a negative control). `bytecodealliance/wit-bindgen` publishes neither. `bytecodealliance/cargo-component` ships no release assets at all. . Build provenance is not a weaker substitute for a sums file — it is STRONGER. A sums file says \"these bytes hash to this\". An attestation binds the artifact to a workflow, a repository and a source commit (observed: `publish.yml@refs/heads/main`, commit `3ef3cefc…`), which is what `[tool.source]` has always wanted to record and could not. . Clauses: (1) The assembler shall accept build provenance as a first-class ingestion proof alongside cosign-signed sums. (2) It shall record INSIDE the signed layer payload WHICH mechanism vouched for each tool, and what that mechanism asserted — a consumer must be able to tell a cosign-signed tool from an attested one from an unverifiable one without leaving the layer. (3) A tool with NEITHER mechanism shall be refused by default, so \"we could not verify this\" can never be the silent path; shipping one anyway shall require an explicit, recorded decision. (4) The refusal shall name the alternative that exists — a fork release through this org's signed pipeline — because for `wit-bindgen` that is the actual answer and the operator should not have to infer it. (5) The choice of mechanism shall be visible in `varve inspect`, since a layer mixing both is now the ordinary case. (6) The recorded signer shall be an identity or ABSENT — never blank. `unverified` naming any signer is refused, and so is a blank signer under a mechanism that did vouch: both are signed into the layer and read as a claim of provenance with nobody behind it. The assembler shall represent \"nobody\" as an absent field rather than an empty string, so the two cannot be confused at the boundary. Measured 2026-09-19: the pulseengine-wasm realm's first deposit failed here — the ladder reported \"no signer\" as \"\" and staging wrapped it in a present field, so the realm's own layer was refused by its own assembler."
 
   - id: REQ-LAYERREPO-001
     type: requirement
