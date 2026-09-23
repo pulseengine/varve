@@ -43,7 +43,22 @@ jobs:
         id: dur
         run: echo "secs=${{ github.event_name == 'schedule' && 600 || 60 }}" >> "$GITHUB_OUTPUT"
       - name: Run ${{ matrix.target }}
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=${{ steps.dur.outputs.secs }} -rss_limit_mb=4096
+        # The build target is stated, not inherited. On the self-hosted pool
+        # cargo-fuzz resolved its default target to
+        # `x86_64-unknown-linux-musl` and the build failed with "sanitizer is
+        # incompatible with statically linked libc" — the sanitizer needs a
+        # dynamic libc. The nightly toolchain there is gnu and ordinary cargo
+        # builds are gnu, so this came from the runner's ambient
+        # configuration rather than from anything in this repository.
+        #
+        # Naming the triple fixes it and is right independently: a fuzzer
+        # should exercise the libc we SHIP against, and a gate whose target
+        # depends on which machine picked up the job is proving something
+        # different from run to run.
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            --target x86_64-unknown-linux-gnu \
+            -- -max_total_time=${{ steps.dur.outputs.secs }} -rss_limit_mb=4096
       - name: Upload any crash corpus
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

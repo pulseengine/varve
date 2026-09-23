@@ -54,11 +54,19 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: fetch rivet (pinned, digest-checked, cosign-verified)
+        # `curl`, not `gh`: the GitHub CLI ships on hosted images and NOT on
+        # the self-hosted ones, which is how this job first failed there
+        # (`gh: command not found`). rivet's releases are public, so the
+        # download needs no client and no token — and nothing is trusted
+        # because of how it arrived: the cosign bundle and the digest below
+        # are what establish these bytes, over any transport.
         run: |
           set -euo pipefail
-          gh release download "$RIVET_VERSION" --repo pulseengine/rivet \
-            -p "rivet-$RIVET_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
-            -p SHA256SUMS.txt -p SHA256SUMS.txt.cosign.bundle
+          base="https://github.com/pulseengine/rivet/releases/download/$RIVET_VERSION"
+          for f in "rivet-$RIVET_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+                   SHA256SUMS.txt SHA256SUMS.txt.cosign.bundle; do
+            curl -fsSL --retry 3 -o "$f" "$base/$f"
+          done
           cosign verify-blob \
             --bundle SHA256SUMS.txt.cosign.bundle \
             --certificate-identity-regexp '^https://github.com/pulseengine/rivet/' \
@@ -66,10 +74,14 @@ jobs:
             SHA256SUMS.txt
           sha256sum -c <(grep "x86_64-unknown-linux-gnu" SHA256SUMS.txt)
           tar xzf "rivet-$RIVET_VERSION-x86_64-unknown-linux-gnu.tar.gz"
-          install -m 0755 rivet /usr/local/bin/rivet
-          rivet --version
-        env:
-          GH_TOKEN: ${{ github.token }}
+          # Into the job's own temp dir, not /usr/local/bin. A self-hosted
+          # runner's filesystem OUTLIVES the job: writing a binary there needs
+          # root we do not have, and would leave one version of rivet on the
+          # host to be picked up by the next job that expects another.
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 rivet "$RUNNER_TEMP/bin/rivet"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/rivet" --version
       - name: rivet validate
         run: rivet validate
       - name: rivet check verification-evidence (anti-rot)
