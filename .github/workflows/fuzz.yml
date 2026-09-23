@@ -24,7 +24,7 @@ permissions:
 jobs:
   fuzz:
     name: cargo fuzz (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, rust-cpu]
     strategy:
       fail-fast: false
       matrix:

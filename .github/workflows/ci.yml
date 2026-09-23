@@ -16,12 +16,20 @@ env:
 
 jobs:
   rust:
-    name: fmt · clippy · test
+    # The check name must stay `fmt · clippy · test (ubuntu-latest)` — branch
+    # protection matches on it, and a renamed required check can never report,
+    # which blocks every merge. So the matrix carries the RUNNER separately
+    # from the platform name, and the name is written out rather than derived.
+    name: fmt · clippy · test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - os: ubuntu-latest
+            runner: [self-hosted, linux, x64, rust-cpu]
+          - os: macos-latest
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -41,7 +49,7 @@ jobs:
 
   rivet:
     name: rivet validate · release plan
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, light]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
@@ -107,7 +115,7 @@ jobs:
 
   msrv:
     name: MSRV (1.89)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, rust-cpu]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # 1.89 pinned below
@@ -117,7 +125,7 @@ jobs:
 
   coverage:
     name: coverage (advisory evidence)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, rust-cpu]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -135,7 +143,7 @@ jobs:
 
   deny:
     name: cargo deny (supply-chain audit)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, light]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install cargo-deny
@@ -145,7 +153,7 @@ jobs:
 
   corrosion:
     name: corrosion offline build (REQ-CORROSION-001)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, rust-cpu]
     # The real test is 36-97s. Without a bound, a hung apt mirror held a
     # required check open indefinitely and there was nothing to end it.
     timeout-minutes: 20
@@ -172,7 +180,7 @@ jobs:
 
   keydisk:
     name: no signing key on disk (REQ-NOKEYDISK-001)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, light]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # `docs ci` names `echo "$SECRET" > key.tmp` as the thing adopters
@@ -198,7 +206,7 @@ jobs:
     # stops matching the rule that required it, and the gate quietly becomes
     # optional the next time the file list changes.
     name: cargo mutants (${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, lean-mem]
     # SHARDED, not shortened. The v0.31.0 run found 705 mutants across 28 files
     # and was cancelled at the 60-minute limit — which is the failure this job's
     # previous comment warned about: a gate that times out is indistinguishable
@@ -344,6 +352,22 @@ jobs:
           # missed mutant fails. A run with no summary line also fails, because
           # a gate that cannot find its own result must not report success.
           set +e
+          # A per-process address-space cap is MANDATORY on the `lean-mem`
+          # class (org runbook, rivet docs/ci-runners.md) and it is also the
+          # answer to this job's own history: shard `varve-core (trust)` was
+          # KILLED at 23 minutes with exit 143 under a 60-minute cap — not a
+          # timeout, a resource termination, which reports nothing in exactly
+          # the way a cancellation does. cargo-mutants can produce a mutant
+          # that allocates without bound (neutralise the `+= 1` in a loop that
+          # also pushes, and the Vec grows forever), and an OOM kill takes the
+          # whole job with no summary, so the gate cannot tell "nothing
+          # survived" from "nothing ran".
+          #
+          # 48 GiB of RLIMIT_AS, matching rivet's `ulimit -v 50331648`: the
+          # runaway MUTANT dies on an allocation failure, the run continues,
+          # and that mutant is reported. Defence in depth alongside the host
+          # cgroup's MemoryMax.
+          ulimit -v 50331648
           # shellcheck disable=SC2086 -- FILES is a deliberate flag list
           cargo mutants --no-shuffle -j 4 --timeout 120 $FILES 2>&1 | tee mutants.log
           set -e
@@ -381,7 +405,7 @@ jobs:
     name: cargo mutants (trust-critical gate)
     needs: [mutants]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, light]
     steps:
       - name: Every shard must have passed
         env:
@@ -399,7 +423,7 @@ jobs:
 
   proofs:
     name: SMT obligations (ordeal, certificate-checked)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, rust-cpu]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
