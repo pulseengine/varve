@@ -45,6 +45,7 @@ fn docs_tool(name: &str) -> DepositTool {
         name: name.into(),
         version: "1.0.0".into(),
         platform: None,
+        target: None,
         bytes: format!("<h1>{name}</h1>").into_bytes(),
         source: None,
         runner: None,

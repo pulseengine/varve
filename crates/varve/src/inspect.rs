@@ -56,6 +56,20 @@ fn realm_width(rows: &[Row]) -> Option<usize> {
     )
 }
 
+/// The platform cell: the machine that RUNS the payload, and — for a
+/// cross-toolchain — what it BUILDS FOR, as the pair that identifies it.
+///
+/// Shown in the platform column rather than a column of its own because the
+/// two are one fact: `x86_64-unknown-linux-gnu -> arm-zephyr-eabi` says what
+/// neither half says alone, and a whole extra column would be empty for every
+/// layer that carries no cross-toolchain.
+fn platform_cell(r: &Row) -> String {
+    match &r.target {
+        Some(t) => format!("{} -> {t}", r.platform),
+        None => r.platform.clone(),
+    }
+}
+
 /// One payload, as reported.
 struct Row {
     name: String,
@@ -68,6 +82,10 @@ struct Row {
     /// The entry's signed platform, or `any` where it carries none — an
     /// unstamped platform means any-platform, as it does everywhere else.
     platform: String,
+    /// What the payload BUILDS FOR, when it differs from what runs it
+    /// (REQ-SDKTARGET-001 clause 5). A layer carrying three cross-toolchains
+    /// and unable to say which is which is not inspectable.
+    target: Option<String>,
     digest: String,
     /// `dispatched` | `held` | `unknown` (the kind annotation is one this
     /// varve does not recognise, so whether it dispatches is not knowable).
@@ -137,6 +155,7 @@ pub fn run(store: &Store, layer: Option<&str>, json: bool) -> anyhow::Result<()>
                 version: e.annotations.get("eu.pulseengine.tool.version").cloned(),
                 kind,
                 known_kind: parsed.is_ok(),
+                target: e.annotations.get(varve_core::platform::ANN_TARGET).cloned(),
                 platform: e
                     .annotations
                     .get(varve_core::platform::ANN_PLATFORM)
@@ -371,7 +390,7 @@ fn print_text(
     };
     let (wn, wk, wp) = (w(|r| &r.name, "NAME"), w(|r| &r.kind, "KIND"), {
         rows.iter()
-            .map(|r| r.platform.chars().count())
+            .map(|r| platform_cell(r).chars().count())
             .chain(std::iter::once(8))
             .max()
             .unwrap_or(8)
@@ -410,7 +429,7 @@ fn print_text(
             r.kind,
             r.name,
             r.version.as_deref().unwrap_or("-"),
-            r.platform,
+            platform_cell(r),
             if wr.is_some() { r.realm.as_str() } else { "" },
             if wr.is_some() { "  " } else { "" },
             r.layer,
@@ -511,7 +530,48 @@ mod tests {
             present: true,
             layer: "2026.09.9".into(),
             realm: "t".into(),
+            target: None,
         }
+    }
+
+    /// Clause 5. Three cross-toolchains for one host are one name, one
+    /// version and one platform three times over; the target is the only
+    /// thing that tells them apart, so a report that omits it is not a
+    /// report of this layer.
+    ///
+    /// Shown as the PAIR rather than in a column of its own: `platform`
+    /// alone answers "can I run this", `target` alone answers nothing, and
+    /// `x86_64-unknown-linux-gnu -> arm-zephyr-eabi` is the identity.
+    // rivet: verifies REQ-SDKTARGET-001
+    #[test]
+    fn a_cross_toolchain_reports_the_pair_that_identifies_it() {
+        let sdk = |target: &str| {
+            let mut r = row("zephyr-sdk", None);
+            r.platform = "x86_64-unknown-linux-gnu".into();
+            r.target = Some(target.into());
+            r
+        };
+        let rows = [
+            sdk("arm-zephyr-eabi"),
+            sdk("riscv64-zephyr-elf"),
+            row("rivet", None),
+        ];
+        let cells: Vec<String> = rows.iter().map(platform_cell).collect();
+        assert_eq!(
+            cells,
+            vec![
+                "x86_64-unknown-linux-gnu -> arm-zephyr-eabi",
+                "x86_64-unknown-linux-gnu -> riscv64-zephyr-elf",
+                // A payload whose output runs where it ran says nothing extra:
+                // clause 4, unchanged by this dimension.
+                "any",
+            ]
+        );
+        assert_ne!(
+            cells[0], cells[1],
+            "two toolchains a realm installs side by side must be \
+             distinguishable in the one place that reports what a layer holds"
+        );
     }
 
     /// `inspect` has two output paths and they must agree about what the layer
