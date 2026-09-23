@@ -141,26 +141,58 @@ fn collect() -> anyhow::Result<Vec<DocsPayload>> {
     // varve cannot vouch for would look authoritative and be worthless.
     varve_core::verify_installed(&store, &entry, &verifier, &varve_core::host_platform())?;
 
-    let manifest =
-        varve_core::LayerManifest::parse(&std::fs::read(entry.root.join("layer.json"))?)?;
+    // EVERY layer of the composition, not just the pinned one. Reading only
+    // the pinned layer's manifest is why this answered "layer 2026.09.1 carries
+    // no documentation" on a four-layer composition whose documentation lived
+    // in one of the other three — while `varve export-docs`, walking the
+    // composition, found it. Two commands disagreeing about what one pin
+    // contains is the defect; the walk now lives in varve-core, where both use
+    // the same one.
+    let roots = realm_roots(&cwd)?;
+    let own_realm = pin.realm.clone().unwrap_or_else(|| "(this project)".into());
+    let layers = varve_core::compose::walk_installed(
+        &store,
+        &entry,
+        &verifier,
+        &own_realm,
+        &roots,
+        &varve_core::host_platform(),
+    )
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if layers.len() > 1 {
+        eprintln!(
+            "following the composition: {} layers — {}",
+            layers.len(),
+            layers
+                .iter()
+                .map(|l| format!("{} (realm '{}')", l.entry.layer, l.realm))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     let mut out = Vec::new();
-    for e in &manifest.entries {
-        if e.kind().ok() != Some(varve_core::PayloadKind::Docs) {
-            continue;
-        }
-        let Some(path) = store.entry_path(&entry, e) else {
-            continue;
-        };
+    for p in varve_core::compose::payloads_of(
+        &layers,
+        varve_core::PayloadKind::Docs,
+        &varve_core::host_platform(),
+    )
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    {
         out.push(
-            DocsPayload::from_signed(&e.annotations, std::fs::read(&path)?)
+            DocsPayload::from_signed(&p.annotations, p.bytes)
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
         );
     }
     if out.is_empty() {
         bail!(
-            "layer {} carries no documentation. `varve inspect` lists every payload it does \
-             carry.",
-            entry.layer
+            "layer {} carries no documentation{}. `varve inspect` lists every payload it \
+             does carry.",
+            entry.layer,
+            if layers.len() > 1 {
+                format!(", nor do the {} layer(s) it composes", layers.len() - 1)
+            } else {
+                String::new()
+            }
         );
     }
     Ok(out)
@@ -184,4 +216,29 @@ fn store_root() -> anyhow::Result<std::path::PathBuf> {
     }
     let home = std::env::var_os("HOME").context("HOME is not set and VARVE_ROOT is not set")?;
     Ok(std::path::PathBuf::from(home).join(".varve"))
+}
+
+/// Every realm this project can name, mapped to its trust root.
+///
+/// The composition walk verifies each included layer against the root of the
+/// realm its include NAMES, and varve-core does not read varve-realms.toml —
+/// resolving them is the caller's job, so that the crate that verifies has no
+/// opinion about where trust material lives.
+fn realm_roots(
+    cwd: &std::path::Path,
+) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    let mut out = std::collections::BTreeMap::new();
+    let names = match varve_core::realm::realm_names(cwd) {
+        Ok(names) => names,
+        // No realms file at all is not an error here: a project pinning no
+        // realm composes nothing that needs one, and the walk says so itself
+        // if an include names a realm.
+        Err(_) => return Ok(out),
+    };
+    for name in names {
+        if let Ok(realm) = varve_core::resolve_realm(cwd, &name) {
+            out.insert(name, realm.trust_root.clone());
+        }
+    }
+    Ok(out)
 }

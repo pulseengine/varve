@@ -99,12 +99,24 @@ Two things go in the file:
 
 Hand them a `varve-realms.toml` containing both. That file is the whole bootstrap: it names where bytes come from and which key makes them acceptable. Everything else — digests, counters, support windows — travels inside the signed manifest.
 
-And, **if your registry is private, a third thing that does not go in the file**: a credential. varve reads `$VARVE_REGISTRY_AUTH` as `username:password`, or falls back to Docker/podman config files; it never executes a `credsStore` helper, so cloud registries need the credential handed over directly:
+And, **if your registry is private, a third thing that does not go in the file**: a credential.
+
+On a workstation the shortest path is usually the one you already use: the `auths` section of the Docker and podman config files is one of the places varve looks.
+
+```sh
+docker login jfrog.example.com      # or podman login — either one works
+```
+
+Or hand varve the credential directly, which is what CI and cloud registries need:
 
 ```sh
 export VARVE_REGISTRY_AUTH="$USER:$GHCR_TOKEN"
 export VARVE_REGISTRY_AUTH="AWS:$(aws ecr get-login-password --region eu-central-1)"
 ```
+
+`export` reaches every subshell, so one of these covers a whole session — including several `varve install` runs for the layers of a composition. It applies to the registry named in the `oci://` reference, so several layers in one registry need it once.
+
+varve never executes a `credsStore`/`credHelpers` helper: sourcing a secret by running a PATH-resolved binary is the trust varve refuses elsewhere (REQ-SHADOW-001). If your `docker login` stored the credential in a helper rather than in `auths`, varve says so by name and tells you to supply it directly.
 
 Without it a pull fails with *"offered no credential"*, naming `VARVE_REGISTRY_AUTH` — distinct from *"rejected it"*, which means the one you gave is wrong. Full precedence: `varve docs environment`. The credential is a *transport* secret: it decides whether the bytes arrive, never whether they are accepted.
 
