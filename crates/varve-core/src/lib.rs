@@ -75,6 +75,7 @@ pub use deposit::{
 pub use ingest::{ANN_PROOF, ANN_PROOF_ASSERTS, ANN_PROOF_SIGNER, IngestProof, UnknownProof};
 pub use install::{
     InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
+    install_by_digest,
 };
 pub use kind::{ANN_KIND, PayloadKind, UnknownKind};
 pub use layer::{LayerId, LayerIdError, Line};

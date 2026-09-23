@@ -273,6 +273,177 @@ fn the_composition_offers_every_layers_tools_once() {
     assert!(names.contains(&"rivet"), "{names:?}");
 }
 
+/// A composition of a composition: root -> mid -> leaf. The walk is over a DAG,
+/// so a longer path is just a longer path — but the leaf must be reached, or a
+/// chain passes because the root's DIRECT includes were all present.
+// rivet: verifies REQ-COMPOSE-001
+#[test]
+fn a_composition_of_a_composition_is_walked_to_the_leaf() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root_dir = tmp.path().join("root");
+    let store = Store::at(&root_dir);
+    let bench = Bench {
+        store: store.clone(),
+        root: root_dir.clone(),
+        tmp: tmp.path().to_path_buf(),
+    };
+    let leafr = realm("leaf-realm");
+    let midr = realm("mid-realm");
+    let topr = realm("top-realm");
+
+    let leaf = deposit_and_install(
+        &bench,
+        &leafr,
+        "2026.09.0",
+        1,
+        vec![docs_tool("deep")],
+        Vec::new(),
+    );
+    let mid = deposit_and_install(
+        &bench,
+        &midr,
+        "2026.09.1",
+        1,
+        vec![tool("middle")],
+        vec![DepositInclude {
+            digest: leaf,
+            realm: Some(leafr.name.clone()),
+            layer: Some("2026.09.0".into()),
+        }],
+    );
+    let top = deposit_and_install(
+        &bench,
+        &topr,
+        "2026.09.2",
+        1,
+        vec![tool("apex")],
+        vec![DepositInclude {
+            digest: mid,
+            realm: Some(midr.name.clone()),
+            layer: Some("2026.09.1".into()),
+        }],
+    );
+
+    let entry = store.get(&top).unwrap().unwrap();
+    let verifier = PinnedKeyVerifier::from_public_key_bytes(&topr.pk).unwrap();
+    let mut roots: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    roots.insert(midr.name.clone(), midr.pk.clone());
+    roots.insert(leafr.name.clone(), leafr.pk.clone());
+
+    let layers = varve_core::compose::walk_installed(
+        &store,
+        &entry,
+        &verifier,
+        &topr.name,
+        &roots,
+        "test-platform",
+    )
+    .expect("walks the chain");
+    assert_eq!(layers.len(), 3, "the walk stopped before the leaf");
+
+    // The documentation is two levels down, which is where a viewer reading
+    // only the pinned layer — or only its direct includes — would miss it.
+    let docs = varve_core::compose::payloads_of(&layers, PayloadKind::Docs, "test-platform")
+        .expect("collects");
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0].name, "deep");
+}
+
+/// A DIAMOND: two layers of one composition sharing a base. The shared layer is
+/// visited ONCE and is not mistaken for a cycle — conflating "reachable by two
+/// paths" with "on its own path" is the bug this shape exists to catch.
+// rivet: verifies REQ-COMPOSE-001
+#[test]
+fn a_diamond_visits_the_shared_base_once_and_is_not_a_cycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root_dir = tmp.path().join("root");
+    let store = Store::at(&root_dir);
+    let bench = Bench {
+        store: store.clone(),
+        root: root_dir.clone(),
+        tmp: tmp.path().to_path_buf(),
+    };
+    let baser = realm("base-realm");
+    let leftr = realm("left-realm");
+    let rightr = realm("right-realm");
+    let topr = realm("top-realm");
+
+    let base = deposit_and_install(
+        &bench,
+        &baser,
+        "2026.09.0",
+        1,
+        vec![tool("shared")],
+        Vec::new(),
+    );
+    let inc_base = |d: &str| DepositInclude {
+        digest: d.to_string(),
+        realm: Some(baser.name.clone()),
+        layer: Some("2026.09.0".into()),
+    };
+    let left = deposit_and_install(
+        &bench,
+        &leftr,
+        "2026.09.1",
+        1,
+        vec![tool("left")],
+        vec![inc_base(&base)],
+    );
+    let right = deposit_and_install(
+        &bench,
+        &rightr,
+        "2026.09.2",
+        1,
+        vec![tool("right")],
+        vec![inc_base(&base)],
+    );
+    let top = deposit_and_install(
+        &bench,
+        &topr,
+        "2026.09.3",
+        1,
+        vec![tool("apex")],
+        vec![
+            DepositInclude {
+                digest: left,
+                realm: Some(leftr.name.clone()),
+                layer: Some("2026.09.1".into()),
+            },
+            DepositInclude {
+                digest: right,
+                realm: Some(rightr.name.clone()),
+                layer: Some("2026.09.2".into()),
+            },
+        ],
+    );
+
+    let entry = store.get(&top).unwrap().unwrap();
+    let verifier = PinnedKeyVerifier::from_public_key_bytes(&topr.pk).unwrap();
+    let mut roots: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for r in [&baser, &leftr, &rightr] {
+        roots.insert(r.name.clone(), r.pk.clone());
+    }
+    let layers = varve_core::compose::walk_installed(
+        &store,
+        &entry,
+        &verifier,
+        &topr.name,
+        &roots,
+        "test-platform",
+    )
+    .expect("a diamond is not a cycle");
+    assert_eq!(
+        layers.len(),
+        4,
+        "top, left, right, base — the base exactly once"
+    );
+
+    let tools = varve_core::compose::payloads_of(&layers, PayloadKind::Tool, "test-platform")
+        .expect("collects");
+    let shared: Vec<_> = tools.iter().filter(|p| p.name == "shared").collect();
+    assert_eq!(shared.len(), 1, "the shared base was offered twice");
+}
+
 /// The depth bound, at its edge — both sides of the one comparison.
 ///
 /// `cargo mutants` survived two mutations of `ancestors.len() > MAX_DEPTH` in

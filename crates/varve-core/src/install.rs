@@ -138,6 +138,58 @@ pub struct InstallPolicy<'a> {
     pub index: Option<crate::lineindex::IndexPolicy<'a>>,
 }
 
+/// Install a layer named only by the digest of its signed manifest — what an
+/// `[[include]]` names (REQ-COMPOSEINSTALL-001).
+///
+/// A composition names the layers it needs by digest, and until v0.38.0 varve
+/// declined to FETCH them: an operator installing a four-layer composition from
+/// one registry had to create a pinned directory per layer and install each by
+/// hand. The refusal bought nothing. A digest is fixed at signing, so whatever
+/// arrives either hashes to it or is refused; declining to fetch bytes varve
+/// can name exactly is friction wearing the clothes of caution.
+///
+/// What it does NOT do is pin: no varve.toml is written, because obtaining a
+/// layer and choosing it are different acts, and a pin that appeared by itself
+/// would be a decision nobody made.
+///
+/// Every check a direct install makes still runs — the realm's signed index,
+/// anti-rollback, the platform filter — because this delegates to `install`
+/// rather than reimplementing it. The cost is re-fetching one small manifest to
+/// learn the layer id and channel the digest belongs to; the alternative was a
+/// second copy of two hundred lines that decide whether bytes are acceptable,
+/// and a second copy is how those two answers drift apart.
+pub fn install_by_digest(
+    digest: &str,
+    source: &dyn LayerSource,
+    verifier: &dyn ManifestVerifier,
+    store: &Store,
+    marks: &mut HighWaterMarks,
+    policy: &InstallPolicy<'_>,
+) -> Result<InstallOutcome, InstallError> {
+    let fetched = source.fetch_manifest(&LayerRef::Digest(digest.to_string()))?;
+    let bytes = verifier.verify(&fetched)?;
+    let manifest = LayerManifest::parse(&bytes)?;
+    let channel = match manifest.channel.as_str() {
+        "qualified" => crate::pin::Channel::Qualified,
+        "rolling" => crate::pin::Channel::Rolling,
+        other => {
+            return Err(InstallError::ChannelMismatch {
+                pinned: "qualified|rolling".to_string(),
+                got: other.to_string(),
+            });
+        }
+    };
+    let pin = Pin {
+        realm: None,
+        channel,
+        layer: manifest.layer.clone(),
+        digest: Some(digest.to_string()),
+        tools: None,
+        exports: Vec::new(),
+    };
+    install(&pin, source, verifier, store, marks, policy)
+}
+
 pub fn install(
     pin: &Pin,
     source: &dyn LayerSource,
