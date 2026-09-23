@@ -6,8 +6,14 @@
 //! one rivet CI run, every `self-hosted` job had completed while every
 //! `ubuntu-latest` job was still queued).
 //!
-//! Speed is not a reason to move everything. Three workflows must stay on
-//! GitHub-hosted runners, and the reason is varve's own product:
+//! Speed is not a reason to move everything, and for one job shape the pool
+//! is SLOWER: the five `cargo mutants` shards run 21-39 minutes each, five
+//! wide, and a shared host can only serialise them — measured at hours per
+//! pull request, with one shard sitting unassigned for 3h39m before being
+//! cancelled. They run on hosted VMs, where the five run at once.
+//!
+//! Three workflows must stay on GitHub-hosted runners for a different and
+//! stronger reason — varve's own product:
 //!
 //! * `release.yml` produces the SLSA build provenance that varve's ingestion
 //!   ladder accepts as rung 2. That attestation's worth comes from binding an
@@ -59,7 +65,12 @@ fn signing_and_attesting_workflows_never_run_on_our_own_machines() {
 #[test]
 fn the_pr_gates_run_on_the_pool_and_name_a_class() {
     for (name, want) in [
-        ("ci.yml", 9usize),
+        // 8, not 9: the five mutation shards went BACK to hosted runners after
+        // measurement — 21-39 minutes each, five wide, serialised two at a
+        // time on a shared host, with one shard never getting a runner at all.
+        // The aggregator that reads their result stays on the pool, because it
+        // is three lines of shell.
+        ("ci.yml", 8usize),
         ("systest.yml", 6),
         ("fuzz.yml", 1),
         ("mutants.yml", 1),

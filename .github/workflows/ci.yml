@@ -218,7 +218,20 @@ jobs:
     # stops matching the rule that required it, and the gate quietly becomes
     # optional the next time the file list changes.
     name: cargo mutants (${{ matrix.shard }})
-    runs-on: [self-hosted, linux, x64, lean-mem]
+    # MEASURED, then reverted. These five shards moved to the pool with the
+    # rest of the gates and it made them worse, because they are the one job
+    # shape a shared host cannot absorb: 21-39 minutes each, five wide, and
+    # memory-hungry. Serialised two at a time they span 64 minutes at best and
+    # HOURS when more than one PR is open — one shard never got a runner at
+    # all, sat queued for 3h39m and was cancelled, which the aggregator
+    # correctly refused to read as a pass.
+    #
+    # A hosted runner gives each shard its own VM, so the five run at once and
+    # the matrix costs about as long as its slowest member. The fast gates stay
+    # on the pool, where they start in seconds instead of queueing 30-70
+    # minutes; this is the split the measurements support, not a retreat from
+    # it.
+    runs-on: ubuntu-latest
     # SHARDED, not shortened. The v0.31.0 run found 705 mutants across 28 files
     # and was cancelled at the 60-minute limit — which is the failure this job's
     # previous comment warned about: a gate that times out is indistinguishable
@@ -236,12 +249,6 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      # The pool is ONE host with twelve runner slots, not twelve machines.
-      # Five shards at once put ~20 cargo workers plus sccache on it and drove
-      # the disk to 69% against the post-job hook's 70% threshold. Two at a
-      # time leaves the box usable — by the rest of this workflow, and by the
-      # other repositories sharing it.
-      max-parallel: 2
       matrix:
         include:
           # SPLIT AGAIN at v0.33.0. Adding consumer.rs took the single
@@ -350,12 +357,10 @@ jobs:
         # modules that hold the trust decisions must kill every mutant.
         # The nightly workflow covers the full workspace, advisory.
         #
-        # `-j 2`, not 4. Four matched a HOSTED runner, where the job owned
-        # the whole VM. On the shared pool four workers per shard oversubscribe
-        # the host, and that costs more than throughput: `--timeout 120` below
-        # is what separates a HANG from a slow test, and it can only mean that
-        # if the machine is not thrashing. rivet reduced the same knob on the
-        # same pool for the same reason.
+        # `-j 4` matches a hosted runner's cores, which this job owns for the
+        # duration. `--timeout 120` below is what separates a HANG from a slow
+        # test, and it can only mean that on a machine that is not thrashing —
+        # which is the other reason these shards belong on a dedicated VM.
         env:
           FILES: ${{ matrix.files }}
         run: |
@@ -394,7 +399,7 @@ jobs:
           # cgroup's MemoryMax.
           ulimit -v 50331648
           # shellcheck disable=SC2086 -- FILES is a deliberate flag list
-          cargo mutants --no-shuffle -j 2 --timeout 120 $FILES 2>&1 | tee mutants.log
+          cargo mutants --no-shuffle -j 4 --timeout 120 $FILES 2>&1 | tee mutants.log
           set -e
           SUMMARY="$(grep -E '[0-9]+ mutants tested' mutants.log | tail -1 || true)"
           if [ -z "$SUMMARY" ]; then
