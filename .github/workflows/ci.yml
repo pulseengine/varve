@@ -152,6 +152,29 @@ jobs:
           name: coverage-lcov
           path: lcov.info
           retention-days: 30
+      # `release.yml` collects every platform's archives with
+      # download-artifact and uploads whatever lands in that directory. If the
+      # action ever returns a different SHAPE — nested a directory deeper, or
+      # named differently — the release publishes the wrong file set, and
+      # before this nothing on a pull request had ever run it.
+      #
+      # Round-tripping the artifact just uploaded is a real exercise of the
+      # same action at the same pin, and costs one small file.
+      - name: Fetch it back — the action release.yml depends on, exercised here
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: coverage-lcov
+          path: rehearsal
+      - name: What came back is what went out
+        run: |
+          set -euo pipefail
+          test -f rehearsal/lcov.info || {
+            echo "::error::download-artifact did not place lcov.info where \
+                  release.yml expects its archives — same action, same pin"
+            ls -R rehearsal || true
+            exit 1
+          }
+          cmp lcov.info rehearsal/lcov.info
 
   deny:
     name: cargo deny (supply-chain audit)
