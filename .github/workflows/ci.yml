@@ -230,9 +230,18 @@ jobs:
     # So the list grows and the job splits. Each shard carries one crate's
     # modules and runs the whole workspace's lib tests as its kill criteria, so
     # sharding changes how long the gate takes and not what it proves.
-    timeout-minutes: 60
+    # 60 minutes was enough while every shard had a hosted VM to itself. It is
+    # not enough when they share one host: `varve-producer` (519 mutants) was
+    # cancelled at exactly 60:00 on this job's first run against the pool.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
+      # The pool is ONE host with twelve runner slots, not twelve machines.
+      # Five shards at once put ~20 cargo workers plus sccache on it and drove
+      # the disk to 69% against the post-job hook's 70% threshold. Two at a
+      # time leaves the box usable — by the rest of this workflow, and by the
+      # other repositories sharing it.
+      max-parallel: 2
       matrix:
         include:
           # SPLIT AGAIN at v0.33.0. Adding consumer.rs took the single
@@ -341,8 +350,12 @@ jobs:
         # modules that hold the trust decisions must kill every mutant.
         # The nightly workflow covers the full workspace, advisory.
         #
-        # `-j 4` matches the hosted runner's cores. The unsharded job ran
-        # serially, which is how 705 mutants overran an hour.
+        # `-j 2`, not 4. Four matched a HOSTED runner, where the job owned
+        # the whole VM. On the shared pool four workers per shard oversubscribe
+        # the host, and that costs more than throughput: `--timeout 120` below
+        # is what separates a HANG from a slow test, and it can only mean that
+        # if the machine is not thrashing. rivet reduced the same knob on the
+        # same pool for the same reason.
         env:
           FILES: ${{ matrix.files }}
         run: |
@@ -381,7 +394,7 @@ jobs:
           # cgroup's MemoryMax.
           ulimit -v 50331648
           # shellcheck disable=SC2086 -- FILES is a deliberate flag list
-          cargo mutants --no-shuffle -j 4 --timeout 120 $FILES 2>&1 | tee mutants.log
+          cargo mutants --no-shuffle -j 2 --timeout 120 $FILES 2>&1 | tee mutants.log
           set -e
           SUMMARY="$(grep -E '[0-9]+ mutants tested' mutants.log | tail -1 || true)"
           if [ -z "$SUMMARY" ]; then
