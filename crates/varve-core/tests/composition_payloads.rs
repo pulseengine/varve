@@ -75,6 +75,57 @@ struct Bench {
 }
 
 /// Deposit a layer into a directory-shaped layout and install it.
+/// A source serving one deposited layout: its signed envelope and every blob
+/// the manifest names. Shared so that a fetch BY DIGEST is served exactly what
+/// a fetch by pin is — otherwise the two paths could differ in the test and
+/// agree in production, or the reverse.
+/// The signed envelope a deposit wrote: named directly, or found among the
+/// blobs when the layout names it by digest.
+fn read_envelope(layout: &std::path::Path) -> Vec<u8> {
+    std::fs::read(layout.join("layer.dsse.json"))
+        .or_else(|_| {
+            for e in std::fs::read_dir(layout.join("blobs/sha256")).unwrap() {
+                let p = e.unwrap().path();
+                let b = std::fs::read(&p).unwrap();
+                if serde_json::from_slice::<serde_json::Value>(&b)
+                    .ok()
+                    .and_then(|v| v.get("payload").cloned())
+                    .is_some()
+                {
+                    return Ok::<Vec<u8>, std::io::Error>(b);
+                }
+            }
+            panic!("no envelope in {}", layout.display())
+        })
+        .unwrap()
+}
+
+fn source_at(layout: &std::path::Path) -> MemorySource {
+    let envelope = read_envelope(layout);
+    let mut source = MemorySource::new().with_manifest(&envelope);
+    for e in std::fs::read_dir(layout.join("blobs/sha256")).unwrap() {
+        let p = e.unwrap().path();
+        let b = std::fs::read(&p).unwrap();
+        let d = manifest_digest(&b);
+        source = source.with_blob(&d, &b);
+    }
+    source
+}
+
+/// The layout a `deposit_and_install` wrote for one layer.
+fn source_for(b: &Bench, layer: &str) -> MemorySource {
+    source_at(&b.tmp.join(format!("layout-{layer}")))
+}
+
+fn policy<'a>() -> InstallPolicy<'a> {
+    InstallPolicy {
+        index: None,
+        now: "2026-09-20T00:00:00Z",
+        staleness_threshold_days: 3650,
+        platform: "test-platform",
+    }
+}
+
 fn deposit_and_install(
     b: &Bench,
     r: &Realm,
@@ -101,32 +152,7 @@ fn deposit_and_install(
     .expect("deposits");
 
     // Install from the layout the deposit just wrote.
-    let envelope = std::fs::read(layout.join("layer.dsse.json"))
-        .or_else(|_| {
-            // The layout names the envelope by digest; find it among the blobs.
-            for e in std::fs::read_dir(layout.join("blobs/sha256")).unwrap() {
-                let p = e.unwrap().path();
-                let b = std::fs::read(&p).unwrap();
-                if serde_json::from_slice::<serde_json::Value>(&b)
-                    .ok()
-                    .and_then(|v| v.get("payload").cloned())
-                    .is_some()
-                {
-                    return Ok::<Vec<u8>, std::io::Error>(b);
-                }
-            }
-            panic!("no envelope in {}", layout.display())
-        })
-        .unwrap();
-
-    let mut source = MemorySource::new().with_manifest(&envelope);
-    // Every payload blob the manifest names.
-    for e in std::fs::read_dir(layout.join("blobs/sha256")).unwrap() {
-        let p = e.unwrap().path();
-        let b = std::fs::read(&p).unwrap();
-        let d = manifest_digest(&b);
-        source = source.with_blob(&d, &b);
-    }
+    let source = source_at(&layout);
 
     let pin = Pin::parse(
         &format!("manifest-version = 1\n[toolchain]\nchannel = \"rolling\"\nlayer = \"{layer}\"\n"),
@@ -528,4 +554,94 @@ fn a_composition_exactly_max_depth_deep_walks_and_one_deeper_is_refused() {
         matches!(err, varve_core::compose::ComposeError::TooDeep),
         "got: {err}"
     );
+}
+
+/// Fetching a layer known ONLY by the digest of its signed manifest.
+///
+/// This is what `varve install` does for every `[[include]]` it walks, and it
+/// shipped without a test: the requirement said "install fetches what a
+/// composition names" while nothing exercised the fetch, so the evidence for
+/// it was a CLI path nobody re-ran. Found while preparing v0.38.0, by asking
+/// rivet which markers pointed at the requirement and getting "No test markers
+/// found".
+///
+/// The point of `install_by_digest` is that it DELEGATES: an included layer
+/// must pass every check a pinned one does rather than a shorter list, because
+/// it arrives without a pin to state expectations. So the test also proves the
+/// checks are still there — a wrong root is refused, and a digest the source
+/// does not hold is refused rather than silently skipped.
+// rivet: verifies REQ-COMPOSEINSTALL-001
+#[test]
+fn a_layer_named_only_by_digest_is_fetched_verified_and_laid_down() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root_dir = tmp.path().join("root");
+    let store = Store::at(&root_dir);
+    let bench = Bench {
+        store: store.clone(),
+        root: root_dir.clone(),
+        tmp: tmp.path().to_path_buf(),
+    };
+    let r = realm("upstream-realm");
+
+    // Deposited and installed once so the layout and a source for it exist;
+    // then installed AGAIN, by digest alone, into a fresh store — the way a
+    // composing project first meets it.
+    let digest = deposit_and_install(&bench, &r, "2026.09.0", 1, vec![tool("wac")], Vec::new());
+
+    let fresh_dir = tmp.path().join("fresh");
+    let fresh = Store::at(&fresh_dir);
+    let source = source_for(&bench, "2026.09.0");
+    let verifier = PinnedKeyVerifier::from_public_key_bytes(&r.pk).unwrap();
+    let mut marks = HighWaterMarks::load(&fresh_dir).unwrap();
+    let outcome = varve_core::install::install_by_digest(
+        &digest,
+        &source,
+        &verifier,
+        &fresh,
+        &mut marks,
+        &policy(),
+    )
+    .expect("a layer named by digest installs");
+
+    assert_eq!(outcome.digest, digest, "installed something else");
+    assert_eq!(outcome.layer.to_string(), "2026.09.0");
+    assert!(
+        fresh.get(&digest).unwrap().is_some(),
+        "the fetch reported success and laid nothing down"
+    );
+
+    // The realm's own root is what vouches for it. Another realm's root must
+    // not do — this is the trust boundary an include exists to draw, and
+    // `install_by_digest` has no pin to carry it, so it can only come from the
+    // verifier the caller resolved.
+    let other = realm("someone-else");
+    let wrong = PinnedKeyVerifier::from_public_key_bytes(&other.pk).unwrap();
+    let other_dir = tmp.path().join("wrong-root");
+    let other_store = Store::at(&other_dir);
+    let mut other_marks = HighWaterMarks::load(&other_dir).unwrap();
+    varve_core::install::install_by_digest(
+        &digest,
+        &source,
+        &wrong,
+        &other_store,
+        &mut other_marks,
+        &policy(),
+    )
+    .expect_err("a layer signed by one realm must not verify under another's root");
+
+    // And a digest nobody serves is an error, not an empty success: a
+    // composition that names bytes the registry does not hold must fail where
+    // the operator can see it.
+    let missing_dir = tmp.path().join("missing");
+    let missing_store = Store::at(&missing_dir);
+    let mut missing_marks = HighWaterMarks::load(&missing_dir).unwrap();
+    varve_core::install::install_by_digest(
+        &format!("sha256:{}", "0".repeat(64)),
+        &source,
+        &verifier,
+        &missing_store,
+        &mut missing_marks,
+        &policy(),
+    )
+    .expect_err("a digest the source does not hold must be refused");
 }
