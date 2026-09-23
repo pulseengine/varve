@@ -19,7 +19,7 @@ env:
 jobs:
   mutants:
     name: cargo mutants (full workspace, advisory)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, lean-mem]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -32,7 +32,16 @@ jobs:
       - name: Full-workspace mutation run
         # Advisory: report and preserve evidence; the trust-critical gate
         # lives in ci.yml and is required.
-        run: cargo mutants --no-shuffle || true
+        #
+        # The address-space cap is mandatory on the `lean-mem` class (org
+        # runbook) and doubly so here: this run mutates the WHOLE workspace,
+        # so it meets every memory-runaway mutant the sharded gate is scoped
+        # away from. Without it one such mutant OOM-kills the job and the
+        # advisory evidence is silently empty. `|| true` would hide that.
+        run: |
+          set -euo pipefail
+          ulimit -v 50331648
+          cargo mutants --no-shuffle || true
       - name: Upload mutation evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

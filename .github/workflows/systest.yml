@@ -32,7 +32,7 @@ permissions:
 jobs:
   selfhost-vendor:
     name: self-host via export-crates-vendor (clause 1)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, rust-cpu]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -61,7 +61,7 @@ jobs:
     # signal, not a gate (cf. publish-crates.yml) — but so is a permanently
     # skipped one, which is why this comment must not outlive the condition.
     if: vars.VARVE_SYSTEST_EXPORT_CARGO == '1'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, rust-cpu]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -74,7 +74,7 @@ jobs:
 
   oci-roundtrip:
     name: OCI registry round trip (clause 2, varve#62)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, rust-cpu]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -93,7 +93,7 @@ jobs:
 
   deposit-layer:
     name: layer assembly, end to end without publishing (REQ-SYSTEST-002)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, rust-cpu]
     # Minutes, not tens of minutes: no network, no registry, ~50 fixture files
     # and 24 tiny payloads. A producer gate that took as long as the self-host
     # jobs would be one people learn to ignore.
@@ -123,7 +123,7 @@ jobs:
 
   compose-realms:
     name: two realms composed, end to end (REQ-REALM2-001 clause 3)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, rust-cpu]
     # Longer than deposit-layer: the negative control rebuilds varve from a
     # mutated copy of the source, which is a second release build.
     timeout-minutes: 30
@@ -156,7 +156,7 @@ jobs:
 
   install-shadow:
     name: the installer names which varve will run (REQ-INSTALLSHADOW-001)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, rust-cpu]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # A maintainer followed the documented install and ended up running a
