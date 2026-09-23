@@ -2823,6 +2823,10 @@ fn deposit_cmd(
             name: name.to_string(),
             version: version.to_string(),
             platform: platform.map(str::to_string),
+            // `--tool NAME@VERSION[@PLATFORM]=PATH` deposits a plain tool,
+            // whose output runs where it ran. A cross-toolchain declares its
+            // target in a manifest, not on a command line.
+            target: None,
             bytes,
             source: None,
             runner: None,

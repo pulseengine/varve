@@ -335,6 +335,10 @@ pub fn install(
         name: String,
         version: Option<String>,
         dispatchable: bool,
+        /// What the payload builds for, when it says (REQ-SDKTARGET-001).
+        /// Two cross-toolchains for one host differ ONLY here, so it has to
+        /// survive the fetch or they collide on one path.
+        target: Option<String>,
         bytes: Vec<u8>,
     }
     let mut tools: Vec<Fetched> = Vec::new();
@@ -375,6 +379,7 @@ pub fn install(
             name: tool,
             version: crate::store::entry_version(entry).map(str::to_string),
             dispatchable: crate::store::entry_is_dispatchable(entry),
+            target: crate::platform::entry_target(entry).map(str::to_string),
             bytes: blob,
         });
     }
@@ -395,6 +400,7 @@ pub fn install(
             name: t.name.as_str(),
             version: t.version.as_deref(),
             dispatchable: t.dispatchable,
+            target: t.target.as_deref(),
             bytes: t.bytes.as_slice(),
         })
         .collect();

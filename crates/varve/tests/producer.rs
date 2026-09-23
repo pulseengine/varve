@@ -60,6 +60,7 @@ fn deposit_spec(layer: &str, counter: u64) -> varve_core::DepositSpec {
             name: "synth".into(),
             version: "0.45.0".into(),
             platform: None,
+            target: None,
             bytes: b"synth-bytes".to_vec(),
             source: None,
             runner: None,

@@ -77,6 +77,11 @@ pub struct DepositTool {
     /// Target triple this binary is built for; `None` claims
     /// platform-independence (scripts, data). New deposits should stamp it.
     pub platform: Option<String>,
+    /// What this payload BUILDS FOR, when that differs from what runs it
+    /// (REQ-SDKTARGET-001). `platform` is the machine that executes these
+    /// bytes; `target` is the machine the artefacts they produce will run on.
+    /// A compiler you invoke declares none and is unchanged by this field.
+    pub target: Option<String>,
     pub bytes: Vec<u8>,
     /// Where the bytes came from — recorded INSIDE the signed payload so
     /// downstream lockfiles (Bazel registries) inherit the signature anchor
@@ -225,6 +230,10 @@ pub struct SpecTool {
     pub version: String,
     #[serde(default)]
     pub platform: Option<String>,
+    /// `target` — what this payload BUILDS FOR (REQ-SDKTARGET-001 clause 1).
+    /// Absent for anything whose output runs on the machine that ran it.
+    #[serde(default)]
+    pub target: Option<String>,
     /// Binary path, absolute or relative to the spec file's directory.
     pub path: String,
     #[serde(default)]
@@ -299,6 +308,7 @@ impl SpecTool {
             name: self.name,
             version: self.version,
             platform: self.platform,
+            target: self.target,
             bytes,
             source: self.source,
             runner: self.runner,
@@ -509,17 +519,25 @@ fn platform_label(platform: Option<&String>) -> String {
 /// Cargo.lock has 14 names at more than one version; refusing them meant varve
 /// could not express its own dependency graph as a layer.
 fn check_identities(tools: &[&DepositTool]) -> Result<(), DepositError> {
-    // (name, platform) -> the version already seen, for dispatchable payloads.
-    let mut dispatched: std::collections::BTreeMap<(&str, Option<&String>), &str> =
+    // (name, platform, target) -> the version already seen, for dispatchable
+    // payloads.
+    let mut dispatched: std::collections::BTreeMap<(&str, Option<&String>, Option<&String>), &str> =
         std::collections::BTreeMap::new();
-    // (name, version, platform) -> seen, for everything else.
-    let mut held: std::collections::BTreeSet<(&str, &str, Option<&String>)> =
+    // (name, version, platform, target) -> seen, for everything else.
+    //
+    // The TARGET belongs in the identity (REQ-SDKTARGET-001 clause 3) because
+    // for a cross-toolchain the platform is the same for every target: it
+    // describes the machine that runs the compiler, not the machine its output
+    // runs on. Without it, the four toolchains a Zephyr realm wants are one
+    // identity four times over and the layer is refused.
+    let mut held: std::collections::BTreeSet<(&str, &str, Option<&String>, Option<&String>)> =
         std::collections::BTreeSet::new();
     for tool in tools {
         let dispatchable = tool.kind.unwrap_or_default().is_dispatchable();
         let platform = tool.platform.as_ref();
+        let target = tool.target.as_ref();
         if dispatchable {
-            if let Some(first) = dispatched.insert((&tool.name, platform), &tool.version) {
+            if let Some(first) = dispatched.insert((&tool.name, platform, target), &tool.version) {
                 return Err(DepositError::DuplicateTool {
                     name: tool.name.clone(),
                     platform: platform_label(platform),
@@ -527,11 +545,14 @@ fn check_identities(tools: &[&DepositTool]) -> Result<(), DepositError> {
                     second: tool.version.clone(),
                 });
             }
-        } else if !held.insert((&tool.name, &tool.version, platform)) {
+        } else if !held.insert((&tool.name, &tool.version, platform, target)) {
             return Err(DepositError::DuplicatePayload {
                 name: tool.name.clone(),
                 version: tool.version.clone(),
-                platform: platform_label(platform),
+                platform: match target {
+                    Some(t) => format!("{} target {t}", platform_label(platform)),
+                    None => platform_label(platform),
+                },
             });
         }
     }
@@ -801,6 +822,11 @@ pub fn deposit_with_options(
                     crate::platform::ANN_PLATFORM.into(),
                     platform.clone().into(),
                 );
+            }
+            // Clause 2: signed, so a consumer resolves by target rather than
+            // by a name the producer happened to choose.
+            if let Some(target) = &tool.target {
+                annotations.insert(crate::platform::ANN_TARGET.into(), target.clone().into());
             }
             if let Some(source) = &tool.source {
                 annotations.insert(
@@ -1138,6 +1164,7 @@ mod tests {
                     name: "synth".into(),
                     version: "0.45.0".into(),
                     platform: None,
+                    target: None,
                     bytes: b"synth-bytes".to_vec(),
                     source: None,
                     runner: None,
@@ -1152,6 +1179,7 @@ mod tests {
                     name: "rivet".into(),
                     version: "0.32.0".into(),
                     platform: None,
+                    target: None,
                     bytes: b"rivet-bytes".to_vec(),
                     source: None,
                     runner: None,
@@ -1520,6 +1548,7 @@ mod tests {
             name: name.into(),
             version: version.into(),
             platform: platform.map(str::to_string),
+            target: None,
             bytes: format!("{name}-{version}-bytes").into_bytes(),
             source: None,
             runner: None,
@@ -1530,6 +1559,59 @@ mod tests {
             docs_title: None,
             docs_documents: None,
         }
+    }
+
+    /// Two cross-toolchains for one host, same name and version, different
+    /// targets: two payloads, not a duplicate.
+    ///
+    /// The identity rule was (name, version, platform), and for a
+    /// cross-toolchain the platform is IDENTICAL across targets — it is the
+    /// machine running the compiler, not the one the output runs on. So the
+    /// four arm/riscv/xtensa/arc toolchains a realm wants were one identity
+    /// four times over, and the deposit refused the layer.
+    // rivet: verifies REQ-SDKTARGET-001
+    #[test]
+    fn two_targets_of_one_sdk_are_two_payloads_not_a_duplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sk, _pk) = crate::generate_root_keypair();
+        let sdk = |target: &str| {
+            let mut t = payload(
+                "zephyr-sdk",
+                "1.0.1",
+                Some(crate::kind::PayloadKind::Sdk),
+                Some("x86_64-unknown-linux-gnu"),
+            );
+            t.target = Some(target.to_string());
+            t.sdk_prefix = Some("/opt/zephyr-sdk-1.0.1".into());
+            t.bytes = format!("{target}-bytes").into_bytes();
+            t
+        };
+        let mut spec = tests::spec();
+        spec.tools = vec![sdk("arm-zephyr-eabi"), sdk("riscv64-zephyr-elf")];
+        let layout = tmp.path().join("ok");
+        let outcome = deposit(&spec, &sk, "k", &layout).expect("two targets are two payloads");
+
+        // Clause 2: the target is IN the signed manifest, so a consumer can
+        // resolve by it rather than by a name the producer chose.
+        let hex = outcome.digest.strip_prefix("sha256:").unwrap();
+        let bytes = std::fs::read(layout.join("blobs/sha256").join(hex)).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = manifest["manifests"].as_array().unwrap();
+        let targets: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e["annotations"][crate::platform::ANN_TARGET].as_str())
+            .collect();
+        assert_eq!(targets, vec!["arm-zephyr-eabi", "riscv64-zephyr-elf"]);
+
+        // …and one target deposited twice is still a duplicate: extending the
+        // identity must not open a hole in the rule it extends.
+        let mut dup = spec;
+        dup.tools = vec![sdk("arm-zephyr-eabi"), sdk("arm-zephyr-eabi")];
+        let err = deposit(&dup, &sk, "k", &tmp.path().join("dup")).unwrap_err();
+        assert!(
+            matches!(&err, DepositError::DuplicatePayload { name, .. } if name == "zephyr-sdk"),
+            "got: {err}"
+        );
     }
 
     // rivet: verifies REQ-STORE-002

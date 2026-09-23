@@ -12,6 +12,26 @@
 /// Annotation carrying an entry's target triple.
 pub const ANN_PLATFORM: &str = "eu.pulseengine.platform";
 
+/// Annotation carrying what a payload BUILDS FOR, when that differs from what
+/// runs it (REQ-SDKTARGET-001 clause 2).
+///
+/// `ANN_PLATFORM` answers "which machine executes these bytes"; this answers
+/// "which machine will the artefacts they produce run on". For a compiler you
+/// invoke, one question — and this annotation is absent. For a cross-toolchain
+/// they are different questions with different answers, and the platform
+/// dimension alone cannot tell two of them apart: every target of
+/// `zephyr-sdk` for this host has the SAME platform.
+///
+/// Recorded in the signed manifest so a consumer resolves by target rather
+/// than by a name the producer happened to choose — gale asks for "the
+/// arm-zephyr-eabi toolchain", not for "the payload called toolchain-3".
+pub const ANN_TARGET: &str = "eu.pulseengine.target";
+
+/// What a manifest entry declares it builds for, if anything.
+pub fn entry_target(entry: &crate::manifest::ManifestEntry) -> Option<&str> {
+    entry.annotations.get(ANN_TARGET).map(String::as_str)
+}
+
 /// The host's target triple, in the same vocabulary deposits use.
 pub fn host_platform() -> String {
     let arch = std::env::consts::ARCH;

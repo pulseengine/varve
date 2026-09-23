@@ -15,6 +15,7 @@ fn tool(name: &str, kind: Option<PayloadKind>) -> DepositTool {
         name: name.into(),
         version: "0.36.0".into(),
         platform: None,
+        target: None,
         bytes: format!("{name}-bytes").into_bytes(),
         source: None,
         runner: None,

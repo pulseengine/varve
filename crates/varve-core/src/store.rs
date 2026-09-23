@@ -41,6 +41,13 @@ pub struct Payload<'a> {
     pub version: Option<&'a str>,
     /// Dispatched by name — see `PayloadKind::is_dispatchable`.
     pub dispatchable: bool,
+    /// What this payload BUILDS FOR, when that differs from what runs it
+    /// (REQ-SDKTARGET-001 clause 1). `platform` says which machine executes
+    /// these bytes; `target` says which machine the artefacts they produce
+    /// will run on. For a compiler you invoke they are the same question and
+    /// this is `None`; for a cross-toolchain they are different, and the PAIR
+    /// is what identifies the payload.
+    pub target: Option<&'a str>,
     pub bytes: &'a [u8],
 }
 
@@ -51,6 +58,19 @@ impl<'a> Payload<'a> {
             name,
             version: None,
             dispatchable: true,
+            target: None,
+            bytes,
+        }
+    }
+
+    /// A payload that builds for a target other than the machine running it:
+    /// `payloads/<name>/<version>/<target>`.
+    pub fn targeted(name: &'a str, version: &'a str, target: &'a str, bytes: &'a [u8]) -> Self {
+        Payload {
+            name,
+            version: Some(version),
+            dispatchable: false,
+            target: Some(target),
             bytes,
         }
     }
@@ -115,12 +135,24 @@ pub fn payload_rel_path(
     dispatchable: bool,
     name: &str,
     version: Option<&str>,
+    target: Option<&str>,
 ) -> Result<PathBuf, StoreError> {
     safe_component("payload name", name)?;
     match (dispatchable, version) {
         (false, Some(version)) => {
             safe_component("payload version", version)?;
-            Ok(PathBuf::from(PAYLOAD_DIR).join(name).join(version))
+            let at = PathBuf::from(PAYLOAD_DIR).join(name).join(version);
+            // The target is the LAST component, so a payload that declares
+            // none keeps the exact path it had before this dimension existed
+            // (clause 4) and a layer installed by an older varve is still
+            // found where it was put.
+            match target {
+                Some(target) => {
+                    safe_component("payload target", target)?;
+                    Ok(at.join(target))
+                }
+                None => Ok(at),
+            }
         }
         _ => Ok(PathBuf::from("bin").join(name)),
     }
@@ -239,10 +271,16 @@ impl Store {
         let mut placed: BTreeMap<PathBuf, String> = BTreeMap::new();
         let mut plan: Vec<(PathBuf, &Payload<'_>)> = Vec::new();
         for payload in payloads {
-            let rel = payload_rel_path(payload.dispatchable, payload.name, payload.version)?;
-            let who = match payload.version {
-                Some(v) => format!("{}@{v}", payload.name),
-                None => payload.name.to_string(),
+            let rel = payload_rel_path(
+                payload.dispatchable,
+                payload.name,
+                payload.version,
+                payload.target,
+            )?;
+            let who = match (payload.version, payload.target) {
+                (Some(v), Some(t)) => format!("{}@{v} for {t}", payload.name),
+                (Some(v), None) => format!("{}@{v}", payload.name),
+                (None, _) => payload.name.to_string(),
             };
             if let Some(first) = placed.get(&rel) {
                 return Err(StoreError::Collision {
@@ -410,7 +448,13 @@ impl Store {
     pub fn entry_path(&self, layer: &InstalledLayer, entry: &ManifestEntry) -> Option<PathBuf> {
         let name = entry.annotations.get("eu.pulseengine.tool")?;
         let dispatchable = entry_is_dispatchable(entry);
-        let rel = payload_rel_path(dispatchable, name, entry_version(entry)).ok()?;
+        let rel = payload_rel_path(
+            dispatchable,
+            name,
+            entry_version(entry),
+            crate::platform::entry_target(entry),
+        )
+        .ok()?;
         let path = layer.root.join(rel);
         if path.is_file() {
             return Some(path);
@@ -929,6 +973,7 @@ mod tests {
             name,
             version: Some(version),
             dispatchable: false,
+            target: None,
             bytes,
         }
     }
@@ -975,6 +1020,63 @@ mod tests {
         );
     }
 
+    /// A cross-toolchain is identified by a PAIR: the host that runs it and
+    /// the target it builds for. Two SDKs with one name and one version, for
+    /// one host, differing only in target, are two different payloads —
+    /// `toolchain_gnu_linux-x86_64_arm-zephyr-eabi` and
+    /// `..._riscv64-zephyr-elf` are both "the toolchain", for this machine,
+    /// and a realm wants both installed at once.
+    ///
+    /// Before this they landed on one path. The platform dimension could not
+    /// separate them because platform describes the machine that RUNS the
+    /// bytes, and for a cross-toolchain that is the same machine for every
+    /// target — which is the whole reason this requirement exists.
+    // rivet: verifies REQ-SDKTARGET-001
+    #[test]
+    fn two_sdks_differing_only_by_target_are_two_payloads() {
+        let (_tmp, store) = store();
+        let manifest = fixtures::manifest("2026.08.0", "qualified");
+        let arm = Payload::targeted("zephyr-sdk", "1.0.1", "arm-zephyr-eabi", b"arm-bytes");
+        let riscv = Payload::targeted("zephyr-sdk", "1.0.1", "riscv64-zephyr-elf", b"riscv-bytes");
+        let digest = store
+            .lay_down_payloads(&manifest, &[arm, riscv])
+            .expect("two targets of one SDK are not a collision");
+
+        let root = store.core_dir().join(digest.replace(':', "-"));
+        let arm_path = root
+            .join(crate::store::PAYLOAD_DIR)
+            .join("zephyr-sdk")
+            .join("1.0.1")
+            .join("arm-zephyr-eabi");
+        let riscv_path = root
+            .join(crate::store::PAYLOAD_DIR)
+            .join("zephyr-sdk")
+            .join("1.0.1")
+            .join("riscv64-zephyr-elf");
+        assert_eq!(std::fs::read(&arm_path).unwrap(), b"arm-bytes");
+        assert_eq!(std::fs::read(&riscv_path).unwrap(), b"riscv-bytes");
+    }
+
+    /// …and the guard still holds WITHIN a target: two payloads with the same
+    /// name, version and target are still one identity and must be refused.
+    /// Adding a dimension must not open a hole in the rule it extends.
+    // rivet: verifies REQ-SDKTARGET-001
+    #[test]
+    fn two_sdks_with_the_same_target_still_collide() {
+        let (_tmp, store) = store();
+        let manifest = fixtures::manifest("2026.08.0", "qualified");
+        let err = store
+            .lay_down_payloads(
+                &manifest,
+                &[
+                    Payload::targeted("zephyr-sdk", "1.0.1", "arm-zephyr-eabi", b"first"),
+                    Payload::targeted("zephyr-sdk", "1.0.1", "arm-zephyr-eabi", b"second"),
+                ],
+            )
+            .unwrap_err();
+        assert!(matches!(&err, StoreError::Collision { .. }), "got: {err}");
+    }
+
     // rivet: verifies REQ-STORE-002
     #[test]
     fn two_payloads_claiming_one_path_are_refused_before_anything_is_written() {
@@ -1011,12 +1113,14 @@ mod tests {
                         name: "wit-pkg",
                         version: None,
                         dispatchable: false,
+                        target: None,
                         bytes: b"a",
                     },
                     Payload {
                         name: "wit-pkg",
                         version: None,
                         dispatchable: false,
+                        target: None,
                         bytes: b"b",
                     },
                 ],
@@ -1123,14 +1227,14 @@ mod tests {
         let e = entry("future", Some("2.0.0"), Some("quantum-blob"));
         assert!(!entry_is_dispatchable(&e));
         assert_eq!(
-            payload_rel_path(false, "future", Some("2.0.0")).unwrap(),
+            payload_rel_path(false, "future", Some("2.0.0"), None).unwrap(),
             PathBuf::from("payloads/future/2.0.0")
         );
         // …while an entry with NO kind annotation is a tool, as pre-kind
         // layers require.
         assert!(entry_is_dispatchable(&entry("synth", Some("0.45.0"), None)));
         assert_eq!(
-            payload_rel_path(true, "synth", Some("0.45.0")).unwrap(),
+            payload_rel_path(true, "synth", Some("0.45.0"), None).unwrap(),
             PathBuf::from("bin/synth")
         );
     }
