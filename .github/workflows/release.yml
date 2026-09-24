@@ -653,6 +653,31 @@ jobs:
               release-assets/*
           fi
 
+          # The release note the TRACE produces, not the one a human
+          # remembered to write. `rivet release notes` states what was
+          # committed to this version, what was delivered, what was withheld,
+          # and the verification evidence behind each — and it names the
+          # ASPICE 11-03 elements it does NOT compute rather than leaving
+          # their absence to be discovered.
+          #
+          # Generated here because rivet is already fetched and
+          # cosign-verified above for the tracepack export, and because a note
+          # pasted by hand is a note that drifts from the graph it claims to
+          # summarise. GitHub's `--generate-notes` list of merged PRs stays
+          # below it: one says what changed, the other says what was promised.
+          if rivet release notes "$VERSION" > /tmp/rivet-notes.md 2>/dev/null; then
+            BODY=$(gh release view "$VERSION" --json body -q .body)
+            {
+              cat /tmp/rivet-notes.md
+              printf '\n---\n\n'
+              printf '%s\n' "$BODY"
+            } > /tmp/notes.md
+            gh release edit "$VERSION" --notes-file /tmp/notes.md
+          else
+            echo "::warning::rivet release notes produced nothing for $VERSION — \
+                  the release body carries only the commit list"
+          fi
+
           # Surface the recorded independent-review verdict (REQ-INDEP-001,
           # DD-019) at the top of the notes, when the release carries a
           # `method: review` rivet artifact for this version. The verdict lives
