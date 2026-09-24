@@ -80,7 +80,10 @@ detect_target() {
 			die "unsupported platform: ${os} ${arch}.
        varve publishes binaries for exactly these targets:
          aarch64-apple-darwin, x86_64-apple-darwin,
-         aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu
+         aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu,
+         aarch64-unknown-linux-musl, x86_64-unknown-linux-musl
+       (this script selects the gnu build on Linux; the musl archives are
+        statically linked and run where glibc is older or absent)
        Build from source instead: cargo install varve
        (a source build is not covered by the release signature — see
         \`varve docs bootstrap\`)."

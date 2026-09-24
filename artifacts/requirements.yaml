@@ -4431,3 +4431,19 @@ artifacts:
       model: claude-opus-5
       timestamp: 2026-09-22T19:25:22Z
     release: v0.38.0
+
+  - id: REQ-LAYERDIFF-001
+    type: requirement
+    title: A consumer can ask whether a newer layer exists, and what changing to it would change
+    status: proposed
+    description: |-
+      Two questions a pinned consumer asks that varve answers badly or not at all.
+
+      FIRST: is there a newer layer for my line? The signal EXISTS — `install` prints the realm's signed index high-water counter beside the one it accepted (REQ-INDEXAUTH-001 clause 4, reported and deliberately not enforced) — but it is only emitted while installing, it requires the realm to have opted into `signed-index = true`, and there is no way to ASK. A consumer who wants to know today either re-runs an install they did not want, or reads `varve status`, which answers a different question (support window, yanks, known problems). The staleness warning is vaguer still: "check whether a newer deposit of its line exists" tells the operator to go and look, by hand, at a registry varve is already talking to.
+
+      SECOND: what would change? Nothing answers this. There is no diff of any kind. A consumer deciding whether to move from 2026.09.4 to 2026.09.5 has `varve inspect --layer` twice and their own eyes, across a payload table that can run to dozens of rows and, for a composition, several layers. The one question a toolchain bump actually raises — which tools moved, what appeared, what disappeared, did the composition change — is left to manual comparison of two signed manifests varve could compare mechanically.
+
+      Both are transcriptions, not judgements: the manifests are signed, and a diff is a statement about what two trust roots already attested. That is the discipline `varve sbom` follows — copy what was anchored, never scan.
+
+      Clauses: (1) A command shall report, without installing, whether the realm's line holds a layer newer than the pinned one, using the SIGNED index where the realm publishes one and saying plainly when it does not — an unauthenticated tag listing must never be presented as an answer, because a registry that HIDES a layer is undetectable that way, which is REQ-INDEXAUTH-001's reason for existing. (2) A command shall diff two layers by their SIGNED manifests: payloads added, removed, and changed in version, with each layer of a composition attributed. (3) The diff shall work offline for two installed layers, and shall say what it cannot know when one side is absent locally rather than silently fetching. (4) Neither command shall change the pin or the store — asking what would change must never be what changes it. (5) The ingestion PROOF of each payload shall travel into the diff, because "this tool moved from cosign-signed to unverified" is the most important thing a bump can tell an operator and is invisible in a version comparison.
+    release: v0.39.0

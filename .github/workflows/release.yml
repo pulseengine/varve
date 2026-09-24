@@ -71,6 +71,28 @@ jobs:
             os: ubuntu-latest
             archive: tar.gz
             cross: true
+          # MUSL, beside gnu and not instead of it (maintainer's decision,
+          # 2026-09-24, pulseengine/varve#175).
+          #
+          # Measured 2026-09-22: every Linux binary this organisation ships is
+          # dynamically linked with a GLIBC_2.39 floor — the runner image's
+          # glibc, not a decision anyone made. That will not start on Ubuntu
+          # 22.04, Debian 12, RHEL 9, Amazon Linux 2023, Alpine or
+          # distroless-static, which is precisely the air-gapped and
+          # enterprise ground varve is aimed at.
+          #
+          # These are what the `pulseengine` realm's layer will ingest for its
+          # Linux platform keys. The gnu archives stay, because they cost one
+          # matrix leg each and remain the better choice for anyone taking a
+          # binary directly onto a glibc host.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
           - target: x86_64-apple-darwin
             os: macos-14
             archive: tar.gz
