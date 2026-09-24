@@ -82,6 +82,28 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: systest
+      # REHEARSAL, not convenience. This is the same action, at the same pin,
+      # that `deposit-layer.yml` uses to publish a real layer — and until now
+      # NOTHING on a pull request ran it. Dependabot's bump to v2 arrived with
+      # 26 green checks, none of which had executed the action, so "green"
+      # said nothing about the upgrade and the break would have surfaced at
+      # deposit time.
+      #
+      # `oci-roundtrip.sh` prefers an `oras` already on PATH, so installing it
+      # here turns the existing push/pull round trip into the strongest
+      # rehearsal available: the action installs the client, and the client
+      # then pushes and pulls a real layer through a real registry.
+      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1 as of 2026-08-07
+      - name: the installed oras is the one the round trip uses
+        run: |
+          set -euo pipefail
+          command -v oras >/dev/null || {
+            echo "::error::setup-oras put no `oras` on PATH — the round trip \
+                  below would silently fall back to its own download and \
+                  rehearse nothing"
+            exit 1
+          }
+          oras version
       - name: real registry, standard clients, then varve install + verify
         # The script downloads sha256-pinned zot (the registry) and oras (the
         # pushing client), pushes the deposited layout with the DOCUMENTED
