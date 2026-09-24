@@ -1,5 +1,98 @@
 # Changelog
 
+## v0.38.0 — 2026-09-24
+
+*One pin installs the whole composition, a cross-toolchain says what it builds
+for, and "nobody vouched" stops being spelled as a name.*
+
+Held deliberately. `REQ-SDKTARGET-001` had been deferred three times — to
+v0.36.0, then v0.37.0, then v0.38.0 — and its own text carried a safeguard
+saying a fourth would need to be a decision, not a slip. The maintainer chose
+to hold the release until it landed. It took a day.
+
+| | before | now |
+|---|---|---|
+| installing a composed layer | one `varve install` per included layer, by hand, each needing the right realm | one command walks the graph and fetches each from its own realm |
+| two cross-toolchains for one host | one identity twice — the deposit refused the layer | identified by the PAIR (host, target) |
+| an unproven upstream, ingested on an opt-in | signed as `proof-signer = ""` — nobody vouched, spelled as somebody | the signer is absent, and a blank one is refused under every mechanism |
+| `varve-serve` on a composition | "layer X carries no documentation" | reads every layer the pin composes |
+
+### One pin, one command
+
+A pin naming an `[[include]]` installed exactly one layer and told the operator
+to install the rest by hand — for a graph the layer already **names**, by the
+digest of a signed manifest. `varve install` now walks the composition and
+fetches every layer it reaches, each from **its own realm's registry**,
+verified against **its own realm's root**. An included layer passes every check
+a pinned one does, because `install_by_digest` delegates to the same `install`
+rather than re-implementing a shorter list.
+
+The walk is a DAG walk, not a recursion: a digest already on the current path
+is a **cycle** and is refused with the path printed; the same digest reached by
+two paths is a **diamond** and is visited once. A depth counter alone cannot
+tell those apart. `--no-follow-includes` keeps the old behaviour.
+
+### A payload can say what it builds FOR
+
+varve filed every payload under the triple of the machine that **runs** it.
+That is the whole story for a compiler you invoke and half of it for a
+cross-toolchain: `zephyrproject-rtos/sdk-ng` ships 140 assets named
+`toolchain_gnu_<host>_<target>.tar.xz`, and every target for one host carries
+the same platform. The four toolchains a realm wants were one identity four
+times over.
+
+A payload may now declare a `target` beside its platform; the pair identifies
+it, it is signed into the manifest as `eu.pulseengine.target`, the store keys
+on it, and `varve inspect` reports
+`x86_64-unknown-linux-gnu -> arm-zephyr-eabi`. A payload that declares no
+target keeps the exact path it had — the target is the last path component, so
+layers installed by an older varve are still found where they were put.
+
+### Nobody vouched is an absent signer, not an empty one
+
+The `pulseengine-wasm` realm could not deposit its first layer. varve refused
+its own output:
+
+```
+payload 'wac' from bytecodealliance/wac declares proof = "unverified" and also
+names proof-signer "" — nothing vouched for these bytes, so naming an identity
+that did would be signed, attributable and false.
+```
+
+The refusal was right. The producer was wrong: the ingest ladder reported "no
+signer" as an **empty string**, and staging wrapped whatever it got in
+`Some(..)`. Both halves had tests — the ladder's asserted the signer is `""`,
+the renderer's asserted a `None` signer is not emitted — and neither ever ran
+the empty string through the code that decides. `Accepted::signer` is now
+`Option<String>`, so the broken state cannot be expressed, and the compiler
+enumerated every site that had to choose.
+
+The same shape one branch over is closed too: a **verified** mechanism naming a
+**blank** signer would have been signed as "cosign verified this, by nobody
+named". Refused now, under every mechanism.
+
+### Also
+
+- `varve-serve` and `varve inspect` read the whole composition, not just the
+  pinned layer; `inspect` names the realm each payload came from when more than
+  one is present.
+- The docs say `docker login`, not only `$VARVE_REGISTRY_AUTH` — credentials
+  are per **registry**, not per layer.
+- CI's fast gates moved to the organisation's own runners (30–70 minutes of
+  queueing became seconds); the mutation shards stayed on hosted VMs after
+  measurement said a shared host can only serialise them. `cargo mutants` now
+  runs under an address-space cap, which fixes a real defect: a memory-runaway
+  mutant used to take the whole job with no summary, so the gate could not tell
+  "nothing survived" from "nothing ran".
+
+### Deferred, with the reason recorded
+
+`REQ-KEYROLES-001` and `REQ-VERIFYPAR-001` move to v0.39.0. Neither has been
+deferred before. Key roles change what a signature *means* and want their own
+review; parallel hashing has an unmet precondition of its own — the requirement
+says "once a cold measurement says hashing is the cost", and no cold
+measurement has been taken.
+
 ## v0.37.0 — 2026-09-18
 
 *A realm can say what it composes, and what it ingests without proof.*
