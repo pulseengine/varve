@@ -53,6 +53,7 @@ fn selectable_targets() -> BTreeSet<String> {
 }
 
 // rivet: verifies REQ-BOOTSTRAP-001
+// rivet: verifies REQ-LIBCFLOOR-001
 #[test]
 fn every_target_the_installer_selects_is_actually_built() {
     let built = built_targets();
@@ -72,6 +73,7 @@ fn every_target_the_installer_selects_is_actually_built() {
 
 /// The message a stranded user reads must list what the release really ships.
 // rivet: verifies REQ-BOOTSTRAP-001
+// rivet: verifies REQ-LIBCFLOOR-001
 #[test]
 fn the_advertised_target_list_is_the_one_that_is_published() {
     let s = read("install.sh");

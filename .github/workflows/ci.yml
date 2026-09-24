@@ -8,11 +8,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # varve's own discipline applied to its dependencies: the verifier version is
-  # pinned, fetched by exact release, digest-checked and cosign-verified before
-  # it is trusted to gate anything. Bump deliberately, in a reviewed diff.
-
 jobs:
   rust:
     # The check name must stay `fmt · clippy · test (ubuntu-latest)` — branch
