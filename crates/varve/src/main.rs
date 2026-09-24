@@ -3040,6 +3040,16 @@ fn archive(
 /// layout and the env-configured trust root.
 struct ProjectCtx {
     pin: Pin,
+    /// `$VARVE_ROOT` itself — NOT this project's realm partition.
+    ///
+    /// `Realm::effective_root` maps a base root to `<base>/realms/<fingerprint>`,
+    /// so it must be given the base every time. Handing it a partition nests
+    /// one realm INSIDE another: a transitive install then reports success,
+    /// writes the included layers under the composing realm's fingerprint, and
+    /// the next command cannot find them because the composition walk looks at
+    /// siblings. Keeping the base on the context means a caller cannot reach
+    /// for the wrong root without noticing which field it typed.
+    base_root: PathBuf,
     /// The directory holding `varve.toml` — what every declared export
     /// destination is relative to (REQ-EXPORTDECL-001 clause 2).
     root: PathBuf,
@@ -3056,6 +3066,7 @@ fn project_ctx(base: &Store) -> anyhow::Result<ProjectCtx> {
             let store = Store::at(realm.effective_root(base.root()));
             Ok(ProjectCtx {
                 pin,
+                base_root: base.root().to_path_buf(),
                 root,
                 store,
                 realm: Some(realm),
@@ -3063,6 +3074,7 @@ fn project_ctx(base: &Store) -> anyhow::Result<ProjectCtx> {
         }
         None => Ok(ProjectCtx {
             pin,
+            base_root: base.root().to_path_buf(),
             root,
             store: base.clone(),
             realm: None,
@@ -3211,9 +3223,16 @@ fn fetch_included_layer(
     })?;
     let verifier = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    // That realm's partition, not this project's: a cross-realm include lives
-    // under the INCLUDED realm's fingerprint.
-    let store = Store::at(realm.effective_root(ctx.store.root()));
+    // That realm's partition, as a SIBLING of this project's.
+    //
+    // `effective_root` maps a BASE root to `<base>/realms/<fingerprint>`, so it
+    // takes `ctx.base_root` and never `ctx.store.root()` — the latter is
+    // already a partition, and feeding it back in nests the included realm
+    // inside the composing one. That failed exactly once, on the first real
+    // two-realm composition: install reported "fetched composed layer … from
+    // realm 'pulseengine'" and succeeded, and the very next command said the
+    // layer was not installed, because the composition walk looks for siblings.
+    let store = Store::at(realm.effective_root(&ctx.base_root));
     let source = varve_core::RegistrySource::parse(&realm.registry)?;
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let index = Some(varve_core::IndexPolicy {

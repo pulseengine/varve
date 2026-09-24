@@ -116,3 +116,109 @@ fn a_layer_with_neither_payloads_nor_includes_is_still_refused() {
         "nothing is written for a refused deposit"
     );
 }
+
+/// A layer that carries ONLY a composition installs.
+///
+/// Found building the `covalent` realm — the worked multi-realm example: one
+/// pin over the PulseEngine toolchain and the bytecodealliance component
+/// tools. It deposited, it signed, and `varve install` refused it:
+///
+///   layer 2026.09.0 carries no entry for platform x86_64-unknown-linux-gnu —
+///   refusing to install a wrong-architecture toolchain
+///
+/// The fail-closed platform rule is right and stays: a fully-stamped layer
+/// with nothing for this host must never install looking complete. But it
+/// asked the wrong question. A composition edge is not a payload — it names
+/// another layer's manifest and is deliberately skipped by the fetch loop —
+/// so a pure composition has ZERO entries that could ever match a platform,
+/// and "none matched" is not evidence of a wrong architecture.
+///
+/// The deposit-side defect, one stage further down the pipeline: `deposit`
+/// learned that a composition-only layer is not an empty layer, and `install`
+/// had not. Same rule, a different command applying it.
+// rivet: verifies REQ-COMPOSE-001
+#[test]
+fn a_layer_that_is_only_a_composition_installs_on_any_platform() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let layout = tmp.path().join("layout");
+
+    // Two includes, no payloads of its own — the covalent realm's shape.
+    let inc = |d: &str, realm: &str, layer: &str| varve_core::deposit::DepositInclude {
+        digest: d.to_string(),
+        realm: Some(realm.to_string()),
+        layer: Some(layer.to_string()),
+    };
+    varve_core::deposit(
+        &varve_core::DepositSpec {
+            includes: vec![
+                inc(
+                    &format!("sha256:{}", "a".repeat(64)),
+                    "pulseengine",
+                    "2026.09.12",
+                ),
+                inc(
+                    &format!("sha256:{}", "b".repeat(64)),
+                    "pulseengine-wasm",
+                    "2026.09.0",
+                ),
+            ],
+            layer: "2026.09.0".parse().unwrap(),
+            channel: "rolling".into(),
+            counter: 1,
+            issued_at: "2026-09-24T00:00:00Z".into(),
+            tools: Vec::new(),
+        },
+        &sk,
+        "covalent-1",
+        &layout,
+    )
+    .expect("a composition-only layer deposits");
+
+    let envelope = std::fs::read_dir(layout.join("blobs/sha256"))
+        .unwrap()
+        .filter_map(|e| {
+            let b = std::fs::read(e.unwrap().path()).ok()?;
+            serde_json::from_slice::<serde_json::Value>(&b)
+                .ok()?
+                .get("payload")
+                .is_some()
+                .then_some(b)
+        })
+        .next()
+        .expect("the signed envelope");
+    let mut source = varve_core::source::MemorySource::new().with_manifest(&envelope);
+    for e in std::fs::read_dir(layout.join("blobs/sha256")).unwrap() {
+        let b = std::fs::read(e.unwrap().path()).unwrap();
+        let d = varve_core::store::manifest_digest(&b);
+        source = source.with_blob(&d, &b);
+    }
+
+    let root = tmp.path().join("root");
+    let store = varve_core::store::Store::at(&root);
+    let pin = varve_core::Pin::parse(
+        "manifest-version = 1\n[toolchain]\nchannel = \"rolling\"\nlayer = \"2026.09.0\"\n",
+        "varve.toml",
+    )
+    .unwrap();
+    let mut marks = varve_core::rollback::HighWaterMarks::load(&root).unwrap();
+    let verifier = varve_core::verify::PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+
+    // The platform is deliberately one no payload could ever be stamped for:
+    // a pure composition is platform-independent because it carries no bytes.
+    let outcome = varve_core::install::install(
+        &pin,
+        &source,
+        &verifier,
+        &store,
+        &mut marks,
+        &varve_core::install::InstallPolicy {
+            index: None,
+            now: "2026-09-24T00:00:00Z",
+            staleness_threshold_days: 3650,
+            platform: "x86_64-unknown-linux-gnu",
+        },
+    )
+    .expect("a layer that is only a composition must install — it carries no bytes to mismatch");
+    assert_eq!(outcome.layer.to_string(), "2026.09.0");
+}
