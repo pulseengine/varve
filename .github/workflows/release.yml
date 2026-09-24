@@ -484,25 +484,24 @@ jobs:
       # rivet's own traceability, exported as queryable/assessor-importable
       # evidence — generated *before* SHA256SUMS so the signed sums (and the
       # cosign signature over them) transitively cover the safety case too.
-      - name: Fetch rivet (pinned, digest-checked, cosign-verified)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RIVET_VERSION: v0.32.0
+      # rivet comes from THIS PROJECT'S PIN (varve#106). The release used to
+      # name a version here and ci.yml named a different one, so the evidence
+      # a release shipped and the evidence a pull request checked were produced
+      # by two different tools — and neither artifact said which.
+      #
+      # The varve that resolves it is the one this release is building, which
+      # is also the strongest possible statement the release can make: the
+      # toolchain that produced the safety case was resolved by the binary
+      # being shipped.
+      - name: Resolve rivet through this project's pin
         run: |
           set -euo pipefail
-          gh release download "$RIVET_VERSION" --repo pulseengine/rivet \
-            -p "rivet-$RIVET_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
-            -p SHA256SUMS.txt -p SHA256SUMS.txt.cosign.bundle
-          cosign verify-blob \
-            --bundle SHA256SUMS.txt.cosign.bundle \
-            --certificate-identity-regexp '^https://github.com/pulseengine/rivet/' \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            SHA256SUMS.txt
-          sha256sum -c <(grep "x86_64-unknown-linux-gnu" SHA256SUMS.txt)
-          tar xzf "rivet-$RIVET_VERSION-x86_64-unknown-linux-gnu.tar.gz"
-          install -m 0755 rivet /usr/local/bin/rivet
-          rm -f SHA256SUMS.txt SHA256SUMS.txt.cosign.bundle
-          rivet --version
+          cargo build --locked -p varve
+          ./target/debug/varve install
+          ./target/debug/varve shim install --dir "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          ./target/debug/varve which rivet
+          "$RUNNER_TEMP/bin/rivet" --version
 
       - name: Export traceability evidence (ReqIF + HTML + source artifacts)
         env:

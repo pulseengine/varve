@@ -12,7 +12,6 @@ env:
   # varve's own discipline applied to its dependencies: the verifier version is
   # pinned, fetched by exact release, digest-checked and cosign-verified before
   # it is trusted to gate anything. Bump deliberately, in a reviewed diff.
-  RIVET_VERSION: v0.32.0
 
 jobs:
   rust:
@@ -53,35 +52,32 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
-      - name: fetch rivet (pinned, digest-checked, cosign-verified)
-        # `curl`, not `gh`: the GitHub CLI ships on hosted images and NOT on
-        # the self-hosted ones, which is how this job first failed there
-        # (`gh: command not found`). rivet's releases are public, so the
-        # download needs no client and no token — and nothing is trusted
-        # because of how it arrived: the cosign bundle and the digest below
-        # are what establish these bytes, over any transport.
+      # rivet comes from THIS PROJECT'S PIN, not from a version number
+      # written here (varve#106). It was declared in four places that
+      # disagreed — twice in these workflows, once in the layer varve
+      # publishes, once on whoever's PATH — and the evidence this job produces
+      # never recorded which one made it.
+      #
+      # The varve that resolves the pin is the build from this tree, on
+      # purpose: a release binary would be testing a different varve than the
+      # one under review, and the pin has to be readable by the code being
+      # changed or it proves nothing about it.
+      #
+      # This is also the only place varve dogfoods `install` against a REAL
+      # published layer on every pull request.
+      - name: build the varve under test
+        run: cargo build --locked -p varve
+
+      - name: resolve rivet through this project's pin
         run: |
           set -euo pipefail
-          base="https://github.com/pulseengine/rivet/releases/download/$RIVET_VERSION"
-          for f in "rivet-$RIVET_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
-                   SHA256SUMS.txt SHA256SUMS.txt.cosign.bundle; do
-            curl -fsSL --retry 3 -o "$f" "$base/$f"
-          done
-          cosign verify-blob \
-            --bundle SHA256SUMS.txt.cosign.bundle \
-            --certificate-identity-regexp '^https://github.com/pulseengine/rivet/' \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            SHA256SUMS.txt
-          sha256sum -c <(grep "x86_64-unknown-linux-gnu" SHA256SUMS.txt)
-          tar xzf "rivet-$RIVET_VERSION-x86_64-unknown-linux-gnu.tar.gz"
-          # Into the job's own temp dir, not /usr/local/bin. A self-hosted
-          # runner's filesystem OUTLIVES the job: writing a binary there needs
-          # root we do not have, and would leave one version of rivet on the
-          # host to be picked up by the next job that expects another.
-          mkdir -p "$RUNNER_TEMP/bin"
-          install -m 0755 rivet "$RUNNER_TEMP/bin/rivet"
+          ./target/debug/varve install
+          ./target/debug/varve shim install --dir "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          # Say WHICH layer answered, so the evidence below is attributable.
+          ./target/debug/varve which rivet
           "$RUNNER_TEMP/bin/rivet" --version
+
       - name: rivet validate
         run: rivet validate
       - name: rivet check verification-evidence (anti-rot)
