@@ -343,6 +343,17 @@ pub fn install(
     }
     let mut tools: Vec<Fetched> = Vec::new();
     let mut matched = 0usize;
+    // Entries that COULD match a platform — everything that is not a
+    // composition edge. The fail-closed check below compares against this and
+    // not against the manifest's whole entry list, because an `[[include]]`
+    // carries no bytes and is never stamped for a platform: counting it would
+    // make a layer that is ONLY a composition look like a layer whose every
+    // payload was for the wrong architecture.
+    let payload_entries = manifest
+        .entries
+        .iter()
+        .filter(|e| e.kind() != Ok(crate::kind::PayloadKind::Layer))
+        .count();
     for entry in &manifest.entries {
         if !crate::platform::entry_matches(
             entry
@@ -386,7 +397,7 @@ pub fn install(
 
     // A fully-stamped layer with nothing for this platform fails closed —
     // a wrong-architecture toolchain must not land looking installed.
-    if matched == 0 && !manifest.entries.is_empty() {
+    if matched == 0 && payload_entries > 0 {
         return Err(InstallError::NoPlatformEntry {
             layer: manifest.layer.to_string(),
             platform: policy.platform.to_string(),
