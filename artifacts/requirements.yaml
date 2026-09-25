@@ -4471,3 +4471,8 @@ artifacts:
         Shipping (a) would have been easy and would have entrenched the weaker model: once `shim install` works on Windows, the argument for a better mechanism has to overcome an installed base. Refusing keeps the question open at the only time it is cheap to keep open — before any Windows build exists (varve#197).
 
         It also removes a false claim rather than adding a true one. `cmd-shim.md` already told readers "on unix a symlink, on Windows a copy", describing behaviour no build has ever produced; the refusal makes the documentation and the binary agree.
+    links:
+      - type: satisfies
+        target: REQ-SHIM-002
+      - type: satisfies
+        target: REQ-SHIM-001
