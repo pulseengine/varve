@@ -1,0 +1,26 @@
+# varve pins the tools ITS OWN development loop uses.
+#
+# Closes varve#106: rivet was declared in FOUR places that disagreed —
+# `RIVET_VERSION` in ci.yml (v0.32.0), the same variable again in release.yml,
+# the layer varve itself publishes (v0.38.0), and whatever sat on a
+# maintainer's PATH. The traceability evidence this project ships — `rivet
+# validate`, the coverage report, the ReqIF export in every release — was
+# produced by an ambient tool whose version the artifact never recorded. "Which
+# toolchain produced this evidence?" was unanswerable for varve's own releases,
+# which is the question varve exists to answer.
+#
+# WHAT THIS PIN DOES NOT COVER, stated because the claim would otherwise read
+# as stronger than it is: the `varve` binary under test. That one must be the
+# build from this working tree, or the gate proves nothing. The pin covers the
+# tools the loop USES (rivet, ordeal), never the artifact it PRODUCES.
+#
+# 2026.09.12 and not the newest tag: this is the layer whose rivet 0.38.0 was
+# actually run against this repository's artifacts before pinning it —
+# `validate` PASS, `check verification-evidence` ✓ 373 named-test steps. Pin
+# what you verified is the rule varve asks of everyone else.
+manifest-version = 1
+
+[toolchain]
+realm   = "pulseengine"
+channel = "rolling"
+layer   = "2026.09.12"
