@@ -242,8 +242,17 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
         // An explicit name wins over the template. Some upstreams ship only a
         // musl Linux build, whose name no template can derive from a gnu
         // triple; naming the file is exact where inferring it would guess.
+        //
+        // The explicit name is ITSELF expanded, because the two cases differ.
+        // `wac-cli-x86_64-unknown-linux-musl` carries no version and means
+        // itself — expansion is a no-op. `synth-%V-x86_64-unknown-linux-musl
+        // .tar.gz` does carry one, and freezing it here would break on the
+        // realm's next unattended scan: the scanner bumps `version`, the
+        // hardcoded asset still names the old release, and the deposit 404s
+        // at 3am. An upstream that ships musl under a versioned name was
+        // simply not expressible before this.
         let asset = match t.asset_for.get(*p) {
-            Some(explicit) => explicit.clone(),
+            Some(explicit) => asset::expand(explicit, &t.version, &release, Some(p), None)?,
             None => asset::expand(&template, &t.version, &release, Some(p), None)?,
         };
         out.push(PayloadPlan {
@@ -405,6 +414,83 @@ pub fn releases(plans: &[PayloadPlan]) -> Vec<(String, String)> {
         }
     }
     seen
+}
+
+#[cfg(test)]
+mod asset_for_template_tests {
+    use super::*;
+
+    fn manifest(asset_for: &[(&str, &str)]) -> varve_core::layerspec::LayerManifest {
+        let entries = asset_for
+            .iter()
+            .map(|(k, v)| format!("\"{k}\" = \"{v}\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = format!(
+            "[varve]\nversion = \"v0.39.0\"\n\n\
+             [realm]\nname = \"r\"\nchannel = \"rolling\"\n\
+             registry = \"oci://ghcr.io/o/r\"\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"v0.74.0\"\n\
+             [tool.asset-for]\n{entries}\n"
+        );
+        varve_core::layerspec::parse_layer_manifest(&text).expect("layer.toml")
+    }
+
+    /// An upstream that publishes musl under a VERSIONED name cannot be
+    /// expressed by a literal `asset-for`: the realm's scanner bumps the
+    /// version unattended, and a hardcoded `synth-v0.74.0-…-musl.tar.gz` then
+    /// names a release that no longer exists. The failure is a 404 during an
+    /// unattended deposit — the exact shape the scanner exists to avoid.
+    ///
+    /// The template language already knows how to write the version. The only
+    /// thing missing was letting `asset-for` use it.
+    ///
+    /// `%R` and not `%V`: these upstreams put the RELEASE TAG in the asset
+    /// name (`synth-v0.74.0-…`), and `%V` is the bare version (`0.74.0`).
+    /// Checked against the real release listing rather than assumed — the
+    /// first draft of this test asserted the wrong one.
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn an_explicit_asset_may_be_a_template_so_it_survives_a_version_bump() {
+        let m = manifest(&[
+            (
+                "x86_64-unknown-linux-gnu",
+                "synth-%R-x86_64-unknown-linux-musl.tar.gz",
+            ),
+            (
+                "aarch64-unknown-linux-gnu",
+                "synth-%R-aarch64-unknown-linux-musl.tar.gz",
+            ),
+        ]);
+        let plan = plan(
+            &m,
+            &["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"],
+        )
+        .expect("plans");
+        let assets: Vec<&str> = plan.iter().map(|p| p.asset.as_str()).collect();
+        assert_eq!(
+            assets,
+            vec![
+                "synth-v0.74.0-x86_64-unknown-linux-musl.tar.gz",
+                "synth-v0.74.0-aarch64-unknown-linux-musl.tar.gz",
+            ],
+            "a musl asset must be nameable without freezing the version into the manifest"
+        );
+    }
+
+    /// Every asset-for entry that exists today is a plain file name, and must
+    /// keep meaning exactly itself. Expansion has to be a no-op for them or
+    /// this change breaks three realms quietly.
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn a_literal_asset_name_still_means_itself() {
+        let m = manifest(&[(
+            "x86_64-unknown-linux-gnu",
+            "wac-cli-x86_64-unknown-linux-musl",
+        )]);
+        let plan = plan(&m, &["x86_64-unknown-linux-gnu"]).expect("plans");
+        assert_eq!(plan[0].asset, "wac-cli-x86_64-unknown-linux-musl");
+    }
 }
 
 #[cfg(test)]
