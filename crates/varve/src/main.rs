@@ -1050,9 +1050,37 @@ fn shim_install(store: &Store, extra_tools: &[String]) -> anyhow::Result<()> {
         std::os::unix::fs::symlink(&varve_exe, &path).with_context(|| {
             format!("cannot link {} -> {}", path.display(), varve_exe.display())
         })?;
+        // DD-031: where a shim can only be a COPY, refuse instead of writing
+        // one. A copy binds to the varve that existed at install time, and
+        // `self-update` replaces the binary without touching shims — so every
+        // shim would keep running the old code, forever, with nothing saying
+        // so. The pin still resolves the right LAYER, so the tool dispatched
+        // is right; what goes stale is varve's own verification and refusal
+        // logic, which is the worst part of it to have quietly out of date.
+        //
+        // The alternatives each cost something the design exists to avoid
+        // (a `.cmd` wrapper reintroduces a parser and batch quoting; a
+        // hard link is orphaned by the atomic replace; a Windows symlink
+        // depends on Developer Mode, so freshness would vary per machine).
+        // Choosing between them is varve#197's business; until then this says
+        // so out loud rather than half-working.
         #[cfg(not(unix))]
-        std::fs::copy(&varve_exe, &path)
-            .with_context(|| format!("cannot copy varve to {}", path.display()))?;
+        {
+            let _ = &varve_exe;
+            anyhow::bail!(
+                "`varve shim install` is not available on this platform: a shim here could only \
+                 be a COPY of varve, and `varve self-update` would then leave every shim running \
+                 the version it was copied from — including its verification and refusal logic — \
+                 with nothing reporting it.\n\
+                 \n\
+                 Use `varve run <tool>` instead: it resolves this project's pin on every \
+                 invocation and is never stale.\n\
+                 \n\
+                 The mechanism that would make shims safe here is undecided on purpose \
+                 (DD-031, varve#197) — a refusal you can read beats a shim that is correct today \
+                 and wrong after the next update."
+            );
+        }
     }
     // The sourceable environment, rustup-style: one line in the shell
     // config sets everything up, and re-sourcing never stacks PATH.

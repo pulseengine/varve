@@ -4447,3 +4447,27 @@ artifacts:
 
       Clauses: (1) A command shall report, without installing, whether the realm's line holds a layer newer than the pinned one, using the SIGNED index where the realm publishes one and saying plainly when it does not — an unauthenticated tag listing must never be presented as an answer, because a registry that HIDES a layer is undetectable that way, which is REQ-INDEXAUTH-001's reason for existing. (2) A command shall diff two layers by their SIGNED manifests: payloads added, removed, and changed in version, with each layer of a composition attributed. (3) The diff shall work offline for two installed layers, and shall say what it cannot know when one side is absent locally rather than silently fetching. (4) Neither command shall change the pin or the store — asking what would change must never be what changes it. (5) The ingestion PROOF of each payload shall travel into the diff, because "this tool moved from cosign-signed to unverified" is the most important thing a bump can tell an operator and is invisible in a version comparison.
     release: v0.39.0
+
+  - id: DD-031
+    type: design-decision
+    title: shim install refuses where the shim would be a copy, until a better mechanism is chosen
+    status: accepted
+    description: |-
+      A shim IS the varve binary reached under another name, and that is worth keeping: varve reads argv[0], dispatches that tool, and nothing on the path parses a string. Arguments reach the tool as raw bytes, so a filename that is not valid UTF-8 survives, and dispatch costs one process instead of two.
+
+      On unix the shim is a symlink, which buys a second property for free: `self-update` replaces the binary and every shim follows. The code comment says exactly that — "self-update cannot leave them stale".
+
+      ON WINDOWS THERE IS NO SYMLINK TO RELY ON, so the shim was a copy, and the property silently inverts. A copy binds to the varve that existed at `shim install` time; `self-update` then replaces varve.exe and leaves every shim running the old code forever. Measured 2026-09-25: `self-update` never mentions shims at all, so the invariant held by accident of the filesystem on unix and not at all on Windows.
+
+      That matters more than it looks. The PIN still resolves to the same layer, so a stale shim dispatches the right TOOL — what goes stale is varve's own resolution, verification and refusal logic. A fix to varve never reaches the shims. For a tool whose job is refusing the wrong bytes, a dispatcher running last month's refusals is precisely the wrong thing to have quietly.
+
+      OPTIONS CONSIDERED. (a) Copy, and re-write the shims during self-update: smallest change, but it makes freshness depend on remembering to call it from every future path that replaces the binary. (b) Windows symlinks, available unprivileged since Windows 10 1703 under Developer Mode: rejected as the mechanism, because freshness would depend on a machine-local developer flag and give two different answers on one operating system. (c) Hard link: tracks content only while the file is updated IN PLACE, and self-update deliberately does an atomic replace — a new inode, an orphaned link, the same staleness reached less obviously. (d) `.cmd` wrappers calling `varve run`: reintroduces exactly what this design removes — a string handed to a parser, two processes per invocation, and Windows batch quoting, which mangles arguments a component-model toolchain passes routinely. (e) Shell functions instead of shims: never stale, and useless where it matters most — `make`, CI and anything that spawns `rivet` directly would get the ambient binary rather than the pinned one.
+
+      DECISION (maintainer, 2026-09-25): none of them yet. `shim install` REFUSES on any platform where the shim would be a copy, and says why. A refusal an operator can read beats a copy that is correct on the day it is written and wrong after the next update, with nothing anywhere saying so. `varve run` and `varve which` are unaffected — they resolve the pin per invocation and were never stale.
+
+      This is deliberately reversible and deliberately not a solution: it converts a silent staleness bug into a loud gap, so that whichever mechanism wins later is chosen on its merits rather than because something already half-works.
+    fields:
+      rationale: |-
+        Shipping (a) would have been easy and would have entrenched the weaker model: once `shim install` works on Windows, the argument for a better mechanism has to overcome an installed base. Refusing keeps the question open at the only time it is cheap to keep open — before any Windows build exists (varve#197).
+
+        It also removes a false claim rather than adding a true one. `cmd-shim.md` already told readers "on unix a symlink, on Windows a copy", describing behaviour no build has ever produced; the refusal makes the documentation and the binary agree.
