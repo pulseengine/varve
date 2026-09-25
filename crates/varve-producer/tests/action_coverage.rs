@@ -122,3 +122,47 @@ fn nothing_is_excused_that_is_no_longer_used() {
         );
     }
 }
+
+/// A workflow that does not PARSE produces no checks at all.
+///
+/// Found the hard way: removing `RIVET_VERSION` left `env:` with nothing but a
+/// comment under it, which Actions rejects. `ci.yml` stopped parsing, all ten
+/// of its jobs silently failed to register, and the pull request showed
+/// "11 checks, 0 failed" — every one of them from OTHER workflows. Branch
+/// protection caught it only because a required check never reported; had the
+/// broken workflow held no required check, it would have looked green.
+///
+/// No YAML parser is available here, and one is not needed: the failure shape
+/// is a mapping key with no mapping under it. A key ending in `:` at some
+/// indentation must be followed by a more-indented line, or it declares
+/// nothing.
+// rivet: verifies REQ-CIGATE-001
+#[test]
+fn no_workflow_declares_a_mapping_with_nothing_under_it() {
+    // Keys whose value is legitimately empty or inline are not this shape.
+    const INLINE_OK: &[&str] = &["pull_request:", "workflow_dispatch:", "schedule:", "push:"];
+    for (name, text) in workflows() {
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_end();
+            if !trimmed.ends_with(':') || trimmed.trim_start().starts_with('#') {
+                continue;
+            }
+            let indent = trimmed.len() - trimmed.trim_start().len();
+            if INLINE_OK.contains(&trimmed.trim_start()) {
+                continue;
+            }
+            // The next line that actually declares something.
+            let next = lines[i + 1..]
+                .iter()
+                .find(|l| !l.trim().is_empty() && !l.trim().starts_with('#'));
+            let Some(next) = next else { continue };
+            let next_indent = next.len() - next.trim_start().len();
+            assert!(
+                next_indent > indent,
+                "{name}: `{}` has nothing under it — Actions refuses the whole file, every job                  in it fails to register, and the pull request shows only the checks from OTHER                  workflows",
+                trimmed.trim()
+            );
+        }
+    }
+}
