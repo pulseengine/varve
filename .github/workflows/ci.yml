@@ -75,7 +75,7 @@ jobs:
           echo "$VARVE_ROOT/shims" >> "$GITHUB_PATH"
           # Say WHICH layer answered, so the evidence below is attributable.
           ./target/debug/varve which rivet
-          "$RUNNER_TEMP/bin/rivet" --version
+          "$VARVE_ROOT/shims/rivet" --version
 
       - name: rivet validate
         run: rivet validate

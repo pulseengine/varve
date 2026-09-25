@@ -503,7 +503,7 @@ jobs:
           ./target/debug/varve shim install
           echo "$VARVE_ROOT/shims" >> "$GITHUB_PATH"
           ./target/debug/varve which rivet
-          "$RUNNER_TEMP/bin/rivet" --version
+          "$VARVE_ROOT/shims/rivet" --version
 
       - name: Export traceability evidence (ReqIF + HTML + source artifacts)
         env:
