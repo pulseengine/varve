@@ -66,9 +66,13 @@ jobs:
       - name: resolve rivet through this project's pin
         run: |
           set -euo pipefail
+          # An explicit store, so the shim directory has a known path and the
+          # job leaves nothing in a home directory a self-hosted runner reuses.
+          export VARVE_ROOT="$RUNNER_TEMP/varve"
+          echo "VARVE_ROOT=$VARVE_ROOT" >> "$GITHUB_ENV"
           ./target/debug/varve install
-          ./target/debug/varve shim install --dir "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          ./target/debug/varve shim install
+          echo "$VARVE_ROOT/shims" >> "$GITHUB_PATH"
           # Say WHICH layer answered, so the evidence below is attributable.
           ./target/debug/varve which rivet
           "$RUNNER_TEMP/bin/rivet" --version
