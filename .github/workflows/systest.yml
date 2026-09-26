@@ -93,7 +93,7 @@ jobs:
       # here turns the existing push/pull round trip into the strongest
       # rehearsal available: the action installs the client, and the client
       # then pushes and pulls a real layer through a real registry.
-      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1 as of 2026-08-07
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v1 as of 2026-08-07
       - name: the installed oras is the one the round trip uses
         run: |
           set -euo pipefail
