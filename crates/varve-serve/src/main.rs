@@ -105,7 +105,9 @@ fn main() -> anyhow::Result<()> {
 /// implementation of "which payloads does this layer have" is a second thing
 /// to keep in step.
 fn collect() -> anyhow::Result<Vec<DocsPayload>> {
-    let store = varve_core::Store::at(store_root()?);
+    // The BASE root. Named `base` because `effective_root` below maps a base
+    // root to a realm partition, and handing it a partition instead nests them.
+    let base = varve_core::Store::at(store_root()?);
     let cwd = std::env::current_dir().context("cannot determine working directory")?;
     let pin_path = varve_core::discover::find_pin(&cwd).context(
         "no varve.toml found walking up from here — this project pins no layer, so there \
@@ -116,7 +118,7 @@ fn collect() -> anyhow::Result<Vec<DocsPayload>> {
     let (store, verifier) = match &pin.realm {
         Some(name) => {
             let realm = varve_core::resolve_realm(&cwd, name)?;
-            let s = varve_core::Store::at(realm.effective_root(store.root()));
+            let s = varve_core::Store::at(realm.effective_root(base.root()));
             let v = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
             (s, v)
@@ -130,7 +132,7 @@ fn collect() -> anyhow::Result<Vec<DocsPayload>> {
             let bytes = hex_decode(hex.trim())?;
             let v = varve_core::PinnedKeyVerifier::from_public_key_bytes(&bytes)
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-            (store, v)
+            (base, v)
         }
     };
 

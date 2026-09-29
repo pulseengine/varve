@@ -1,5 +1,122 @@
 # Changelog
 
+## v0.39.0 — 2026-09-29
+
+*Linux binaries that start where our consumers run, a layer that is only a
+composition, and varve pinning its own toolchain at last.*
+
+`rivet release status v0.39.0` — 1 artifact, 1 verified, cuttable.
+
+Cut on the v0.37.0 precedent: a consumer is blocked. The `covalent` realm — the
+worked multi-realm example — cannot deposit its first layer until a RELEASE
+carries the composition-only install fix, because its deposit workflow runs a
+released varve. `REQ-KEYROLES-001`, `REQ-VERIFYPAR-001` and
+`REQ-LAYERDIFF-001` move to v0.40.0 with the reason recorded on each.
+
+| | before | now |
+|---|---|---|
+| Linux payloads | glibc only, a 2.39 floor nobody chose | musl archives beside the gnu ones |
+| a layer that is only a composition | refused at install — "carries no entry for platform" | installs; its includes land beside it |
+| an included realm's partition | nested INSIDE the composing realm's | a sibling, where the walk looks |
+| rivet's version | declared in four places that disagreed | one pin, read by both workflows |
+| `pulseengine-wasm` | published a layer nobody could resolve | in the realms file consumers download |
+
+### The libc floor was the runner image's, not a decision
+
+Measured by reading the ELF of every binary this organisation ships: all Linux
+payloads are dynamically linked, six of ten with a **GLIBC_2.39** floor. That
+excludes Ubuntu 22.04, Debian 12, RHEL 9, Amazon Linux 2023, Alpine and
+`distroless-static` — the air-gapped and regulated ground varve is built for. A
+layer's portability is the *maximum* floor across its payloads, so one payload
+sets it for the whole toolchain: a consumer on RHEL 9 installs cleanly,
+verifies cleanly, and cannot execute a single tool.
+
+varve now publishes statically linked musl archives beside the gnu ones
+(`REQ-LIBCFLOOR-001`). A constraint found while implementing it, and worth
+knowing before anyone copies the pattern: **musl cannot be a new platform.**
+`host_platform()` resolves every Linux host to `{arch}-unknown-linux-gnu`, so a
+musl-*keyed* payload would match no host and fail closed. The triple in a layer
+is a platform **key**, not a libc claim — a musl asset fills the gnu-keyed slot
+through `asset-for`, exactly as the `pulseengine-wasm` realm already does for
+`wac`.
+
+`install.sh` keeps selecting gnu until a musl build has been produced and run.
+Switching a bootstrap default to an artifact that has never existed is not a
+default, it is a guess. `release_targets.rs` holds both ends: every triple the
+installer can select must be built, and every target the release publishes must
+appear in the message an unsupported host reads.
+
+### A layer that carries only a composition is not an empty layer
+
+Building the `covalent` realm — one pin over the PulseEngine toolchain and the
+bytecodealliance component tools — it deposited, signed, and then would not
+install:
+
+```
+layer 2026.09.0 carries no entry for platform x86_64-unknown-linux-gnu —
+refusing to install a wrong-architecture toolchain
+```
+
+The fail-closed platform rule is right and stays. It asked the wrong question.
+A composition edge is not a payload — it names another layer's manifest and the
+fetch loop deliberately skips it — so a pure composition has **zero** entries
+that could ever match a platform, and "none matched" is not evidence of a wrong
+architecture. `deposit` learned this at v0.37.0; `install` had not.
+
+The second half was ours: `fetch_included_layer` derived an included realm's
+partition from the *composing* realm's root instead of the store root, so
+transitive installs nested realms inside each other. Install reported success
+and the next command could not find the layers.
+
+Both now proven end to end — one pin, three realms, 66 payloads, each layer
+verified against its own root.
+
+**If you are on v0.38.0, you can drop the workaround.** The nesting was live in
+the last release, and consumers verifying a composed layer were told to promote
+the transitively-fetched realms up to `$VARVE_ROOT` by hand before running
+`varve verify`. That is no longer needed: the includes land as siblings, which
+is where the walk has always looked. Nothing has to be moved, and an existing
+store that was promoted by hand is already in the right shape.
+
+The fix was one variable at one call site, and reverting it left all 108 CLI
+tests green — reaching that line needs a live registry for a second realm, so
+nothing in the suite could see it. It is now held by a source-level gate
+instead: every `effective_root` argument in shipped code must *name* a base
+root, because `store.root()` does not tell a reviewer whether that store is the
+base or already a partition, and that ambiguity is where the bug lived.
+
+### varve pins its own toolchain
+
+rivet was declared in four places that disagreed: twice in these workflows
+(v0.32.0), once in the layer varve itself publishes (v0.38.0), once on whoever's
+PATH. It bit this project during v0.38.0's release — a `rivet release notes`
+step worked on a laptop and silently did nothing in CI, because CI's rivet
+predated the subcommand. The release shipped with a warning in the log and a
+note nobody wrote.
+
+`varve.toml` now names the layer, both workflows resolve rivet through it, and
+`RIVET_VERSION` is gone. CI builds the varve under test and uses **that** to
+install the pin, which makes this the only place varve dogfoods `install`
+against a real published layer on every pull request.
+
+What the pin does **not** cover, said in the file rather than left to be
+inferred: the `varve` binary under test. That must be the build from the
+working tree, or the gate proves nothing.
+
+### Also
+
+- `pulseengine-wasm` is in the `varve-realms.toml` consumers download. It had a
+  published layer, a root and a registry, and nothing distributed its
+  definition — so nobody could resolve it, and a composition naming it failed
+  with `UnknownRealm`.
+- Every action a tag-time workflow depends on is now exercised on pull requests
+  or named unrehearsable with a reason. A dependabot bump to `setup-oras`
+  arrived with 26 green checks, none of which had run the action.
+- A workflow that declares a mapping with nothing under it fails the build.
+  An empty `env:` stopped `ci.yml` parsing during this release's own
+  development: ten jobs failed to register and the pull request showed
+  "11 checks, 0 failed", every one from other workflows.
+
 ## v0.38.0 — 2026-09-24
 
 *One pin installs the whole composition, a cross-toolchain says what it builds
