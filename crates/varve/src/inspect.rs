@@ -25,12 +25,13 @@ use anyhow::Context;
 use varve_core::Store;
 
 /// The documentation-specific half of a row.
-struct DocsRow {
-    format: String,
-    entry: Option<String>,
-    title: Option<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DocsRow {
+    pub(crate) format: String,
+    pub(crate) entry: Option<String>,
+    pub(crate) title: Option<String>,
     /// The payload this documents, by name.
-    documents: Option<String>,
+    pub(crate) documents: Option<String>,
 }
 
 /// How wide the REALM column must be, or `None` when every payload comes from
@@ -71,46 +72,47 @@ fn platform_cell(r: &Row) -> String {
 }
 
 /// One payload, as reported.
-struct Row {
-    name: String,
-    version: Option<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Row {
+    pub(crate) name: String,
+    pub(crate) version: Option<String>,
     /// The kind as written in the SIGNED annotation, so an unknown kind is
     /// reported verbatim rather than dropped or guessed (`sbom` labels such an
     /// entry rather than losing it; so does this).
-    kind: String,
-    known_kind: bool,
+    pub(crate) kind: String,
+    pub(crate) known_kind: bool,
     /// The entry's signed platform, or `any` where it carries none — an
     /// unstamped platform means any-platform, as it does everywhere else.
-    platform: String,
+    pub(crate) platform: String,
     /// What the payload BUILDS FOR, when it differs from what runs it
     /// (REQ-SDKTARGET-001 clause 5). A layer carrying three cross-toolchains
     /// and unable to say which is which is not inspectable.
-    target: Option<String>,
-    digest: String,
+    pub(crate) target: Option<String>,
+    pub(crate) digest: String,
     /// `dispatched` | `held` | `unknown` (the kind annotation is one this
     /// varve does not recognise, so whether it dispatches is not knowable).
-    dispatch: &'static str,
+    pub(crate) dispatch: &'static str,
     /// For a `docs` payload: what it IS, where a reader starts, and the label
     /// a human chooses by — all from SIGNED annotations
     /// (REQ-LAYERDOCS-001). `None` for every other kind.
-    docs: Option<DocsRow>,
+    pub(crate) docs: Option<DocsRow>,
     /// Which mechanism vouched for this payload's UPSTREAM bytes
     /// (REQ-INGEST-001 clause 5). `unrecorded` where the layer predates the
     /// requirement — absence of a claim is not a claim, and restating a
     /// hundred existing payloads as either verified or unverified would be
     /// inventing one. An unknown mechanism is reported verbatim, like `kind`.
-    ingest_proof: String,
+    pub(crate) ingest_proof: String,
     /// The identity credited with vouching, where one is recorded — the fact
     /// a consumer might filter on ("refuse anything not signed under
     /// pulseengine/"), which is why it is its own field and not prose.
-    proof_signer: Option<String>,
+    pub(crate) proof_signer: Option<String>,
     /// Are these bytes on disk here? `install` lays down only the host
     /// platform's entries, so another platform's entry is present in the
     /// signed manifest and absent from the store — which is correct, and worth
     /// saying rather than leaving as a mystery.
-    present: bool,
-    layer: String,
-    realm: String,
+    pub(crate) present: bool,
+    pub(crate) layer: String,
+    pub(crate) realm: String,
 }
 
 const DISPATCHED: &str = "dispatched";
@@ -121,9 +123,27 @@ pub fn run(store: &Store, layer: Option<&str>, json: bool) -> anyhow::Result<()>
     let target = crate::export_target(store, layer)?;
     let layers = crate::composition_for_export(&target)?;
     let host = varve_core::host_platform();
-    let mut rows = Vec::new();
+    let rows = rows_of(&layers)?;
 
-    for l in &layers {
+    if json {
+        print_json(&target, &layers, &rows, &host);
+    } else {
+        print_text(&target, &layers, &rows, &host);
+    }
+    Ok(())
+}
+
+/// Every payload of a composed layer, read from the SIGNED manifests.
+///
+/// The ONE place that answers "which payloads does this layer have". `inspect`
+/// renders it and `diff` compares two of them; neither re-reads a manifest for
+/// itself. A second implementation of this question is a second thing to keep
+/// in step, and this codebase has paid for that shape more than once — the
+/// platform rule answered differently by deposit and install, the store root
+/// computed one way by the composing realm and another by the include.
+pub(crate) fn rows_of(layers: &[varve_core::compose::ComposedLayer]) -> anyhow::Result<Vec<Row>> {
+    let mut rows = Vec::new();
+    for l in layers {
         let payload = std::fs::read(l.entry.root.join("layer.json")).with_context(|| {
             format!(
                 "cannot read the signed manifest of layer {} — the store entry is incomplete",
@@ -208,12 +228,7 @@ pub fn run(store: &Store, layer: Option<&str>, json: bool) -> anyhow::Result<()>
         ))
     });
 
-    if json {
-        print_json(&target, &layers, &rows, &host);
-    } else {
-        print_text(&target, &layers, &rows, &host);
-    }
-    Ok(())
+    Ok(rows)
 }
 
 /// The store partition a composed layer lives in — a cross-realm include lives

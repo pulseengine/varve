@@ -15,6 +15,7 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use varve_core::{Pin, Store, discover, resolve};
 
+mod diff;
 mod docs;
 mod exit;
 mod inspect;
@@ -56,6 +57,25 @@ enum Cmd {
         #[arg(long)]
         layer: Option<String>,
         /// Machine-readable output (see `varve docs inspect` for the shape).
+        #[arg(long)]
+        json: bool,
+    },
+    /// What changing from one installed layer to another would change (CI).
+    ///
+    /// A transcription, never a judgement: both manifests are signed, and this
+    /// states what two trust roots already attested. Offline — both layers must
+    /// already be installed, and an absent side is reported as absent rather
+    /// than fetched. Nothing here writes to the store or the pin.
+    ///
+    /// A payload that STOPPED being vouched for is reported as its own finding,
+    /// not as a column to scan past: it is the most consequential thing a bump
+    /// can carry and no version number shows it (REQ-LAYERDIFF-001, DD-032).
+    Diff {
+        /// The layer being moved FROM, e.g. `2026.09.12`.
+        from: String,
+        /// The layer being moved TO, e.g. `2026.09.15`.
+        to: String,
+        /// Machine-readable output — the only producer of delta data (DD-032).
         #[arg(long)]
         json: bool,
     },
@@ -896,6 +916,7 @@ fn run() -> anyhow::Result<Outcome> {
             Ok(())
         }
         Cmd::Inspect { layer, json } => inspect::run(&store, layer.as_deref(), json),
+        Cmd::Diff { from, to, json } => diff::run(&store, &from, &to, json),
     }?;
     Ok(outcome)
 }
