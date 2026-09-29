@@ -4400,7 +4400,7 @@ artifacts:
       created-by: ai
       model: claude-opus-5
       timestamp: 2026-09-18T06:54:05Z
-    release: v0.40.0
+    release: v0.44.0
 
   - id: REQ-KEYROLES-001
     type: requirement
@@ -4416,7 +4416,7 @@ artifacts:
       created-by: ai
       model: claude-opus-5
       timestamp: 2026-09-18T06:54:44Z
-    release: v0.40.0
+    release: v0.43.0
 
   - id: REQ-COMPOSEINSTALL-001
     type: requirement
@@ -4490,3 +4490,85 @@ artifacts:
         target: REQ-SHIM-002
       - type: satisfies
         target: REQ-SHIM-001
+
+  - id: DD-032
+    type: design-decision
+    title: The layer diff is a CLI that emits JSON; every other view renders that JSON
+    status: accepted
+    description: |-
+      REQ-LAYERDIFF-001 says WHAT a diff must report. This says where it lives, decided by the maintainer 2026-09-29.
+
+      THE DIFF IS `varve diff`, AND ITS `--format json` IS THE ONLY PRODUCER OF DELTA DATA IN THE SYSTEM. The terminal table, the varve-serve page, and any future signed delta referrer are RENDERERS of that JSON. None recomputes a diff from manifests itself.
+
+      WHY THE CLI AND NOT THE VIEWER. Three properties the requirement demands belong to a command, not a page. Clause 3 requires the diff to work OFFLINE for two installed layers; a page that fetches is a different thing. Clause 4 requires that asking what would change never changes the pin or the store — a claim about a process that exits, not a session. And a diff is the natural shape of a CI gate ("this bump lost a proof of origin, fail the build"), which needs an exit code and machine-readable output. varve-serve is local-only by design, so a viewer-first answer leaves the gate unbuilt.
+
+      WHY ONE PRODUCER. The recurring defect here is two code paths deciding one thing: the platform rule answered differently by deposit and install; the store root computed one way by the composing realm and another by the include. A delta shown in a terminal disagreeing with one shown in a browser would be that defect with a wider audience — and the audience would be consumers deciding whether to accept a toolchain bump.
+
+      WHAT THIS DEFERS, NOT REJECTS. A DSSE-signed delta published as an OCI referrer at deposit time is the stronger trust story: the consumer reads an ATTESTED changelog, and it answers clause 3's hard case where the previous layer is not installed locally. It needs this command to generate its content, so it comes second.
+
+      THE PROOF RUNG IS A FINDING, NOT A COLUMN. Clause 5 requires the ingestion proof to travel into the diff. A payload moving from cosign-sums to unverified matters more than any version bump in the same table, so it is reported separately rather than buried among rows, and it is what a gate keys on.
+    fields:
+      rationale: Building the viewer first would leave the CI gate unbuilt, because a page has no exit code — and a bump that silently drops a payload's proof of origin is exactly what a gate should stop. Building the signed referrer first would mean writing the diff twice, since the referrer needs this command to generate its content. The command is the only one of the three that satisfies the requirement on its own.
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-09-29T20:23:31Z
+    links:
+      - type: satisfies
+        target: REQ-LAYERDIFF-001
+
+  - id: REQ-EVIDENCE-001
+    type: requirement
+    title: A layer carries the evidence for what it carries, so a pinned toolchain can be assessed offline
+    status: proposed
+    description: |-
+      A consumer pins a layer and gets verified BYTES. What they cannot get, from the layer, is what those bytes were shown to do: which requirements each tool verifies, what its coverage is, what an assessor would read. That evidence exists — varve itself publishes varve-<version>-rivet-artifacts.tar.gz, -traceability-html.tar.gz and .reqif with every release, and other repos publish their own — but it lives beside the release on a website, not inside the signed layer. So it is neither pinned, nor verified, nor available offline, nor guaranteed to be the same thing six months later.
+
+      This is the gap the product otherwise closes. varve's argument is that a toolchain should be something you pin and verify rather than something you download and hope about. Today that argument stops at the binary: the bytes are attested, and every claim ABOUT the bytes is a URL.
+
+      Clauses:
+
+      (1) A layer may carry an `evidence` payload for a tool, holding that tool's traceability bundle as published by its own repository, ingested through the SAME ladder as any other payload (cosign-signed sums > build provenance > upstream sums > unverified with a recorded reason). Evidence gets no special trust: an unverified bundle is marked unverified exactly as an unverified binary is.
+
+      (2) The evidence payload is bound to the tool payload it describes — same name, same version — so a layer cannot carry evidence for a version of a tool it does not ship. A bundle whose version does not match a shipped tool is refused at deposit, not reported at install.
+
+      (3) `varve inspect` reports which payloads carry evidence and which do not. A toolchain where three of ten tools carry evidence must read as three of ten, never as a green check.
+
+      (4) The evidence travels into the diff (REQ-LAYERDIFF-001, DD-032): a bump that changes a tool's verification posture — requirements verified, coverage, a proof that disappeared — is reported as a change, because that is a reason to accept or refuse a bump that no version number shows.
+
+      (5) Nothing here makes varve a traceability tool. varve does not read, interpret, validate or re-derive the evidence; it transports and attests it, exactly as it does a binary. Interpreting a rivet bundle is rivet's job, and a consumer runs rivet against what varve delivered. varve's only claim is that the bundle came from the tool's own release and was not altered afterwards.
+
+      (6) Evidence is optional per payload and per realm. A realm that carries none is a realm with no evidence, not a broken one — this must not become a gate that forces repos to publish bundles before they are ready.
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-09-29T20:24:40Z
+    release: v0.41.0
+
+  - id: DD-033
+    type: design-decision
+    title: Evidence travels inside the layer as a payload, rather than being linked to or aggregated from the web
+    status: accepted
+    description: |-
+      Decided by the maintainer 2026-09-29, choosing among three ways to connect rivet's traceability to a varve layer.
+
+      CHOSEN: a new `evidence` payload kind. Each tool's traceability bundle, as published by that tool's own repository, is ingested into the layer through the ordinary ladder and signed with everything else.
+
+      THE PRODUCER SIDE ALREADY EXISTS. varve's own release publishes varve-0.39.0-rivet-artifacts.tar.gz, varve-0.39.0-traceability-html.tar.gz and varve-0.39.0-traceability.reqif. So this is an INGESTION question — a new kind and a binding rule — not new tooling to generate evidence. The same is true wherever a repo already publishes a bundle; where one does not, clause 6 says that realm simply carries no evidence.
+
+      WHAT WAS REJECTED, AND WHY IT MATTERS RATHER THAN BEING MERELY WORSE.
+
+      Linking rivet artifacts to the layer digest they shipped in is nearly free and keeps the layer unchanged. It also answers the question only for people who have every repository checked out, which is not the consumer. An air-gapped assessor — the case the product exists for — gets nothing.
+
+      Aggregating the published traceability HTML in varve-serve is the one that looks closest to "show it nicely", and it is the one to be most careful about. It would fetch each repo's site at view time and present the result beside verified bytes. That reports what a website says now, not what a root attested then: the site can change, disappear, or be served by someone else, and the page would look identical. varve's entire argument is that this substitution is the thing you must not make. Making it about EVIDENCE, next to payloads where we refuse to make it about bytes, would be the sharpest inconsistency in the product.
+
+      THE LINE THIS DECISION DOES NOT CROSS. varve transports and attests the bundle; it does not read it. No varve command interprets a requirement, computes coverage or judges a trace — a consumer runs rivet against what varve delivered. The moment varve parses evidence to say something about it, it has taken on rivet's job and acquired a second implementation of the traceability model to keep in step, which is the defect shape this codebase keeps paying for.
+    fields:
+      rationale: The two alternatives both break the property that makes a pin worth having. Linking rivet artifacts to layer digests leaves the evidence in repositories the consumer does not have, so the answer exists only for us. Aggregating each repo's published traceability HTML in varve-serve fetches from the network per repo, reporting what a website says today rather than what a root attested at deposit — which is the failure varve was built to remove, reintroduced one level up. Carrying the bundle as a payload is the only option where the evidence is pinned, verified and offline, and it needs no new machinery because the release assets already exist.
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-09-29T20:25:18Z
+    links:
+      - type: satisfies
+        target: REQ-EVIDENCE-001
