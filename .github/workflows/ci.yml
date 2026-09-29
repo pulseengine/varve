@@ -339,6 +339,15 @@ jobs:
               -f crates/varve-core/src/mirror.rs
               -f crates/varve-core/src/support.rs
               -f crates/varve-core/src/layer.rs
+          # NEW at v0.40.0, as its own shard rather than appended to one.
+          # Every split above happened because a shard was GROWN until it was
+          # cancelled or killed, and each time the comment warned against the
+          # next addition doing it again. `delta.rs` decides what counts as a
+          # change between two layers and what counts as a finding — what a CI
+          # gate refuses a toolchain bump on — so it is gated, not declared.
+          - shard: varve-core (delta)
+            files: >-
+              -f crates/varve-core/src/delta.rs
           - shard: varve-producer
             files: >-
               -f crates/varve-producer/src/asset.rs
