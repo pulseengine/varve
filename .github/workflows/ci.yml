@@ -356,6 +356,13 @@ jobs:
           - shard: varve-core (delta)
             files: >-
               -f crates/varve-core/src/delta.rs
+          # GATED on arrival rather than declared as debt (varve#126's lesson).
+          # A wrong closure ships a wrong signed tree, and the module is small,
+          # pure and has no I/O — its tests run in 20ms, so there is no cost
+          # argument for leaving it out.
+          - shard: varve-core (wit-closure)
+            files: >-
+              -f crates/varve-core/src/witclosure.rs
           - shard: varve-producer
             files: >-
               -f crates/varve-producer/src/asset.rs
