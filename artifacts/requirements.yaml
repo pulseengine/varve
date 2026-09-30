@@ -4676,3 +4676,61 @@ artifacts:
     links:
       - type: satisfies
         target: REQ-TOOLCHAIN-001
+
+  - id: REQ-WIT-001
+    type: requirement
+    title: A layer carries WIT packages flat, and composes a dependency tree only when one is asked for
+    status: proposed
+    description: |-
+      `kind = "wit"` has existed since REQ-KIND-001 as a name: it parses, sorts, is HELD rather than dispatched, and `inspect` reports it. Nothing consumes it, no layer carries one, and the kind was added before anything did — so what a `wit` payload IS was never decided.
+
+      THE UNIT IS ONE PACKAGE, NOT A TREE. A WIT package depends on other WIT packages, and the obvious shape — vendor `wit/deps/` inside each payload, as a project checkout does — re-creates at the interface level precisely the failure varve exists to prevent at the tool level. Two payloads could each carry `wasi:io@0.2.0`, with DIFFERENT bytes, both signed by the same root, and nothing anywhere would notice: one name, two sets of bytes (REQ-STORE-002). Storing packages flat, one per `namespace:name@version`, makes that unrepresentable — there is one `wasi:io@0.2.0` in a layer, at one digest, and every consumer of it resolves to the same bytes.
+
+      It is also what the ecosystem already does, which matters for the integration that follows. `wkg` stores packages flat in a registry and materialises a project's `deps/` at fetch time with a lock file; dependencies are RESOLVED, never vendored into a published package.
+
+      Clauses:
+
+      (1) A `wit` payload is exactly one WIT package, identified by its `namespace:name@version`, stored flat. A layer may carry many, including several versions of one package, each at its own digest.
+
+      (2) The dependency closure is computed from the PACKAGES THEMSELVES, not restated in the manifest. A WIT package declares what it imports; deriving the closure from signed bytes is transcription, while a second list in `layer.toml` is a second thing to keep in step and the source of the drift this requirement exists to remove.
+
+      (3) Composition happens when a consumer asks for it. Given a package to treat as top level, the consumer-facing command materialises that package with its transitive dependencies in the layout the asking tool expects — and does so OFFLINE, from packages already in the verified store. Nothing resolves over the network.
+
+      (4) A closure that cannot be completed from the layer is a REFUSAL naming the missing package, never a partial tree. A `wit/` directory missing a dependency fails later, inside another tool, with an error about the interface rather than about the layer.
+
+      (5) Nothing here requires a consumer to adopt an integration. How a composed tree is REACHED — materialised as a copy, or pointed at in place — is REQ-WITREACH-001 and DD-036.
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-09-30T15:03:37Z
+    release: v0.44.0
+
+  - id: DD-036
+    type: design-decision
+    title: A WIT package is stored as the binary package the ecosystem pins, and export comes before link
+    status: accepted
+    description: |-
+      Decided by the maintainer 2026-09-30 from the spike in varve#220, after measuring what four consumers actually take.
+
+      THE FORM IS THE BINARY PACKAGE: `<namespace>/<name>/<version>.wasm`, byte-identical to what `wkg`'s local backend reads. Two consequences make it the right unit. The later link is then a genuine POINTER rather than a disguised export — wkg reads the store as it stands. And our digest is the same digest the ecosystem pins, so "this is wasi:io@0.2.0" means the same thing inside and outside the layer, which a re-encoded copy could not guarantee.
+
+      WHAT THIS COSTS, AND IT IS NOT NOTHING. What varve signs is compiled. `inspect` shows a hash of bytes no human reads, in a product whose argument is that a consumer can audit what they were given. The mitigation is that decoding is mechanical and one command away, and that the export path emits WIT text — but comments and formatting do not survive the round trip, so the signed artifact is not the authored artifact. That is a real reduction in auditability, taken deliberately.
+
+      EXPORT FIRST, LINK LATER. `export-wit` ships the way every other consumable kind works: it materialises into the project, it is an ARTIFACT OF RECORD that can be committed and handed to an assessor six months later, and it serves wit-bindgen, cargo-component and Bazel's vendored path immediately. A link serves none of those.
+
+      DD-035's warning applies here unchanged and is repeated because it is the failure mode: if the copy is the only path for long, it becomes the habit a link later has to displace.
+
+      DECIDED TOGETHER WITH THE TOOLCHAIN, in v0.44.0. `link` is one question with two payloads (REQ-TOOLCHAIN-001, DD-035), and answering it twice is how one concept becomes two mechanisms. WIT is the better proving ground of the two: wkg's `local` backend already exists and is offline by construction, where rustup's link carries the staleness DD-035 deferred on.
+
+      THE AIR GAP, AS A CONSTRAINT AND NOT AN ASPIRATION. A link points INTO the store and never at a remote. Pointing a resolver at an upstream registry would destroy the air gap and the verification in one move, and it is the obvious wrong turn because it is less work than the right one. The measured case: `rules_wasm_component`'s `wkg_wit_deps` today resolves from `registry.wasm.org`, and a store-local wkg mapping closes that hole with the same call.
+
+      Transport is untouched. `archive` + `install --from` carry the bytes to an air-gapped site as they always did; export and link are both about consumption after install, so neither weakens a transport neither performs.
+    fields:
+      rationale: "Source .wit files are the richer form and would make a signed interface readable, which is a real loss to give up. It was given up because the binary package is the form wkg's local backend reads in place: storing source would mean even the LINK had to encode and materialise, which is an export wearing a link's name, and would arrive weaker than the mechanism it is meant to be. Carrying both was rejected for the reason the flat-package rule exists — it puts one interface in two artifacts that must be kept in step."
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-09-30T15:04:01Z
+    links:
+      - type: satisfies
+        target: REQ-WIT-001
