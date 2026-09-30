@@ -178,6 +178,26 @@ pub struct InstalledLayer {
     pub channel: String,
     /// Root directory of this layer in the core.
     pub root: PathBuf,
+    /// The platform this layer was INSTALLED FOR, where the install recorded
+    /// one (`varve install --platform`, or the host at install time).
+    ///
+    /// `verify` must filter by this and not by the host it happens to be run
+    /// on. Installing a Linux toolchain from a Mac is legitimate — building or
+    /// inspecting one — and before this, `verify` resolved the HOST, found the
+    /// darwin entry, hashed the linux bytes that were actually laid down, and
+    /// reported "its bytes were altered" about bytes nobody had touched
+    /// (varve#189). A trust tool that cries wolf teaches people to ignore it.
+    ///
+    /// `None` for layers installed before this was recorded; callers fall back
+    /// to the host, which is what they did for all of them.
+    ///
+    /// This file is LOCAL state and is not signed, which is safe in one
+    /// direction only: a tampered value can name a platform whose payloads
+    /// were never laid down (`MissingTool`), or one the layer has no entries
+    /// for (`NothingToVerify`), or one whose digests do not match what is on
+    /// disk (`ToolDigestMismatch`). Every outcome is a refusal. It cannot
+    /// cause a verification to pass that would otherwise fail.
+    pub platform: Option<String>,
 }
 
 /// The core store rooted at a directory (defaults to `~/.varve` in the CLI;
@@ -493,13 +513,46 @@ impl Store {
             .get("eu.pulseengine.varve.channel")
             .cloned()
             .unwrap_or_default();
+        let platform = std::fs::read_to_string(root.join(INSTALL_FILE))
+            .ok()
+            .and_then(|t| serde_json::from_str::<InstallRecord>(&t).ok())
+            .map(|r| r.platform);
         Ok(InstalledLayer {
             digest: digest.to_string(),
             layer,
             channel,
             root,
+            platform,
         })
     }
+}
+
+/// What the install recorded about itself, beside the layer it laid down.
+pub const INSTALL_FILE: &str = "installed.json";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct InstallRecord {
+    platform: String,
+}
+
+/// Record the platform a layer was laid down FOR.
+///
+/// Written by `install` after the lay-down, so `verify` filters by the
+/// decision the install made rather than re-deriving one from the host it is
+/// run on — the shape that has cost this codebase repeatedly.
+pub fn record_install_platform(root: &Path, platform: &str) -> Result<(), StoreError> {
+    let path = root.join(INSTALL_FILE);
+    let body = serde_json::to_vec_pretty(&InstallRecord {
+        platform: platform.to_string(),
+    })
+    .map_err(|e| StoreError::Io {
+        path: path.display().to_string(),
+        source: std::io::Error::other(e),
+    })?;
+    std::fs::write(&path, body).map_err(|source| StoreError::Io {
+        path: path.display().to_string(),
+        source,
+    })
 }
 
 /// Compute the store key for manifest bytes: `sha256:<hex>`.

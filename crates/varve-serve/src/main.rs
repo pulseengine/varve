@@ -141,7 +141,10 @@ fn collect() -> anyhow::Result<Vec<DocsPayload>> {
     let entry = varve_core::resolve(&pin, &store)?.layer;
     // Re-verified before anything is read: serving the contents of a layer
     // varve cannot vouch for would look authoritative and be worthless.
-    varve_core::verify_installed(&store, &entry, &verifier, &varve_core::host_platform())?;
+    // varve#189: the platform this layer was installed for, not the host.
+    let host = varve_core::host_platform();
+    let plat = entry.platform.as_deref().unwrap_or(&host);
+    varve_core::verify_installed(&store, &entry, &verifier, plat)?;
 
     // EVERY layer of the composition, not just the pinned one. Reading only
     // the pinned layer's manifest is why this answered "layer 2026.09.1 carries

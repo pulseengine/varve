@@ -418,6 +418,13 @@ pub fn install(
     let stored_digest = store.lay_down_payloads(&bytes, &payloads)?;
     debug_assert_eq!(stored_digest, digest);
 
+    // Record WHICH platform these payloads were selected for, so `verify`
+    // filters by the decision made here instead of re-deriving one from
+    // whatever host it is run on later (varve#189).
+    if let Some(entry) = store.get(&digest)? {
+        crate::store::record_install_platform(&entry.root, policy.platform)?;
+    }
+
     // Retain the signature envelope beside the payload, so `varve verify`
     // can repeat the install-time verdict offline, forever. (When transport
     // was already the bare payload — test doubles — there is nothing to keep.)
