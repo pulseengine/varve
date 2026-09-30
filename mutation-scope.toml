@@ -26,6 +26,7 @@
 "crates/varve/src/docs.rs" = "docs topics + their 24 tests live in the bin crate, so `--lib` never runs them"
 "crates/varve/src/inspect.rs" = "bin crate module"
 "crates/varve/src/exit.rs" = "bin crate module"
+"crates/varve/src/diff.rs" = "bin crate module: rendering only. Everything with a decision in it — what counts as changed, and what counts as a finding — is in varve-core::delta so the gate CAN reach it, the same move varve-serve made."
 "crates/varve-producer/src/main.rs" = "the producer CLI; `--lib` tests cannot reach it"
 "crates/varve-serve/src/main.rs" = "the viewer's entry point; everything with a decision in it was moved into the lib so the gate CAN reach it"
 

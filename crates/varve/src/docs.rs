@@ -342,6 +342,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "consumer-api — asking varve from Rust instead of from a shell",
         "concept-consumer-api.md"
     ),
+    topic!(
+        "diff",
+        "diff — what changing to another layer would change",
+        "cmd-diff.md"
+    ),
     topic!("docs", "docs — this documentation", "cmd-docs.md"),
     Topic {
         slug: "inspect",
@@ -384,6 +389,9 @@ pub fn find(slug: &str) -> Option<&'static Topic> {
 /// why the gate reported green through two audits that found the docs unusable
 /// for exactly those things (REQ-DOCS-003).
 pub const REQUIRED_TOPICS: &[&str] = &[
+    // REQ-LAYERDIFF-001 / DD-032. The delta JSON exists to be gated on;
+    // a diff documented without the gate that consumes it teaches nothing.
+    "diff",
     // Step 0. Until v0.26.0 the docs began at `varve install` — which needs a
     // varve you do not have. A tool for verified distribution that has no
     // documented verified way to obtain ITSELF is the hole this closes
@@ -432,6 +440,9 @@ pub const REQUIRED_TOPICS: &[&str] = &[
 /// files were under 30 words when this was written, and personas recovered the
 /// file formats from serde errors instead.
 pub const TOPICS_NEEDING_EXAMPLES: &[&str] = &[
+    // REQ-LAYERDIFF-001 / DD-032. The delta JSON exists to be gated on;
+    // a diff documented without the gate that consumes it teaches nothing.
+    "diff",
     // The bootstrap is nothing BUT commands: describing "verify the script
     // before running it" without the literal transcript leaves the reader with
     // the piped one-liner, which is the form this topic exists to demote.
@@ -1321,12 +1332,16 @@ mod tests {
             .collect();
         let mut unclassified: Vec<String> = Vec::new();
         for (lang, block) in blocks {
-            if matches!(lang.as_str(), "toml" | "json") {
+            // Only `toml` needs a marker to reach a parser. Every `json`
+            // block now reaches one by construction — the typed arms first,
+            // then a catch-all that at minimum requires valid json — so
+            // listing json here would report a block that IS parsed as one
+            // that is not.
+            if lang.as_str() == "toml" {
                 let recognised = block.contains("[toolchain]")
                     || block.contains("[realm.")
                     || block.contains("[[tool]]")
-                    || block.contains("[tool.runner]")
-                    || block.contains("\"line\"");
+                    || block.contains("[tool.runner]");
                 if !recognised {
                     unclassified.push(block.lines().next().unwrap_or("").trim().to_string());
                 }
@@ -1389,6 +1404,17 @@ mod tests {
                 "json" if block.contains("\"line\"") => {
                     serde_json::from_str::<varve_core::linestatus::LineStatus>(&block)
                         .expect("the documented line-status document must parse");
+                    checked += 1;
+                }
+                // Every OTHER documented json block must at least be json.
+                // Before this arm such a block reached no parser at all, so a
+                // sketch full of ellipses read as a document a consumer could
+                // paste into `jq`. It cannot be typed here — these are shapes
+                // varve prints, not shapes it parses — but "is it valid JSON"
+                // is the check that was missing entirely.
+                "json" => {
+                    serde_json::from_str::<serde_json::Value>(&block)
+                        .expect("a documented json example must be valid json");
                     checked += 1;
                 }
                 _ => {}

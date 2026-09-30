@@ -28,6 +28,7 @@ pub mod bazel;
 pub mod compose;
 pub mod consumer;
 pub mod crateexport;
+pub mod delta;
 pub mod deposit;
 pub mod discover;
 pub mod docsexport;
