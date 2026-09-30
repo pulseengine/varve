@@ -37,7 +37,6 @@
 "crates/varve-serve/src/cli.rs" = "clap derive; the flags themselves are gated by the docs check that enumerates them"
 
 [not-yet]
-"crates/varve-core/src/linestatus.rs" = "yank + advisory state, a stop-the-build signal. 18 survivors measured 2026-09-07, 5 of them NotFound guards. REQ-MUTATE-003 clause 3 names this file."
 "crates/varve-core/src/lineindex.rs" = "omission detection. REQ-MUTATE-003 clause 3 names this file."
 "crates/varve-core/src/registry.rs" = "what a registry is willing to serve. REQ-MUTATE-003 clause 3 names this file."
 "crates/varve-core/src/store.rs" = "digest computation and lay-down; trust-relevant"
