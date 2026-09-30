@@ -1901,7 +1901,12 @@ fn export_target(base: &Store, layer: Option<&str>) -> anyhow::Result<ExportTarg
                 .into_iter()
                 .find(|e| e.layer == wanted)
                 .with_context(|| format!("layer {l} is not installed — varve install it first"))?;
-            varve_core::verify_installed(&store, &entry, &verifier, &varve_core::host_platform())?;
+            // The platform the layer was INSTALLED for, not the host running verify
+            // (varve#189). Layers installed before this was recorded have none,
+            // and fall back to the host exactly as every layer used to.
+            let host = varve_core::host_platform();
+            let plat = entry.platform.as_deref().unwrap_or(&host);
+            varve_core::verify_installed(&store, &entry, &verifier, plat)?;
             Ok(ExportTarget {
                 store,
                 entry,

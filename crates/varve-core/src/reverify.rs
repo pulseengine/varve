@@ -33,6 +33,24 @@ pub enum ReverifyError {
     Manifest(#[from] ManifestError),
     #[error("payload '{tool}' is missing from the installed layer")]
     MissingTool { tool: String },
+    /// The platform filter matched nothing, so nothing was checked.
+    ///
+    /// Reported as a REFUSAL because the alternative is that "this layer
+    /// carries no payload for your platform" and "every payload of this layer
+    /// is intact" are the same answer. A verification that checked nothing is
+    /// not a verification, and it is the cheapest thing to arrange: it needs
+    /// no altered bytes, only a platform nothing matches (varve#189).
+    #[error(
+        "verified nothing: layer {layer} carries {available} payload(s), none of them for \
+         platform '{platform}'. It carries: {carried}. If this layer was installed for \
+         another platform, verify it for that one."
+    )]
+    NothingToVerify {
+        layer: String,
+        platform: String,
+        available: usize,
+        carried: String,
+    },
     #[error("payload '{tool}' does not match its signed digest {digest} — its bytes were altered")]
     ToolDigestMismatch { tool: String, digest: String },
     #[error(transparent)]
@@ -171,6 +189,36 @@ pub fn verify_installed_timed(
         }
         checked += 1;
     }
+    // A platform filter that matched nothing must not read as success.
+    // `checked == 0` is only acceptable when the layer genuinely has no
+    // payloads at all — a composition-only layer, which install already
+    // learned to accept (REQ-COMPOSE-001).
+    let payload_entries = manifest
+        .entries
+        .iter()
+        .filter(|e| e.kind() != Ok(crate::kind::PayloadKind::Layer))
+        .count();
+    if checked == 0 && payload_entries > 0 {
+        let mut carried: Vec<&str> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.kind() != Ok(crate::kind::PayloadKind::Layer))
+            .map(|e| {
+                e.annotations
+                    .get(crate::platform::ANN_PLATFORM)
+                    .map(String::as_str)
+                    .unwrap_or("any")
+            })
+            .collect();
+        carried.sort_unstable();
+        carried.dedup();
+        return Err(ReverifyError::NothingToVerify {
+            layer: layer.layer.to_string(),
+            platform: platform.to_string(),
+            available: payload_entries,
+            carried: carried.join(", "),
+        });
+    }
     timing.checked = checked;
     Ok((checked, timing))
 }
@@ -253,6 +301,198 @@ mod tests {
             layer,
             verifier,
         }
+    }
+
+    /// A layer installed FOR one platform, as `--platform` produces.
+    fn installed_for(install_platform: &str) -> Installed {
+        let (sk, pk) = generate_root_keypair();
+        let linux = b"wac-linux-bytes".to_vec();
+        let mac = b"wac-darwin-bytes".to_vec();
+        let (dl, dm) = (manifest_digest(&linux), manifest_digest(&mac));
+        let payload = crate::manifest::fixtures::manifest_with_platform_tools(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[
+                ("wac", &dl, Some("x86_64-unknown-linux-gnu")),
+                ("wac", &dm, Some("aarch64-apple-darwin")),
+            ],
+        );
+        let envelope = sign_layer_manifest(&payload, &sk, "varve-root-1").unwrap();
+        let source = MemorySource::new()
+            .with_manifest(envelope.as_bytes())
+            .with_blob(&dl, &linux)
+            .with_blob(&dm, &mac);
+        let pin = Pin::parse(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\n",
+            "varve.toml",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let store = Store::at(&root);
+        let mut marks = HighWaterMarks::load(&root).unwrap();
+        let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+        let policy = InstallPolicy {
+            index: None,
+            now: "2026-08-07T00:00:00Z",
+            staleness_threshold_days: 90,
+            platform: install_platform,
+        };
+        let outcome = install(&pin, &source, &verifier, &store, &mut marks, &policy).unwrap();
+        let layer = store.get(&outcome.digest).unwrap().unwrap();
+        Installed {
+            _tmp: tmp,
+            store,
+            layer,
+            verifier,
+        }
+    }
+
+    /// A composition-only layer checks zero payloads and that is CORRECT.
+    ///
+    /// The refusal added for varve#189 keys on `payload_entries > 0`, and a
+    /// mutant weakening that to `>= 0` survived: nothing distinguished "this
+    /// layer has payloads and none matched" from "this layer has no payloads
+    /// at all". The second is a whole supported layer kind — `install`
+    /// learned it at REQ-COMPOSE-001 and refusing it here would break every
+    /// composition-only pin.
+    // rivet: verifies REQ-COMPOSE-001
+    #[test]
+    fn a_composition_only_layer_verifies_although_it_checks_nothing() {
+        let (sk, pk) = generate_root_keypair();
+        let payload = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json",
+ "artifactType":"application/vnd.pulseengine.varve.layer.v1+json",
+ "annotations":{{"eu.pulseengine.varve.layer":"2026.07.0",
+ "eu.pulseengine.varve.line":"2026.07","eu.pulseengine.varve.channel":"qualified",
+ "eu.pulseengine.varve.counter":"1",
+ "org.opencontainers.image.created":"2026-07-31T09:14:00Z"}},
+ "manifests":[{{"digest":"sha256:{d}","size":0,
+ "annotations":{{"{k}":"layer","eu.pulseengine.varve.include.realm":"other"}}}}]}}"#,
+            d = "0".repeat(64),
+            k = crate::kind::ANN_KIND,
+        )
+        .into_bytes();
+        let envelope = sign_layer_manifest(&payload, &sk, "varve-root-1").unwrap();
+        let source = MemorySource::new().with_manifest(envelope.as_bytes());
+        let pin = Pin::parse(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\n",
+            "varve.toml",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let store = Store::at(&root);
+        let mut marks = HighWaterMarks::load(&root).unwrap();
+        let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+        let policy = InstallPolicy {
+            index: None,
+            now: "2026-08-07T00:00:00Z",
+            staleness_threshold_days: 90,
+            platform: "x86_64-unknown-linux-gnu",
+        };
+        let outcome = install(&pin, &source, &verifier, &store, &mut marks, &policy).unwrap();
+        let layer = store.get(&outcome.digest).unwrap().unwrap();
+        let checked = verify_installed(&store, &layer, &verifier, "x86_64-unknown-linux-gnu")
+            .expect("a composition-only layer must verify, not be refused for checking nothing");
+        assert_eq!(checked, 0, "it has no payloads of its own to check");
+    }
+
+    /// The refusal has to name the platforms the layer ACTUALLY carries.
+    ///
+    /// Without this, a mutant inverting the filter that builds that list
+    /// survived: the message would have listed the composition edges instead
+    /// of the payloads, and an operator would be told to try a platform the
+    /// layer has nothing for.
+    // rivet: verifies REQ-VERIFY-001
+    #[test]
+    fn the_refusal_names_the_platforms_the_layer_does_carry() {
+        let i = installed_for("x86_64-unknown-linux-gnu");
+        let err = verify_installed(
+            &i.store,
+            &i.layer,
+            &i.verifier,
+            "riscv64gc-unknown-linux-gnu",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        for expected in ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"] {
+            assert!(
+                msg.contains(expected),
+                "the refusal does not name {expected}, which this layer carries: {msg}"
+            );
+        }
+        assert!(msg.contains("riscv64gc-unknown-linux-gnu"), "{msg}");
+    }
+
+    /// varve#189: a layer installed FOR another platform verifies, and is
+    /// not accused of tampering.
+    ///
+    /// Reported from a Mac installing a Linux toolchain — legitimate, and the
+    /// thing `--platform` exists for. `verify` resolved the HOST, matched the
+    /// darwin entry, hashed the linux bytes that were actually laid down, and
+    /// said "its bytes were altered". The bytes were exactly what was signed;
+    /// the platform was the wrong question. Install records which platform it
+    /// chose, and verify asks that instead of the host.
+    // rivet: verifies REQ-VERIFY-001
+    #[test]
+    fn a_layer_installed_for_another_platform_verifies_against_that_platform() {
+        let i = installed_for("x86_64-unknown-linux-gnu");
+        assert_eq!(
+            i.layer.platform.as_deref(),
+            Some("x86_64-unknown-linux-gnu"),
+            "install did not record the platform it selected payloads for"
+        );
+        let plat = i.layer.platform.clone().unwrap();
+        let checked = verify_installed(&i.store, &i.layer, &i.verifier, &plat)
+            .expect("a layer installed for another platform must verify");
+        assert_eq!(checked, 1, "the linux payload was not the one checked");
+    }
+
+    /// The exact false accusation varve#189 reported, pinned so it cannot
+    /// come back: asking about the HOST names bytes that were never there.
+    // rivet: verifies REQ-VERIFY-001
+    #[test]
+    fn asking_the_wrong_platform_is_what_produced_the_false_tamper_claim() {
+        let i = installed_for("x86_64-unknown-linux-gnu");
+        let out = verify_installed(&i.store, &i.layer, &i.verifier, "aarch64-apple-darwin");
+        assert!(
+            matches!(out, Err(ReverifyError::MissingTool { .. }))
+                || matches!(out, Err(ReverifyError::ToolDigestMismatch { .. })),
+            "expected the host-platform question to fail; got {out:?}"
+        );
+        // …and the recorded platform is what saves the caller from asking it.
+        assert_eq!(
+            i.layer.platform.as_deref(),
+            Some("x86_64-unknown-linux-gnu")
+        );
+    }
+
+    /// Verifying against a platform the layer carries NOTHING for must refuse.
+    ///
+    /// Found while fixing varve#189. `verify_installed` filters entries by
+    /// platform and counts what it checked; nothing anywhere refused a count
+    /// of zero, so "this layer has no payload for your platform" and "every
+    /// payload of this layer is intact" were the same answer — `Ok`. A
+    /// verification that checked nothing is not a verification, and it is the
+    /// shape an attacker would pick: it needs no bad bytes, only a platform
+    /// nothing matches.
+    // rivet: verifies REQ-VERIFY-001
+    #[test]
+    fn verifying_against_a_platform_the_layer_carries_nothing_for_is_refused() {
+        let i = installed_for("x86_64-unknown-linux-gnu");
+        let out = verify_installed(
+            &i.store,
+            &i.layer,
+            &i.verifier,
+            "riscv64gc-unknown-linux-gnu",
+        );
+        assert!(
+            matches!(out, Err(ReverifyError::NothingToVerify { .. })),
+            "verifying a layer for a platform it carries nothing for did not refuse: {out:?}"
+        );
     }
 
     // rivet: verifies REQ-VERIFY-001
