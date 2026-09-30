@@ -2274,4 +2274,371 @@ mod tests {
             KnownLayers::Unknown { .. }
         ));
     }
+
+    // ─── varve#126: the mutation gate reaches this file now ────────────────
+    //
+    // `linestatus.rs` carries two security-relevant SIGNED fields — yanks and
+    // advisories — and was outside the required gate, with 18 survivors
+    // measured. These kill them. Each names the decision the mutant would
+    // have silently changed, because a survivor here is not a style point: it
+    // is a way for a yank to stop firing.
+
+    /// True when mode 000 does not actually deny a read here (running as
+    /// root, or a filesystem ignoring permission bits), so the
+    /// unreadable-file tests cannot hold their premise and must skip.
+    #[cfg(unix)]
+    fn cannot_deny_reads() -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = match tempfile::tempdir() {
+            Ok(t) => t,
+            Err(_) => return true,
+        };
+        let probe = tmp.path().join("probe");
+        if std::fs::write(&probe, b"x").is_err() {
+            return true;
+        }
+        if std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o000)).is_err() {
+            return true;
+        }
+        std::fs::read(&probe).is_ok()
+    }
+
+    #[cfg(unix)]
+    fn deny_reads(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+
+    fn line() -> Line {
+        "2026.07".parse().unwrap()
+    }
+
+    /// A layout carrying a signed status for `for_line`.
+    fn layout_with_status(dir: &Path, for_line: &str, sk: &[u8]) {
+        std::fs::create_dir_all(dir).unwrap();
+        let index = dir.join("index.json");
+        if !index.exists() {
+            std::fs::write(&index, br#"{"schemaVersion":2,"manifests":[]}"#).unwrap();
+        }
+        let mut doc = status(1);
+        doc.line = for_line.to_string();
+        doc.yanked = BTreeMap::new();
+        doc.known_problems = Vec::new();
+        let envelope = doc.sign(sk, "k").unwrap();
+        attach_to_layout(dir, &for_line.parse::<Line>().unwrap(), envelope.as_bytes()).unwrap();
+    }
+
+    /// An ABSENT status is `None`; an UNREADABLE one is an error.
+    ///
+    /// Seven mutants lived in the `e.kind() == NotFound` guards of the five
+    /// read paths. Flipping any of them makes every io error read as "there
+    /// is no line-status here" — so a status file that exists and cannot be
+    /// read reports no yanks and no advisories, silently, which is the one
+    /// answer this file must never give by accident.
+    // rivet: verifies REQ-KP-001
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_status_is_an_error_and_an_absent_one_is_not() {
+        let (sk, pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cache = StatusCache::at_root(root);
+
+        // Absent — every read path says "nothing here", not an error.
+        assert!(cache.envelope_bytes(&line()).unwrap().is_none());
+        assert!(cache.load(&line(), &pk).unwrap().is_none());
+        assert!(cache.load_parsed(&line()).unwrap().is_none());
+        let empty_layout = root.join("empty-layout");
+        std::fs::create_dir_all(&empty_layout).unwrap();
+        assert!(read_any_from_layout(&empty_layout).unwrap().is_none());
+        assert!(read_from_layout(&empty_layout, &line()).unwrap().is_none());
+
+        if cannot_deny_reads() {
+            return;
+        }
+
+        // Present but unreadable — every read path REFUSES.
+        let envelope = status(1).sign(&sk, "k").unwrap();
+        cache
+            .update(&line(), envelope.as_bytes(), &status(1))
+            .unwrap();
+        deny_reads(&cache.envelope_path(&line()));
+        assert!(
+            cache.envelope_bytes(&line()).is_err(),
+            "an unreadable cached status read as absent"
+        );
+        assert!(cache.load(&line(), &pk).is_err(), "load read it as absent");
+        assert!(
+            cache.load_parsed(&line()).is_err(),
+            "load_parsed read it as absent"
+        );
+
+        let layout = root.join("layout");
+        layout_with_status(&layout, "2026.07", &sk);
+        deny_reads(&layout.join("index.json"));
+        assert!(
+            read_any_from_layout(&layout).is_err(),
+            "an unreadable layout index read as carrying no status"
+        );
+        assert!(
+            read_from_layout(&layout, &line()).is_err(),
+            "an unreadable layout index read as carrying no status"
+        );
+    }
+
+    /// `read_from_layout` must match the artifact type AND the line.
+    ///
+    /// With `||` in that predicate, asking for one line returns ANOTHER
+    /// line's status — a validly signed document answering a question it was
+    /// not written about.
+    // rivet: verifies REQ-KP-001
+    #[test]
+    fn a_status_for_another_line_is_not_returned_for_this_one() {
+        let (sk, _pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = tmp.path().join("layout");
+        layout_with_status(&layout, "2026.08", &sk);
+        assert!(
+            read_from_layout(&layout, &line()).unwrap().is_none(),
+            "a 2026.08 status was returned when 2026.07 was asked for"
+        );
+        let eight: Line = "2026.08".parse().unwrap();
+        assert!(read_from_layout(&layout, &eight).unwrap().is_some());
+    }
+
+    /// Attaching one line's status must not evict another line's.
+    ///
+    /// With `||` in the retain predicate, attaching for 2026.07 drops the
+    /// 2026.08 entry — the layout silently loses an advisory nobody removed.
+    // rivet: verifies REQ-KP-001
+    #[test]
+    fn attaching_a_status_leaves_other_lines_alone() {
+        let (sk, _pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = tmp.path().join("layout");
+        layout_with_status(&layout, "2026.08", &sk);
+        layout_with_status(&layout, "2026.07", &sk);
+        let eight: Line = "2026.08".parse().unwrap();
+        assert!(
+            read_from_layout(&layout, &eight).unwrap().is_some(),
+            "attaching 2026.07's status evicted 2026.08's"
+        );
+        assert!(read_from_layout(&layout, &line()).unwrap().is_some());
+    }
+
+    /// Re-attaching the SAME line replaces rather than duplicates.
+    // rivet: verifies REQ-KP-001
+    #[test]
+    fn attaching_the_same_line_twice_leaves_one_entry() {
+        let (sk, _pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = tmp.path().join("layout");
+        layout_with_status(&layout, "2026.07", &sk);
+        layout_with_status(&layout, "2026.07", &sk);
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(layout.join("index.json")).unwrap()).unwrap();
+        let n = index["manifests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["artifactType"] == LINE_STATUS_ARTIFACT_TYPE)
+            .count();
+        assert_eq!(n, 1, "re-attaching duplicated the line-status entry");
+    }
+
+    /// The cache refuses a counter BELOW the cached one, and accepts an equal
+    /// one — re-attaching the same status must not be an error.
+    ///
+    /// `<` mutated to `<=` makes re-writing the current status a refusal,
+    /// which would break the documented reissue path.
+    // rivet: verifies REQ-KP-001
+    #[test]
+    fn the_cache_refuses_older_and_permits_re_writing_the_same_counter() {
+        let (sk, _pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = StatusCache::at_root(tmp.path());
+        let two = {
+            let mut d = status(2);
+            d.line = "2026.07".into();
+            d
+        };
+        cache
+            .update(&line(), two.sign(&sk, "k").unwrap().as_bytes(), &two)
+            .unwrap();
+        cache
+            .update(&line(), two.sign(&sk, "k").unwrap().as_bytes(), &two)
+            .expect("re-writing the SAME counter must be allowed");
+        let one = status(1);
+        assert!(
+            cache
+                .update(&line(), one.sign(&sk, "k").unwrap().as_bytes(), &one)
+                .is_err(),
+            "the cache accepted an older counter"
+        );
+    }
+
+    /// The SIGNED line wins over the referrer annotation that points at it.
+    ///
+    /// `lineindex::read_from_layout` selects by the index entry's `line`
+    /// ANNOTATION, which is ordinary unsigned JSON in `index.json`. The
+    /// `doc.line == line` guard here is what re-checks the claim against the
+    /// SIGNED document, and it was replaceable with `true`.
+    ///
+    /// So the attack this kills is precise: annotate a referrer `2026.07`,
+    /// point it at a validly signed index for `2026.08`, and the layers of a
+    /// different line become the listing that decides whether a yank names a
+    /// real layer. Editing an annotation needs no key at all.
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn a_line_index_for_another_line_is_not_this_lines_listing() {
+        let (sk, _pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = tmp.path().join("layout");
+        std::fs::create_dir_all(&layout).unwrap();
+        std::fs::write(
+            layout.join("index.json"),
+            br#"{"schemaVersion":2,"manifests":[]}"#,
+        )
+        .unwrap();
+        let idx = crate::lineindex::LineIndex {
+            line: "2026.08".into(),
+            counter: 1,
+            issued_at: "2026-08-07T00:00:00Z".into(),
+            layers: vec![crate::lineindex::IndexedLayer {
+                layer: "2026.08.0".into(),
+                digest: "sha256:00".into(),
+                channel: "qualified".into(),
+                counter: 1,
+            }],
+        };
+        let envelope = idx.sign(&sk, "k").unwrap();
+        // Annotated 2026.07; the signed payload inside says 2026.08.
+        crate::lineindex::attach_to_layout(&layout, "2026.07", envelope.as_bytes()).unwrap();
+
+        match known_layers_in_layout(&layout, "2026.07") {
+            KnownLayers::Unknown { why } => assert!(
+                why.contains("2026.08"),
+                "the refusal should name the line the index IS for: {why}"
+            ),
+            KnownLayers::Known { layers, .. } => panic!(
+                "a 2026.08 index answered for 2026.07 with {layers:?} — a yank could then be \
+                 checked against the wrong line's layers"
+            ),
+        }
+        // …and an honestly annotated one IS the listing for its own line.
+        let honest = tmp.path().join("honest");
+        std::fs::create_dir_all(&honest).unwrap();
+        std::fs::write(
+            honest.join("index.json"),
+            br#"{"schemaVersion":2,"manifests":[]}"#,
+        )
+        .unwrap();
+        crate::lineindex::attach_to_layout(&honest, "2026.08", envelope.as_bytes()).unwrap();
+        assert!(matches!(
+            known_layers_in_layout(&honest, "2026.08"),
+            KnownLayers::Known { .. }
+        ));
+    }
+
+    /// Scanning layouts counts them, and a count of zero means "found none".
+    ///
+    /// `scanned += 1` was replaceable with `*=` (leaving it at 0, so a real
+    /// layout reported "no oci-layout was found") and with `-=` (an underflow
+    /// on the first success). Nothing exercised the success path.
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn scanning_a_real_layout_reports_how_many_were_scanned() {
+        let (sk, _pk) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = tmp.path().join("layout");
+        layout_with_status(&layout, "2026.07", &sk);
+        match known_layers_in_layout_dirs(std::slice::from_ref(&layout), "2026.07") {
+            KnownLayers::Known { source, .. } => assert!(
+                source.contains("1 local layout"),
+                "wrong scanned count in: {source}"
+            ),
+            KnownLayers::Unknown { why } => {
+                panic!("a real layout was not recognised as one: {why}")
+            }
+        }
+        // A directory that is not a layout, and holds none, stays Unknown.
+        let empty = tmp.path().join("nothing");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(matches!(
+            known_layers_in_layout_dirs(&[empty], "2026.07"),
+            KnownLayers::Unknown { .. }
+        ));
+    }
+
+    /// A document that names NO layer is distinguished from one that does.
+    ///
+    /// Two mutants lived here. `yanked.len() + sum(affected)` became `*`, so
+    /// a document with no yanks but real advisories counted as naming
+    /// nothing; and the `referenced == 0` guard became `false`, so a genuine
+    /// baseline lost its "nothing to check" answer. Both turn a precise
+    /// statement about what was checked into a wrong one.
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn what_counts_as_naming_no_layer_is_exact() {
+        let unknown = KnownLayers::Unknown {
+            why: "no index published".into(),
+        };
+
+        // A true baseline: no yanks, no problems.
+        let mut baseline = status(1);
+        baseline.yanked = BTreeMap::new();
+        baseline.known_problems = Vec::new();
+        let r = baseline.check_layer_refs_against(&unknown, false).unwrap();
+        assert!(
+            r.note.contains("names no layer"),
+            "a baseline document did not read as naming no layer: {}",
+            r.note
+        );
+
+        // Zero yanks but a real advisory: 0 + 1 = 1, and `*` would say 0.
+        let mut advisory_only = status(1);
+        advisory_only.yanked = BTreeMap::new();
+        advisory_only.known_problems = vec![KnownProblem {
+            id: "KP-9".into(),
+            title: "t".into(),
+            severity: "low".into(),
+            affected: vec!["2026.07.0".into()],
+            workaround: None,
+            detection: None,
+            mitigation: None,
+        }];
+        let r = advisory_only
+            .check_layer_refs_against(&unknown, false)
+            .unwrap();
+        assert!(
+            !r.note.contains("names no layer"),
+            "a document naming a layer was treated as naming none: {}",
+            r.note
+        );
+        assert!(!r.existence_checked);
+    }
+
+    /// The note reports how many references were actually checked.
+    ///
+    /// `refs += 1` was replaceable with `*=`, pinning the count at zero — the
+    /// operator would be told "0 advisory reference checked" on a document
+    /// that checked several, which is the number they would rely on.
+    // rivet: verifies REQ-ADVISORY-002
+    #[test]
+    fn the_note_counts_the_references_it_checked() {
+        let known = KnownLayers::Known {
+            source: "a test listing".into(),
+            line: Some("2026.07".into()),
+            layers: vec!["2026.07.0".into(), "2026.07.1".into()],
+        };
+        // status(1) yanks 2026.07.0 and has two problems affecting 1 and 2
+        // ids: 1 + 1 + 2 = 4 references.
+        let r = status(1).check_layer_refs_against(&known, false).unwrap();
+        assert!(r.existence_checked);
+        assert!(
+            r.note.starts_with("4 advisory references checked"),
+            "wrong reference count: {}",
+            r.note
+        );
+    }
 }

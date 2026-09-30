@@ -279,6 +279,50 @@ mod tests {
         assert_eq!(hwm.mark(m.layer.line()), Some(3));
     }
 
+    /// `advance` never lowers a mark — and it says so in its doc, which
+    /// nothing tested until varve#210.
+    ///
+    /// An infra report measuring a 12-runner fleet found marks of 4 written
+    /// on 09-23 sitting beside marks of 3 written on 09-30, and reasonably
+    /// read that as something rewriting the mark downward. It is not: the
+    /// real cause is state LOSS and re-seeding, because a missing file loads
+    /// as first contact. But the claim being untested is how that reading
+    /// stayed plausible, and "repair the mark" is exactly the fix somebody
+    /// reaches for next. A lowered mark silently re-accepts every layer the
+    /// consumer has already moved past.
+    // rivet: verifies REQ-ROLLBACK-001
+    #[test]
+    fn advance_never_lowers_a_mark_however_it_is_called() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut hwm = HighWaterMarks::load(tmp.path()).unwrap();
+        hwm.advance(&manifest("2026.07.3", 9)).unwrap();
+        assert_eq!(hwm.mark(manifest("2026.07.0", 1).layer.line()), Some(9));
+
+        // Every counter below the mark, including zero, leaves it alone.
+        for lower in [8, 4, 1, 0] {
+            hwm.advance(&manifest("2026.07.0", lower)).unwrap();
+            assert_eq!(
+                hwm.mark(manifest("2026.07.0", 1).layer.line()),
+                Some(9),
+                "advancing with counter {lower} lowered the mark"
+            );
+        }
+        // Equal is a no-op; higher still raises.
+        hwm.advance(&manifest("2026.07.3", 9)).unwrap();
+        assert_eq!(hwm.mark(manifest("2026.07.0", 1).layer.line()), Some(9));
+        hwm.advance(&manifest("2026.07.4", 10)).unwrap();
+        assert_eq!(hwm.mark(manifest("2026.07.0", 1).layer.line()), Some(10));
+
+        // And it survives a reload, because the refusal an operator meets is
+        // served from the file and not from this process's memory.
+        let reloaded = HighWaterMarks::load(tmp.path()).unwrap();
+        assert_eq!(
+            reloaded.mark(manifest("2026.07.0", 1).layer.line()),
+            Some(10),
+            "the mark did not persist at its highest value"
+        );
+    }
+
     // rivet: verifies REQ-ROLLBACK-001
     #[test]
     fn a_counter_below_the_mark_is_rejected() {

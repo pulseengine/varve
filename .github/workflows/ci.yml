@@ -339,6 +339,14 @@ jobs:
               -f crates/varve-core/src/mirror.rs
               -f crates/varve-core/src/support.rs
               -f crates/varve-core/src/layer.rs
+          # GATED at v0.40.0 (varve#126). It carries two security-relevant
+          # SIGNED fields — yanks and advisories — and sat in `not-yet` with
+          # 18 survivors measured. All 18 are dead; the file is in the gate
+          # rather than in the debt list, which is the only state in which
+          # zero survivors means anything tomorrow. 117 mutants, ~5 min.
+          - shard: varve-core (line-status)
+            files: >-
+              -f crates/varve-core/src/linestatus.rs
           # NEW at v0.40.0, as its own shard rather than appended to one.
           # Every split above happened because a shard was GROWN until it was
           # cancelled or killed, and each time the comment warned against the
