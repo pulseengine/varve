@@ -9,7 +9,28 @@ rust-version = "1.89"
 publish = false
 
 [dependencies]
+# Detached-OpenPGP verification for signed upstream digest lists
+# (REQ-SIGNEDSUMS-001). PRODUCER-ONLY, deliberately: an upstream proof is
+# checked once, at deposit, and travels into the layer as a signed
+# annotation. A consumer reads that annotation and never re-verifies the
+# upstream — so the ~2.3 MiB this pulls in has no business in the binary
+# every consumer downloads.
+#
+# `sequoia-openpgp` was measured and rejected twice over: LGPL-2.0-or-later,
+# which is not on deny.toml's allow-list and is the wrong licence to
+# static-link into a musl binary, and a default backend of the C library
+# Nettle via `nettle-sys` (pkg-config + bindgen + cc). rPGP is MIT/Apache-2.0
+# with ZERO build dependencies. `default-features = false` drops the bzip2
+# default, which serves compressed messages and never a detached signature.
+# The RUSTSEC-2023-0071 cost this carries is recorded in deny.toml.
+pgp = { version = "0.20.0", default-features = false }
 anyhow = "1.0.104"
+# This crate reports to a CLI through `anyhow`, which is right for a command.
+# `pgpsums` is a verification boundary and uses TYPED errors instead: a caller
+# deciding whether a refusal was "no signature", "wrong key" or "hashed below
+# the floor" must not be reading strings to find out. Same version as
+# varve-core, which already uses it for the same reason.
+thiserror = "2.0.19"
 clap = { version = "4.6.6", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.151"
@@ -21,6 +42,12 @@ base64 = "0.23.1"
 
 
 [dev-dependencies]
+# Test-only OpenPGP key generation and signing. A verifier's negative
+# controls need signatures nobody should accept — a text-type signature, a
+# certificate carrying its own revocation — and those cannot be borrowed from
+# an upstream, only produced. Pinned to the `rand` 0.8 line `pgp` itself uses.
+rand = "0.8"
+rand_chacha = "0.3"
 tar = "0.4"
 flate2 = "1.1"
 tempfile = "3.27.0"

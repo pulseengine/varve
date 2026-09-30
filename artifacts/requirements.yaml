@@ -4582,19 +4582,23 @@ artifacts:
 
       That rung is the right answer for a bare `SHA256SUMS.txt`. It is the wrong answer for a digest list somebody SIGNED.
 
-      Measured 2026-09-30 against static.rust-lang.org: `channel-rust-stable.toml` is 898 KB and carries, for every package and every target, a `url` and a sha256 `hash`; `channel-rust-stable.toml.asc` is a detached PGP signature over it. The claim that makes is the claim `cosign-sums` makes — the holder of this identity published these digests — reached by a different mechanism. Ingesting it as `upstream-sums` would understate it, and ingesting it as unverified would be false.
+      Measured 2026-09-30 against static.rust-lang.org: `channel-rust-stable.toml` carries per-target `url` and sha256, with a detached PGP signature beside it. The claim that makes is the claim `cosign-sums` makes — the holder of this identity published these digests — reached by a different mechanism.
+
+      CORRECTED 2026-09-30 after implementation measured the real artifact, because the first draft of this requirement would have produced a parser that silently loses digests. The manifest holds 917 (package, target) pairs of which only 601 are `available = true`; each available target carries FOUR fields, not two — `url`/`hash` for the .tar.gz and `xz_url`/`xz_hash` for the .tar.xz; and there is a second table shape this requirement did not mention at all, `[[artifacts.<kind>.target.<triple>]]`, whose digest field is spelled `hash-sha256` and which carries the rustc SOURCE tarballs. 1213 (url, digest) pairs in total. A parser written to the original text would have dropped exactly the assets a reproducibility or air-gap story wants.
 
       Clauses:
 
-      (1) A new proof mechanism records that a digest list was verified against a NAMED public key: the key's identity travels in the signed annotation exactly as a cosign identity does, so `inspect` and `diff` can report who vouched.
+      (1) A new proof mechanism records that a digest list was verified against a NAMED public key. THE IDENTITY IS THE FINGERPRINT. An OpenPGP user ID is a string its own holder typed into a certificate it self-signed, unlike a cosign subject which a third party issued against an OIDC identity — rendering the two alike would report an attacker-chosen name as an identity. A user ID may be shown as a label; the fingerprint is what a consumer filters on. The key that actually signed is recorded separately from the primary, because collapsing them is how a compromised subkey goes unnoticed.
 
-      (2) The mechanism is general. It is specified as "a detached signature over a digest list, verified against a key the realm pins", not as "Rust". Any upstream that signs its sums reaches it.
+      (2) The mechanism is general: "a detached signature over a digest list, verified against a key the realm pins", not "Rust". Any upstream that signs its sums reaches it.
 
-      (3) The verifying key is pinned by the REALM, in the same file and with the same custody as a trust root, and is NOT fetched at ingestion time. A key discovered alongside the artifact it vouches for is not a proof, and a keyserver lookup at deposit time makes the network an authority (DD-023's reason for keeping it out of signing).
+      (3) The verifying key is pinned by the REALM, with the same custody as a trust root and NOT the same shape. A varve trust root is 32 raw ed25519 bytes; an OpenPGP certificate is kilobytes — a primary key, subkeys, user IDs, self-signatures, and possibly its own revocation. The realm format needs a distinct field type, and a REVOKED certificate must be refused: an operator re-pinning an upstream key export after the upstream revoked it is the realistic failure, and a raw ed25519 root has no analogue for it. The key is never fetched at ingestion time; a key discovered beside the artifact it vouches for is not a proof.
 
-      (4) It does NOT rank against `cosign-sums` or `build-provenance`. Those are different claims and varve does not collapse them (IngestProof::is_verified, DD-032's finding rule). It is a verified rung; which verified rung is reported verbatim.
+      (4) "Verified against a named key" is NOT atomic, and the mechanism must say which verification it performed. A SHA-1 signature and a SHA-512 signature are both "signed with PGP" and only one is worth anything; rPGP enforces a digest floor only for post-quantum algorithms, so a SHA-1 RSA signature verifies by default. A TEXT-type detached signature hashes the line-ending-normalised form, so one signature verifies over two different byte strings — unusable for a digest list that must be byte-exact. The rung therefore requires a BINARY-type signature and a 256-bit digest floor.
 
-      (5) A signature that does not verify is a refusal, never a downgrade to `upstream-sums`. A list whose signature fails is evidence of a problem, not an unsigned list.
+      (5) The entries of a verified list SHALL BE UNREACHABLE WITHOUT THE VERIFICATION. A verifier can only return an error; whether that error becomes a downgrade is the caller's choice, and leaving it there is the invariant-enforced-too-late shape this project keeps paying for. The API returns the parsed digests and the vouching identity together or not at all, so no code path can hold trusted digests it did not verify.
+
+      (6) Key EXPIRY is deliberately not checked, and the reason is the same one anti-rollback has: deciding expiry needs a clock, and every clock available at verification time is absent (air-gapped), wrong, or attested by the key whose validity is the question. It waits for a trusted-time story. This is a recorded non-check, not an oversight.
     provenance:
       created-by: ai-assisted
       model: claude-opus-5
