@@ -893,6 +893,42 @@ mod tests {
 
     /// Fails if a leaf package's closure stops including the leaf itself — a
     /// consumer asking for `base` must still be told to lay `base` down.
+    /// The index's own accessors report what it holds.
+    ///
+    /// Added because the mutation shard this module was gated into on arrival
+    /// reported four survivors here and nowhere else: `as_str`, `is_empty`
+    /// (both directions) and `idents` were reachable only through other
+    /// assertions, so replacing each with a constant changed nothing any test
+    /// looked at. They are small, and that is the point — `idents` returning
+    /// nothing is how an export would compose an empty tree and call it a
+    /// closure.
+    // rivet: verifies REQ-WIT-001
+    #[test]
+    fn the_index_reports_what_it_actually_holds() {
+        let empty = PackageIndex::new();
+        assert!(empty.is_empty(), "a fresh index is empty");
+        assert_eq!(empty.len(), 0);
+        assert_eq!(empty.idents().count(), 0);
+
+        // The diamond fixture carries four packages across two namespaces.
+        let idx = diamond_index();
+        assert!(!idx.is_empty(), "an index holding packages is not empty");
+        assert_eq!(idx.len(), 4);
+
+        // …and `idents` yields exactly those, in key order — an empty
+        // iterator or a different set is a different layer.
+        let got: Vec<String> = idx.idents().map(|i| i.as_str().to_string()).collect();
+        assert_eq!(got.len(), 4, "got {got:?}");
+        assert!(got.contains(&"acme:base@2.0.0".to_string()), "{got:?}");
+        let mut sorted = got.clone();
+        sorted.sort();
+        assert_eq!(got, sorted, "idents must yield key order: {got:?}");
+
+        // `as_str` is the key as written, not a rendering of the parts.
+        let ident: PackageIdent = "acme:base@2.0.0".parse().unwrap();
+        assert_eq!(ident.as_str(), "acme:base@2.0.0");
+    }
+
     // rivet: verifies REQ-WIT-001
     #[test]
     fn a_package_with_no_dependencies_closes_over_itself() {
