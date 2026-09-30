@@ -465,6 +465,7 @@ mod tests {
             release: "v0.7.2".into(),
             asset: "with-device-0.2.2-aarch64-apple-darwin.tar.gz".into(),
             platform: Some("aarch64-apple-darwin".into()),
+            named_explicitly: false,
             kind: PayloadKind::Tarball,
             unverified_reason: None,
             contains: None,
@@ -517,6 +518,7 @@ mod tests {
             version: version.into(),
             asset: asset.into(),
             platform: Some("x86_64-unknown-linux-gnu".into()),
+            named_explicitly: false,
             kind: PayloadKind::Tarball,
             unverified_reason: None,
         }

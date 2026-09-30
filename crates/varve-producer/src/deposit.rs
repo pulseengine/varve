@@ -344,24 +344,63 @@ pub fn describe(
     s
 }
 
-/// Report a payload that was planned but had no build, so an operator sees the
-/// gap rather than inferring it from a shorter list.
-pub fn omitted(planned: &[crate::plan::PayloadPlan], resolved: &[Resolved]) -> Vec<String> {
+/// Payloads that were planned and had no matching asset.
+///
+/// Split by what the absence MEANS, which the manifest already says and this
+/// function used to throw away.
+pub struct Missing {
+    /// Upstream builds fewer platforms than the layer asks for. Ordinary:
+    /// reported so an operator sees the gap rather than inferring it from a
+    /// shorter list, and the deposit continues.
+    pub notes: Vec<String>,
+    /// An asset the manifest NAMED, through `asset-for`, that is not there.
+    /// Naming it was a claim that it exists, so its absence is a mistake in
+    /// the manifest and the deposit must not proceed.
+    pub refusals: Vec<String>,
+}
+
+/// Report a payload that was planned but had no build.
+///
+/// The distinction matters more than it looks. Layer 2026.09.18 shipped with
+/// no Linux build of five tools because an `asset-for` template went
+/// unexpanded by an older assembler: every name contained a literal `%R`,
+/// matched nothing, and read as "upstream does not build this" — which is
+/// what loom legitimately does, so the notes were unremarkable and the
+/// deposit succeeded.
+///
+/// The tool never knew upstream does not build it. It knew no asset matched.
+/// Those are the same observation and opposite conclusions, and only the
+/// manifest can tell them apart: a name the operator wrote by hand is a
+/// claim, a name a template produced is a guess.
+pub fn omitted(planned: &[crate::plan::PayloadPlan], resolved: &[Resolved]) -> Missing {
     let got: std::collections::BTreeSet<(String, String)> = resolved
         .iter()
         .map(|r| (r.plan.name.clone(), r.plan.asset.clone()))
         .collect();
-    planned
+    let mut m = Missing {
+        notes: Vec::new(),
+        refusals: Vec::new(),
+    };
+    for p in planned
         .iter()
         .filter(|p| !got.contains(&(p.name.clone(), p.asset.clone())))
-        .map(|p| {
-            format!(
-                "{} has no {} build — the layer omits it there",
-                p.name,
-                p.platform.as_deref().unwrap_or("(no platform)")
-            )
-        })
-        .collect()
+    {
+        let platform = p.platform.as_deref().unwrap_or("(no platform)");
+        if p.named_explicitly {
+            m.refusals.push(format!(
+                "{} names asset '{}' for {} in {} {}, and that release has no such asset. \
+                 `asset-for` is a claim that the file is there; if upstream simply does not \
+                 build this platform, remove the entry and the default template will omit it.",
+                p.name, p.asset, platform, p.repo, p.release
+            ));
+        } else {
+            m.notes.push(format!(
+                "{} has no {} build — the layer omits it there (looked for '{}' in {} {})",
+                p.name, platform, p.asset, p.repo, p.release
+            ));
+        }
+    }
+    m
 }
 
 impl From<crate::stage::StageError> for RunError {
@@ -430,6 +469,7 @@ mod tests {
                 version: "v0.34.0".into(),
                 asset: asset.into(),
                 platform: platform.map(str::to_string),
+                named_explicitly: false,
                 kind,
                 unverified_reason: None,
             },
@@ -898,6 +938,7 @@ mod tests {
             version: "v1".into(),
             asset: asset.into(),
             platform: Some(plat.into()),
+            named_explicitly: false,
             kind: PayloadKind::Tarball,
             unverified_reason: None,
         };
@@ -915,11 +956,91 @@ mod tests {
                 why: crate::carryforward::FetchReason::NoPrevious,
             },
         }];
-        let msgs = omitted(&planned, &resolved);
-        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        let m = omitted(&planned, &resolved);
+        assert_eq!(m.notes.len(), 1, "{:?}", m.notes);
         assert!(
-            msgs[0].contains("loom") && msgs[0].contains("darwin"),
-            "{msgs:?}"
+            m.notes[0].contains("loom") && m.notes[0].contains("darwin"),
+            "{:?}",
+            m.notes
         );
+        // A template-derived name that matched nothing is NOT a refusal:
+        // upstream building fewer platforms than the layer asks for is
+        // ordinary, and loom has done exactly this for months.
+        assert!(
+            m.refusals.is_empty(),
+            "a genuine upstream gap was refused: {:?}",
+            m.refusals
+        );
+    }
+
+    /// The shape that shipped layer 2026.09.18 without a Linux build of five
+    /// tools: an `asset-for` name that does not exist.
+    ///
+    /// The assembler could not tell this from loom's genuine gap, because it
+    /// only ever knew "no asset matched" and reported it as "upstream does
+    /// not build this". Naming an asset by hand is a claim that the file is
+    /// there; the manifest is the only place that distinction exists.
+    // rivet: verifies REQ-PRODUCER-002
+    #[test]
+    fn an_asset_the_manifest_named_and_that_is_absent_is_refused_not_noted() {
+        let p = |name: &str, plat: &str, asset: &str, named: bool| crate::plan::PayloadPlan {
+            release: "v0.76.0".into(),
+            upstream_sums: None,
+            title: None,
+            documents: None,
+            contains: None,
+            name: name.into(),
+            repo: "pulseengine/synth".into(),
+            version: "0.76.0".into(),
+            asset: asset.into(),
+            platform: Some(plat.into()),
+            named_explicitly: named,
+            kind: PayloadKind::Tarball,
+            unverified_reason: None,
+        };
+        // Exactly 2026.09.18: darwin resolved from the default template,
+        // linux was named through `asset-for` and never expanded.
+        let darwin = p(
+            "synth",
+            "aarch64-apple-darwin",
+            "synth-v0.76.0-aarch64-apple-darwin.tar.gz",
+            false,
+        );
+        let linux = p(
+            "synth",
+            "x86_64-unknown-linux-gnu",
+            "synth-%R-x86_64-unknown-linux-musl.tar.gz",
+            true,
+        );
+        let planned = vec![darwin.clone(), linux];
+        let resolved = vec![Resolved {
+            plan: darwin,
+            digest: "d".into(),
+            accepted: crate::ingest::Accepted {
+                mechanism: crate::ingest::Mechanism::CosignSums,
+                signer: Some("s".into()),
+                asserts: "a".into(),
+            },
+            bytes: None,
+            decision: crate::carryforward::Decision::Fetch {
+                why: crate::carryforward::FetchReason::NoPrevious,
+            },
+        }];
+        let m = omitted(&planned, &resolved);
+        assert!(
+            m.notes.is_empty(),
+            "a named asset that does not exist was reported as an ordinary gap: {:?}",
+            m.notes
+        );
+        assert_eq!(m.refusals.len(), 1, "{:?}", m.refusals);
+        let r = &m.refusals[0];
+        // The refusal has to name the asset it looked for, or the reader
+        // cannot see the unexpanded `%R` that caused it.
+        assert!(
+            r.contains("synth-%R-x86_64-unknown-linux-musl.tar.gz"),
+            "the refusal does not name the asset it looked for: {r}"
+        );
+        assert!(r.contains("x86_64-unknown-linux-gnu"), "{r}");
+        assert!(r.contains("pulseengine/synth"), "{r}");
     }
 }
