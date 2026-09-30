@@ -4,6 +4,31 @@
 [advisories]
 version = 2
 yanked = "deny"
+# RUSTSEC-2023-0071 — Marvin attack, `rsa` 0.9.x, reached through
+# `pgp` (rPGP), which varve-producer uses to verify detached OpenPGP
+# signatures over upstream digest lists (REQ-SIGNEDSUMS-001). There is no
+# patched release: the advisory's `patched` list is empty.
+#
+# WHY THIS IS ACCEPTABLE HERE, and the condition under which it stops being.
+# The advisory is a timing side-channel in RSA PRIVATE-KEY operations. varve
+# holds no OpenPGP private key and performs no RSA decryption or signing; it
+# verifies signatures made elsewhere, using public keys, over bytes that are
+# already public. There is no secret in this process for a timing channel to
+# leak.
+#
+# That reasoning fails the day varve SIGNS with RSA. It does not today —
+# realm signing is ed25519 (`varve keygen`, `sign-layer-manifest`) and this
+# module is verification-only — and if that changes, this entry must go and
+# the dependency must be re-argued rather than inherited.
+#
+# Reviewed against the alternative: `sequoia-openpgp` avoids `rsa` but is
+# LGPL-2.0-or-later (not on the allow-list below) and links the C library
+# Nettle, which a statically linked musl binary cannot take. Dropping PGP
+# support entirely would remove the only proof-carrying path to upstream Rust
+# and force either an in-org compiler build or unvouched bytes (DD-034).
+ignore = [
+  "RUSTSEC-2023-0071",
+]
 
 [bans]
 multiple-versions = "warn"

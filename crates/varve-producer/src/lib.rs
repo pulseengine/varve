@@ -24,6 +24,7 @@ pub mod immutable;
 pub mod ingest;
 pub mod nextlayer;
 pub mod orchestrate;
+pub mod pgpsums;
 pub mod plan;
 pub mod registry;
 pub mod scan;
