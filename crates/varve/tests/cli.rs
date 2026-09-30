@@ -3891,6 +3891,97 @@ fn a_realm_that_never_promised_an_index_installs_exactly_as_before() {
     varve(&fx).arg("verify").assert().success();
 }
 
+/// varve#178: the host qualifies PRESENCE, and `inspect` printed it beside
+/// the DISPATCHED/HELD counts, where it read as a claim about dispatch.
+///
+/// Nothing was computed wrongly — every row's PLATFORM was right. The summary
+/// claimed something it was not measuring, and it claimed it hardest in the
+/// case that most needs clarity: a layer installed for somewhere else, where
+/// every row disagrees with the host and nothing said why.
+// rivet: verifies REQ-INSPECT-001
+#[test]
+fn inspect_does_not_attach_the_host_to_a_count_the_host_does_not_decide() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("i178-root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("i178-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    for (file, bytes) in [("w-a", b"wac-for-a"), ("w-b", b"wac-for-b")] {
+        std::fs::write(parent.join(file), bytes).unwrap();
+    }
+    let spec = parent.join("i178-spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"wac\"\nversion = \"1.0.0\"\n\
+             platform = \"platform-a\"\npath = \"{a}\"\n\n\
+             [[tool]]\nname = \"wac\"\nversion = \"1.0.0\"\n\
+             platform = \"platform-b\"\npath = \"{b}\"\n",
+            a = parent.join("w-a").display(),
+            b = parent.join("w-b").display(),
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("i178-layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "k", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .args(["--platform", "platform-a"])
+        .assert()
+        .success();
+
+    let out = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["inspect", "--layer", "2026.07.0"])
+        .assert()
+        .success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+
+    // The counts line must no longer carry a platform at all.
+    let counts = text
+        .lines()
+        .find(|l| l.contains("DISPATCHED"))
+        .unwrap_or_else(|| panic!("no counts line in:\n{text}"));
+    assert!(
+        !counts.contains("platform-a") && !counts.contains("platform"),
+        "the host is still attached to the DISPATCHED/HELD counts, which it does \
+         not decide: {counts}"
+    );
+    // …and the cross-platform state is stated, not left to be inferred from
+    // every row disagreeing with the host.
+    assert!(
+        text.contains("installed for platform-a"),
+        "inspect does not say which platform the layer was installed for:\n{text}"
+    );
+
+    // The machine-readable side carries it too, or a pipeline has to parse
+    // the sentence above.
+    let j = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["inspect", "--layer", "2026.07.0", "--json"])
+        .assert()
+        .success();
+    let doc: serde_json::Value =
+        serde_json::from_slice(&j.get_output().stdout).expect("inspect --json must be json");
+    assert_eq!(
+        doc["installed_for"], "platform-a",
+        "inspect --json does not report the platform the layer was installed for"
+    );
+}
+
 // rivet: verifies REQ-OFFLINE-001
 #[test]
 fn archive_of_a_multi_platform_layer_says_what_it_carries_and_refuses_elsewhere() {

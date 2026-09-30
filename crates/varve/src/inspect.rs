@@ -320,6 +320,11 @@ fn print_json(
             .map(|l| l.realm.clone()),
         "manifest_digest": target.entry.digest,
         "host_platform": host,
+        // Which platform this layer's payloads were laid down FOR. `null`
+        // for layers installed before that was recorded. A consumer reading
+        // `host_platform` alone cannot tell a cross-platform install from a
+        // tampered store, and those want opposite responses (varve#178).
+        "installed_for": target.entry.platform,
         "composition": composition,
         "payloads": payloads,
         "summary": {
@@ -390,10 +395,32 @@ fn print_text(
     }
     let dispatched = rows.iter().filter(|r| r.dispatch == DISPATCHED).count();
     let held = rows.len() - dispatched;
+    // The host qualifies PRESENCE, never dispatch. Printing it beside the
+    // DISPATCHED/HELD counts read as "4 payloads dispatch on this host",
+    // which was false whenever the layer was installed for another platform —
+    // dispatch is decided by payload KIND and the host decides nothing about
+    // it (varve#178). Nothing was computed wrongly; the label sat on the
+    // wrong number.
     println!(
-        "\n{} payload(s): {dispatched} DISPATCHED, {held} HELD  (platform {host})\n",
+        "\n{} payload(s): {dispatched} DISPATCHED, {held} HELD",
         rows.len()
     );
+    let present = rows.iter().filter(|r| r.present).count();
+    match target.entry.platform.as_deref() {
+        // Installed for somewhere else: say so plainly rather than leaving a
+        // reader to notice that every PLATFORM cell disagrees with the host.
+        // A store holding only another platform's bytes is worth knowing.
+        Some(installed) if installed != host => println!(
+            "installed for {installed}; host is {host} — {}",
+            if present == 0 {
+                "none of it present for this host".to_string()
+            } else {
+                format!("{present} of {} present for this host", rows.len())
+            }
+        ),
+        _ => println!("presence checked against {host}"),
+    }
+    println!();
     // Column widths from the data: a fixed width truncates the one crate name
     // somebody needed to read.
     let w = |f: fn(&Row) -> &str, head: &str| {
