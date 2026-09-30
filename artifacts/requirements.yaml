@@ -4703,7 +4703,7 @@ artifacts:
       created-by: ai-assisted
       model: claude-opus-5
       timestamp: 2026-09-30T15:03:37Z
-    release: v0.44.0
+    release: v0.41.0
 
   - id: DD-036
     type: design-decision
