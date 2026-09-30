@@ -179,8 +179,24 @@ fn main() -> anyhow::Result<()> {
             // A payload the layer does not carry on some platform is reported
             // by name. An operator reading a shorter list than they expected
             // should not have to work out which entry went missing.
-            for note in deposit::omitted(&planned, &resolved) {
+            let missing = deposit::omitted(&planned, &resolved);
+            for note in &missing.notes {
                 eprintln!("note: {note}");
+            }
+            // …but an asset the MANIFEST NAMED and that is not there is a
+            // mistake in the manifest, not a gap upstream. Refusing here is
+            // what layer 2026.09.18 needed: it shipped without a single Linux
+            // build of five tools, and every one of them was a named asset
+            // that did not exist.
+            if !missing.refusals.is_empty() {
+                for r in &missing.refusals {
+                    eprintln!("error: {r}");
+                }
+                anyhow::bail!(
+                    "{} named asset(s) do not exist — refusing to deposit a layer that \
+                     silently omits what the manifest says it carries",
+                    missing.refusals.len()
+                );
             }
 
             let mut tools = Vec::with_capacity(resolved.len());

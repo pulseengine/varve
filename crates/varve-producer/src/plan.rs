@@ -87,6 +87,17 @@ pub struct PayloadPlan {
     pub asset: String,
     /// `None` for a platform-independent payload.
     pub platform: Option<String>,
+    /// Did the manifest NAME this asset, through `asset-for`, rather than
+    /// leave it to the default template?
+    ///
+    /// The difference decides what a missing asset MEANS. A template-derived
+    /// name that matches nothing is ordinary: upstream builds three platforms
+    /// where the layer asks for four, and the layer omits the fourth (loom
+    /// has done this for months). An asset the operator wrote out by hand and
+    /// that does not exist is a MISTAKE — naming it was a claim that it is
+    /// there. Layer 2026.09.18 shipped without a single Linux build of five
+    /// tools because both read as the same note.
+    pub named_explicitly: bool,
     pub kind: PayloadKind,
     /// Why this release is ingested with no proof, if it is.
     pub unverified_reason: Option<String>,
@@ -229,6 +240,9 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             release: release.clone(),
             asset: asset::expand(&template, &t.version, &release, None, None)?,
             platform: None,
+            // No `asset-for` on this path: either the payload is platform-
+            // independent, or its kind carries no per-platform naming at all.
+            named_explicitly: false,
             kind,
             unverified_reason: t.unverified_reason.clone(),
             contains: t.contains.clone(),
@@ -251,7 +265,8 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
         // hardcoded asset still names the old release, and the deposit 404s
         // at 3am. An upstream that ships musl under a versioned name was
         // simply not expressible before this.
-        let asset = match t.asset_for.get(*p) {
+        let explicit = t.asset_for.get(*p);
+        let asset = match explicit {
             Some(explicit) => asset::expand(explicit, &t.version, &release, Some(p), None)?,
             None => asset::expand(&template, &t.version, &release, Some(p), None)?,
         };
@@ -262,6 +277,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             release: release.clone(),
             asset,
             platform: Some((*p).to_string()),
+            named_explicitly: explicit.is_some(),
             kind,
             unverified_reason: t.unverified_reason.clone(),
             contains: t.contains.clone(),
@@ -285,6 +301,9 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             release: v.version.clone(),
             asset: asset::expand(&v.asset, &v.version, &v.version, None, None)?,
             platform: None,
+            // No `asset-for` on this path: either the payload is platform-
+            // independent, or its kind carries no per-platform naming at all.
+            named_explicitly: false,
             kind: PayloadKind::Vsix,
             unverified_reason: None,
             contains: None,
@@ -302,6 +321,9 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             release: v.version.clone(),
             asset: asset::expand(&v.asset, &v.version, &v.version, Some(p), None)?,
             platform: Some((*p).to_string()),
+            // No `asset-for` on this path: either the payload is platform-
+            // independent, or its kind carries no per-platform naming at all.
+            named_explicitly: false,
             kind: PayloadKind::Vsix,
             unverified_reason: None,
             contains: None,
@@ -335,6 +357,9 @@ pub fn plan_docs(d: &ManifestDocs) -> Result<Vec<PayloadPlan>, PlanError> {
         release: release.clone(),
         asset: asset::expand(&d.asset, &d.version, &release, None, None)?,
         platform: None,
+        // No `asset-for` on this path: either the payload is platform-
+        // independent, or its kind carries no per-platform naming at all.
+        named_explicitly: false,
         kind: PayloadKind::Docs(d.format),
         unverified_reason: None,
         // The declared entry point IS a shape check — `contains` already
@@ -373,6 +398,9 @@ pub fn plan_crate(c: &ManifestCrate) -> Result<Vec<PayloadPlan>, PlanError> {
         release: release.clone(),
         asset: asset::expand(&template, &c.version, &release, None, None)?,
         platform: None,
+        // No `asset-for` on this path: either the payload is platform-
+        // independent, or its kind carries no per-platform naming at all.
+        named_explicitly: false,
         kind: PayloadKind::Crate,
         unverified_reason: None,
         contains: None,
