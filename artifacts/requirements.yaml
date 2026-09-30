@@ -4572,3 +4572,107 @@ artifacts:
     links:
       - type: satisfies
         target: REQ-EVIDENCE-001
+
+  - id: REQ-SIGNEDSUMS-001
+    type: requirement
+    title: A digest list signed with PGP is a proof of origin, and is not confused with an unsigned one
+    status: proposed
+    description: |-
+      The ingestion ladder has one rung for a publisher's own digest list — `upstream-sums` — and REQ-UPSTREAMSUMS-001 is explicit about what it does and does not establish: the bytes are the bytes that list names, and NOTHING about who produced them, because the same host serves the list and the bytes.
+
+      That rung is the right answer for a bare `SHA256SUMS.txt`. It is the wrong answer for a digest list somebody SIGNED.
+
+      Measured 2026-09-30 against static.rust-lang.org: `channel-rust-stable.toml` is 898 KB and carries, for every package and every target, a `url` and a sha256 `hash`; `channel-rust-stable.toml.asc` is a detached PGP signature over it. The claim that makes is the claim `cosign-sums` makes — the holder of this identity published these digests — reached by a different mechanism. Ingesting it as `upstream-sums` would understate it, and ingesting it as unverified would be false.
+
+      Clauses:
+
+      (1) A new proof mechanism records that a digest list was verified against a NAMED public key: the key's identity travels in the signed annotation exactly as a cosign identity does, so `inspect` and `diff` can report who vouched.
+
+      (2) The mechanism is general. It is specified as "a detached signature over a digest list, verified against a key the realm pins", not as "Rust". Any upstream that signs its sums reaches it.
+
+      (3) The verifying key is pinned by the REALM, in the same file and with the same custody as a trust root, and is NOT fetched at ingestion time. A key discovered alongside the artifact it vouches for is not a proof, and a keyserver lookup at deposit time makes the network an authority (DD-023's reason for keeping it out of signing).
+
+      (4) It does NOT rank against `cosign-sums` or `build-provenance`. Those are different claims and varve does not collapse them (IngestProof::is_verified, DD-032's finding rule). It is a verified rung; which verified rung is reported verbatim.
+
+      (5) A signature that does not verify is a refusal, never a downgrade to `upstream-sums`. A list whose signature fails is evidence of a problem, not an unsigned list.
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-09-30T13:12:53Z
+    release: v0.44.0
+
+  - id: REQ-TOOLCHAIN-001
+    type: requirement
+    title: A layer can carry the compiler, so a pin stops floating underneath the tools it pins
+    status: proposed
+    description: |-
+      varve pins the tools and lets the compiler float. The failure that proves it is in varve#120, measured rather than argued: loom's nightly fuzz, the SAME commit, green on 22-24 August and red on the 25th, with `dtolnay/rust-toolchain@nightly` re-resolved each morning — and a `thiserror` update that happened DESPITE a committed lockfile. Nothing in the repository changed between a green run and a red one. That is the exact failure varve exists to prevent, one level below where varve currently reaches.
+
+      A Rust toolchain is a tree — rustc, cargo, the standard library per target — and it is NOT an `sdk`. `sdk` means "relocate this to a prefix", which is its whole model and the subject of varve#135. rustc derives its sysroot from its own executable path, which is why `rustup toolchain link` works against an arbitrary directory: a toolchain must be laid down and pointed at, never patched. Overloading `sdk` would hide the one attribute that distinguishes them behind a flag.
+
+      Clauses:
+
+      (1) A new payload kind carries a toolchain: a tree laid down whole, HELD rather than dispatched, with no prefix rewriting of any kind.
+
+      (2) The kind is reported as itself. `inspect` and `diff` say a layer carries a COMPILER, because "the compiler moved" is a materially different statement from "a tool moved" — it is the change most likely to alter build output, and a diff that reads it as one row among forty has buried the headline.
+
+      (3) A toolchain names the targets it can build FOR, which is not the platform it runs ON (REQ-SDKTARGET-001 clause 5 already draws that line for cross-toolchains, and a Rust toolchain is the case that makes it ordinary).
+
+      (4) Nothing about this kind requires a consumer to adopt an integration. How a toolchain is REACHED — a copy, a rustup registration, something else — is deliberately not settled here (DD-035).
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-09-30T13:13:14Z
+    release: v0.44.0
+
+  - id: DD-034
+    type: design-decision
+    title: The Rust toolchain is ingested from upstream under a signed-digest-list rung, not built in-org
+    status: accepted
+    description: |-
+      Decided by the maintainer 2026-09-30, from the spike in varve#218.
+
+      MEASURED FIRST, and it changed the answer. static.rust-lang.org publishes `channel-rust-stable.toml` — 898 KB carrying a url and a sha256 hash for every package and target — and `channel-rust-stable.toml.asc`, a detached PGP signature over it. Rust does not ship bare sums; it ships a SIGNED digest list.
+
+      So ingesting the toolchain does not mean accepting unvouched bytes, which is what made this cheap enough to choose. The comparison worth stating: `wit-bindgen` blocks a deposit today because it offers nothing at all, and the only ways forward there are an operator's recorded reason or a fork. Rust offers a real proof, reached by a mechanism varve does not yet speak.
+
+      WHAT THIS COSTS. varve learns PGP verification, and pins Rust's release key. That second part is the one to watch: this project currently knows exactly one kind of key, a realm trust root, with a custody story being written for it (REQ-CEREMONY-001, varve#112). A second kind of pinned key arrives with the same questions and none of the answers, and REQ-SIGNEDSUMS-001 clause 3 exists to stop the easy wrong turn — a key fetched at ingestion time, or discovered beside the artifact it vouches for, is not a proof.
+
+      WHAT IT BUYS BEYOND RUST. The rung is specified as "a detached signature over a digest list, verified against a key the realm pins". Any upstream that signs its sums reaches it without further work, which is the usual shape of a release in the parts of the ecosystem that predate sigstore.
+    fields:
+      rationale: "Building rustc in-org would put the toolchain on cosign-sums with no new crypto and no new key to custody — the strongest provenance available, and rejected on cost rather than on principle: four targets, hours of CI and GB per release, and ongoing ownership of a compiler build nobody in the organisation has today. That cost is only worth paying if upstream offers nothing, and upstream offers a signed digest list. The third option, declaring a version without carrying it, was rejected because it answers neither half of varve#120 — nothing is verified and nothing works air-gapped."
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-09-30T13:13:36Z
+    links:
+      - type: satisfies
+        target: REQ-SIGNEDSUMS-001
+
+  - id: DD-035
+    type: design-decision
+    title: A toolchain is its own payload kind, and how a consumer reaches it is deferred
+    status: accepted
+    description: |-
+      Decided by the maintainer 2026-09-30, from the spike in varve#218. Two decisions that belong together, because the second is about the first.
+
+      THE KIND. A toolchain is a tree laid down whole and never relocated. rustc derives its sysroot from its own executable path — which is why `rustup toolchain link` works against an arbitrary directory — so it needs none of the prefix patching `export-sdk` performs for Yocto, and varve#135 is the opposite complaint, that the one-prefix model does not fit a Nix closure. Naming it a kind also lets `inspect` and `diff` report that a layer carries a COMPILER, which is the change most likely to alter build output and the last thing that should read as one row among forty.
+
+      `link` IS DEFERRED, AND THE REASON IS NOT SQUEAMISHNESS. criticalup's `link create` registers a pinned toolchain as a real rustup toolchain, and it is the right shape for something hundreds of MB per target — varve#141 already measures 2 GB costing ~9 s merely to hash, and every consumption path varve has today is a COPY.
+
+      But a link is not a shim. `rustup toolchain link <name> <path>` writes an absolute path ONCE, and varve's store is content-addressed: a new layer is a new path, and the old registration keeps working while pointing at the previous toolchain. That is exactly the staleness DD-031 refused for the Windows shim copy — correct the day it is written, silently wrong after the next update, with nothing saying so. A shim does not have the problem because it re-resolves the pin per invocation; a link cannot, because rustup reads it without asking varve.
+
+      A fix exists and is the difference from DD-031's case: varve owns a stable indirection the registration points at, and repoints it on install. That is a real answer, which is why this is a DEFERRAL and not a refusal. It is deferred because choosing between it and an honest copy depends on how consumers reach for a toolchain, and today none can — the kind does not exist. Designing the integration first would be designing for a payload nobody has yet held.
+
+      WHAT MUST NOT HAPPEN WHILE IT IS DEFERRED: shipping the kind with a large copy as its only path, and letting that become the habit the link later has to displace. If the copy is the only route for long, that is this decision being taken by default rather than revisited.
+
+      Windows is inherited unchanged from varve#197 and DD-031. Whatever `link` becomes, it is unix-first for the same reason shims are.
+    fields:
+      rationale: "Reusing `sdk` would have avoided a kind at the price of hiding the distinction that matters: `sdk` means relocate-to-a-prefix, and a toolchain must specifically not be relocated. Splitting a toolchain into per-binary `tool` payloads was rejected outright — rustc needs lib/rustlib beside it, so the parts cannot be laid down independently, and the result would dispatch and then fail to compile. Deferring `link` was chosen over both shipping and refusing it, because the argument for either depends on how consumers actually reach a toolchain, and no consumer has one yet."
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-09-30T13:14:00Z
+    links:
+      - type: satisfies
+        target: REQ-TOOLCHAIN-001
