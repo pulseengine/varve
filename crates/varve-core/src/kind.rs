@@ -41,6 +41,21 @@ pub enum PayloadKind {
     ZephyrModule,
     /// A C/C++ SDK tree (headers + libs + a cmake package).
     Sdk,
+    /// A language toolchain — a compiler and the libraries it needs, as the
+    /// upstream publishes them (REQ-TOOLCHAIN-001).
+    ///
+    /// NOT an `sdk`, and the difference is the one thing that matters about
+    /// it: an `sdk` is relocated to a prefix, and a toolchain must never be
+    /// patched. rustc derives its sysroot from its own executable path, which
+    /// is why `rustup toolchain link` works against an arbitrary directory —
+    /// so a toolchain is laid down and POINTED AT. Carrying the prefix rule
+    /// into this kind would be rewriting a compiler that did not need it.
+    ///
+    /// HELD, never dispatched: `varve run rustc` would dispatch a binary out
+    /// of a tree whose siblings it needs, and a toolchain is reached through
+    /// whatever the consumer-facing path turns out to be (DD-035), not by
+    /// name.
+    Toolchain,
     /// A WebAssembly component.
     WasmComponent,
     /// A VS Code extension package (`.vsix`), consumed via `export-vsix`
@@ -62,6 +77,26 @@ pub enum PayloadKind {
 }
 
 impl PayloadKind {
+    /// Every kind, so a caller that must cover all of them cannot fall
+    /// behind the enum.
+    ///
+    /// The docs gate used to hard-code its own list of seven, which meant a
+    /// new kind could reach the parser and never reach the reference with
+    /// nothing noticing — the same shape the `ALL_KINDS` test below exists to
+    /// stop inside this module. Deriving beats restating.
+    pub const ALL: &'static [PayloadKind] = &[
+        PayloadKind::Tool,
+        PayloadKind::Crate,
+        PayloadKind::Wit,
+        PayloadKind::ZephyrModule,
+        PayloadKind::Sdk,
+        PayloadKind::Toolchain,
+        PayloadKind::WasmComponent,
+        PayloadKind::Vsix,
+        PayloadKind::Docs,
+        PayloadKind::Layer,
+    ];
+
     /// Is a payload of this kind dispatched BY NAME (REQ-STORE-002 clause 1)?
     ///
     /// Only a `tool` is: `varve which`, `varve run` and the argv[0] shims all
@@ -83,6 +118,7 @@ impl PayloadKind {
             PayloadKind::Wit => "wit",
             PayloadKind::ZephyrModule => "zephyr-module",
             PayloadKind::Sdk => "sdk",
+            PayloadKind::Toolchain => "toolchain",
             PayloadKind::WasmComponent => "wasm-component",
             PayloadKind::Vsix => "vsix",
             PayloadKind::Docs => "docs",
@@ -115,6 +151,7 @@ impl FromStr for PayloadKind {
             "wit" => Ok(PayloadKind::Wit),
             "zephyr-module" => Ok(PayloadKind::ZephyrModule),
             "sdk" => Ok(PayloadKind::Sdk),
+            "toolchain" => Ok(PayloadKind::Toolchain),
             "wasm-component" => Ok(PayloadKind::WasmComponent),
             "vsix" => Ok(PayloadKind::Vsix),
             "docs" => Ok(PayloadKind::Docs),
@@ -137,6 +174,7 @@ mod tests {
         PayloadKind::Wit,
         PayloadKind::ZephyrModule,
         PayloadKind::Sdk,
+        PayloadKind::Toolchain,
         PayloadKind::WasmComponent,
         PayloadKind::Vsix,
         PayloadKind::Docs,
@@ -153,10 +191,11 @@ mod tests {
             PayloadKind::Wit => 2,
             PayloadKind::ZephyrModule => 3,
             PayloadKind::Sdk => 4,
-            PayloadKind::WasmComponent => 5,
-            PayloadKind::Vsix => 6,
-            PayloadKind::Docs => 7,
-            PayloadKind::Layer => 8,
+            PayloadKind::Toolchain => 5,
+            PayloadKind::WasmComponent => 6,
+            PayloadKind::Vsix => 7,
+            PayloadKind::Docs => 8,
+            PayloadKind::Layer => 9,
         }
     }
 

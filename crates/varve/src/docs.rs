@@ -804,20 +804,31 @@ mod tests {
             );
         }
 
-        // The parser knows seven `[[tool]]` kinds; the reference listed six.
+        // DERIVED from the enum, not restated. The list used to be seven
+        // literals here, so a kind could reach the parser and never reach
+        // the reference — which is how `toolchain` was added with this test
+        // still passing. `layer` is excluded: it is a composition EDGE, not
+        // something a `[[tool]]` entry declares.
+        // Read the LINE that enumerates kinds, not the whole document. A
+        // substring search over the topic passes vacuously: `toolchain`
+        // matched the `[toolchain]` pin section and a path spelled
+        // `toolchains/poky` long before it was a payload kind, so this test
+        // reported a kind as documented when it was not mentioned once.
         let cfg = body("config-reference");
-        for kind in [
-            "tool",
-            "crate",
-            "wit",
-            "zephyr-module",
-            "sdk",
-            "wasm-component",
-            "vsix",
-        ] {
+        let kinds_line = cfg
+            .lines()
+            .find(|l| l.contains("kind") && l.contains("| crate |"))
+            .unwrap_or_else(|| {
+                panic!("config-reference no longer has a line enumerating payload kinds")
+            });
+        for kind in varve_core::kind::PayloadKind::ALL
+            .iter()
+            .filter(|k| **k != varve_core::kind::PayloadKind::Layer)
+            .map(|k| k.as_str())
+        {
             assert!(
-                cfg.contains(kind),
-                "config-reference must list the `{kind}` payload kind"
+                kinds_line.contains(kind),
+                "config-reference's kind list does not name `{kind}`: {kinds_line}"
             );
         }
 

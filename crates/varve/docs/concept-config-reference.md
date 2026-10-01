@@ -127,8 +127,10 @@ name     = "rivet"
 version  = "0.32.0"
 path     = "./dist/rivet"      # relative to this file
 platform = "x86_64-unknown-linux-gnu"   # optional; absent = any platform
-kind     = "tool"              # tool | crate | wit | zephyr-module | sdk | wasm-component | vsix | docs
+kind     = "tool"              # tool | crate | wit | zephyr-module | sdk | toolchain | wasm-component | vsix | docs
                                # `vsix` is a VS Code extension package (`varve docs payload-kinds`)
+                               # `toolchain` is a compiler and its libraries, laid down and
+                               # pointed at — NEVER relocated, so it takes no sdk-prefix
 # sdk-prefix = "/opt/poky/4.0.15"   # REQUIRED on kind = "sdk", refused on every other kind:
                                # the absolute path the tree was BUILT for, which is the
                                # relocation budget `varve export-sdk` patches against

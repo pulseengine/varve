@@ -219,7 +219,12 @@ pub fn stage_one<R: CommandRunner>(
         // published it — unpacking and re-packing would break the digest that
         // upstream's own sums cover, and relocation is export-sdk's job on the
         // consumer's machine (REQ-SDK-001 clause 3).
-        PayloadKind::Sdk => {
+        // A toolchain stages exactly as an sdk does: the archive IS the
+        // payload, never executable, and opened once here to prove it can
+        // be. What differs between them is relocation, and that is decided
+        // in `check_sdk_prefixes`, not here — a toolchain carries no prefix
+        // and is refused if it declares one.
+        PayloadKind::Sdk | PayloadKind::Toolchain => {
             stage::place(&archive, &dest, false)?;
             // Clause 5: shape, not architecture. A tree cannot be
             // arch-checked, but it CAN be opened, and the failure that catches
@@ -234,7 +239,7 @@ pub fn stage_one<R: CommandRunner>(
                 let bytes = std::fs::read(&dest)?;
                 let members = varve_core::sdkexport::read_members(&bytes).map_err(|e| {
                     anyhow::anyhow!(
-                        "{}: the sdk payload cannot be opened by the code that will \
+                        "{}: the payload cannot be opened by the code that will \
                          export it: {e}",
                         r.plan.name
                     )
