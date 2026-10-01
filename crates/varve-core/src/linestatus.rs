@@ -1175,6 +1175,7 @@ mod tests {
                 docs_entry: None,
                 docs_title: None,
                 docs_documents: None,
+                libc: None,
             }],
         };
         let outcome = deposit(&spec, &sk, "k", &dest).unwrap();
@@ -1613,6 +1614,7 @@ mod tests {
                     docs_entry: None,
                     docs_title: None,
                     docs_documents: None,
+                    libc: None,
                 }],
             },
             &sk,
@@ -1668,6 +1670,7 @@ mod tests {
                     docs_entry: None,
                     docs_title: None,
                     docs_documents: None,
+                    libc: None,
                 }],
             },
             &sk,
@@ -1777,6 +1780,7 @@ mod tests {
                     docs_entry: None,
                     docs_title: None,
                     docs_documents: None,
+                    libc: None,
                 }],
             },
             &sk,
@@ -1881,6 +1885,7 @@ mod tests {
                 docs_entry: None,
                 docs_title: None,
                 docs_documents: None,
+                libc: None,
             }],
         };
         deposit(&spec, &sk, "k", &dest).unwrap();
@@ -2093,6 +2098,7 @@ mod tests {
                     docs_entry: None,
                     docs_title: None,
                     docs_documents: None,
+                    libc: None,
                 }],
             },
             &sk,
@@ -2234,6 +2240,7 @@ mod tests {
                     docs_entry: None,
                     docs_title: None,
                     docs_documents: None,
+                    libc: None,
                 }],
                 includes: Vec::new(),
             };

@@ -55,6 +55,7 @@ fn docs_tool(name: &str) -> DepositTool {
         docs_entry: None,
         docs_title: Some(format!("{name} handbook")),
         docs_documents: None,
+        libc: None,
     }
 }
 

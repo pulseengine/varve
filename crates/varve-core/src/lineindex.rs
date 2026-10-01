@@ -160,6 +160,45 @@ impl LineIndex {
     /// The greatest counter the realm asserts for this line. `None` for an
     /// empty index, which asserts nothing and must not be mistaken for a mark
     /// of zero.
+    /// Which layers of this index are newer than `pinned`, and which entries
+    /// could not be ordered at all (REQ-LAYERDIFF-001 clause 1).
+    ///
+    /// IN THE LIB, not in the CLI that calls it, because it is a DECISION and
+    /// the mutation gate's kill criteria are `--workspace --lib`. A comparison
+    /// living in `main.rs` is one the gate cannot reach, and this particular
+    /// comparison is one I got wrong: measuring a real realm on 2026-10-01 I
+    /// ordered layer ids as STRINGS, which puts `2026.09.12` before
+    /// `2026.09.2`, and reported a staleness figure wrong by eight layers.
+    /// `LayerId` orders by `(line, patch)` numerically.
+    ///
+    /// An entry that will not parse is RETURNED, never dropped: a layer this
+    /// varve cannot order is one it cannot promise is not newer, and dropping
+    /// it would turn "I do not understand this entry" into "there is nothing
+    /// newer" — the same collapse of two different answers that makes an
+    /// unauthenticated tag listing useless for this question.
+    pub fn newer_than<'a>(
+        &'a self,
+        pinned: &crate::layer::LayerId,
+    ) -> (Vec<&'a IndexedLayer>, Vec<&'a str>) {
+        let mut newer: Vec<&IndexedLayer> = self
+            .layers
+            .iter()
+            .filter(|l| {
+                l.layer
+                    .parse::<crate::layer::LayerId>()
+                    .is_ok_and(|id| &id > pinned)
+            })
+            .collect();
+        newer.sort_by_key(|l| l.layer.parse::<crate::layer::LayerId>().ok());
+        let unparseable: Vec<&str> = self
+            .layers
+            .iter()
+            .filter(|l| l.layer.parse::<crate::layer::LayerId>().is_err())
+            .map(|l| l.layer.as_str())
+            .collect();
+        (newer, unparseable)
+    }
+
     pub fn high_water(&self) -> Option<u64> {
         self.layers.iter().map(|e| e.counter).max()
     }
@@ -1076,5 +1115,85 @@ mod tests {
             check("2026.08", Some(forged.as_bytes()), None, None, &policy),
             Err(IndexError::Verify(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod newer_than_tests {
+    use super::{IndexedLayer, LineIndex};
+    use crate::layer::LayerId;
+    fn pinned_index(layers: &[(&str, &str)]) -> LineIndex {
+        LineIndex {
+            line: "2026.09".into(),
+            counter: 7,
+            issued_at: "2026-10-01T00:00:00Z".into(),
+            layers: layers
+                .iter()
+                .map(|(layer, channel)| IndexedLayer {
+                    layer: (*layer).to_string(),
+                    digest: format!("sha256:{layer}"),
+                    channel: (*channel).to_string(),
+                    counter: 1,
+                })
+                .collect(),
+        }
+    }
+
+    /// The ordering is NUMERIC, and this is the case that proves it.
+    ///
+    /// `2026.09.2` is OLDER than the pinned `2026.09.12`, and a string compare
+    /// says the opposite because '1' < '2'. I made exactly this mistake on
+    /// 2026-10-01 while measuring how stale a real realm was and reported a
+    /// figure wrong by eight layers. If this test ever passes with a
+    /// lexicographic comparison, it is measuring nothing.
+    // rivet: verifies REQ-LAYERDIFF-001
+    #[test]
+    fn newer_means_numerically_newer_not_alphabetically() {
+        let pinned: LayerId = "2026.09.12".parse().unwrap();
+        let idx = pinned_index(&[
+            ("2026.09.2", "rolling"),
+            ("2026.09.9", "rolling"),
+            ("2026.09.12", "rolling"),
+            ("2026.09.13", "rolling"),
+            ("2026.10.1", "rolling"),
+        ]);
+        let (newer, unparseable) = idx.newer_than(&pinned);
+        let got: Vec<&str> = newer.iter().map(|l| l.layer.as_str()).collect();
+        assert_eq!(
+            got,
+            vec!["2026.09.13", "2026.10.1"],
+            "2026.09.2 and 2026.09.9 are OLDER than 2026.09.12; a string \
+             compare would have reported them as newer"
+        );
+        assert!(unparseable.is_empty());
+    }
+
+    /// The pin being the newest is a real answer, not an empty one.
+    // rivet: verifies REQ-LAYERDIFF-001
+    #[test]
+    fn nothing_newer_is_reported_as_nothing_newer() {
+        let pinned: LayerId = "2026.10.1".parse().unwrap();
+        let idx = pinned_index(&[("2026.09.20", "rolling"), ("2026.10.1", "rolling")]);
+        let (newer, unparseable) = idx.newer_than(&pinned);
+        assert!(newer.is_empty(), "{newer:?}");
+        assert!(unparseable.is_empty());
+    }
+
+    /// An entry this varve cannot order is RETURNED, not dropped.
+    ///
+    /// Dropping it would turn "I do not understand this" into "there is
+    /// nothing newer", which is the same collapse of two different answers
+    /// that makes a tag listing unusable for this question.
+    // rivet: verifies REQ-LAYERDIFF-001
+    #[test]
+    fn an_entry_that_cannot_be_ordered_is_not_silently_dropped() {
+        let pinned: LayerId = "2026.09.12".parse().unwrap();
+        let idx = pinned_index(&[("2026.09.13", "rolling"), ("next", "rolling")]);
+        let (newer, unparseable) = idx.newer_than(&pinned);
+        assert_eq!(
+            newer.iter().map(|l| l.layer.as_str()).collect::<Vec<_>>(),
+            vec!["2026.09.13"]
+        );
+        assert_eq!(unparseable, vec!["next"], "the unorderable entry vanished");
     }
 }

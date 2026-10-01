@@ -4435,7 +4435,7 @@ artifacts:
   - id: REQ-LAYERDIFF-001
     type: requirement
     title: A consumer can ask whether a newer layer exists, and what changing to it would change
-    status: proposed
+    status: implemented
     description: |-
       Two questions a pinned consumer asks that varve answers badly or not at all.
 
@@ -4738,3 +4738,36 @@ artifacts:
     links:
       - type: satisfies
         target: REQ-WIT-001
+
+  - id: REQ-LIBCSTATED-001
+    type: requirement
+    title: A Linux payload states the libc it needs, measured from its own bytes
+    status: verified
+    description: |-
+      A platform key names the SLOT a consumer resolves by, and on Linux that slot is spelled `-unknown-linux-gnu` whatever the bytes are. `host_platform()` maps Linux to `{arch}-unknown-linux-gnu`, so a static musl build cannot have its own key and fills the gnu one (#175).
+
+      MEASURED 2026-10-01 on the live layer. `ghcr.io/pulseengine/layers:2026.10.1` files `ordeal` under `eu.pulseengine.platform = aarch64-unknown-linux-gnu` with `eu.pulseengine.source.asset = ordeal-v0.24.0-aarch64-unknown-linux-musl.tar.gz`. 10 of its 25 Linux payloads are musl-sourced and NO annotation anywhere records a libc. So the signed manifest asserts gnu over bytes that need nothing, and the only way a consumer could tell was to read the asset FILENAME — the inference varve refuses in every other place it decides what a payload IS (cf. REQ-LAYERDOCS-001: what each document IS comes from its SIGNED annotation, never from the asset name). Here the signed annotation is the misleading one, which is worse than silence: #175 measured a GLIBC_2.39 floor that makes the layer unusable on RHEL 9, Debian 12, Alpine and distroless, and a consumer reading the manifest would conclude that floor applies to payloads which in fact have none.
+
+      Clauses:
+
+      (1) A payload's libc requirement shall be MEASURED from the deposited bytes, never declared by hand and never inferred from a file name. The ELF program headers are the source: PT_INTERP names the interpreter, and that string is the floor.
+
+      (2) The measurement shall be recorded in the SIGNED manifest, beside the platform annotation and never instead of it — the platform remains the slot a consumer resolves by, and this states what the bytes in that slot actually need.
+
+      (3) An unrecognised interpreter shall be recorded VERBATIM rather than rounded to a known libc. An interpreter varve does not recognise is a fact the operator should see before signing.
+
+      (4) Where nothing could be measured — a Mach-O, a shebang script, a tree-shaped payload, a truncated file — NO annotation shall be written. Absence of evidence is not a portability guarantee, and recording "static" by default would be a signed claim nobody checked. This is the clause most likely to be implemented wrongly, because defaulting is easier than abstaining.
+
+      (5) Not in scope: changing which asset is ingested, or giving musl its own platform key. Both belong to REQ-LIBCFLOOR-001, which is verified and shipped in v0.39.0 — it made the layer CARRY portable bytes. This requirement makes the layer SAY so, which is the half its own measurement note implies and does not deliver: it measured the floor by reading ELFs on 2026-09-22, and nothing in the signed manifest records what that reading found. This requirement makes the layer state what it carries; it does not change what it carries.
+    tags: [core]
+    fields:
+      category: functional
+      priority: must
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-01T11:01:59Z
+    release: v0.40.0
+    links:
+      - type: traces-to
+        target: REQ-LIBCFLOOR-001

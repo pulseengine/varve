@@ -3225,3 +3225,71 @@ artifacts:
       model: claude-opus-5
       timestamp: 2026-10-01T04:33:24Z
     release: v0.41.0
+
+  - id: VER-LIBCSTATED-001
+    type: verification
+    title: A Linux payload's libc floor is measured from its bytes and signed into the manifest
+    status: verified
+    description: |-
+      REQ-LIBCSTATED-001, clause by clause.
+
+      (1) MEASURED, never inferred. `binfmt::linkage` reads PT_INTERP from the ELF program headers, in the module that already reads the architecture and on the same stated principle — "the header is read. Reading, not executing." Nothing consults the asset name. The producer measures the STAGED bytes, at the point it already reads them for the architecture check, so what is measured is what is deposited.
+
+      (2) Recorded in the SIGNED manifest as `eu.pulseengine.platform.libc`, beside `eu.pulseengine.platform` and never instead of it. Proven end to end rather than only in units, 2026-10-01: two payloads deposited under ONE `x86_64-unknown-linux-gnu` key emerged from the signed manifest as libc='glibc' and libc='static' — the exact pair live layer 2026.10.1 cannot distinguish.
+
+      (3) An unrecognised interpreter is recorded verbatim (`Linkage::Other`), not rounded to a known libc.
+
+      (4) Where nothing is measurable NO annotation is written: a Mach-O, a shebang script, a tree, a truncated file. `an_unmeasurable_payload_records_no_floor` and `an_unmeasurable_payload_is_not_reported_as_static` hold the distinction between None and "static", which is the clause most likely to be got wrong because defaulting is easier than abstaining.
+
+      Surfaced to consumers in `inspect`'s platform cell and in `--format json`.
+
+      EVIDENCE IS REAL BINARIES, not synthesised headers: the first 1 KiB of the ordeal v0.24.0 x86_64 gnu and musl builds from one release. Everything `linkage` reads lies below offset 764, so a prefix carries all of it, and `file(1)` is the independent oracle ("static-pie linked" vs "interpreter /lib64/ld-linux-x86-64.so.2"). The fixtures are REQUIRED, not skipped when absent — a gate that passes because its fixture is missing is the vacuous shape this repo keeps finding.
+
+      NEGATIVE CONTROLS, each confirmed present in the file before the verdict was read: making the interpreter scan never match reddened both real-binary tests; removing `target` from the json reddened the text/json agreement test; flipping `e_phentsize < 56` to `>` reddened both program-header boundary tests.
+
+      THE MUTATION GATE FOUND A REAL HOLE, 2026-10-01. Both fixtures carry e_phentsize exactly 56, so the comparison guarding the program-header stride was invisible to every test and `<` -> `>` survived. That mutant would refuse a legal binary with padded program headers while still accepting a malformed one. Covered now by rebuilding the real fixture's header table at a 64-byte stride.
+
+      FOUND WHILE SURFACING THIS, and fixed here: `--format json` omitted `target` while the text form printed it, against the rule stated in the json emitter's own comment that a machine reading it must see the same facts. The row builder is extracted so the two forms can be compared at all, and a test compares them.
+    tags: [core]
+    fields:
+      method: automated-test
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-01T14:23:57Z
+    release: v0.40.0
+    links:
+      - type: verifies
+        target: REQ-LIBCSTATED-001
+
+  - id: VER-LAYERDIFF-001
+    type: verification
+    title: A consumer can ask what is newer and what would change, without installing either
+    status: verified
+    description: |-
+      REQ-LAYERDIFF-001, clause by clause, with one limitation stated plainly rather than left for a reader to discover.
+
+      (1) `varve outdated` answers whether the realm's line holds a layer newer than the pin, WITHOUT installing. It reads the realm's signed line index through the same `lineindex::check` the install path runs — so the two cannot disagree about what a valid index is — and verifies against the realm's trust root and nothing else. A registry tag listing is never presented as an answer: where the realm publishes no index, the command SAYS SO and reports nothing, because "there is nothing newer" and "I cannot know" are different answers and collapsing them is the failure REQ-INDEXAUTH-001 exists to prevent. `--json` carries an `answerable` flag so a pipeline can tell the two apart without parsing prose.
+
+      THE ORDERING IS NUMERIC, and that is tested because I got it wrong. Measuring a real realm on 2026-10-01 I sorted layer ids as strings, which puts 2026.09.12 before 2026.09.2, and reported a staleness figure wrong by eight layers. `newer_than` is extracted from the command so the comparison is testable without a registry, and the negative control is the string compare itself: it reports 2026.09.2 and 2026.09.9 as newer than 2026.09.12 and the test goes red. An index entry that will not parse is RETURNED rather than dropped, so "I do not understand this entry" cannot become "there is nothing newer".
+
+      (2) `varve diff` diffs two layers by their SIGNED manifests — added, removed, changed in version, each layer of a composition attributed. `delta.rs` is the only producer of delta data (DD-032).
+
+      (3) Offline for two installed layers; an absent side is reported as absent rather than silently fetched.
+
+      (4) Neither command writes: not the pin, not the store, not the anti-rollback mark. There is deliberately no `--update` on `outdated` — asking what would change must never be what changes it.
+
+      (5) The ingestion proof travels into the diff as a FINDING, not a column: `LostProofOfOrigin` and `StoppedRecordingProof` in `delta.rs`.
+
+      THE LIMITATION, which is why the requirement stays `implemented` and not `verified`. Clause 1's useful path has never run against a real realm, because NO realm publishes a signed line index: checked on the live registry 2026-10-01, `ghcr.io/pulseengine/layers` serves 21 layer tags and zero `line-index-*` tags. So `varve outdated` today answers "cannot answer" for every real pin, correctly. The publisher is REQ-POSTDEPOSIT-001 clause 5, tracked as pulseengine-layers#6, whose own blocker (#5) merged 2026-09-07. This is the same shape REQ-INDEXAUTH-001 records in its `no-publisher-2026-09-06` field: a fetch path with no publisher is a check that cannot fire. The command is unit-tested and its refusal path is exercised; its reporting path awaits an index to read.
+    tags: [core]
+    fields:
+      method: automated-test
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-01T14:53:16Z
+    release: v0.40.0
+    links:
+      - type: verifies
+        target: REQ-LAYERDIFF-001

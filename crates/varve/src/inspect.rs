@@ -65,9 +65,18 @@ fn realm_width(rows: &[Row]) -> Option<usize> {
 /// neither half says alone, and a whole extra column would be empty for every
 /// layer that carries no cross-toolchain.
 fn platform_cell(r: &Row) -> String {
-    match &r.target {
-        Some(t) => format!("{} -> {t}", r.platform),
+    // The measured libc goes in the SAME cell, for the same reason the target
+    // does: the platform key is the slot, and what the bytes in it need is the
+    // other half of one fact. Two payloads under one `-unknown-linux-gnu` key
+    // can differ here (REQ-LIBCSTATED-001), and a reader comparing them needs
+    // both side by side rather than in distant columns.
+    let base = match &r.libc {
+        Some(libc) => format!("{} ({libc})", r.platform),
         None => r.platform.clone(),
+    };
+    match &r.target {
+        Some(t) => format!("{base} -> {t}"),
+        None => base,
     }
 }
 
@@ -88,6 +97,15 @@ pub(crate) struct Row {
     /// (REQ-SDKTARGET-001 clause 5). A layer carrying three cross-toolchains
     /// and unable to say which is which is not inspectable.
     pub(crate) target: Option<String>,
+    /// What the payload needs from the host's libc (REQ-LIBCSTATED-001),
+    /// measured from its ELF at deposit. `None` where nothing was measurable
+    /// — reported as absent rather than as `static`, because the layer makes
+    /// no portability claim it did not check.
+    ///
+    /// The platform above is the SLOT; this is what the bytes in it need. Two
+    /// payloads under one `-unknown-linux-gnu` key can differ here, and that
+    /// difference is the whole reason the annotation exists.
+    pub(crate) libc: Option<String>,
     pub(crate) digest: String,
     /// `dispatched` | `held` | `unknown` (the kind annotation is one this
     /// varve does not recognise, so whether it dispatches is not knowable).
@@ -176,6 +194,7 @@ pub(crate) fn rows_of(layers: &[varve_core::compose::ComposedLayer]) -> anyhow::
                 kind,
                 known_kind: parsed.is_ok(),
                 target: e.annotations.get(varve_core::platform::ANN_TARGET).cloned(),
+                libc: e.annotations.get(varve_core::platform::ANN_LIBC).cloned(),
                 platform: e
                     .annotations
                     .get(varve_core::platform::ANN_PLATFORM)
@@ -252,8 +271,8 @@ fn store_of(l: &varve_core::compose::ComposedLayer) -> &Store {
 ///   "host_platform",                          what `present` was decided against
 ///   "composition": [ {"layer","manifest_digest","realm","root"} ],
 ///   "payloads":    [ {"name","version","kind","known_kind","platform",
-///                     "dispatch","ingest_proof","proof_signer","digest",
-///                     "present","layer","realm"} ],
+///                     "target","libc","dispatch","ingest_proof",
+///                     "proof_signer","digest","present","layer","realm"} ],
 ///   "summary": {"payloads","dispatched","held","layers",
 ///               "unverified","unrecorded"}
 /// }
@@ -264,6 +283,51 @@ fn store_of(l: &varve_core::compose::ComposedLayer) -> &Store {
 /// a positive fact (it runs anywhere), not a missing one. `dispatch` is one of
 /// `dispatched` | `held` | `unknown`. `composition` always has at least one
 /// element, the root, flagged `"root": true`.
+/// The `payloads` array of `--format json`, as a value rather than as print
+/// output.
+///
+/// Extracted so a test can compare it against what the text form shows. It
+/// was inline in `print_json`, which meant the only way to check the two
+/// agreed was to read both — and they did not: `target` was printed by the
+/// text cell and absent from the json.
+fn payload_json(rows: &[Row]) -> Vec<serde_json::Value> {
+    rows.iter()
+        .map(|r| {
+            serde_json::json!({
+                "name": r.name,
+                "version": r.version,
+                "kind": r.kind,
+                "known_kind": r.known_kind,
+                "platform": r.platform,
+                // `target` was absent here while the text form printed it,
+                // against this function's own rule two comments below. A
+                // machine could not see which of three cross-toolchains a
+                // payload was, which is the question REQ-SDKTARGET-001
+                // clause 5 exists to answer.
+                "target": r.target,
+                // What the bytes in that platform slot need from the host,
+                // measured at deposit (REQ-LIBCSTATED-001). `null` where
+                // nothing was measurable — never "static" by default.
+                "libc": r.libc,
+                "dispatch": r.dispatch,
+                "ingest_proof": r.ingest_proof,
+                "proof_signer": r.proof_signer,
+                "digest": r.digest,
+                "present": r.present,
+                "layer": r.layer,
+                "realm": r.realm,
+                // The text form prints a documentation block; a machine
+                // reading --format json must be able to see the same facts, or
+                // the two outputs disagree about what the layer contains.
+                "docs_format": r.docs.as_ref().map(|d| &d.format),
+                "docs_entry": r.docs.as_ref().and_then(|d| d.entry.as_ref()),
+                "docs_title": r.docs.as_ref().and_then(|d| d.title.as_ref()),
+                "docs_documents": r.docs.as_ref().and_then(|d| d.documents.as_ref()),
+            })
+        })
+        .collect()
+}
+
 fn print_json(
     target: &crate::ExportTarget,
     layers: &[varve_core::compose::ComposedLayer],
@@ -281,32 +345,7 @@ fn print_json(
             })
         })
         .collect();
-    let payloads: Vec<_> = rows
-        .iter()
-        .map(|r| {
-            serde_json::json!({
-                "name": r.name,
-                "version": r.version,
-                "kind": r.kind,
-                "known_kind": r.known_kind,
-                "platform": r.platform,
-                "dispatch": r.dispatch,
-                "ingest_proof": r.ingest_proof,
-                "proof_signer": r.proof_signer,
-                "digest": r.digest,
-                "present": r.present,
-                "layer": r.layer,
-                "realm": r.realm,
-                // The text form prints a documentation block; a machine
-                // reading --format json must be able to see the same facts, or
-                // the two outputs disagree about what the layer contains.
-                "docs_format": r.docs.as_ref().map(|d| &d.format),
-                "docs_entry": r.docs.as_ref().and_then(|d| d.entry.as_ref()),
-                "docs_title": r.docs.as_ref().and_then(|d| d.title.as_ref()),
-                "docs_documents": r.docs.as_ref().and_then(|d| d.documents.as_ref()),
-            })
-        })
-        .collect();
+    let payloads: Vec<_> = payload_json(rows);
     let doc = serde_json::json!({
         "command": "inspect",
         "layer": target.entry.layer.to_string(),
@@ -573,7 +612,73 @@ mod tests {
             layer: "2026.09.9".into(),
             realm: "t".into(),
             target: None,
+            libc: None,
         }
+    }
+
+    /// Two payloads under ONE platform key, distinguished only by the floor
+    /// their bytes need.
+    ///
+    /// This is the pair layer 2026.10.1 could not tell apart: `ordeal` filed
+    /// under `x86_64-unknown-linux-gnu` from a musl asset, beside a genuinely
+    /// glibc-linked payload in the same slot. If the cell did not carry the
+    /// libc, these two rows would be identical in every visible field.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn one_platform_key_two_floors_are_distinguishable() {
+        let mut glibc = row("needs-glibc", None);
+        glibc.platform = "x86_64-unknown-linux-gnu".into();
+        glibc.libc = Some("glibc".into());
+        let mut portable = row("needs-nothing", None);
+        portable.platform = "x86_64-unknown-linux-gnu".into();
+        portable.libc = Some("static".into());
+
+        let a = platform_cell(&glibc);
+        let b = platform_cell(&portable);
+        assert_ne!(a, b, "the two floors render identically: {a}");
+        assert!(a.contains("glibc"), "{a}");
+        assert!(b.contains("static"), "{b}");
+
+        // Unmeasured stays silent — no "(unknown)", no "(static)".
+        let mut quiet = row("unmeasured", None);
+        quiet.platform = "x86_64-unknown-linux-gnu".into();
+        quiet.libc = None;
+        assert_eq!(platform_cell(&quiet), "x86_64-unknown-linux-gnu");
+    }
+
+    /// The text form and `--format json` must not disagree about what a layer
+    /// contains.
+    ///
+    /// Provoked by a defect: `target` was printed by the text form and ABSENT
+    /// from the json, directly against the rule the json emitter states in its
+    /// own comment. A reader of either output is entitled to the same facts,
+    /// so this checks the json carries every field the row distinguishes
+    /// payloads by rather than trusting that whoever adds the next one
+    /// remembers both places.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn the_json_carries_every_field_the_text_form_distinguishes_by() {
+        let mut r = row("cross", None);
+        r.platform = "x86_64-unknown-linux-gnu".into();
+        r.target = Some("arm-zephyr-eabi".into());
+        r.libc = Some("static".into());
+
+        let json = payload_json(std::slice::from_ref(&r));
+        let one = &json[0];
+        for field in ["platform", "target", "libc"] {
+            assert!(
+                !one[field].is_null(),
+                "json omits `{field}`, which the text cell prints: {one}"
+            );
+        }
+        // And the values agree, not merely exist.
+        assert_eq!(one["target"], "arm-zephyr-eabi");
+        assert_eq!(one["libc"], "static");
+        let cell = platform_cell(&r);
+        assert!(
+            cell.contains("static") && cell.contains("arm-zephyr-eabi"),
+            "{cell}"
+        );
     }
 
     /// Clause 5. Three cross-toolchains for one host are one name, one
