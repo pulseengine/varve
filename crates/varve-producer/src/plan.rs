@@ -656,14 +656,13 @@ mod tests {
         let m = manifest(
             "[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\nversion = \"v0.10.1\"\n\
              layout = \"raw-per-platform\"\nasset = \"wac-cli-%T\"\n\
-             unverified-reason = \"publishes nothing verifiable\"\n",
+             unverified-reason = \"v0.10.1 publishes nothing verifiable\"\n",
         );
         let p = plan(&m, PLATFORMS).expect("plans");
         assert_eq!(p.len(), 2);
-        assert!(
-            p.iter()
-                .all(|x| x.unverified_reason.as_deref() == Some("publishes nothing verifiable"))
-        );
+        assert!(p.iter().all(
+            |x| x.unverified_reason.as_deref() == Some("v0.10.1 publishes nothing verifiable")
+        ));
     }
 
     /// rivet appears as a tool AND an extension from one release. Verifying
@@ -748,7 +747,7 @@ mod tests {
             "[[tool]]\nname = \"probe\"\nrepo = \"acme/hub\"\nbinary = \"probed\"\n\
              version = \"1.2.3\"\nrelease = \"v9.9.9\"\n\
              asset = \"probe-%V-%T.bin\"\nlayout = \"raw-per-platform\"\n\
-             unverified-reason = \"upstream publishes nothing\"\n\
+             unverified-reason = \"v9.9.9 upstream publishes nothing\"\n\
              upstream-sums = \"sha256.sum\"\n",
         );
         let p = plan(&m, PLATFORMS).expect("plans");
@@ -762,7 +761,7 @@ mod tests {
         assert_eq!(f.kind, PayloadKind::RawPerPlatform, "`layout` is inert");
         assert_eq!(
             f.unverified_reason.as_deref(),
-            Some("upstream publishes nothing"),
+            Some("v9.9.9 upstream publishes nothing"),
             "`unverified-reason` is inert"
         );
         assert_eq!(

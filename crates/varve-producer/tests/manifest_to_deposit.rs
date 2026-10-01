@@ -381,7 +381,7 @@ name    = "wac"
 repo    = "bytecodealliance/wac"
 version = "v0.11.0"
 asset   = "wac-%V.tar.gz"
-unverified-reason = "publishes neither cosign-signed sums nor build provenance (measured 2026-09-18)"
+unverified-reason = "wac v0.11.0 publishes neither cosign-signed sums nor build provenance (measured 2026-09-18)"
 "#;
 
     let tmp = tempfile::tempdir().unwrap();
