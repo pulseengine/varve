@@ -4435,7 +4435,7 @@ artifacts:
   - id: REQ-LAYERDIFF-001
     type: requirement
     title: A consumer can ask whether a newer layer exists, and what changing to it would change
-    status: implemented
+    status: verified
     description: |-
       Two questions a pinned consumer asks that varve answers badly or not at all.
 
