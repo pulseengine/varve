@@ -337,6 +337,38 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
+    /// Compose a WIT package and its dependencies out of the layer
+    /// (REQ-WIT-001 clause 3).
+    ///
+    /// A layer carries WIT packages FLAT, one per `namespace:name@version`.
+    /// This writes the one you name plus its transitive closure into the
+    /// layout `wkg`'s local backend reads — `<ns>/<name>/<version>.wasm` —
+    /// so the bytes you build against are the bytes varve verified, copied
+    /// and not re-encoded.
+    ///
+    /// Offline. A dependency the layer does not carry is a refusal naming it,
+    /// never a partial tree: a tree missing one package fails later, inside
+    /// another tool, with an error about an interface.
+    ExportWit {
+        /// Layer to export from, e.g. `2026.09.0`. Defaults to the resolved
+        /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
+        #[arg(long)]
+        layer: Option<String>,
+        /// Output directory. This is the `root` a `wkg` local registry points
+        /// at.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// The package to treat as top level, as `namespace:name@version`.
+        /// Its dependencies come with it; naming a dependency directly is
+        /// legal and exports the smaller closure.
+        #[arg(long, value_name = "NS:NAME@VER")]
+        package: String,
+        /// Print the `wkg` configuration stanza for this tree, under this
+        /// registry name. The stanza is printed for you to place; varve does
+        /// not edit your tool configuration.
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+    },
     /// Unpack and RELOCATE the layer's verified `sdk` tree into a directory
     /// you can source (REQ-SDK-001 clause 3). The store keeps the archive
     /// exactly as its producer signed it; the usable tree lives here, with the
@@ -781,6 +813,18 @@ fn run() -> anyhow::Result<Outcome> {
             &out,
             select.as_deref(),
             for_payload.as_deref(),
+        ),
+        Cmd::ExportWit {
+            layer,
+            out,
+            package,
+            registry,
+        } => export_wit(
+            &store,
+            layer.as_deref(),
+            &out,
+            &package,
+            registry.as_deref(),
         ),
         Cmd::ExportSdk { layer, out, select } => {
             export_sdk(&store, layer.as_deref(), &out, select.as_deref())
@@ -2616,6 +2660,76 @@ fn export_vsix(store: &Store, layer: Option<&str>, out: &std::path::Path) -> any
         );
     }
     write_export_stamp(out, &target.entry, "vsix")?;
+    Ok(())
+}
+
+/// `varve export-wit` — compose a WIT package and its dependencies.
+///
+/// REQ-WIT-001 clause 3. The layer carries WIT packages flat, one per
+/// `namespace:name@version`; this writes the one asked for plus its
+/// transitive closure into the layout `wkg`'s local backend reads. Offline:
+/// every package comes from the verified store.
+fn export_wit(
+    store: &Store,
+    layer: Option<&str>,
+    out: &std::path::Path,
+    package: &str,
+    registry: Option<&str>,
+) -> anyhow::Result<()> {
+    use varve_core::witclosure::{PackageIdent, PackageIndex};
+
+    let target = export_target(store, layer)?;
+    let layers = composition_for_export(&target)?;
+    report_composition(&layers);
+    let out = &absolute_export_dir(out)?;
+
+    let root: PackageIdent = package
+        .parse()
+        .map_err(|e: varve_core::witclosure::WitClosureError| anyhow::anyhow!(e.to_string()))?;
+
+    // Index every `wit` payload the composition offers, keyed by the identity
+    // in its OWN BYTES rather than by the name the manifest gave it — the
+    // package says what it is, and a manifest that disagrees is the thing
+    // worth catching, not worth trusting.
+    let payloads = collect_verified_payloads(&layers, varve_core::PayloadKind::Wit)?;
+    let mut index = PackageIndex::new();
+    let mut bytes_by_ident: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
+    for p in &payloads {
+        let ident = index
+            .insert_binary(&p.bytes)
+            .map_err(|e| anyhow::anyhow!("payload '{}': {e}", p.name))?;
+        bytes_by_ident.insert(ident.as_str().to_string(), p.bytes.clone());
+    }
+    if index.is_empty() {
+        anyhow::bail!(
+            "this layer carries no `wit` payload, so there is nothing to compose — \
+             `varve inspect` lists what it does carry"
+        );
+    }
+
+    let closure = varve_core::witclosure::closure(&index, &root)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let report = varve_core::witexport::export(&closure, &root, out, &|i: &PackageIdent| {
+        bytes_by_ident.get(i.as_str()).cloned()
+    })
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    println!(
+        "exported {} package(s) for {} to {}",
+        report.written.len(),
+        report.root,
+        out.display()
+    );
+    for w in &report.written {
+        println!("  {w}");
+    }
+    // The stanza is PRINTED, never written: varve does not edit a consumer's
+    // tool configuration, and the registry name is theirs because it is what
+    // their wkg.toml or build rule already refers to.
+    if let Some(reg) = registry {
+        println!("\nwkg configuration for this tree — add to your wkg config:\n");
+        print!("{}", varve_core::witexport::wkg_stanza(reg, out));
+    }
     Ok(())
 }
 
@@ -4594,6 +4708,47 @@ mod cli_contract_tests {
             })
             .map(|c| c.get_name().to_string())
             .collect()
+    }
+
+    /// Every subcommand says what it does, in its OWN words.
+    ///
+    /// Provoked by a defect, not by a principle: `ExportWit` was pasted into
+    /// the middle of `ExportSdk`'s doc comment, so `export-wit --help`
+    /// described SDK relocation and `export-sdk --help` was blank. Every gate
+    /// in the repo stayed green — the docs gate checks that a TOPIC exists,
+    /// which it did, and clap does not mind an undocumented variant.
+    ///
+    /// Blank is the signature of the mistake: a stolen doc comment leaves the
+    /// item it was taken from with nothing. That makes this cheap to check and
+    /// impossible to drift, which a list of expected help strings would not be.
+    // rivet: verifies REQ-DOCS-001
+    #[test]
+    fn every_subcommand_says_what_it_does() {
+        let cmd = super::Cli::command();
+        let mut silent: Vec<&str> = Vec::new();
+        let mut n = 0;
+        for sub in cmd.get_subcommands() {
+            n += 1;
+            let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+            let long = sub
+                .get_long_about()
+                .map(|a| a.to_string())
+                .unwrap_or_default();
+            if about.trim().is_empty() && long.trim().is_empty() {
+                silent.push(sub.get_name());
+            }
+        }
+        assert!(
+            n >= 20,
+            "the subcommand enumeration found {n} — if clap's shape changed this \
+             test is measuring nothing"
+        );
+        assert!(
+            silent.is_empty(),
+            "subcommand(s) {silent:?} have no help text at all. The usual cause is \
+             a new variant pasted INSIDE the previous one's doc comment, which \
+             also gives the new command the wrong description — check both."
+        );
     }
 
     // rivet: verifies REQ-CIGATE-001

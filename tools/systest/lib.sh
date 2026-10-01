@@ -195,19 +195,67 @@ systest_build_varve() {
   "$VARVE" --version
 }
 
-# Deposit varve's own Cargo.lock as a layer and pin a project on it.
+# Sign a deposit spec into a layer and pin a project on it.
+#
+# Everything a gate needs after it has WRITTEN a spec, and nothing about where
+# the spec came from: keygen, deposit, the baseline line-status, the pinned
+# consumer project, the environment. It was extracted from `systest_make_layer`
+# when the `export-wit` gate needed the same dance around a different spec — a
+# second copy would have been a second thing to keep in step with
+# deposit-layer.yml, which is the defect shape this repo keeps finding.
+#
+# Arguments: work-dir, spec path, layer, and a key-id suffix so two layers
+# signed into the same work dir do not overwrite each other's key.
 #
 # On return:
-#   $WORK/layout          the signed oci-layout (baseline line-status attached)
-#   $WORK/root.pub        the trust root the layer verifies against
-#   $WORK/project         a directory whose varve.toml pins $LAYER
-#   VARVE_ROOT, VARVE_TRUST_ROOT exported for the varve invocations that follow
+#   $work/<pfx>layout     the signed oci-layout (baseline line-status attached)
+#   $work/<pfx>root.pub   the trust root the layer verifies against
+#   $work/<pfx>project    a directory whose varve.toml pins the layer
+#   LAYOUT, PROJECT set; VARVE_ROOT, VARVE_TRUST_ROOT exported
+systest_sign_spec_and_pin() { # work spec layer [prefix]
+  local work="$1" spec="$2" layer="$3" pfx="${4:-}"
+  local line="${layer%.*}"
+  local issued_at support_until
+  issued_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  LAYOUT="$work/${pfx}layout"
+  PROJECT="$work/${pfx}project"
+
+  "$VARVE" keygen --out "$work/${pfx}root.key" --pub "$work/${pfx}root.pub"
+  "$VARVE" deposit \
+    --spec "$spec" \
+    --issued-at "$issued_at" \
+    --key "$work/${pfx}root.key" --key-id systest-root-1 \
+    --out "$LAYOUT"
+
+  # A baseline line-status, exactly as deposit-layer.yml attaches one: the
+  # registry push recipe reads it, and `varve status` works after install.
+  # REQ-SUPPORTUNTIL-001: derived, exactly as deposit-layer.yml does it.
+  # `sign-status` refuses a document with no support window.
+  support_until="$("$VARVE" support-horizon --channel rolling --issued-at "$issued_at")"
+  printf '{"line":"%s","counter":1,"issued-at":"%s","support-until":"%s"}\n' \
+    "$line" "$issued_at" "$support_until" > "$work/${pfx}baseline-status.json"
+  "$VARVE" sign-status \
+    --file "$work/${pfx}baseline-status.json" \
+    --key "$work/${pfx}root.key" --key-id systest-root-1 \
+    --out "$work/${pfx}baseline-status.dsse.json"
+  "$VARVE" attach-status --layout "$LAYOUT" --status "$work/${pfx}baseline-status.dsse.json"
+
+  mkdir -p "$PROJECT"
+  printf 'manifest-version = 1\n[toolchain]\nchannel = "rolling"\nlayer = "%s"\n' \
+    "$layer" > "$PROJECT/varve.toml"
+
+  export VARVE_ROOT="$work/${pfx}varve-root"
+  export VARVE_TRUST_ROOT="$work/${pfx}root.pub"
+}
+
+# Deposit varve's own Cargo.lock as a layer and pin a project on it.
+#
+# On return: as `systest_sign_spec_and_pin` with no prefix — $work/layout,
+# $work/root.pub, $work/project, VARVE_ROOT, VARVE_TRUST_ROOT, and $LAYER.
 systest_make_layer() {
   local repo="$1" work="$2"
   LAYER="${VARVE_SYSTEST_LAYER:-2026.08.0}"
-  local line="${LAYER%.*}"
-  local issued_at
-  issued_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   # Populate the real cargo cache with every .crate the lock pins. This is
   # the ONLY network step; everything downstream must hold offline.
@@ -219,31 +267,5 @@ systest_make_layer() {
     --layer "$LAYER" --channel rolling --counter 1 \
     --out "$work/deposit-spec.toml"
 
-  "$VARVE" keygen --out "$work/root.key" --pub "$work/root.pub"
-  "$VARVE" deposit \
-    --spec "$work/deposit-spec.toml" \
-    --issued-at "$issued_at" \
-    --key "$work/root.key" --key-id systest-root-1 \
-    --out "$work/layout"
-
-  # A baseline line-status, exactly as deposit-layer.yml attaches one: the
-  # registry push recipe reads it, and `varve status` works after install.
-  # REQ-SUPPORTUNTIL-001: derived, exactly as deposit-layer.yml does it.
-  # `sign-status` refuses a document with no support window.
-  local support_until
-  support_until="$("$VARVE" support-horizon --channel rolling --issued-at "$issued_at")"
-  printf '{"line":"%s","counter":1,"issued-at":"%s","support-until":"%s"}\n' \
-    "$line" "$issued_at" "$support_until" > "$work/baseline-status.json"
-  "$VARVE" sign-status \
-    --file "$work/baseline-status.json" \
-    --key "$work/root.key" --key-id systest-root-1 \
-    --out "$work/baseline-status.dsse.json"
-  "$VARVE" attach-status --layout "$work/layout" --status "$work/baseline-status.dsse.json"
-
-  mkdir -p "$work/project"
-  printf 'manifest-version = 1\n[toolchain]\nchannel = "rolling"\nlayer = "%s"\n' \
-    "$LAYER" > "$work/project/varve.toml"
-
-  export VARVE_ROOT="$work/varve-root"
-  export VARVE_TRUST_ROOT="$work/root.pub"
+  systest_sign_spec_and_pin "$work" "$work/deposit-spec.toml" "$LAYER"
 }

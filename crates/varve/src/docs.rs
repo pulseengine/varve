@@ -266,6 +266,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "cmd-export-docs.md"
     ),
     topic!(
+        "export-wit",
+        "export-wit — compose a WIT package and its dependencies",
+        "cmd-export-wit.md"
+    ),
+    topic!(
         "export-sdk",
         "export-sdk — a relocated, sourceable SDK tree",
         "cmd-export-sdk.md"
@@ -1343,20 +1348,17 @@ mod tests {
             .collect();
         let mut unclassified: Vec<String> = Vec::new();
         for (lang, block) in blocks {
-            // Only `toml` needs a marker to reach a parser. Every `json`
-            // block now reaches one by construction — the typed arms first,
-            // then a catch-all that at minimum requires valid json — so
-            // listing json here would report a block that IS parsed as one
-            // that is not.
-            if lang.as_str() == "toml" {
-                let recognised = block.contains("[toolchain]")
-                    || block.contains("[realm.")
-                    || block.contains("[[tool]]")
-                    || block.contains("[tool.runner]");
-                if !recognised {
-                    unclassified.push(block.lines().next().unwrap_or("").trim().to_string());
-                }
-            }
+            // Whether a block reached a parser is read from the MATCH BELOW,
+            // by whether it incremented `checked` — not from a second list of
+            // markers kept beside it. That list was the shape this repo keeps
+            // finding: two places deciding one thing. It already lacked
+            // `[registry.`, so a documented wkg stanza was reported
+            // unclassified while the arm that checks it ran.
+            //
+            // Only `toml` needs the guard. Every `json` block reaches a parser
+            // by construction — the typed arms first, then a catch-all that at
+            // minimum requires valid json.
+            let before = checked;
             match lang.as_str() {
                 // `[toolchain]`, NOT `manifest-version`: a review appended a
                 // varve.toml example MISSING manifest-version — the exact
@@ -1412,6 +1414,48 @@ mod tests {
                         .expect("the documented deposit spec must parse");
                     checked += 1;
                 }
+                // A FOREIGN tool's config — `wkg`'s, not varve's — so there
+                // is no varve parser to feed it to. Checking it is valid TOML
+                // would be the weak version: the way this example goes wrong
+                // is by drifting from the stanza varve actually PRINTS, and a
+                // consumer pasting a stanza varve no longer emits gets a
+                // registry that resolves nothing. So it is checked against the
+                // function that emits it — a differential oracle, not an
+                // instance test.
+                "toml" if block.contains("[registry.") => {
+                    let reg = block
+                        .split_once("[registry.\"")
+                        .and_then(|(_, r)| r.split_once("\".local]"))
+                        .map(|(name, _)| name)
+                        .expect("a documented wkg stanza must name a registry");
+                    let root = block
+                        .split_once("root = \"")
+                        .and_then(|(_, r)| r.split_once('"'))
+                        .map(|(path, _)| path)
+                        .expect("a documented wkg stanza must name a root");
+                    // Compare the TEMPLATE, not the rendered text. Feeding
+                    // the block's own values back into `wkg_stanza` and
+                    // comparing the result would pass for any block of this
+                    // shape, which a negative control caught it doing. With
+                    // the two values blanked out on both sides, a change to
+                    // the key path, the field name, the quoting or the order
+                    // fails — which is the drift that strands a consumer.
+                    let probe = varve_core::witexport::wkg_stanza(
+                        "\u{1}REG\u{1}",
+                        std::path::Path::new("\u{1}ROOT\u{1}"),
+                    );
+                    let documented = block
+                        .replace(reg, "\u{1}REG\u{1}")
+                        .replace(root, "\u{1}ROOT\u{1}");
+                    assert_eq!(
+                        probe.trim(),
+                        documented.trim(),
+                        "the documented wkg stanza has a different SHAPE from what \
+                         `wkg_stanza` prints — a consumer pasting it would configure \
+                         a registry that resolves nothing"
+                    );
+                    checked += 1;
+                }
                 "json" if block.contains("\"line\"") => {
                     serde_json::from_str::<varve_core::linestatus::LineStatus>(&block)
                         .expect("the documented line-status document must parse");
@@ -1429,6 +1473,9 @@ mod tests {
                     checked += 1;
                 }
                 _ => {}
+            }
+            if lang.as_str() == "toml" && checked == before {
+                unclassified.push(block.lines().next().unwrap_or("").trim().to_string());
             }
         }
         let _ = std::fs::remove_dir_all(&tmp);
