@@ -360,6 +360,67 @@ mod tests {
         assert_eq!(super::linkage(&elf32), None, "ELF32");
     }
 
+    /// `e_phentsize` is a SIZE, not a magic number: 56 is the ELF64 minimum,
+    /// and a loader-legal file may use a larger one.
+    ///
+    /// Both real fixtures carry exactly 56, so the comparison in `linkage` was
+    /// invisible to every test — the mutation gate caught `<` flipped to `>`
+    /// surviving, which would refuse a legal binary with padded program
+    /// headers while still accepting a malformed one. The table is rebuilt at
+    /// the wider stride from the REAL fixture's own headers, so only the
+    /// stride differs from a file that is known to measure correctly.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn a_program_header_larger_than_the_minimum_is_still_measured() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/libc");
+        let real = std::fs::read(dir.join("ordeal-gnu.elfhead")).expect("fixture");
+        assert_eq!(
+            super::linkage(&real),
+            Some(super::Linkage::Glibc),
+            "the unmodified fixture must measure, or this test proves nothing"
+        );
+
+        let phoff = u64::from_le_bytes(real[32..40].try_into().unwrap()) as usize;
+        let phentsize = u16::from_le_bytes(real[54..56].try_into().unwrap()) as usize;
+        let phnum = u16::from_le_bytes(real[56..58].try_into().unwrap()) as usize;
+        assert_eq!(phentsize, 56, "fixture assumption: the ELF64 minimum");
+
+        // Re-emit the same program headers at a 64-byte stride, appended past
+        // the original content so every `p_offset` still resolves.
+        const WIDE: usize = 64;
+        let mut wide = real.clone();
+        let new_phoff = wide.len();
+        for i in 0..phnum {
+            let entry = &real[phoff + i * phentsize..phoff + (i + 1) * phentsize];
+            wide.extend_from_slice(entry);
+            wide.extend_from_slice(&[0u8; WIDE - 56]);
+        }
+        wide[32..40].copy_from_slice(&(new_phoff as u64).to_le_bytes());
+        wide[54..56].copy_from_slice(&(WIDE as u16).to_le_bytes());
+
+        assert_eq!(
+            super::linkage(&wide),
+            Some(super::Linkage::Glibc),
+            "a 64-byte program header entry is legal and must still be read"
+        );
+    }
+
+    /// An `e_phentsize` too small to hold an ELF64 program header is
+    /// malformed, and measuring it would mean parsing at a stride the file
+    /// does not use.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn a_program_header_too_small_to_hold_one_is_not_measured() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/libc");
+        let mut bytes = std::fs::read(dir.join("ordeal-gnu.elfhead")).expect("fixture");
+        bytes[54..56].copy_from_slice(&32u16.to_le_bytes());
+        assert_eq!(
+            super::linkage(&bytes),
+            None,
+            "a 32-byte program header cannot hold an ELF64 one"
+        );
+    }
+
     /// A musl interpreter is recognised as musl, not rounded to glibc.
     ///
     /// Built by rewriting the REAL gnu fixture's `PT_INTERP` string, so the

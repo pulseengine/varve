@@ -353,6 +353,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "cmd-diff.md"
     ),
     topic!("docs", "docs — this documentation", "cmd-docs.md"),
+    topic!(
+        "outdated",
+        "outdated — is there a newer layer for this line?",
+        "cmd-outdated.md"
+    ),
     Topic {
         slug: "inspect",
         title: "inspect — what is actually in this layer",

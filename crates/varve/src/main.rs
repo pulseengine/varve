@@ -60,6 +60,20 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Is there a newer layer for this line? (CI)
+    ///
+    /// Answered from the realm's SIGNED line index and from nothing else. A
+    /// registry's tag listing would answer faster and is refused: a host that
+    /// HIDES a layer serves nothing that fails verification, so a listing
+    /// cannot tell "there is nothing newer" from "I am not telling you".
+    /// Where the realm publishes no index this says so rather than guessing.
+    ///
+    /// Changes nothing — not the pin, not the store, not the rollback mark.
+    Outdated {
+        /// Machine-readable result on stdout (REQ-CIGATE-001).
+        #[arg(long)]
+        json: bool,
+    },
     /// What changing from one installed layer to another would change (CI).
     ///
     /// A transcription, never a judgement: both manifests are signed, and this
@@ -960,6 +974,7 @@ fn run() -> anyhow::Result<Outcome> {
             Ok(())
         }
         Cmd::Inspect { layer, json } => inspect::run(&store, layer.as_deref(), json),
+        Cmd::Outdated { json } => outdated(&store, json),
         Cmd::Diff { from, to, json } => diff::run(&store, &from, &to, json),
     }?;
     Ok(outcome)
@@ -3420,6 +3435,148 @@ fn fetch_included_layer(
     store
         .get(&outcome.digest)?
         .context("the fetched layer is not in the store it was installed into")
+}
+
+/// `varve outdated` — REQ-LAYERDIFF-001 clause 1.
+///
+/// Does this realm's line hold a layer newer than the one pinned here? The
+/// signal existed only as a line printed while INSTALLING, which is no use to
+/// a consumer who does not want to install: they re-ran an install they did
+/// not want, or read `varve status`, which answers a different question.
+///
+/// THE ANSWER COMES FROM THE SIGNED INDEX AND FROM NOTHING ELSE. A registry's
+/// `/tags/list` would be easier and is refused: a host that HIDES a layer
+/// serves nothing that fails verification, so an unauthenticated listing
+/// cannot distinguish "there is nothing newer" from "I am not telling you"
+/// (REQ-INDEXAUTH-001). Where the realm publishes no index this says so
+/// plainly and reports nothing, because "no newer layer" and "I cannot know"
+/// are different answers and collapsing them is the whole failure.
+///
+/// Nothing is written: not the pin, not the store, not the high-water mark.
+/// Asking what would change must never be what changes it (clause 4).
+fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
+    // The fetch methods are on the source TRAIT, not the concrete registry.
+    use varve_core::LayerSource;
+    let ctx = project_ctx(store)?;
+    let pinned = &ctx.pin.layer;
+    let line = pinned.line().to_string();
+
+    // A realmless pin has no root that could have signed an index, so there is
+    // nothing to verify against and nothing that could be hidden from a check
+    // that cannot exist. Said, not guessed at.
+    let Some(realm) = ctx.realm.as_ref() else {
+        let msg = "this pin names no realm, so no trust root could have signed a line index \
+                   — add a realm to the pin and this can be answered";
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                "command": "outdated",
+                "line": line,
+                "pinned": pinned.to_string(),
+                "answerable": false,
+                "reason": "no-realm",
+                "detail": msg,
+                }))
+                .expect("report serialises")
+            );
+        } else {
+            println!("cannot answer: {msg}");
+        }
+        return Ok(());
+    };
+
+    let source = varve_core::RegistrySource::parse(&realm.registry)?;
+    let envelope = source.fetch_line_index(&line)?;
+    let served = source.served_layers(&line)?;
+    let cached = varve_core::IndexCache::at_root(ctx.store.root()).load(&line)?;
+    let policy = varve_core::IndexPolicy {
+        realm: &realm.name,
+        root_public_key: &realm.trust_root,
+        required: realm.signed_index,
+    };
+    // The same `check` the install path runs, so the two cannot disagree about
+    // what a valid index is. It verifies against the realm root, refuses a
+    // counter regression, and reports a layer the source declines to serve.
+    let verified = varve_core::lineindex::check(
+        &line,
+        envelope.as_deref(),
+        served.as_deref(),
+        cached.as_ref(),
+        &policy,
+    )?;
+
+    let Some(index) = verified else {
+        let msg = format!(
+            "realm '{}' publishes no signed line index for {line}, so whether a newer layer \
+             exists cannot be established. A tag listing would answer, and is refused: a \
+             registry that hides a layer is undetectable that way (see `varve docs \
+             attach-index`)",
+            realm.name
+        );
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                "command": "outdated",
+                "realm": realm.name,
+                "line": line,
+                "pinned": pinned.to_string(),
+                "answerable": false,
+                "reason": "no-signed-index",
+                "detail": msg,
+                }))
+                .expect("report serialises")
+            );
+        } else {
+            println!("cannot answer: {msg}");
+        }
+        return Ok(());
+    };
+
+    let (newer, unparseable) = index.newer_than(pinned);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+            "command": "outdated",
+            "realm": realm.name,
+            "line": line,
+            "pinned": pinned.to_string(),
+            "answerable": true,
+            "index_counter": index.counter,
+            "newer": newer.iter().map(|l| serde_json::json!({
+                "layer": l.layer,
+                "digest": l.digest,
+                "channel": l.channel,
+            })).collect::<Vec<_>>(),
+            "unparseable": unparseable,
+            }))
+            .expect("report serialises")
+        );
+    } else if newer.is_empty() {
+        println!(
+            "{} is the newest layer realm '{}' has signed for line {line} (index #{})",
+            pinned, realm.name, index.counter
+        );
+    } else {
+        println!(
+            "{} newer layer(s) for line {line}, signed by realm '{}' (index #{}):",
+            newer.len(),
+            realm.name,
+            index.counter
+        );
+        for l in &newer {
+            println!("  {} {} {}", l.layer, l.channel, l.digest);
+        }
+        println!("\n`varve diff --to <layer>` shows what changing would change.");
+        println!("Nothing here changed the pin or the store.");
+    }
+    for u in &unparseable {
+        eprintln!("note: the index names {u:?}, which this varve cannot order");
+    }
+    Ok(())
 }
 
 fn install(

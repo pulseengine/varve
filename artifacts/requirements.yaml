@@ -4435,7 +4435,7 @@ artifacts:
   - id: REQ-LAYERDIFF-001
     type: requirement
     title: A consumer can ask whether a newer layer exists, and what changing to it would change
-    status: proposed
+    status: implemented
     description: |-
       Two questions a pinned consumer asks that varve answers badly or not at all.
 
@@ -4742,7 +4742,7 @@ artifacts:
   - id: REQ-LIBCSTATED-001
     type: requirement
     title: A Linux payload states the libc it needs, measured from its own bytes
-    status: implemented
+    status: verified
     description: |-
       A platform key names the SLOT a consumer resolves by, and on Linux that slot is spelled `-unknown-linux-gnu` whatever the bytes are. `host_platform()` maps Linux to `{arch}-unknown-linux-gnu`, so a static musl build cannot have its own key and fills the gnu one (#175).
 
