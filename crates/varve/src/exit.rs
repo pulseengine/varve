@@ -344,6 +344,7 @@ mod tests {
             "tools/systest/selfhost.sh",
             "tools/systest/deposit-layer.sh",
             "tools/systest/oci-roundtrip.sh",
+            "tools/systest/wit-export.sh",
             ".github/workflows/systest.yml",
         ] {
             gate_text.push_str(&std::fs::read_to_string(root.join(rel)).unwrap_or_default());
@@ -354,10 +355,9 @@ mod tests {
              report every adapter as uncovered, which is a different lie"
         );
 
-        // Longest-name-first, so `export-bazel` does not match inside
-        // `export-bazel-distdir` and report it covered when it is not.
-        let mut by_len = adapters.clone();
-        by_len.sort_by_key(|a| std::cmp::Reverse(a.len()));
+        // `export-bazel` must not match inside `export-bazel-distdir` and
+        // report it covered when it is not, so a match counts only when the
+        // character after it cannot continue an adapter name.
         let uncovered: std::collections::BTreeSet<String> = adapters
             .iter()
             .filter(|a| {

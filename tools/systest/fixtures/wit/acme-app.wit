@@ -1,0 +1,10 @@
+package acme:app@0.3.0;
+
+interface run {
+  use acme:base/clock@2.0.0.{instant};
+  go: func() -> instant;
+}
+
+world app {
+  export run;
+}

@@ -3198,3 +3198,30 @@ artifacts:
       model: claude-opus-5
       timestamp: 2026-09-18T17:43:05Z
     release: v0.37.0
+
+  - id: VER-WIT-001
+    type: verification
+    title: A flat WIT layer composes into the layout wkg reads, with the bytes untouched
+    status: verified
+    description: |-
+      REQ-WIT-001 clauses 3 and 4, exercised as a system rather than as units. tools/systest/wit-export.sh deposits two separately-encoded binary WIT packages as kind="wit" payloads (acme:base@2.0.0 and acme:app@0.3.0, the latter importing the former), signs them, installs, verifies, and runs `varve export-wit --package acme:app@0.3.0`.
+
+      WHAT ONLY A SYSTEM RUN SHOWS. The unit tests in witclosure.rs and witexport.rs index packages from bytes handed to them directly. Here the bytes cross deposit, signing, an OCI layout, install and verification before anything decodes them, and the gate asserts they come out BYTE-IDENTICAL to the deposited fixtures — the "copy, not a conversion" claim of DD-036, which is what makes the digest in the layer and the digest on disk the same number. Clause 3 proper: the command is asked for ONE package and must write acme:base beside it, because the app's own signed bytes say it imports it; no list in the manifest is consulted.
+
+      Clause 4 has two controls, both refusals. A package the layer does not carry is refused (RootMissing). A second layer carrying the app but NOT its dependency is refused BY NAME and writes nothing at all — the case that matters, because a tree one package short parses far enough to fail inside wit-bindgen with a message about an interface, and the operator then debugs their WIT instead of their layer.
+
+      THE GATE ITSELF WAS NEGATIVE-CONTROLLED, 2026-10-01: `witclosure::closure` was mutated to return only the root, the mutation was confirmed present in the rebuilt binary ("exported 1 package(s)"), and the gate went red on "the dependency was NOT written". Run locally the same day, PASS end to end.
+
+      NOT COVERED HERE. The producer cannot yet PLAN a wit payload — the assembler mines releases for binaries, and the spec for this gate is written by hand, as gen-crate-deposit-spec.py does for crates. Clause 5 (how a composed tree is reached — copy or link) is REQ-WITREACH-001 and DD-036, deferred to v0.44.0.
+    tags: [system-test]
+    fields:
+      method: automated-test
+      steps: "- run: grep -q \"wit-export.sh\" .github/workflows/systest.yml\n- run: grep -q \"export-wit --package\" tools/systest/wit-export.sh\n- run: grep -q \"byte-identical\" tools/systest/wit-export.sh\n- run: grep -q \"negative control\" tools/systest/wit-export.sh\n- run: bash -n tools/systest/wit-export.sh\n- run: test -f tools/systest/fixtures/wit/acme-app-0.3.0.wasm\n- run: test -f tools/systest/fixtures/wit/acme-base-2.0.0.wasm\n- run: grep -q \"tools/systest/wit-export.sh\" crates/varve/src/exit.rs"
+    links:
+      - type: verifies
+        target: REQ-WIT-001
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-01T04:33:24Z
+    release: v0.41.0

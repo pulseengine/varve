@@ -4684,7 +4684,7 @@ artifacts:
   - id: REQ-WIT-001
     type: requirement
     title: A layer carries WIT packages flat, and composes a dependency tree only when one is asked for
-    status: proposed
+    status: implemented
     description: |-
       `kind = "wit"` has existed since REQ-KIND-001 as a name: it parses, sorts, is HELD rather than dispatched, and `inspect` reports it. Nothing consumes it, no layer carries one, and the kind was added before anything did — so what a `wit` payload IS was never decided.
 
@@ -4718,7 +4718,7 @@ artifacts:
 
       THE FORM IS THE BINARY PACKAGE: `<namespace>/<name>/<version>.wasm`, byte-identical to what `wkg`'s local backend reads. Two consequences make it the right unit. The later link is then a genuine POINTER rather than a disguised export — wkg reads the store as it stands. And our digest is the same digest the ecosystem pins, so "this is wasi:io@0.2.0" means the same thing inside and outside the layer, which a re-encoded copy could not guarantee.
 
-      WHAT THIS COSTS, AND IT IS NOT NOTHING. What varve signs is compiled. `inspect` shows a hash of bytes no human reads, in a product whose argument is that a consumer can audit what they were given. The mitigation is that decoding is mechanical and one command away, and that the export path emits WIT text — but comments and formatting do not survive the round trip, so the signed artifact is not the authored artifact. That is a real reduction in auditability, taken deliberately.
+      WHAT THIS COSTS, AND IT IS NOT NOTHING. What varve signs is compiled. `inspect` shows a hash of bytes no human reads, in a product whose argument is that a consumer can audit what they were given. The mitigation is that decoding is mechanical and one command away: `wasm-tools component wit <file>`, and `wasm-tools` is in the realm. CORRECTED 2026-10-01, when `export-wit` shipped: this decision also said the export path emits WIT text, and it does not. Printing text needs an ENCODER in the production path — `wit-parser` 0.259 carries no printer, `wit-component` does — which would widen the trusted base to produce a form varve does not sign: an export adapter wearing a parser’s name. The decoding dependency is deliberately read-only (see the comment on it in crates/varve-core/Cargo.toml). The auditability cost therefore stands undiminished by anything varve emits, and is taken anyway. A SECOND consequence follows and is tracked on #220 rather than settled here: three of the five consumers that spike measured — wit-bindgen, cargo-component, and the vendored rules_wasm_component path — want a `wit/` SOURCE tree, which this export does not produce. They decode with wasm-tools, which is in the realm. Whether varve should emit the text itself is a dependency decision (`WitPrinter` lives in wit-component, adding wasm-encoder and wasm-metadata to the production trusted base) and is open.
 
       EXPORT FIRST, LINK LATER. `export-wit` ships the way every other consumable kind works: it materialises into the project, it is an ARTIFACT OF RECORD that can be committed and handed to an assessor six months later, and it serves wit-bindgen, cargo-component and Bazel's vendored path immediately. A link serves none of those.
 

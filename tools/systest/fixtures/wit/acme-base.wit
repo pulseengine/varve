@@ -1,0 +1,5 @@
+package acme:base@2.0.0;
+
+interface clock {
+  type instant = u64;
+}
