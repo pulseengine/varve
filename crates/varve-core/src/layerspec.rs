@@ -485,6 +485,14 @@ pub enum LayerSpecError {
     UpstreamSumsNotEncodable { tool: String, asset: String },
     /// An opt-in that states no reason.
     UnverifiedWithoutReason { tool: String },
+    /// An opt-in whose reason is about a DIFFERENT release than the one
+    /// pinned (REQ-INGEST-001). The commonest way to get here is a version
+    /// bump that left the justification behind.
+    ReasonIsAboutAnotherRelease {
+        tool: String,
+        pinned: String,
+        reason: String,
+    },
     /// Two tools from one repository disagree about why it is unverified.
     ConflictingReason {
         repo: String,
@@ -599,6 +607,22 @@ impl fmt::Display for LayerSpecError {
                  every consumer reads it. Say why this is acceptable and what \
                  removes the need, or do not carry the tool."
             ),
+            LayerSpecError::ReasonIsAboutAnotherRelease {
+                tool,
+                pinned,
+                reason,
+            } => write!(
+                f,
+                "tool {tool:?} is pinned at {pinned} and its `unverified-reason` \
+                 never mentions {pinned}: {reason:?}\n\nA reason for carrying \
+                 unverified bytes is a MEASUREMENT of one release — who published \
+                 it, what they did not sign, and when that was checked. It does \
+                 not carry forward to the next release by itself, and the usual \
+                 way to arrive here is a scanner bumping the version while the \
+                 justification stayed behind. Re-check {pinned} upstream and say \
+                 what you found; if it now publishes sums or provenance, drop \
+                 the opt-in instead."
+            ),
             LayerSpecError::ConflictingReason {
                 repo,
                 first,
@@ -683,7 +707,81 @@ pub fn parse_layer_manifest(text: &str) -> Result<LayerManifest, LayerSpecError>
     let manifest: LayerManifest =
         toml::from_str(text).map_err(|e| LayerSpecError::Parse(e.to_string()))?;
     check_includes(&manifest.includes)?;
+    check_unverified(&manifest.tools)?;
     Ok(manifest)
+}
+
+/// Every opt-in in the manifest states a current reason, for the release it
+/// is about, and agrees with any other opt-in on the same release.
+///
+/// HERE, not in `assembler_env`, and that distinction is the whole point. The
+/// real deposit path is `varve-producer deposit --manifest layer.toml`, which
+/// reads this manifest directly — `deposit.yml` says so in as many words:
+/// "there is no env-var adapter". A rule enforced only in the environment
+/// encoding would therefore never run on the path that signs a layer. These
+/// three refusals sat there until 2026-10-01 and were, for the deposit,
+/// decorative.
+///
+/// Same reasoning as `check_includes` above: at the one place a manifest is
+/// read, rather than at the deposit, where the error costs a published layer
+/// id that cannot be reused.
+fn check_unverified(tools: &[ManifestTool]) -> Result<(), LayerSpecError> {
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for t in tools {
+        let Some(why) = &t.unverified_reason else {
+            continue;
+        };
+        let why = why.trim();
+        if why.is_empty() {
+            return Err(LayerSpecError::UnverifiedWithoutReason {
+                tool: t.name.clone(),
+            });
+        }
+        // The reason must name the release it is about. A justification for
+        // unverified bytes is a measurement of ONE release and does not carry
+        // forward on its own — but a scanner that bumps `version` has no idea
+        // the prose beside it just became false, and the stale excuse would
+        // travel into the signed layer where every consumer reads it as
+        // current.
+        //
+        // This is what lets a realm run its scanner unattended: a verified
+        // payload bumps and deposits with nobody watching, while an unverified
+        // one FAILS CLOSED at exactly the point a person's measurement is the
+        // only thing standing behind the bytes. `release` or `version` is
+        // accepted, because an entry whose payload version is its own number
+        // may sensibly be justified by either, and both move with the tag.
+        if !t
+            .release
+            .iter()
+            .chain(std::iter::once(&t.version))
+            .any(|v| why.contains(v.as_str()))
+        {
+            return Err(LayerSpecError::ReasonIsAboutAnotherRelease {
+                tool: t.name.clone(),
+                pinned: t.release.clone().unwrap_or_else(|| t.version.clone()),
+                reason: why.to_string(),
+            });
+        }
+        // The opt-in is per RELEASE, so it is keyed by repository; two tools
+        // from one repo must agree about why it is unverified, or one reason
+        // would be recorded and the other silently dropped.
+        let full = match &t.repo {
+            Some(r) => r.clone(),
+            None => format!("pulseengine/{}", t.name),
+        };
+        if let Some((_, prev)) = seen.iter().find(|(r, _)| *r == full) {
+            if prev != why {
+                return Err(LayerSpecError::ConflictingReason {
+                    repo: full,
+                    first: prev.clone(),
+                    second: why.to_string(),
+                });
+            }
+        } else {
+            seen.push((full, why.to_string()));
+        }
+    }
+    Ok(())
 }
 
 /// A composition must name WHOSE layer it composes, by a digest that is one.
@@ -814,29 +912,15 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
                 asset: sums.clone(),
             });
         }
-        // The opt-in is per RELEASE, so it is keyed by repository; two tools
-        // from one repo must agree about why it is unverified, or one reason
-        // would be recorded and the other silently dropped.
+        // Already VALIDATED at parse time (`check_unverified`); this only
+        // collects what the assembler must pass on, deduplicated per repo.
         if let Some(why) = &t.unverified_reason {
             let why = why.trim();
-            if why.is_empty() {
-                return Err(LayerSpecError::UnverifiedWithoutReason {
-                    tool: t.name.clone(),
-                });
-            }
             let full = match &t.repo {
                 Some(r) => r.clone(),
                 None => format!("pulseengine/{}", t.name),
             };
-            if let Some((_, prev)) = unverified.iter().find(|(r, _)| *r == full) {
-                if prev != why {
-                    return Err(LayerSpecError::ConflictingReason {
-                        repo: full,
-                        first: prev.clone(),
-                        second: why.to_string(),
-                    });
-                }
-            } else {
+            if !unverified.iter().any(|(r, _)| *r == full) {
                 unverified.push((full, why.to_string()));
             }
         }
@@ -1304,8 +1388,8 @@ asset   = "spar-aadl-%P-%V.vsix"
     fn an_unverified_reason_reaches_the_assembler_intact() {
         let text = format!(
             "{REAL}\n[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\n\
-             version = \"v0.10.1\"\nunverified-reason = \"publishes no sums, no cosign \
-             bundle and no attestation; tracked upstream, re-check each cut\"\n"
+             version = \"v0.10.1\"\nunverified-reason = \"v0.10.1 publishes no sums, \
+             no cosign bundle and no attestation; tracked upstream, re-check each cut\"\n"
         );
         let env = env_of(&text);
         assert_eq!(env.unverified_ingest.len(), 1);
@@ -1316,7 +1400,10 @@ asset   = "spar-aadl-%P-%V.vsix"
         // line-separated and a KEY=value line cannot carry newlines.
         let r = env.render();
         assert!(r.contains("UNVERIFIED_INGEST<<"), "{r}");
-        assert!(r.contains("bytecodealliance/wac=publishes no sums"), "{r}");
+        assert!(
+            r.contains("bytecodealliance/wac=v0.10.1 publishes no sums"),
+            "{r}"
+        );
     }
 
     /// A reason containing the delimiter would end the heredoc early and let
@@ -1327,7 +1414,7 @@ asset   = "spar-aadl-%P-%V.vsix"
     fn a_reason_containing_the_delimiter_cannot_close_the_block_early() {
         let text = format!(
             "{REAL}\n[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\n\
-             version = \"v0.10.1\"\nunverified-reason = \"VARVE_UNVERIFIED_EOF\\nPATH=/evil\"\n"
+             version = \"v0.10.1\"\nunverified-reason = \"v0.10.1 VARVE_UNVERIFIED_EOF\\nPATH=/evil\"\n"
         );
         let r = env_of(&text).render();
         let opened = r
@@ -1348,6 +1435,75 @@ asset   = "spar-aadl-%P-%V.vsix"
         );
     }
 
+    /// A scanner bumping the version must not carry the old justification
+    /// with it.
+    ///
+    /// THE REAL CASE, 2026-10-01. `pulseengine-wasm` pins
+    /// `bytecodealliance/wac` at v0.11.0 with the reason "wac v0.11.0
+    /// publishes neither cosign-signed sums nor build provenance (measured
+    /// 2026-09-18)". Upstream cut v0.12.0. Turning on that realm's 15-minute
+    /// scanner would have rewritten `version` and left the prose untouched, so
+    /// a signed layer would have carried v0.12.0 bytes beside a measurement of
+    /// v0.11.0 — a false claim, signed, that every consumer reads as current.
+    ///
+    /// This is also what makes an unattended scanner safe to run: a verified
+    /// payload bumps and deposits with nobody watching, and an unverified one
+    /// stops here, at the one point where a person's measurement is the only
+    /// thing standing behind the bytes.
+    // rivet: verifies REQ-LAYERADAPT-001
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_reason_measuring_another_release_is_refused() {
+        let reason = "wac v0.11.0 publishes neither cosign-signed sums nor build \
+                      provenance (measured 2026-09-18)";
+        let bumped = format!(
+            "{REAL}\n[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\n\
+             version = \"v0.12.0\"\nunverified-reason = \"{reason}\"\n"
+        );
+        // At PARSE, not at `assembler_env`: the real deposit reads the
+        // manifest directly and never builds an environment, so a refusal
+        // that lived only in the encoding would not reach it.
+        let err = parse_layer_manifest(&bumped).unwrap_err();
+        assert_eq!(
+            err,
+            LayerSpecError::ReasonIsAboutAnotherRelease {
+                tool: "wac".into(),
+                pinned: "v0.12.0".into(),
+                reason: reason.to_string(),
+            },
+            "{err}"
+        );
+        // The message has to say which release, or the operator has to diff
+        // the manifest against the prose to find out what went stale.
+        assert!(format!("{err}").contains("v0.12.0"), "{err}");
+
+        // Re-measured, it assembles — the gate asks for a current statement,
+        // not for the opt-in to be abandoned.
+        let remeasured = bumped.replace("v0.11.0 publishes", "v0.12.0 publishes");
+        parse_layer_manifest(&remeasured).expect("a current measurement parses");
+        assert_eq!(env_of(&remeasured).unverified_ingest.len(), 1);
+    }
+
+    /// An entry whose payload version is its own number is justified by either
+    /// number, because both move when the tag does and a reason may sensibly
+    /// name whichever the measurer looked at.
+    // rivet: verifies REQ-LAYERADAPT-001
+    #[test]
+    fn a_reason_may_name_the_release_or_the_version() {
+        for names in ["r2026.1", "v9.9.9"] {
+            let text = format!(
+                "{REAL}\n[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\n\
+                 version = \"v9.9.9\"\nrelease = \"r2026.1\"\nbinary = \"wac\"\n\
+                 asset = \"wac-%T\"\nunverified-reason = \"{names}: nothing signed\"\n"
+            );
+            assert_eq!(
+                env_of(&text).unverified_ingest.len(),
+                1,
+                "a reason naming {names} was refused"
+            );
+        }
+    }
+
     /// "We could not verify this" must never be the silent path.
     // rivet: verifies REQ-LAYERADAPT-001
     #[test]
@@ -1356,7 +1512,7 @@ asset   = "spar-aadl-%P-%V.vsix"
             let text = format!(
                 "{REAL}\n[[tool]]\nname = \"wac\"\nversion = \"v1\"\nunverified-reason = {bad}\n"
             );
-            let err = assembler_env(&parse_layer_manifest(&text).unwrap()).unwrap_err();
+            let err = parse_layer_manifest(&text).unwrap_err();
             assert_eq!(
                 err,
                 LayerSpecError::UnverifiedWithoutReason { tool: "wac".into() },
@@ -1376,16 +1532,16 @@ asset   = "spar-aadl-%P-%V.vsix"
         // one release. Two tarball tools cannot, by construction.
         let text = REAL.replace(
             "layout  = \"raw-per-platform\"",
-            "layout  = \"raw-per-platform\"\nunverified-reason = \"first\"",
+            "layout  = \"raw-per-platform\"\nunverified-reason = \"v0.11.0 first\"",
         ) + "\n[[tool]]\nname = \"sigil\"\nrepo = \"pulseengine/sigil\"\nversion = \"v0.11.0\"\n\
-             unverified-reason = \"second\"\n";
-        let err = assembler_env(&parse_layer_manifest(&text).unwrap()).unwrap_err();
+             unverified-reason = \"v0.11.0 second\"\n";
+        let err = parse_layer_manifest(&text).unwrap_err();
         assert!(
             matches!(err, LayerSpecError::ConflictingReason { .. }),
             "{err:?}"
         );
         // Agreeing is fine, and recorded once.
-        let ok = text.replace("\"second\"", "\"first\"");
+        let ok = text.replace("\"v0.11.0 second\"", "\"v0.11.0 first\"");
         assert_eq!(env_of(&ok).unverified_ingest.len(), 1);
     }
 
