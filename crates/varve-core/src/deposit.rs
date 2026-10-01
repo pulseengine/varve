@@ -94,6 +94,10 @@ pub struct DepositTool {
     /// Payload kind (REQ-KIND-001). `None` or `Tool` deposits no kind
     /// annotation — pre-kind and tool layers keep byte-identical payloads.
     pub kind: Option<crate::kind::PayloadKind>,
+    /// What this payload needs from the host's libc (REQ-LIBCSTATED-001),
+    /// measured from its ELF by the producer. `None` deposits no annotation,
+    /// so a payload nothing could measure makes no claim.
+    pub libc: Option<String>,
     /// The absolute path a tree-shaped payload was BUILT for, signed into the
     /// manifest as `eu.pulseengine.varve.sdk.prefix` (REQ-SDK-001 clause 4).
     ///
@@ -264,6 +268,12 @@ pub struct SpecTool {
     /// `docs-documents` — the payload this document documents, by name.
     #[serde(rename = "docs-documents", default)]
     pub docs_documents: Option<String>,
+    /// `libc` — what this payload needs from the host (REQ-LIBCSTATED-001).
+    /// MEASURED by the producer from the ELF, never declared by hand: a
+    /// hand-written floor is a claim, and this annotation exists because the
+    /// layer was already making one.
+    #[serde(default)]
+    pub libc: Option<String>,
 }
 
 pub fn parse_deposit_spec(toml_text: &str) -> Result<DepositFileSpec, DepositError> {
@@ -313,6 +323,7 @@ impl SpecTool {
             source: self.source,
             runner: self.runner,
             kind,
+            libc: self.libc.clone(),
             sdk_prefix: self.sdk_prefix,
             docs_format: self.docs_format,
             docs_entry: self.docs_entry,
@@ -823,6 +834,12 @@ pub fn deposit_with_options(
                     platform.clone().into(),
                 );
             }
+            // Beside the platform, never instead of it: the platform is the
+            // slot a consumer resolves by, and this is what the bytes in that
+            // slot actually need (REQ-LIBCSTATED-001).
+            if let Some(libc) = &tool.libc {
+                annotations.insert(crate::platform::ANN_LIBC.into(), libc.clone().into());
+            }
             // Clause 2: signed, so a consumer resolves by target rather than
             // by a name the producer happened to choose.
             if let Some(target) = &tool.target {
@@ -1174,6 +1191,7 @@ mod tests {
                     docs_entry: None,
                     docs_title: None,
                     docs_documents: None,
+                    libc: None,
                 },
                 DepositTool {
                     name: "rivet".into(),
@@ -1189,6 +1207,7 @@ mod tests {
                     docs_entry: None,
                     docs_title: None,
                     docs_documents: None,
+                    libc: None,
                 },
             ],
         }
@@ -1558,6 +1577,7 @@ mod tests {
             docs_entry: None,
             docs_title: None,
             docs_documents: None,
+            libc: None,
         }
     }
 

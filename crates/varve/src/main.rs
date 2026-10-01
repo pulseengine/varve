@@ -3006,6 +3006,7 @@ fn deposit_cmd(
             docs_entry: None,
             docs_title: None,
             docs_documents: None,
+            libc: None,
         });
     }
     run_deposit(

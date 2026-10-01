@@ -12,6 +12,22 @@
 /// Annotation carrying an entry's target triple.
 pub const ANN_PLATFORM: &str = "eu.pulseengine.platform";
 
+/// What this payload needs from the host's libc (REQ-LIBCSTATED-001).
+///
+/// `ANN_PLATFORM` names the SLOT a consumer resolves by, and on Linux that
+/// slot is spelled `-unknown-linux-gnu` whether the bytes are glibc-linked or
+/// a static musl build. Layer 2026.10.1 files `ordeal` under
+/// `x86_64-unknown-linux-gnu` from an asset named `...-linux-musl.tar.gz`, and
+/// the signed manifest said nothing about which — so the only way to tell was
+/// to read the asset FILENAME, the inference varve refuses everywhere else.
+///
+/// MEASURED from the payload's ELF program headers, never from its name: one
+/// of `static`, `musl`, `glibc`, or an unrecognised `PT_INTERP` verbatim.
+/// ABSENT when nothing was measurable (a Mach-O, a script, a tree), because
+/// absence of evidence is not a portability guarantee and recording one would
+/// be a signed claim nobody checked.
+pub const ANN_LIBC: &str = "eu.pulseengine.platform.libc";
+
 /// Annotation carrying what a payload BUILDS FOR, when that differs from what
 /// runs it (REQ-SDKTARGET-001 clause 2).
 ///

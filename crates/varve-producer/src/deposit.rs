@@ -266,6 +266,7 @@ pub fn stage_one<R: CommandRunner>(
         }
     }
 
+    let mut libc: Option<String> = None;
     // The architecture check reads the staged file, not the archive — what
     // gets deposited is what gets checked. A tool filed under the wrong
     // platform installs cleanly and fails on first use, on someone else's
@@ -279,6 +280,12 @@ pub fn stage_one<R: CommandRunner>(
     {
         let bytes = std::fs::read(&dest)?;
         binfmt::check_platform(&rel, &bytes, platform)?;
+        // The same bytes answer a second question the layer was already
+        // implying: what does the host have to provide? The platform key says
+        // `-unknown-linux-gnu` for a static musl build too, so without this
+        // the only way to tell was the asset's FILENAME
+        // (REQ-LIBCSTATED-001).
+        libc = binfmt::linkage(&bytes).map(|l| l.as_str().to_string());
     }
 
     Ok(ToolOut {
@@ -297,6 +304,7 @@ pub fn stage_one<R: CommandRunner>(
         },
         docs_title: r.plan.title.clone(),
         docs_documents: r.plan.documents.clone(),
+        libc,
         source: SourceOut {
             repo: r.plan.repo.clone(),
             release: r.plan.release.clone(),
@@ -552,6 +560,116 @@ mod tests {
         assert_eq!(t.kind, None, "a tool must not be labelled a vsix");
         assert!(root.join(&t.path).exists());
         assert_eq!(t.source.proof.as_deref(), Some("cosign-sums"));
+    }
+
+    /// The libc floor recorded in the spec is MEASURED from the staged bytes.
+    ///
+    /// This is the join `binfmt::linkage`'s own tests cannot cover: that the
+    /// producer measures the file it is about to deposit and carries the
+    /// answer into the spec the signer reads. The fixtures are the first 1 KiB
+    /// of the REAL `ordeal` v0.24.0 Linux binaries — the gnu and musl builds
+    /// of one release, which is the pair layer 2026.10.1 files under a single
+    /// `-unknown-linux-gnu` key with nothing to tell them apart.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn the_staged_bytes_decide_the_recorded_libc() {
+        struct StageFixture(&'static str);
+        impl CommandRunner for StageFixture {
+            fn run(&self, _p: &str, args: &[String], _e: &[(String, String)]) -> RunOutput {
+                let dest = args
+                    .iter()
+                    .position(|a| a == "-C")
+                    .and_then(|i| args.get(i + 1))
+                    .expect("-C");
+                let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/libc")
+                    .join(self.0);
+                let bytes = std::fs::read(&src)
+                    .unwrap_or_else(|e| panic!("fixture {} required: {e}", src.display()));
+                let bin = Path::new(dest).join("rivet");
+                std::fs::write(&bin, bytes).unwrap();
+                // Executable, or the staging refuses it as documentation —
+                // which it did on the first run of this test.
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+                RunOutput {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }
+            }
+        }
+
+        for (fixture, want) in [
+            ("ordeal-gnu.elfhead", "glibc"),
+            ("ordeal-musl.elfhead", "static"),
+        ] {
+            let root = scratch(&format!("libc-{want}"));
+            let dl = root.join("dl");
+            std::fs::create_dir_all(&dl).unwrap();
+            std::fs::write(dl.join("rivet-linux.tar.gz"), b"archive").unwrap();
+            let r = resolved(
+                PayloadKind::Tarball,
+                "rivet-linux.tar.gz",
+                Some("x86_64-unknown-linux-gnu"),
+            );
+            let t = stage_one(
+                &StageFixture(fixture),
+                &r,
+                "0.34.0",
+                &root,
+                &dl,
+                &root.join("extract"),
+                Names {
+                    deposited: "rivet",
+                    binary: "rivet",
+                },
+            )
+            .expect("stages");
+            assert_eq!(
+                t.libc.as_deref(),
+                Some(want),
+                "{fixture} staged under a gnu platform key must record {want}"
+            );
+        }
+    }
+
+    /// A payload nothing could measure records NO floor (clause 4).
+    ///
+    /// The distinction that matters: `None`, not `"static"`. Defaulting is
+    /// easier than abstaining, and a default here would be a SIGNED claim that
+    /// an unmeasured payload runs anywhere.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn an_unmeasurable_payload_records_no_floor() {
+        let root = scratch("libc-none");
+        let dl = root.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        std::fs::write(dl.join("rivet-linux.tar.gz"), b"archive").unwrap();
+        let r = resolved(
+            PayloadKind::Tarball,
+            "rivet-linux.tar.gz",
+            Some("x86_64-unknown-linux-gnu"),
+        );
+        // `Unpacker` writes the 20-byte synthetic header the other tests use:
+        // a real ELF magic with no program headers to read.
+        let t = stage_one(
+            &Unpacker,
+            &r,
+            "0.34.0",
+            &root,
+            &dl,
+            &root.join("extract"),
+            Names {
+                deposited: "rivet",
+                binary: "rivet",
+            },
+        )
+        .expect("stages");
+        assert_eq!(
+            t.libc, None,
+            "an unmeasurable payload must make no portability claim"
+        );
     }
 
     /// REQ-SDKDEPOSIT-001. A tree is stored whole, not mined for a binary, and
@@ -816,6 +934,7 @@ mod tests {
             docs_entry: None,
             docs_title: None,
             docs_documents: None,
+            libc: None,
             source: src(asset, sha),
         };
         describe(

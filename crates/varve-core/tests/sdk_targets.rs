@@ -37,6 +37,7 @@ fn sdk(target: &str) -> DepositTool {
         docs_entry: None,
         docs_title: None,
         docs_documents: None,
+        libc: None,
     }
 }
 

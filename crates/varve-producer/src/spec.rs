@@ -55,6 +55,11 @@ pub struct ToolOut {
     pub docs_title: Option<String>,
     #[serde(rename = "docs-documents", skip_serializing_if = "Option::is_none")]
     pub docs_documents: Option<String>,
+    /// What this payload needs from the host's libc, MEASURED from its ELF
+    /// (REQ-LIBCSTATED-001). Absent when nothing was measurable, because
+    /// absence of evidence is not a portability guarantee.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub libc: Option<String>,
     pub source: SourceOut,
 }
 
@@ -135,6 +140,7 @@ mod tests {
             docs_entry: None,
             docs_title: None,
             docs_documents: None,
+            libc: None,
             source: src(),
         }
     }
