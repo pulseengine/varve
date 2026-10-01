@@ -363,6 +363,7 @@ jobs:
           - shard: varve-core (wit-closure)
             files: >-
               -f crates/varve-core/src/witclosure.rs
+              -f crates/varve-core/src/witexport.rs
           # Same reasoning, different stake. This module decides whether an
           # upstream digest list was signed by the key we pinned — a wrong
           # "yes" here admits unvouched bytes into a signed layer.
