@@ -142,6 +142,15 @@ pub fn staged_path_for(
     if kind == PayloadKind::Crate {
         return format!("crates/{name}-{version}.crate");
     }
+    // The archive is the payload, exactly as for an sdk — and under its own
+    // prefix, because a layer may carry both and `sdk/` already means "this
+    // one gets relocated".
+    if kind == PayloadKind::Toolchain {
+        return match platform {
+            Some(p) => format!("toolchain/{name}-{p}-{version}{ext}"),
+            None => format!("toolchain/{name}-{version}{ext}"),
+        };
+    }
     if kind == PayloadKind::Sdk {
         return match platform {
             Some(p) => format!("sdk/{name}-{p}-{version}{ext}"),
@@ -157,7 +166,7 @@ pub fn staged_path_for(
             Some(p) => format!("tools/{name}-{p}"),
             None => format!("tools/{name}"),
         },
-        PayloadKind::Sdk | PayloadKind::Docs(_) | PayloadKind::Crate => {
+        PayloadKind::Sdk | PayloadKind::Toolchain | PayloadKind::Docs(_) | PayloadKind::Crate => {
             unreachable!("handled above, where the extension is kept")
         }
     }

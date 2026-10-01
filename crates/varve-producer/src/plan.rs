@@ -36,6 +36,12 @@ pub enum PayloadKind {
     /// A TREE: the archive is the payload (REQ-SDKDEPOSIT-001). Not mined for
     /// a binary, not architecture-checked as though it were one.
     Sdk,
+    /// A language toolchain (REQ-TOOLCHAIN-001). The archive is the payload,
+    /// as for `Sdk` — and unlike `Sdk` it carries NO relocation prefix,
+    /// because a toolchain is laid down and pointed at rather than patched.
+    /// Keeping it a separate variant is what stops `check_sdk_prefixes`
+    /// demanding a prefix this kind must never have.
+    Toolchain,
     /// Documentation the layer carries for the versions it pins
     /// (REQ-LAYERDOCS-001). HELD, never dispatched — it is data, like a
     /// `vsix`, and varve does not render it.
@@ -63,6 +69,7 @@ impl PayloadKind {
             PayloadKind::Tarball | PayloadKind::RawPerPlatform => None,
             PayloadKind::Vsix => Some("vsix"),
             PayloadKind::Sdk => Some("sdk"),
+            PayloadKind::Toolchain => Some("toolchain"),
             PayloadKind::Docs(_) => Some("docs"),
             PayloadKind::Crate => Some("crate"),
         }
@@ -202,6 +209,11 @@ fn template_of(t: &ManifestTool, kind: PayloadKind) -> String {
         // `wasi-sdk-34.0-arm64-linux.tar.gz`. Neither follows from the tool
         // name, so the manifest states it and `plan` refuses without one.
         PayloadKind::Sdk => unreachable!("an sdk carries its template"),
+        // Nor is a toolchain's: upstream Rust spells it
+        // `rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz`, with the
+        // component name and the version in it and neither derivable
+        // from the payload name. The manifest states it.
+        PayloadKind::Toolchain => unreachable!("a toolchain carries its template"),
         PayloadKind::Docs(_) => unreachable!("a docs entry carries its template"),
         PayloadKind::Crate => unreachable!("a crate is planned by plan_crate"),
     }
@@ -212,6 +224,7 @@ fn kind_of(t: &ManifestTool) -> Result<PayloadKind, PlanError> {
         None | Some("tarball") => Ok(PayloadKind::Tarball),
         Some("raw-per-platform") => Ok(PayloadKind::RawPerPlatform),
         Some("sdk") => Ok(PayloadKind::Sdk),
+        Some("toolchain") => Ok(PayloadKind::Toolchain),
         Some(other) => Err(PlanError::UnknownLayout {
             tool: t.name.clone(),
             layout: other.to_string(),
@@ -873,6 +886,7 @@ mod tests {
             PayloadKind::RawPerPlatform,
             PayloadKind::Vsix,
             PayloadKind::Sdk,
+            PayloadKind::Toolchain,
             PayloadKind::Docs(DocsFormat::Pdf),
             PayloadKind::Crate,
         ];
@@ -885,6 +899,10 @@ mod tests {
                 PayloadKind::Tarball | PayloadKind::RawPerPlatform => varve_core::PayloadKind::Tool,
                 PayloadKind::Vsix => varve_core::PayloadKind::Vsix,
                 PayloadKind::Sdk => varve_core::PayloadKind::Sdk,
+                // A toolchain stages like an sdk and is SIGNED as itself. If
+                // these two ever collapsed, a compiler would be annotated
+                // `sdk` and `export-sdk` would try to relocate it.
+                PayloadKind::Toolchain => varve_core::PayloadKind::Toolchain,
                 PayloadKind::Docs(_) => varve_core::PayloadKind::Docs,
                 PayloadKind::Crate => varve_core::PayloadKind::Crate,
             };
