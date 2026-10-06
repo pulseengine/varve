@@ -32,6 +32,7 @@ pub mod delta;
 pub mod deposit;
 pub mod discover;
 pub mod docsexport;
+pub mod elf;
 pub mod exportstamp;
 pub mod ingest;
 pub mod install;

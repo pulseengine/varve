@@ -143,9 +143,9 @@ directions. Changing your pin is `varve.toml`, and it stays the only way a
 project changes layers.
 
 **It does not tell you whether a newer layer exists.** That is the other half
-of REQ-LAYERDIFF-001 and is not built yet: the signed index carries the answer,
-and an unauthenticated tag listing must never be presented as one, because a
-registry that *hides* a layer is undetectable that way.
+of REQ-LAYERDIFF-001 and it is `varve outdated`, which reads the realm's
+SIGNED index — never an unauthenticated tag listing, because a registry that
+*hides* a layer is undetectable that way. `varve docs outdated`.
 
 ## Composition
 

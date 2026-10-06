@@ -3570,7 +3570,16 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
         for l in &newer {
             println!("  {} {} {}", l.layer, l.channel, l.digest);
         }
-        println!("\n`varve diff --to <layer>` shows what changing would change.");
+        // The REAL invocation, with the layers in hand — `varve diff` takes two
+        // positional arguments and has no `--to`. A hint that does not run is
+        // worse than none: the reader types it, gets "unexpected argument", and
+        // stops trusting the rest of the output.
+        if let Some(newest) = newer.last() {
+            println!(
+                "\n`varve diff {pinned} {}` shows what changing would change.",
+                newest.layer
+            );
+        }
         println!("Nothing here changed the pin or the store.");
     }
     for u in &unparseable {

@@ -9,7 +9,7 @@ varve outdated
   2026.10.0 rolling sha256:aa…
   2026.10.1 rolling sha256:bb…
 
-`varve diff --to <layer>` shows what changing would change.
+`varve diff 2026.10.0 2026.10.1` shows what changing would change.
 Nothing here changed the pin or the store.
 ```
 
