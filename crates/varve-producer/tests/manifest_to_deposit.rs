@@ -560,7 +560,10 @@ asset   = "ordeal-%V-%T.tar.gz"
         std::fs::create_dir_all(d).unwrap();
     }
     let elf = std::fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/libc/ordeal-gnu.elfhead"),
+        // In varve-core, beside the reader it exercises — see the note in
+        // `deposit.rs`'s staging fixture.
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../varve-core/tests/fixtures/libc/ordeal-gnu.elfhead"),
     )
     .expect("the libc fixture is required, not optional");
 

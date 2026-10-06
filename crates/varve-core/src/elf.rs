@@ -138,3 +138,189 @@ pub fn linkage(bytes: &[u8]) -> Option<Linkage> {
     // An ELF64 with program headers and no PT_INTERP asks nothing of the host.
     Some(Linkage::Static)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Linkage, linkage};
+
+    /// Real release binaries, not synthesised headers.
+    ///
+    /// The fixtures are the first 1 KiB of the x86_64 Linux `ordeal` v0.24.0
+    /// binaries — the gnu one and the musl one from the SAME release, which is
+    /// the pair layer 2026.10.1 files under one platform key and cannot tell
+    /// apart. Everything `linkage` reads lives below offset 764, so a prefix
+    /// carries all of it. `file(1)` is the independent oracle: the musl asset
+    /// is "static-pie linked" with no interpreter, the gnu asset names
+    /// `/lib64/ld-linux-x86-64.so.2`.
+    ///
+    /// REQUIRED, not skipped when absent. A gate that passes because its
+    /// fixture is missing is the vacuous shape this repo keeps finding, and
+    /// 2 KiB is no reason to accept one.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn real_release_binaries_report_the_libc_they_actually_need() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/libc");
+        for (name, want) in [
+            ("ordeal-musl.elfhead", Linkage::Static),
+            ("ordeal-gnu.elfhead", Linkage::Glibc),
+        ] {
+            let path = dir.join(name);
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("fixture {} is required: {e}", path.display()));
+            assert_eq!(
+                linkage(&bytes).as_ref(),
+                Some(&want),
+                "{name}: measured the wrong floor"
+            );
+        }
+    }
+
+    /// The interpreter string is reported verbatim when varve does not know it,
+    /// and a non-ELF is `None` rather than `Static`.
+    ///
+    /// `None` and `Static` are the distinction that matters: absence of
+    /// evidence is not a portability guarantee, and recording one would be a
+    /// signed claim nobody checked.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn an_unmeasurable_payload_is_not_reported_as_static() {
+        assert_eq!(linkage(b"#!/bin/sh\necho hi\n"), None, "a script");
+        assert_eq!(linkage(b""), None, "empty");
+        assert_eq!(linkage(b"\x7fELF"), None, "truncated before EI_CLASS");
+        // ELF32 is not measured here rather than guessed at.
+        let mut elf32 = vec![0x7F, b'E', b'L', b'F', 1, 1];
+        elf32.resize(128, 0);
+        assert_eq!(linkage(&elf32), None, "ELF32");
+    }
+
+    /// `e_phentsize` is a SIZE, not a magic number: 56 is the ELF64 minimum,
+    /// and a loader-legal file may use a larger one.
+    ///
+    /// Both real fixtures carry exactly 56, so the comparison in `linkage` was
+    /// invisible to every test — the mutation gate caught `<` flipped to `>`
+    /// surviving, which would refuse a legal binary with padded program
+    /// headers while still accepting a malformed one. The table is rebuilt at
+    /// the wider stride from the REAL fixture's own headers, so only the
+    /// stride differs from a file that is known to measure correctly.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn a_program_header_larger_than_the_minimum_is_still_measured() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/libc");
+        let real = std::fs::read(dir.join("ordeal-gnu.elfhead")).expect("fixture");
+        assert_eq!(
+            linkage(&real),
+            Some(Linkage::Glibc),
+            "the unmodified fixture must measure, or this test proves nothing"
+        );
+
+        let phoff = u64::from_le_bytes(real[32..40].try_into().unwrap()) as usize;
+        let phentsize = u16::from_le_bytes(real[54..56].try_into().unwrap()) as usize;
+        let phnum = u16::from_le_bytes(real[56..58].try_into().unwrap()) as usize;
+        assert_eq!(phentsize, 56, "fixture assumption: the ELF64 minimum");
+
+        // Re-emit the same program headers at a 64-byte stride, appended past
+        // the original content so every `p_offset` still resolves.
+        const WIDE: usize = 64;
+        let mut wide = real.clone();
+        let new_phoff = wide.len();
+        for i in 0..phnum {
+            let entry = &real[phoff + i * phentsize..phoff + (i + 1) * phentsize];
+            wide.extend_from_slice(entry);
+            wide.extend_from_slice(&[0u8; WIDE - 56]);
+        }
+        wide[32..40].copy_from_slice(&(new_phoff as u64).to_le_bytes());
+        wide[54..56].copy_from_slice(&(WIDE as u16).to_le_bytes());
+
+        assert_eq!(
+            linkage(&wide),
+            Some(Linkage::Glibc),
+            "a 64-byte program header entry is legal and must still be read"
+        );
+    }
+
+    /// An `e_phentsize` too small to hold an ELF64 program header is
+    /// malformed, and measuring it would mean parsing at a stride the file
+    /// does not use.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn a_program_header_too_small_to_hold_one_is_not_measured() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/libc");
+        let mut bytes = std::fs::read(dir.join("ordeal-gnu.elfhead")).expect("fixture");
+        bytes[54..56].copy_from_slice(&32u16.to_le_bytes());
+        assert_eq!(
+            linkage(&bytes),
+            None,
+            "a 32-byte program header cannot hold an ELF64 one"
+        );
+    }
+
+    /// An interpreter varve does not recognise is recorded VERBATIM, never
+    /// rounded to one it does.
+    ///
+    /// Clause 3, and it had NO test until an independent review mutated the
+    /// `Other` arm to return `Glibc` and watched all 311 producer tests stay
+    /// green. `Linkage::Other` was constructed in one place and asserted in
+    /// none, so an unrecognised `PT_INTERP` silently became a signed claim of
+    /// glibc — exactly the unchecked claim this clause exists to forbid. The
+    /// mutation gate could not have found it either: cargo-mutants has no
+    /// operator that substitutes `Other(String)` for `Glibc`.
+    ///
+    /// Built by rewriting the REAL fixture's interpreter string, so the
+    /// surrounding header is genuine and only the field under test differs.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn an_unrecognised_interpreter_is_recorded_verbatim_not_rounded() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/libc");
+        let mut bytes = std::fs::read(dir.join("ordeal-gnu.elfhead")).expect("fixture");
+        let gnu = b"/lib64/ld-linux-x86-64.so.2";
+        let at = bytes
+            .windows(gnu.len())
+            .position(|w| w == gnu)
+            .expect("the real fixture names the glibc interpreter");
+        // Same length, so every offset in the real header stays valid.
+        let odd = b"/opt/acme/ld-acme-x86_64.so";
+        assert_eq!(odd.len(), gnu.len());
+        bytes[at..at + odd.len()].copy_from_slice(odd);
+
+        match linkage(&bytes) {
+            Some(Linkage::Other(interp)) => assert_eq!(
+                interp, "/opt/acme/ld-acme-x86_64.so",
+                "the interpreter must be recorded exactly as the ELF names it"
+            ),
+            other => panic!(
+                "an unrecognised interpreter was rounded to {other:?} — a signed \
+                 claim about a libc nobody measured"
+            ),
+        }
+        // And it reaches the manifest as that string, not as a label.
+        assert_eq!(
+            Linkage::Other("/opt/acme/ld-acme-x86_64.so".into()).as_str(),
+            "/opt/acme/ld-acme-x86_64.so"
+        );
+    }
+
+    /// A musl interpreter is recognised as musl, not rounded to glibc.
+    ///
+    /// Built by rewriting the REAL gnu fixture's `PT_INTERP` string, so the
+    /// surrounding header is a genuine one and only the one field under test
+    /// differs.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn a_musl_interpreter_is_not_rounded_to_glibc() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/libc");
+        let mut bytes = std::fs::read(dir.join("ordeal-gnu.elfhead")).expect("fixture");
+        let gnu = b"/lib64/ld-linux-x86-64.so.2";
+        let at = bytes
+            .windows(gnu.len())
+            .position(|w| w == gnu)
+            .expect("the real fixture names the glibc interpreter");
+        let musl = b"/lib/ld-musl-x86_64.so.1\0\0\0";
+        assert_eq!(
+            musl.len(),
+            gnu.len(),
+            "same length keeps every offset valid"
+        );
+        bytes[at..at + musl.len()].copy_from_slice(musl);
+        assert_eq!(linkage(&bytes), Some(Linkage::Musl));
+    }
+}
