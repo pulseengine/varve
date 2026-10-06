@@ -1,5 +1,111 @@
 # Changelog
 
+## v0.40.0 — 2026-10-01
+
+*The layer says what it carries, and a consumer can ask what is newer without
+installing it.*
+
+`rivet release status v0.40.0` — 4 artifacts, 4 verified, cuttable.
+
+The theme of #202 was "the layer tells the truth". Two of its claims turned out
+to be false in the published artifact rather than merely missing, and both are
+measurements this release makes instead of implications it leaves.
+
+| | before | now |
+|---|---|---|
+| a musl payload under a gnu platform key | the signed manifest said `gnu`, the filename said `musl` | `eu.pulseengine.platform.libc`, measured from the ELF |
+| "is there a newer layer?" | only answerable by running an install you did not want | `varve outdated`, from the realm's signed index |
+| the realm's signed line index | read since 2026-09-06, **never published by anyone** | published, and acted on |
+| "what would changing to it change?" | two `varve inspect` runs and your own eyes | `varve diff`, from the signed manifests |
+| a WIT package and its dependencies | nothing materialised them | `varve export-wit`, in the layout `wkg` reads |
+| an `unverified-reason` after a version bump | travelled unchanged into the next signed layer | refused unless it names the release it measures |
+
+### The manifest was asserting gnu over bytes that need nothing
+
+Layer 2026.10.1 filed `ordeal` under `eu.pulseengine.platform =
+aarch64-unknown-linux-gnu` from an asset named
+`ordeal-v0.24.0-aarch64-unknown-linux-musl.tar.gz`. Ten of its 25 Linux
+payloads were musl-sourced and no annotation anywhere recorded a libc, so the
+only way to tell was to read the asset *filename* — the inference varve refuses
+in every other place it decides what a payload is. Here the signed annotation
+was the misleading one, which is worse than silence: #175 measured a GLIBC_2.39
+floor, and a reader of the manifest would conclude it applied to payloads that
+in fact have none.
+
+The floor is now measured from `PT_INTERP` in the payload's own ELF, at the
+point the producer already reads those bytes for the architecture check, and
+signed into the manifest beside the platform. A payload nothing could measure —
+a Mach-O, a script, a tree — records **nothing**, not `static`: absence of
+evidence is not a portability guarantee.
+
+### A check that could not fire, for twenty-five days
+
+`REQ-INDEXAUTH-001` shipped on 2026-09-06 complete, tested and verified, and
+its own notes named the gap: *a fetch path with no publisher is a check that
+cannot fire*. No realm had ever published a line index, so omission detection
+and every guarantee resting on it were reasoning about a document nobody had
+written.
+
+`varve outdated` answers whether the line holds a layer newer than the pin,
+from the **signed** index and nothing else — a registry's tag listing is
+refused, because a host that hides a layer serves nothing that fails
+verification, so a listing cannot tell *"there is nothing newer"* from *"I am
+not telling you"*. Where no index is published it says so, and `--json` carries
+an `answerable` flag so a pipeline can tell the two apart. It writes nothing:
+not the pin, not the store, not the rollback mark.
+
+`tools/systest/line-index.sh` publishes one into a real registry and acts on
+it, with four controls — no index, a realm that promised one and has none, an
+index signed by another key, and an index naming a layer the registry will not
+serve. The pulseengine realm published its first index the same day.
+
+### `varve diff`, which landed after the v0.39.0 tag
+
+It diffs two layers by their SIGNED manifests — added, removed, changed in
+version — offline, for two layers already installed, and says what it cannot
+know when one side is absent rather than silently fetching it. `--format json`
+is the only producer of delta data (DD-032); the table renders that JSON.
+
+The ingestion proof travels as a **finding**, not a column: `synth LOST its
+proof of origin: cosign-sums -> unverified` is the single most important thing
+a bump can tell an operator, and it is invisible in a version comparison.
+
+Honest about its reach: attribution in a composition is by **realm**, not by
+layer id, so two included layers sharing a realm are not distinguished; and the
+renderer in `crates/varve/src/diff.rs` is declared `[bin-target]`, so it carries
+no mutation coverage of its own.
+
+### Breaking, for realm authors only
+
+A `layer.toml` whose `unverified-reason` does not name the release it justifies
+is now **refused at parse**. A reason for carrying unverified bytes is a
+measurement of one release and does not carry forward: a scanner that bumps
+`version` has no idea the prose beside it just became false, and the stale
+excuse would travel into the signed layer where every consumer reads it as
+current.
+
+All three PulseEngine realms already comply and none is affected. A third-party
+realm whose opt-in text omits its own version will need one line changed.
+
+### Falsification
+
+This release is wrong if any of these is observed in the field:
+
+* a Linux payload carrying `eu.pulseengine.platform.libc = static` whose binary
+  has a `PT_INTERP` segment, or one carrying `glibc` that runs on
+  `distroless-static`;
+* `varve outdated` reporting `answerable: true` against a realm that publishes
+  no signed index, or reporting a layer the realm's index does not name;
+* `varve outdated` changing a pin, a store or a high-water mark;
+* a deposit whose `unverified-reason` names the pinned release being refused.
+
+### Not in this release
+
+`signed-index = true` is **not** declared for the pulseengine realm. Line
+2026.09 has 19 layers and no index, so declaring it would fail closed on every
+pin against that line — including covalent's `[[include]]`. The index is a
+floor; 2026.10 is covered and 2026.09 is not claimed.
+
 ## v0.39.0 — 2026-09-29
 
 *Linux binaries that start where our consumers run, a layer that is only a
