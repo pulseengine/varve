@@ -507,4 +507,152 @@ unverified-reason = "wac v0.11.0 publishes neither cosign-signed sums nor build 
         "the reason the operator gave did not travel with the bytes: {:?}",
         wac.annotations
     );
+    // REQ-LIBCSTATED-001 clause 4, end to end rather than at the parser: this
+    // payload is a `#!/bin/sh` script, nothing about it is measurable, and the
+    // SIGNED manifest must therefore carry no libc claim at all. Not "static".
+    assert!(
+        !wac.annotations.contains_key("eu.pulseengine.platform.libc"),
+        "a payload nothing could measure carries a signed portability claim: {:?}",
+        wac.annotations
+    );
+}
+
+/// REQ-LIBCSTATED-001 clause 2: the measured floor reaches the SIGNED manifest.
+///
+/// A clean-room review found this clause resting on a manual observation — no
+/// test anywhere referenced `eu.pulseengine.platform.libc`, and
+/// `varve-core/src/deposit.rs` is in no mutation shard, so nothing would have
+/// said when it stopped being true.
+///
+/// This drives the real path the realm's deposit drives — stage the bytes,
+/// describe the spec, parse it with the real parser, deposit and sign — and
+/// reads the annotation back out of the signed manifest. The payload is the
+/// first 1 KiB of a REAL glibc-linked ordeal binary, the same fixture the unit
+/// tests use, so what is asserted is a measurement and not a label.
+// rivet: verifies REQ-LIBCSTATED-001
+#[test]
+fn the_measured_libc_floor_reaches_the_signed_manifest() {
+    const MANIFEST: &str = r#"
+[varve]
+version = "v0.40.0"
+
+[realm]
+name     = "pulseengine"
+channel  = "rolling"
+registry = "oci://ghcr.io/pulseengine/layers"
+
+[[tool]]
+name    = "ordeal"
+version = "v0.24.0"
+# PER-PLATFORM (`%T`), because a portable payload has no platform and the
+# libc measurement is deliberately skipped for one — the floor is a property
+# of a payload filed under a machine.
+asset   = "ordeal-%V-%T.tar.gz"
+"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let (dl, stage, scratch, layout) = (
+        tmp.path().join("dl"),
+        tmp.path().join("stage"),
+        tmp.path().join("scratch"),
+        tmp.path().join("layout"),
+    );
+    for d in [&dl, &stage, &scratch] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let elf = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/libc/ordeal-gnu.elfhead"),
+    )
+    .expect("the libc fixture is required, not optional");
+
+    let m = varve_core::layerspec::parse_layer_manifest(MANIFEST).expect("layer.toml");
+    let plan = varve_producer::plan::plan(&m, &["x86_64-unknown-linux-gnu"]).expect("plan");
+    let mut staged = Vec::new();
+    for item in &plan {
+        let bytes = tar_gz_exec(&[("ordeal", &elf[..])]);
+        std::fs::write(dl.join(&item.asset), &bytes).unwrap();
+        let accepted = Accepted {
+            mechanism: Mechanism::Unverified,
+            signer: None,
+            asserts: "NOTHING vouched for these bytes; fixture".into(),
+        };
+        let r = Resolved {
+            plan: item.clone(),
+            digest: sha256(&bytes),
+            accepted,
+            bytes: None,
+            decision: Decision::Fetch {
+                why: FetchReason::NoPrevious,
+            },
+        };
+        staged.push(
+            stage_one(
+                &varve_producer::source::Spawn,
+                &r,
+                &item.version,
+                &stage,
+                &dl,
+                &scratch,
+                Names {
+                    deposited: &item.name,
+                    binary: &item.name,
+                },
+            )
+            .unwrap_or_else(|e| panic!("staging {}: {e:#}", item.name)),
+        );
+    }
+    // The spec the signer reads must already carry it — measured by the
+    // producer from the staged bytes, never declared in the manifest above.
+    let spec = varve_producer::deposit::describe("2026.10.9", "rolling", 1, staged, &m.includes);
+    let text = spec.render().unwrap();
+    assert!(
+        text.contains("libc = \"glibc\""),
+        "the deposit spec carries no measured floor:\n{text}"
+    );
+
+    let file_spec = varve_core::parse_deposit_spec(&text).unwrap();
+    let tools = file_spec
+        .tools
+        .into_iter()
+        .map(|t| t.into_deposit_tool(&stage))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("converts");
+    let (sk, _pk) = varve_core::generate_root_keypair();
+    varve_core::deposit(
+        &varve_core::DepositSpec {
+            includes: Vec::new(),
+            layer: file_spec.layer.parse().unwrap(),
+            channel: file_spec.channel,
+            counter: file_spec.counter,
+            issued_at: "2026-10-01T00:00:00Z".into(),
+            tools,
+        },
+        &sk,
+        "root-1",
+        &layout,
+    )
+    .expect("the staged payload deposits");
+
+    let signed = signed_manifest(&layout);
+    let entry = signed
+        .entries
+        .iter()
+        .find(|e| e.annotations.get("eu.pulseengine.tool").map(String::as_str) == Some("ordeal"))
+        .expect("ordeal is in the signed layer");
+    assert_eq!(
+        entry
+            .annotations
+            .get("eu.pulseengine.platform.libc")
+            .map(String::as_str),
+        Some("glibc"),
+        "the measured floor did not reach the SIGNED manifest: {:?}",
+        entry.annotations
+    );
+    // Beside the platform, never instead of it.
+    assert_eq!(
+        entry
+            .annotations
+            .get("eu.pulseengine.platform")
+            .map(String::as_str),
+        Some("x86_64-unknown-linux-gnu")
+    );
 }

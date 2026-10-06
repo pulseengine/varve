@@ -314,6 +314,29 @@ impl SpecTool {
             .map(str::parse)
             .transpose()
             .map_err(|e: crate::kind::UnknownKind| DepositError::Spec(e.to_string()))?;
+        // RE-MEASURED from the bytes just read, and not merely copied from the
+        // spec. The producer measures too — but `varve deposit --spec` signs
+        // whatever spec it is handed, so a rule enforced only in the producer
+        // is enforced where it cannot act (REQ-LIBCSTATED-001 clause 1). A
+        // declaration that disagrees with the bytes is REFUSED rather than
+        // corrected: silently replacing it would hide that someone wrote a
+        // portability floor by hand.
+        let measured = crate::elf::linkage(&bytes).map(|l| l.as_str().to_string());
+        if let Some(declared) = &self.libc {
+            // `None` measured means nothing about these bytes is measurable, so
+            // the declaration cannot be checked at all — absence of evidence is
+            // not a portability guarantee (clause 4).
+            let measured_desc = measured
+                .clone()
+                .unwrap_or_else(|| "nothing measurable in these bytes".to_string());
+            if measured.as_deref() != Some(declared.as_str()) {
+                return Err(DepositError::LibcDeclaredNotMeasured {
+                    name: self.name.clone(),
+                    declared: declared.clone(),
+                    measured: measured_desc,
+                });
+            }
+        }
         Ok(DepositTool {
             name: self.name,
             version: self.version,
@@ -323,7 +346,14 @@ impl SpecTool {
             source: self.source,
             runner: self.runner,
             kind,
-            libc: self.libc.clone(),
+            // RE-MEASURED here, from the bytes this function already read, and
+            // not merely copied from the spec. The producer measures too — but
+            // `varve deposit --spec` signs whatever spec it is handed, so a
+            // rule enforced only in the producer is enforced where it cannot
+            // act (REQ-LIBCSTATED-001 clause 1). A declaration that disagrees
+            // with the bytes is refused rather than corrected: silently
+            // replacing it would hide that someone wrote a floor by hand.
+            libc: measured,
             sdk_prefix: self.sdk_prefix,
             docs_format: self.docs_format,
             docs_entry: self.docs_entry,
@@ -413,6 +443,19 @@ pub enum DepositError {
          believed. Drop it, or deposit this payload as kind = \"docs\"."
     )]
     DocsFormatOnNonDocs { name: String, kind: String },
+    #[error(
+        "payload {name:?} declares libc {declared:?} and its own bytes say {measured:?}. A \
+         portability floor is a MEASUREMENT, not a label: it is signed into the layer and a \
+         consumer reads it to decide whether these bytes will start on their machine, so a \
+         declared one is a claim nobody checked — the thing this field exists to replace. Drop \
+         `libc` from the spec and let the deposit measure it, or deposit the bytes the \
+         declaration describes."
+    )]
+    LibcDeclaredNotMeasured {
+        name: String,
+        declared: String,
+        measured: String,
+    },
     #[error(
         "docs '{name}' version {version} declares no `docs-format` — what the payload IS. \
          Without it `varve export-docs` cannot tell a site from a single file, so the layer \
@@ -1156,6 +1199,132 @@ mod producer_tests {
         ] {
             assert!(!is_rfc3339(bad), "{bad} must be refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod libc_enforcement_tests {
+    use super::*;
+
+    /// A real ELF64 header with a `PT_INTERP` naming glibc, built field by
+    /// field so the test states what it depends on.
+    fn glibc_elf() -> Vec<u8> {
+        const PHOFF: usize = 64;
+        const INTERP: &[u8] = b"/lib64/ld-linux-x86-64.so.2\0";
+        let interp_off = PHOFF + 56;
+        let mut v = vec![0u8; interp_off + INTERP.len()];
+        v[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        v[4] = 2; // ELFCLASS64
+        v[5] = 1; // little-endian
+        v[16..18].copy_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+        v[18..20].copy_from_slice(&0x3Eu16.to_le_bytes()); // x86-64
+        v[32..40].copy_from_slice(&(PHOFF as u64).to_le_bytes());
+        v[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+        v[56..58].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+        v[PHOFF..PHOFF + 4].copy_from_slice(&3u32.to_le_bytes()); // PT_INTERP
+        v[PHOFF + 8..PHOFF + 16].copy_from_slice(&(interp_off as u64).to_le_bytes());
+        v[PHOFF + 32..PHOFF + 40].copy_from_slice(&(INTERP.len() as u64).to_le_bytes());
+        v[interp_off..].copy_from_slice(INTERP);
+        v
+    }
+
+    fn spec_tool(dir: &std::path::Path, libc: Option<&str>) -> SpecTool {
+        std::fs::write(dir.join("tool"), glibc_elf()).unwrap();
+        SpecTool {
+            name: "ordeal".into(),
+            version: "1.0.0".into(),
+            platform: Some("x86_64-unknown-linux-gnu".into()),
+            target: None,
+            path: "tool".into(),
+            source: None,
+            runner: None,
+            kind: None,
+            sdk_prefix: None,
+            docs_format: None,
+            docs_entry: None,
+            docs_title: None,
+            docs_documents: None,
+            libc: libc.map(str::to_string),
+        }
+    }
+
+    /// Clause 1: the floor is MEASURED, never taken on the spec's word.
+    ///
+    /// This is the gap an independent review found: the producer measured, and
+    /// `varve deposit --spec` signed whatever it was handed, so the rule was
+    /// enforced where it could not act. A hand-written `libc = "static"` over
+    /// a glibc binary used to sign; now it is refused, and the refusal names
+    /// both numbers so the operator can see which one is the lie.
+    ///
+    /// It is also the mechanical detector for this release's own falsification
+    /// criterion — "a payload carrying static whose binary has a PT_INTERP".
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn a_declared_libc_the_bytes_contradict_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = spec_tool(tmp.path(), Some("static"))
+            .into_deposit_tool(tmp.path())
+            .expect_err("a hand-declared floor the bytes contradict must not sign");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("\"static\""),
+            "the declaration is not named: {msg}"
+        );
+        assert!(
+            msg.contains("\"glibc\""),
+            "the measurement is not named: {msg}"
+        );
+        assert!(
+            matches!(err, DepositError::LibcDeclaredNotMeasured { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// Measuring is the normal path: no declaration, and the floor still
+    /// reaches the tool because the bytes were read.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn an_undeclared_floor_is_measured_from_the_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = spec_tool(tmp.path(), None)
+            .into_deposit_tool(tmp.path())
+            .expect("an undeclared floor is measured, not refused");
+        assert_eq!(tool.libc.as_deref(), Some("glibc"));
+    }
+
+    /// A declaration that AGREES is accepted — the rule is "measured", not
+    /// "never written down". A producer-written spec carries the measurement
+    /// it just made, and must not be refused for doing so.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn a_declaration_that_matches_the_bytes_is_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = spec_tool(tmp.path(), Some("glibc"))
+            .into_deposit_tool(tmp.path())
+            .expect("the producer's own spec must still deposit");
+        assert_eq!(tool.libc.as_deref(), Some("glibc"));
+    }
+
+    /// Declaring a floor for bytes nothing can measure is refused too.
+    ///
+    /// The tempting alternative is to drop the declaration silently. That
+    /// would let `libc = "static"` on a shell script pass unnoticed, which is
+    /// the same unchecked claim in a quieter form.
+    // rivet: verifies REQ-LIBCSTATED-001
+    #[test]
+    fn a_floor_declared_for_unmeasurable_bytes_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("tool"), b"#!/bin/sh\nexec true\n").unwrap();
+        let mut t = spec_tool(tmp.path(), Some("static"));
+        std::fs::write(tmp.path().join("tool"), b"#!/bin/sh\nexec true\n").unwrap();
+        t.libc = Some("static".into());
+        let err = t
+            .into_deposit_tool(tmp.path())
+            .expect_err("an unverifiable declaration must not sign");
+        assert!(
+            err.to_string().contains("nothing measurable"),
+            "the refusal must say the claim could not be checked: {err}"
+        );
     }
 }
 

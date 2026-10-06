@@ -356,6 +356,21 @@ jobs:
           - shard: varve-core (delta)
             files: >-
               -f crates/varve-core/src/delta.rs
+          # GATED ON ARRIVAL, and this one was earned the hard way. An
+          # independent review mutated the `Other` arm of `linkage` to round an
+          # unrecognised PT_INTERP to glibc and watched all 311 producer tests
+          # stay green — a signed portability claim nobody had checked. The
+          # module was moved here from the producer precisely so this gate can
+          # reach it, and leaving it declared as debt would make that move a
+          # claim rather than a fact.
+          #
+          # Note what the gate alone would NOT have caught: cargo-mutants has
+          # no operator substituting `Other(String)` for `Glibc`, so the shard
+          # being green is necessary and not sufficient. The hand-written
+          # control test is the other half.
+          - shard: varve-core (elf)
+            files: >-
+              -f crates/varve-core/src/elf.rs
           # GATED on arrival rather than declared as debt (varve#126's lesson).
           # A wrong closure ships a wrong signed tree, and the module is small,
           # pure and has no I/O — its tests run in 20ms, so there is no cost
