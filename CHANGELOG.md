@@ -1,6 +1,142 @@
 # Changelog
 
-## v0.40.0 — 2026-10-01
+## v0.41.0 — 2026-10-08
+
+*An upstream that proves each file separately is proven, a tool is carried only
+where it can run, and a layer carries WIT packages flat.*
+
+`rivet release status v0.41.0` — 7 artifacts, 6 verified, 1 accepted, cuttable.
+
+### varve refused bytes upstream fully attests
+
+`pulseengine-wasm` could not deposit, and the reason was ours. GitHub's
+`attest-build-provenance` produces two shapes and nothing announces which is
+in use:
+
+| upstream | attestations | subjects each |
+|---|---|---|
+| `bytecodealliance/wasm-tools` v1.260.0 | one, batched | 10 |
+| `bytecodealliance/wasmtime` v49.0.1 | one per asset | 1 |
+
+varve probed a single asset, cached that statement, and treated its subject
+list as the release's complete set of covered digests — an assumption the code
+stated out loud and which is false for the second shape. Every asset the
+probed statement did not name was refused:
+
+```
+Error: bytecodealliance/wasmtime: wasmtime-v49.0.1-aarch64-macos.tar.xz
+is not named by the build-provenance proof.
+```
+
+`gh attestation verify` exits 0 for that exact file and exits 1 on a one-byte
+flip of it, so the disagreement was varve's. **Fail-closed** — it refused
+proven bytes rather than accepting unproven ones, so there was never a hole;
+it was a liveness defect that stopped a realm depositing. Not a v0.40.0
+regression either: v0.38.0, the pin that realm actually ran, failed
+identically (#245).
+
+Each planned asset the probed statement does not name is now verified against
+its own bytes and its own statement, and the results are merged under the
+existing conflict rule — one name at two digests is still a refusal. A batched
+statement still answers for every asset it names, at **one** verification per
+release, because that cost is part of the contract and a "verify everything
+always" fix would have been correct and silently ten times more expensive
+(REQ-PROVSHAPE-001, DD-037).
+
+Measured against the real upstream with `varve-producer deposit`, which stages
+without publishing: zero provenance refusals, and wasmtime v49.0.1 ingested
+for **all four** platforms where before at most the probed one could pass.
+
+### A tool can be carried for fewer platforms than the layer
+
+A layer declared its platforms once and every tool was planned for all of them;
+a platform was dropped only when the release did not publish the asset. That
+covers "upstream does not build this". It does not cover "upstream builds it and
+varve cannot carry it", which is a different fact and now has its own field:
+
+```toml
+[[tool]]
+name      = "wasm-opt"
+repo      = "WebAssembly/binaryen"
+version   = "133"
+release   = "version_133"
+platforms = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+```
+
+The measured case is `WebAssembly/binaryen` 133. Its Linux binaries are
+statically linked and stand alone — `wasm-opt` is 18.7 MB and references no
+`libbinaryen` at all. Its macOS binaries are 1.7 MB stubs that load a 15 MB
+`@rpath/libbinaryen.dylib` from `@loader_path/../lib`. A varve `tool` payload is
+one executable with no sibling directory, so a macOS payload would be fetched,
+verified, signed into the layer, installed, verified again — **every check
+passing** — and then fail at the first exec.
+
+Expressing that by pointing `asset-for` at a macOS filename that does not exist
+was rejected: binaryen *does* publish macOS assets, so the manifest would assert
+something false, a 404 would be enacting a policy, and the real reason would be
+recorded nowhere.
+
+Absent the field, a tool is still carried for every platform the layer declares.
+A platform the layer does **not** declare is a refusal naming the tool, the
+platform and what is declared — never ignored, because an ignored entry reads
+exactly like a typo and its symptom is a tool quietly missing from a signed
+layer, which is how layer 2026.09.18 shipped without a single Linux build of
+five tools. The field narrows; it can never widen.
+
+`assembler_env` refuses to translate it into the legacy env encoding, beside the
+existing `sdk` and `upstream-sums` refusals. Dropping it there renames nothing —
+it assembles the tool for the platform the realm excluded (REQ-TOOLPLAT-001,
+DD-038).
+
+A manifest using `platforms` needs varve ≥ 0.41.0; older versions reject the
+unknown field rather than ignoring it.
+
+This does not change the payload model. A tool needing a runtime library beside
+it still cannot be carried on any platform — that capability, or an `sdk`
+payload reached by path rather than by shim, is what binaryen on macOS would
+need.
+
+### A layer carries WIT packages flat
+
+`kind = "wit"` had existed as a name since REQ-KIND-001 — it parsed, sorted and
+appeared in `inspect`, and nothing consumed it. A `wit` payload is now exactly
+one WIT package at its own digest, stored flat, so one `wasi:io@0.2.0` in a
+layer is one set of bytes rather than several vendored copies nobody compares.
+The dependency closure is computed from the signed packages themselves, never
+restated in `layer.toml`, and `varve export-wit` materialises a tree offline
+from the verified store. A closure that cannot be completed is a refusal naming
+the missing package, not a partial tree that fails later inside somebody else's
+tool (REQ-WIT-001, DD-036).
+
+### Falsification
+
+This release is wrong if any of these is observed in the field:
+
+* a payload recorded as `build-provenance` whose digest is not named by a
+  verified statement about that asset;
+* an asset nothing attests being ingested because a sibling of it was;
+* a release with one batched attestation costing more than one
+  `gh attestation verify`;
+* `varve export-wit` writing a tree that omits a package the root imports, or
+  writing anything at all when the closure cannot be completed.
+* a tool declaring `platforms` being planned for a platform outside that list,
+  or a tool declaring none being planned for fewer than the layer declares;
+* a layer.toml carrying a `platforms` restriction translating into the env
+  encoding without a refusal.
+
+### Not in this release
+
+`signed-index = true` is still **not** declared for the pulseengine realm. The
+flag is realm-wide and line 2026.09 has 19 layers with no index, so declaring
+it would fail closed on every pin against that line.
+
+The `pulseengine-wasm` deposit is still blocked, now on a realm manifest
+defect rather than on varve: wasm-layers' `binaryen` entry names no `binary`,
+so the assembler looks for a file called `binaryen` in an archive that ships
+`wasm-opt`, `wasm-as` and friends. Which of binaryen's executables that realm
+should carry is a content decision, tracked separately.
+
+## v0.40.0 — 2026-10-06
 
 *The layer says what it carries, and a consumer can ask what is newer without
 installing it.*

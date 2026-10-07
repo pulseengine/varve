@@ -4603,7 +4603,7 @@ artifacts:
       created-by: ai-assisted
       model: claude-opus-5
       timestamp: 2026-09-30T13:12:53Z
-    release: v0.41.0
+    release: v0.42.0
 
   - id: REQ-TOOLCHAIN-001
     type: requirement
@@ -4627,7 +4627,7 @@ artifacts:
       created-by: ai-assisted
       model: claude-opus-5
       timestamp: 2026-09-30T13:13:14Z
-    release: v0.41.0
+    release: v0.42.0
 
   - id: DD-034
     type: design-decision
@@ -4684,7 +4684,7 @@ artifacts:
   - id: REQ-WIT-001
     type: requirement
     title: A layer carries WIT packages flat, and composes a dependency tree only when one is asked for
-    status: implemented
+    status: verified
     description: |-
       `kind = "wit"` has existed since REQ-KIND-001 as a name: it parses, sorts, is HELD rather than dispatched, and `inspect` reports it. Nothing consumes it, no layer carries one, and the kind was added before anything did — so what a `wit` payload IS was never decided.
 
@@ -4771,3 +4771,125 @@ artifacts:
     links:
       - type: traces-to
         target: REQ-LIBCFLOOR-001
+
+  - id: REQ-PROVSHAPE-001
+    type: requirement
+    title: Build provenance is accepted in both shapes upstreams publish it, and a digest comes from a statement that names its asset
+    status: verified
+    description: |-
+      An upstream's build provenance is accepted in BOTH shapes upstreams publish it, and every asset's recorded digest comes from a statement that names that asset.
+
+      GitHub's `attest-build-provenance` produces two shapes and nothing announces which is in use. Measured 2026-10-07: `bytecodealliance/wasm-tools` v1.260.0 publishes ONE statement carrying ten subjects, so a single verification answers for the whole release. `bytecodealliance/wasmtime` v49.0.1 publishes ONE STATEMENT PER ASSET, each naming exactly one file. Both are valid SLSA provenance v1.
+
+      varve probed one asset of a release, cached that statement, and treated its subject list as the release's complete set of covered digests. Against the per-asset shape it therefore refused every asset but the probed one — bytes upstream fully attests, rejected as unproven. `gh attestation verify` exits 0 for the same file in the same minute, and exits 1 on a one-byte flip of it, so the probe disagreeing with varve was not a vacuous comparison. This blocked the `pulseengine-wasm` realm from depositing at all, and it was NOT a v0.40.0 regression: v0.38.0, the pin the realm actually runs, fails identically.
+
+      The failure direction was fail-closed. A statement naming one asset cannot make a different asset pass, so there was no hole — this is a liveness and correctness defect. Recording that distinction is part of the requirement: the fix must not buy liveness with trust.
+
+      Clauses:
+
+      (1) A release whose assets are attested individually shall be ingested whole, with each payload recorded under the mechanism that actually vouched for it rather than downgraded or refused.
+
+      (2) The digest recorded for an asset shall come from a verified statement THAT NAMES THAT ASSET. A statement fetched by asking about a different file shall not vouch for this one, however valid its signature — which is the refusal message's own principle, applied to the statement's provenance as well as its contents.
+
+      (3) A batched statement shall continue to answer for every asset it names, at ONE verification per release. A fix that verifies every asset unconditionally would be correct and would silently multiply upstream calls; the cost is part of the contract.
+
+      (4) An asset that NO statement names shall remain a refusal, even where its siblings are attested. The per-asset lookup is a second place to ask, never a weaker bar.
+
+      (5) Where an asset's own attestation does not verify, the run shall stop rather than fall to a weaker rung — the existing no-silent-downgrade rule, which the new lookup must not route around.
+    links:
+      - type: traces-to
+        target: REQ-INGEST-001
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-07T10:32:27Z
+    release: v0.41.0
+
+  - id: DD-037
+    type: design-decision
+    title: The covered-digest list is built for the planned assets, and topped up per asset only where the probe falls short
+    status: accepted
+    description: |-
+      REQ-PROVSHAPE-001 says a digest must come from a statement that names its asset. This says how, and what was rejected.
+
+      THE RELEASE-WIDE DIGEST LIST IS BUILT FOR THE ASSETS THE LAYER ACTUALLY WANTS, AND IS TOPPED UP PER ASSET ONLY WHERE THE PROBED STATEMENT FALLS SHORT. The probe keeps its single verification, which is what a batching upstream needs; any planned asset that statement does not name is verified against its own bytes and its own statement, and the result is merged. Merging goes through `Sums::from_pairs`'s existing conflict rule, so one name standing at two digests is still a refusal rather than a last-write-wins.
+
+      WHY NOT "VERIFY EVERY ASSET, ALWAYS". It is the obvious reading of the requirement and it is wrong on cost in a way no test would show: `wasm-tools` would go from one `gh attestation verify` to ten, each with a download, and the layer would still be correct — so the regression would be invisible. Clause 3 exists to make that cost a contract, and `a_batched_attestation_still_answers_for_every_asset_it_names` asserts the per-asset path is not entered at all when the batch already names the asset.
+
+      WHY NOT "UNION EVERY PUBLISHED ASSET AT PROBE TIME". It restores a release-wide list and keeps the architecture, but it downloads every asset the release publishes to build it. `wasmtime` publishes far more platforms than any layer ingests, so it would pay for bytes that are then discarded.
+
+      WHY THE LIST IS COMPLETED BEFORE ANY PAYLOAD IS TOUCHED. Two code paths consume it: `run` reads it to compute the expected digest that carry-forward decides on, and `admit` reads it again when the bytes arrive. Topping up lazily inside `admit` would have fixed the second and left the first refusing — the invariant-enforced-where-it-cannot-act shape this repository keeps rediscovering. Completing the list in `verify_release` means both callers see one answer and neither needed changing.
+
+      WHAT THIS DOES NOT DO. It does not make an unattested asset acceptable, and it does not let a statement about one file vouch for another: asking upstream about asset X and receiving a statement that names only Y leaves X uncovered, and X is refused. The lookup is a second place to ask, not a lower bar.
+    fields:
+      rationale: "A batching upstream needs one verification and a per-asset upstream needs one per asset, so the probe's statement is kept and completed rather than replaced. Completing the list in verify_release rather than lazily in admit is deliberate: run() and admit() both consume it, and fixing only the later one would leave carry-forward refusing bytes the proof covers."
+    links:
+      - type: satisfies
+        target: REQ-PROVSHAPE-001
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-07T10:33:04Z
+    release: v0.41.0
+
+  - id: REQ-TOOLPLAT-001
+    type: requirement
+    title: A tool can be carried for fewer platforms than the layer, and an undeclared platform is refused not ignored
+    status: verified
+    description: |-
+      A tool can be carried for fewer platforms than the layer declares, and a platform the layer never declared is refused rather than ignored.
+
+      Until now a layer's platform set was realm-wide: `plan_tool` iterated every platform the layer declared and a platform was dropped only when the release did not publish the asset. That covers "upstream does not build this", which is routine and silent. It does not cover "upstream builds it and it cannot be a varve payload", which is a different fact and needs to be said out loud.
+
+      THE MEASURED CASE, 2026-10-07. `WebAssembly/binaryen` 133 ships thirteen tools. Its Linux binaries are statically linked and stand alone — `wasm-opt` is 18.7 MB and references no `libbinaryen` at all. Its macOS binaries are 1.7 MB stubs that load a 15 MB `@rpath/libbinaryen.dylib` resolved at `@loader_path/../lib`. A varve `tool` payload is ONE executable with no sibling directory, so a macOS payload of `wasm-opt` would be fetched, verified, digested, signed into the layer, installed and verified again — every check passing — and then fail at the first exec with a missing dylib. That is the worst available failure shape, because nothing that could have caught it is wrong.
+
+      WHY NOT EXPRESS IT WITH THE EXISTING MECHANISM. Pointing `asset-for` at a macOS filename that does not exist would make varve skip the platform with its ordinary "no build for this platform" notice. It was rejected: binaryen DOES publish macOS assets, so the manifest would be asserting something false, a 404 would be enacting a policy, and the real reason — a payload model that cannot carry a binary plus its library — would be recorded nowhere a reader could find it.
+
+      Clauses:
+
+      (1) A `[[tool]]` may declare `platforms = [...]`, and is then planned for exactly those. Absent, it is planned for every platform the layer declares — the ordinary case, which this must not narrow.
+
+      (2) A declared platform that the layer does not itself declare is a REFUSAL naming the tool, the platform, and the platforms that ARE declared. Ignoring it is forbidden: an ignored entry is indistinguishable from a typo, and its symptom is a tool quietly missing from a signed layer. Layer 2026.09.18 shipped without a single Linux build of five tools because two conditions read as the same note, and this clause exists so that cannot recur through a new field.
+
+      (3) The payloads follow the LAYER's platform order, not the manifest's, so the shape of a deposit does not depend on the order someone typed.
+
+      (4) This field narrows what a layer carries; it never widens it. A platform absent from the layer cannot be added by a tool asking for it, which is what clause 2 enforces.
+
+      WHAT THIS IS NOT. It is not a fix for the payload model. A tool needing a runtime library beside it still cannot be carried on any platform, and carrying binaryen on macOS needs that capability or an `sdk` payload. This requirement only makes the omission expressible, deliberate, and visible instead of broken at exec.
+    links:
+      - type: traces-to
+        target: REQ-PRODUCER-002
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-07T21:27:28Z
+    release: v0.41.0
+
+  - id: DD-038
+    type: design-decision
+    title: A platform restriction is a tool field that only narrows the layer's list, and an unknown name is refused
+    status: accepted
+    description: |-
+      REQ-TOOLPLAT-001 says a tool may be carried for fewer platforms than the layer. This says how it is spelled and what was rejected, decided 2026-10-07.
+
+      IT IS A FIELD ON THE TOOL, NOT A SECOND PLATFORM SET ON THE LAYER. A layer declares its platforms once; a tool narrows that list and can never extend it. The alternative — per-tool platform sets that each stand alone — would let two tools disagree about what the layer targets, and the layer would no longer have one answer to "which platforms is this for".
+
+      IT NARROWS ONLY, AND AN UNKNOWN NAME IS A REFUSAL. The filter is applied against the layer's declared list and any name not in it stops the deposit. This is the opposite of the usual ergonomic choice, and deliberately: the failure mode of a tolerated name is a tool silently absent from a signed layer, which is exactly how layer 2026.09.18 shipped with no Linux build of five tools. A restriction that matched nothing would publish a layer claiming a tool it does not carry.
+
+      THE ORDER COMES FROM THE LAYER. Filtering preserves the layer's platform order rather than the manifest's, so the payload list does not change shape with the order someone typed. A deposit's contents should not depend on editing style.
+
+      WHY NOT EXPRESS THE OMISSION THROUGH THE EXISTING SKIP. varve already drops a platform whose asset the release does not publish, silently and correctly. Reusing it for binaryen was rejected: binaryen DOES publish macOS assets, so the manifest would have to name a file that is not there. A 404 would be enacting a policy, the manifest would assert something false, and the real reason — a payload model that cannot carry a binary plus its library — would appear nowhere a reader could find it. "Upstream does not build this" and "we cannot carry what upstream built" are different facts and must not share a mechanism.
+
+      THE ENV TRANSLATION REFUSES RATHER THAN DROPPING IT. `assembler_env` has no field for the restriction. It joins `sdk` and `upstream-sums` in refusing to translate, because dropping this one does not rename a payload — it assembles the tool for the platform the realm excluded, and for binaryen that payload passes install and verification and fails at the first exec.
+
+      WHAT THIS DEFERS, NOT REJECTS. A tool payload that carries a required runtime library beside the executable. That is the capability binaryen on macOS actually needs, and until it exists the honest options are a Linux-only tool or an `sdk` payload reached by path rather than by shim. This decision makes the gap expressible; it does not close it.
+    fields:
+      rationale: The failure mode of a tolerated platform name is a tool silently missing from a signed layer, which has happened (layer 2026.09.18). Reusing the existing absent-asset skip was rejected because binaryen does publish macOS assets, so it would require naming a file that is not there and would leave the real reason recorded nowhere.
+    links:
+      - type: satisfies
+        target: REQ-TOOLPLAT-001
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-07T21:52:53Z
+    release: v0.41.0

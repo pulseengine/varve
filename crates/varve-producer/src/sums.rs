@@ -179,6 +179,30 @@ impl Sums {
         self.entries.keys().map(String::as_str)
     }
 
+    /// Fold another statement's digests in.
+    ///
+    /// Build provenance arrives per asset from some upstreams, so one
+    /// release's covered set is assembled from several statements rather than
+    /// read from one (DD-037). A name already standing at a DIFFERENT digest
+    /// is refused with the same error a single malformed sums file would
+    /// raise: two proofs disagreeing about one file is not something to
+    /// resolve by order of arrival.
+    pub fn merge(&mut self, other: &Sums) -> Result<(), SumsError> {
+        for (name, digest) in &other.entries {
+            if let Some(prev) = self.entries.get(name)
+                && prev != digest
+            {
+                return Err(SumsError::Conflicting {
+                    name: name.clone(),
+                    first: prev.clone(),
+                    second: digest.clone(),
+                });
+            }
+            self.entries.insert(name.clone(), digest.clone());
+        }
+        Ok(())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

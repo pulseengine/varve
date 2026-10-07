@@ -143,12 +143,36 @@ pub enum PlanError {
         tool: String,
         layout: String,
     },
+    /// A tool restricts itself to a platform the layer does not declare.
+    ///
+    /// Refused rather than ignored. An ignored entry is indistinguishable from
+    /// a typo, and the symptom would be a tool quietly missing from a signed
+    /// layer — which is how layer 2026.09.18 shipped without a single Linux
+    /// build of five tools.
+    PlatformNotInLayer {
+        tool: String,
+        platform: String,
+        declared: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PlanError::Template(e) => write!(f, "{e}"),
+            PlanError::PlatformNotInLayer {
+                tool,
+                platform,
+                declared,
+            } => write!(
+                f,
+                "tool {tool:?} restricts itself to platform {platform:?}, which \
+                 this layer does not declare.\n  declared: {}\n\
+                 Refusing rather than ignoring it: an ignored entry reads \
+                 exactly like a typo, and the symptom is a tool quietly \
+                 missing from a signed layer.",
+                declared.join(", ")
+            ),
             PlanError::DocsIsNotPerPlatform { name, asset } => write!(
                 f,
                 "docs {name:?} uses a per-platform template {asset:?}. \
@@ -265,7 +289,32 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
         });
         return Ok(out);
     }
-    for p in platforms {
+    // A tool may be carried for FEWER platforms than the layer declares, for
+    // an upstream whose build for one cannot be a varve payload at all. Each
+    // named platform must be one the layer declares, or it is refused: an
+    // ignored name reads exactly like a typo (REQ-TOOLPLAT-001).
+    let carried: Vec<&str> = match &t.platforms {
+        None => platforms.to_vec(),
+        Some(only) => {
+            for want in only {
+                if !platforms.contains(&want.as_str()) {
+                    return Err(PlanError::PlatformNotInLayer {
+                        tool: t.name.clone(),
+                        platform: want.clone(),
+                        declared: platforms.iter().map(|p| (*p).to_string()).collect(),
+                    });
+                }
+            }
+            // Filtered in the LAYER's order, not the manifest's, so a payload
+            // list does not change shape with the order someone typed.
+            platforms
+                .iter()
+                .copied()
+                .filter(|p| only.iter().any(|w| w == p))
+                .collect()
+        }
+    };
+    for p in &carried {
         // An explicit name wins over the template. Some upstreams ship only a
         // musl Linux build, whose name no template can derive from a gnu
         // triple; naming the file is exact where inferring it would guess.
@@ -547,6 +596,85 @@ mod tests {
              channel = \"rolling\"\nregistry = \"oci://x\"\n\n{tools}"
         );
         parse_layer_manifest(&text).expect("parses")
+    }
+
+    /// A tool carried for FEWER platforms than the layer declares.
+    ///
+    /// `WebAssembly/binaryen` 133 is why. Its Linux binaries are statically
+    /// linked and stand alone; its macOS binaries are 1.7 MB stubs needing a
+    /// 15 MB `@rpath/libbinaryen.dylib` at `@loader_path/../lib`. A varve
+    /// `tool` payload is ONE executable, so a macOS payload would pass
+    /// install AND verification and fail at the first exec — the worst shape
+    /// of failure, because every check that could have caught it passes.
+    ///
+    /// Note what this is NOT: skipping an asset the release does not publish.
+    /// binaryen DOES publish macOS assets. Expressing this by naming a file
+    /// that is not there would make a 404 enact a policy.
+    // rivet: verifies REQ-TOOLPLAT-001
+    #[test]
+    fn a_tool_is_carried_only_for_the_platforms_it_names() {
+        let m = manifest(
+            "[[tool]]\nname = \"wasm-opt\"\nrepo = \"WebAssembly/binaryen\"\n\
+             version = \"133\"\nrelease = \"version_133\"\n\
+             platforms = [\"x86_64-unknown-linux-gnu\"]\n",
+        );
+        let p = plan(&m, PLATFORMS).expect("plans");
+        assert_eq!(p.len(), 1, "one platform, not {}: {p:?}", PLATFORMS.len());
+        assert_eq!(p[0].platform.as_deref(), Some("x86_64-unknown-linux-gnu"));
+        assert_eq!(p[0].name, "wasm-opt");
+    }
+
+    /// Absent, every platform the layer declares — the ordinary case, and the
+    /// one a filter must not quietly narrow.
+    // rivet: verifies REQ-TOOLPLAT-001
+    #[test]
+    fn a_tool_naming_no_platforms_is_carried_for_all_of_them() {
+        let m = manifest("[[tool]]\nname = \"rivet\"\nversion = \"v0.34.0\"\n");
+        let p = plan(&m, PLATFORMS).expect("plans");
+        assert_eq!(p.len(), PLATFORMS.len());
+    }
+
+    /// A platform the layer does not declare is a REFUSAL, not a no-op.
+    ///
+    /// This is the clause that matters. An ignored entry reads exactly like a
+    /// typo, and its symptom is a tool quietly absent from a signed layer —
+    /// how layer 2026.09.18 shipped without a single Linux build of five
+    /// tools. A restriction that silently matches nothing would deposit a
+    /// layer claiming a tool it does not carry.
+    // rivet: verifies REQ-TOOLPLAT-001
+    #[test]
+    fn a_platform_the_layer_does_not_declare_is_refused_not_ignored() {
+        let m = manifest(
+            "[[tool]]\nname = \"wasm-opt\"\nrepo = \"WebAssembly/binaryen\"\n\
+             version = \"133\"\nrelease = \"version_133\"\n\
+             platforms = [\"x86_64-unknown-linux-musl\"]\n",
+        );
+        let e = plan(&m, PLATFORMS).expect_err("a platform the layer never declared");
+        assert!(
+            matches!(
+                &e,
+                PlanError::PlatformNotInLayer { tool, platform, .. }
+                    if tool == "wasm-opt" && platform == "x86_64-unknown-linux-musl"
+            ),
+            "{e:?}"
+        );
+        // The message must name what IS declared, or the operator cannot see
+        // whether they mistyped the triple or the layer is missing it.
+        assert!(e.to_string().contains("aarch64-apple-darwin"), "{e}");
+    }
+
+    /// The payload order follows the LAYER's platform order, not the order
+    /// somebody happened to type into the manifest.
+    // rivet: verifies REQ-TOOLPLAT-001
+    #[test]
+    fn the_carried_platforms_keep_the_layers_order() {
+        let m = manifest(
+            "[[tool]]\nname = \"rivet\"\nversion = \"v0.34.0\"\n\
+             platforms = [\"x86_64-unknown-linux-gnu\", \"aarch64-apple-darwin\"]\n",
+        );
+        let p = plan(&m, PLATFORMS).expect("plans");
+        let got: Vec<&str> = p.iter().filter_map(|x| x.platform.as_deref()).collect();
+        assert_eq!(got, PLATFORMS, "reordered by the manifest: {got:?}");
     }
 
     // rivet: verifies REQ-PRODUCER-002

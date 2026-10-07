@@ -275,6 +275,32 @@ impl<R: CommandRunner> Source for GhSource<R> {
             })
     }
 
+    fn attestation_json_for(
+        &self,
+        repo: &str,
+        version: &str,
+        asset: &str,
+    ) -> Result<String, RunError> {
+        // Verified against THIS asset's bytes, which is the whole point: the
+        // statement that comes back names the file it was asked about, so the
+        // digest recorded for these bytes is one an attestation actually
+        // vouches for rather than one inherited from a sibling.
+        let path = self.download(repo, version, asset)?;
+        let argv = gh::attestation_verify_argv(&path.to_string_lossy(), repo);
+        let out = self.runner.run("gh", &argv, &gh::forge_env(&self.forge));
+        if !out.ok() {
+            return Err(io_err(
+                &format!("{repo} {version}: {asset}"),
+                &format!(
+                    "`gh attestation verify` did not accept this asset's own \
+                     attestation: {}",
+                    out.stderr.trim()
+                ),
+            ));
+        }
+        Ok(out.stdout)
+    }
+
     fn asset_bytes(&self, repo: &str, version: &str, asset: &str) -> Result<Vec<u8>, RunError> {
         let path = self.download(repo, version, asset)?;
         read(&path)

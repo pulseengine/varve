@@ -61,8 +61,25 @@ pub trait Source {
     /// The text of a release's `SHA256SUMS.txt`, called only after cosign
     /// accepted it.
     fn sums_text(&self, repo: &str, version: &str) -> Result<String, RunError>;
-    /// The in-toto statement `gh attestation verify` accepted.
+    /// The in-toto statement `gh attestation verify` accepted, discovered by
+    /// probing ONE asset of the release.
     fn attestation_json(&self, repo: &str, version: &str) -> Result<String, RunError>;
+    /// The in-toto statement for ONE named asset, verified against that
+    /// asset's own bytes.
+    ///
+    /// Needed because the two upstream publishing styles are not
+    /// distinguishable in advance. A publisher that batches its release into
+    /// one attestation yields a statement naming every asset, and the probe's
+    /// copy answers for all of them. A publisher that calls
+    /// `attest-build-provenance` per file yields a statement naming exactly
+    /// one, and every other asset has a proof of its own that the probe never
+    /// fetched (varve#245).
+    fn attestation_json_for(
+        &self,
+        repo: &str,
+        version: &str,
+        asset: &str,
+    ) -> Result<String, RunError>;
     fn asset_bytes(&self, repo: &str, version: &str, asset: &str) -> Result<Vec<u8>, RunError>;
 }
 
@@ -205,6 +222,14 @@ pub fn verify_release<S: Source>(
     version: &str,
     optins: &BTreeMap<String, String>,
     upstream_sums_asset: Option<&str>,
+    // The assets this layer actually plans to ingest from the release.
+    //
+    // Needed because build provenance may arrive per asset, and the covered
+    // set must be COMPLETE before any payload is touched: `run` reads it to
+    // decide carry-forward and `admit` reads it again when the bytes land, so
+    // topping it up lazily would fix one caller and leave the other refusing
+    // (DD-037).
+    wanted: &[String],
 ) -> Result<Verified, RunError> {
     let probe = src.probe(forge, repo, version)?;
     let accepted = ingest::choose(forge, repo, version, &probe, optins, upstream_sums_asset)?;
@@ -239,15 +264,49 @@ pub fn verify_release<S: Source>(
             })?)
         }
         Mechanism::BuildProvenance => {
+            // The statement the probe already verified. An upstream that
+            // batches its release names every asset here, and this is the
+            // whole answer — one verification, as clause 3 requires.
             let json = src.attestation_json(repo, version)?;
-            Some(
-                crate::attestation::parse(&json)
-                    .map_err(|e| RunError::Io {
-                        context: format!("{repo} {version}: reading the verified attestation"),
-                        detail: e.to_string(),
-                    })?
-                    .sums,
-            )
+            let mut covered = crate::attestation::parse(&json)
+                .map_err(|e| RunError::Io {
+                    context: format!("{repo} {version}: reading the verified attestation"),
+                    detail: e.to_string(),
+                })?
+                .sums;
+
+            // An upstream that calls `attest-build-provenance` per file names
+            // only ONE asset there, and every other asset of the release has
+            // a proof of its own that the probe never fetched. Refusing those
+            // rejects bytes upstream fully attests (varve#245), so each
+            // planned asset the probed statement does not name is verified
+            // against its own bytes and its own statement.
+            for asset in wanted {
+                if covered.digest_of(asset).is_some() {
+                    continue;
+                }
+                // Not published at all is "this platform has no build", which
+                // is routine and is the caller's to report. Asking upstream
+                // for an attestation over a file that does not exist would
+                // turn it into an error.
+                if !probe.published.is_empty() && !probe.published.contains(asset) {
+                    continue;
+                }
+                let one = src.attestation_json_for(repo, version, asset)?;
+                let parsed = crate::attestation::parse(&one).map_err(|e| RunError::Io {
+                    context: format!("{repo} {version}: reading {asset}'s own attestation"),
+                    detail: e.to_string(),
+                })?;
+                // Merged, not replaced: a statement that names a DIFFERENT
+                // asset leaves this one uncovered, and it is then refused by
+                // the same rule as any other unproven asset rather than
+                // credited with its sibling's proof.
+                covered.merge(&parsed.sums).map_err(|e| RunError::Io {
+                    context: format!("{repo} {version}: {asset}"),
+                    detail: e.to_string(),
+                })?;
+            }
+            Some(covered)
         }
         // No proof was offered and an operator said to proceed anyway. There
         // is no list of covered digests because there is no list.
@@ -318,7 +377,8 @@ pub fn run<S: Source>(
         let sums_asset = idxs
             .first()
             .and_then(|i| plans[*i].upstream_sums.as_deref());
-        let v = verify_release(src, forge, &repo, &version, optins, sums_asset)?;
+        let wanted: Vec<String> = idxs.iter().map(|i| plans[*i].asset.clone()).collect();
+        let v = verify_release(src, forge, &repo, &version, optins, sums_asset, &wanted)?;
         seen.record(&repo, &version, v.accepted.clone())?;
         for i in idxs {
             let p = &plans[i];
@@ -530,7 +590,35 @@ mod tests {
         sums: BTreeMap<String, String>,
         blobs: BTreeMap<String, Vec<u8>>,
         probes: BTreeMap<String, ReleaseProbe>,
+        /// `repo@version` -> the statement the PROBE returns.
+        attestations: BTreeMap<String, String>,
+        /// `repo@version/asset` -> the statement that asset's own
+        /// verification returns.
+        per_asset: BTreeMap<String, String>,
         calls: std::cell::RefCell<Vec<String>>,
+    }
+
+    /// One `gh attestation verify --format json` document.
+    fn attestation_doc(subjects: &[(&str, &[u8])]) -> String {
+        let subs: Vec<String> = subjects
+            .iter()
+            .map(|(n, b)| {
+                format!(
+                    r#"{{"name":"{n}","digest":{{"sha256":"{}"}}}}"#,
+                    sha256_hex(b)
+                )
+            })
+            .collect();
+        format!(
+            r#"[{{"verificationResult":{{
+                "statement":{{"subject":[{}]}},
+                "signature":{{"certificate":{{
+                    "buildSignerURI":"https://github.com/up/stream/.github/workflows/release.yml@refs/tags/v1",
+                    "sourceRepositoryDigest":"cafebabe"
+                }}}}
+            }}}}]"#,
+            subs.join(",")
+        )
     }
 
     impl Fixture {
@@ -557,10 +645,65 @@ mod tests {
             );
             f
         }
+        /// A release proven by BUILD PROVENANCE, in the shape a publisher
+        /// that calls `attest-build-provenance` per file produces: every
+        /// asset has its own statement, and each names only itself.
+        ///
+        /// Measured shape — `bytecodealliance/wasmtime` v49.0.1 (varve#245).
+        fn attested_per_asset(repo: &str, version: &str, pairs: &[(&str, &[u8])]) -> Self {
+            let mut f = Fixture::default();
+            let key = format!("{repo}@{version}");
+            for (n, b) in pairs {
+                f.blobs.insert(format!("{key}/{n}"), b.to_vec());
+                f.per_asset
+                    .insert(format!("{key}/{n}"), attestation_doc(&[(*n, *b)]));
+            }
+            // The probe takes the first asset, so that is the statement it
+            // caches for the release.
+            let (first, fb) = pairs[0];
+            f.attestations
+                .insert(key.clone(), attestation_doc(&[(first, fb)]));
+            f.probes.insert(
+                key,
+                ReleaseProbe {
+                    published: pairs.iter().map(|(n, _)| n.to_string()).collect(),
+                    has_sums: false,
+                    has_cosign_bundle: false,
+                    cosign: None,
+                    attestation: crate::ingest::AttestationProbe::Verified {
+                        signer: "https://github.com/up/stream/.github/workflows/release.yml@refs/tags/v1".into(),
+                        commit: "cafebabe".into(),
+                    },
+                },
+            );
+            f
+        }
+
+        /// The same release in the shape a publisher that batches produces:
+        /// ONE statement naming every asset.
+        ///
+        /// Measured shape — `bytecodealliance/wasm-tools` v1.260.0, 10
+        /// subjects in one statement.
+        fn attested_as_one_batch(repo: &str, version: &str, pairs: &[(&str, &[u8])]) -> Self {
+            let mut f = Fixture::attested_per_asset(repo, version, pairs);
+            let key = format!("{repo}@{version}");
+            let batch = attestation_doc(pairs);
+            f.attestations.insert(key.clone(), batch.clone());
+            // A batch publisher's per-asset lookup would also return the
+            // batch, but nothing should need to ask: the probe's copy already
+            // names every asset.
+            for (n, _) in pairs {
+                f.per_asset.insert(format!("{key}/{n}"), batch.clone());
+            }
+            f
+        }
+
         fn with(mut self, other: Fixture) -> Self {
             self.sums.extend(other.sums);
             self.blobs.extend(other.blobs);
             self.probes.extend(other.probes);
+            self.attestations.extend(other.attestations);
+            self.per_asset.extend(other.per_asset);
             self
         }
         fn log(&self) -> Vec<String> {
@@ -585,8 +728,26 @@ mod tests {
                 detail: "no sums".into(),
             })
         }
-        fn attestation_json(&self, _r: &str, _v: &str) -> Result<String, RunError> {
-            unimplemented!("not reached by these fixtures")
+        fn attestation_json(&self, repo: &str, version: &str) -> Result<String, RunError> {
+            let k = format!("{repo}@{version}");
+            self.calls.borrow_mut().push(format!("attest {k}"));
+            self.attestations.get(&k).cloned().ok_or(RunError::Io {
+                context: k,
+                detail: "no attestation".into(),
+            })
+        }
+        fn attestation_json_for(
+            &self,
+            repo: &str,
+            version: &str,
+            asset: &str,
+        ) -> Result<String, RunError> {
+            let k = format!("{repo}@{version}/{asset}");
+            self.calls.borrow_mut().push(format!("attest-one {k}"));
+            self.per_asset.get(&k).cloned().ok_or(RunError::Io {
+                context: k,
+                detail: "this asset has no attestation of its own".into(),
+            })
         }
         fn asset_bytes(&self, repo: &str, version: &str, asset: &str) -> Result<Vec<u8>, RunError> {
             let k = format!("{repo}@{version}/{asset}");
@@ -604,6 +765,176 @@ mod tests {
 
     fn payload_key_for_test(name: &str, platform: Option<&str>) -> String {
         crate::deposit::payload_key(name, platform)
+    }
+
+    /// An upstream that attests EACH ASSET SEPARATELY is ingested whole.
+    ///
+    /// Two publishing styles exist and nothing announces which is in use.
+    /// `wasm-tools` v1.260.0 puts ten subjects in one statement; `wasmtime`
+    /// v49.0.1 publishes one statement per asset, each naming one file. varve
+    /// probed a single asset and treated its subject list as the release's
+    /// complete set of covered digests, so against the second style it
+    /// refused every asset but the probed one — bytes upstream fully attests,
+    /// rejected as unproven (varve#245).
+    ///
+    /// Fail-closed, so never a hole; it blocked `pulseengine-wasm` from
+    /// depositing at all.
+    // rivet: verifies REQ-PROVSHAPE-001
+    #[test]
+    fn an_upstream_that_attests_each_asset_separately_is_ingested_whole() {
+        let f =
+            Fixture::attested_per_asset("o/r", "v1", &[("first.tar.gz", A), ("second.tar.gz", B)]);
+        let plans = vec![
+            plan("first", "o/r", "v1", "first.tar.gz"),
+            plan("second", "o/r", "v1", "second.tar.gz"),
+        ];
+
+        let got = run(
+            &f,
+            &Forge::github_com(),
+            &plans,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &never,
+            &no_reuse,
+        )
+        .expect("both assets are attested by their own statements");
+
+        assert_eq!(got.len(), 2, "both payloads resolve");
+        // The digest recorded is the one the proof carries, for each.
+        assert_eq!(got[0].digest, sha256_hex(A));
+        assert_eq!(got[1].digest, sha256_hex(B));
+        for r in &got {
+            assert_eq!(
+                r.accepted.mechanism,
+                Mechanism::BuildProvenance,
+                "recorded as proven, not downgraded"
+            );
+        }
+    }
+
+    /// The batch style keeps working, and keeps costing ONE verification.
+    ///
+    /// The fix must not turn a ten-subject statement into ten calls: that is
+    /// the regression a naive "verify everything per asset" would ship, and
+    /// it would be invisible because the result is still correct.
+    // rivet: verifies REQ-PROVSHAPE-001
+    #[test]
+    fn a_batched_attestation_still_answers_for_every_asset_it_names() {
+        let f = Fixture::attested_as_one_batch(
+            "o/r",
+            "v1",
+            &[("first.tar.gz", A), ("second.tar.gz", B)],
+        );
+        let plans = vec![
+            plan("first", "o/r", "v1", "first.tar.gz"),
+            plan("second", "o/r", "v1", "second.tar.gz"),
+        ];
+
+        let got = run(
+            &f,
+            &Forge::github_com(),
+            &plans,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &never,
+            &no_reuse,
+        )
+        .expect("one statement names both assets");
+        assert_eq!(got.len(), 2);
+
+        let per_asset: Vec<String> = f
+            .log()
+            .into_iter()
+            .filter(|c| c.starts_with("attest-one "))
+            .collect();
+        assert!(
+            per_asset.is_empty(),
+            "a statement that already names the asset must not be re-verified: {per_asset:?}"
+        );
+    }
+
+    /// An asset with no proof of its own, in a release whose other assets
+    /// have one, is still refused.
+    ///
+    /// This is the property the per-asset top-up must not spend. Falling back
+    /// to "ask that asset" must not become "accept whatever comes back", and
+    /// an asset nothing attests has to stay a refusal.
+    // rivet: verifies REQ-PROVSHAPE-001
+    #[test]
+    fn an_asset_no_attestation_names_is_still_refused_when_its_siblings_have_one() {
+        let mut f =
+            Fixture::attested_per_asset("o/r", "v1", &[("first.tar.gz", A), ("second.tar.gz", B)]);
+        // Published, downloadable, and vouched for by nothing.
+        f.per_asset.remove("o/r@v1/second.tar.gz");
+        let plans = vec![
+            plan("first", "o/r", "v1", "first.tar.gz"),
+            plan("second", "o/r", "v1", "second.tar.gz"),
+        ];
+
+        let err = run(
+            &f,
+            &Forge::github_com(),
+            &plans,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &never,
+            &no_reuse,
+        )
+        .expect_err("an unattested asset must not ride in on its siblings' proofs");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("second.tar.gz"),
+            "the refusal must name the asset: {msg}"
+        );
+    }
+
+    /// A statement that names a DIFFERENT asset cannot vouch for this one.
+    ///
+    /// The per-asset lookup asks upstream about asset X; if what comes back
+    /// names only Y, accepting it would credit X with Y's proof. The digest
+    /// would then be absent and the asset must be refused rather than
+    /// recorded from the bytes we happen to hold.
+    // rivet: verifies REQ-PROVSHAPE-001
+    #[test]
+    fn a_statement_naming_another_asset_does_not_vouch_for_this_one() {
+        let mut f =
+            Fixture::attested_per_asset("o/r", "v1", &[("first.tar.gz", A), ("second.tar.gz", B)]);
+        // Upstream answers the question about `second` with a statement about
+        // `first` — a valid signature over the wrong subject.
+        f.per_asset.insert(
+            "o/r@v1/second.tar.gz".into(),
+            attestation_doc(&[("first.tar.gz", A)]),
+        );
+        let plans = vec![
+            plan("first", "o/r", "v1", "first.tar.gz"),
+            plan("second", "o/r", "v1", "second.tar.gz"),
+        ];
+
+        let err = run(
+            &f,
+            &Forge::github_com(),
+            &plans,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &never,
+            &no_reuse,
+        )
+        .expect_err("a proof over another file is not a proof over this one");
+
+        // THE KIND, not just the name. Asserting only that the message
+        // mentions the asset would pass under the wrong implementation too:
+        // crediting `second` with `first`'s digest also fails, as a
+        // DigestMismatch. Only `NotCoveredByProof` says the statement was
+        // refused for naming the wrong file, which is the property.
+        assert!(
+            matches!(
+                &err,
+                RunError::NotCoveredByProof { asset, mechanism, .. }
+                    if asset == "second.tar.gz" && *mechanism == "build-provenance"
+            ),
+            "expected the asset to be left uncovered, got: {err:?}"
+        );
     }
 
     /// THE property. A signature over a sums file says nothing about the bytes
