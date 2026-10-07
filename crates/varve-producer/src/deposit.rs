@@ -581,8 +581,13 @@ mod tests {
                     .position(|a| a == "-C")
                     .and_then(|i| args.get(i + 1))
                     .expect("-C");
+                // ONE copy of the fixtures, owned by the crate that owns the
+                // reader: they moved to varve-core with `linkage`, because a
+                // module whose tests live in another crate is invisible to the
+                // mutation shard that gates it — which is exactly how the
+                // `e_phentsize` mutant came back after the move.
                 let src = Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/fixtures/libc")
+                    .join("../varve-core/tests/fixtures/libc")
                     .join(self.0);
                 let bytes = std::fs::read(&src)
                     .unwrap_or_else(|e| panic!("fixture {} required: {e}", src.display()));
