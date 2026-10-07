@@ -46,6 +46,13 @@ base64 = "0.23.1"
 # controls need signatures nobody should accept — a text-type signature, a
 # certificate carrying its own revocation — and those cannot be borrowed from
 # an upstream, only produced. Pinned to the `rand` 0.8 line `pgp` itself uses.
+#
+# NOT A STALE PIN, AND NOT MOVEABLE ON ITS OWN. These hand their RNG to
+# `pgp`, which takes `rand_core` 0.6; a 0.9 RNG is a different trait of the
+# same name, so the bump fails even with both crates raised together
+# (measured on #236/#237). dependabot has a matching `ignore`; the exit
+# condition and what to do when it arrives are in #240. Change both places
+# or neither.
 rand = "0.8"
 rand_chacha = "0.3"
 tar = "0.4"

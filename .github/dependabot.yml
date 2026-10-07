@@ -34,6 +34,32 @@ updates:
           - minor
           - patch
 
+    # rand and rand_chacha CANNOT move to the 0.9 line, and dependabot reopens
+    # them every week unless told. They are dev-dependencies whose only job is
+    # to hand a deterministic RNG to `pgp`'s key generation, and `pgp` takes
+    # `rand_core` 0.6 — so a 0.9 RNG is a DIFFERENT trait of the same name,
+    # not a newer one.
+    #
+    # MEASURED on #236/#237 (2026-10-07), bumping BOTH together so that the
+    # usual "they must land as a pair" answer was ruled out first:
+    #
+    #   error[E0277]: the trait bound `ChaCha20Rng: rand_core::CryptoRng`
+    #                 is not satisfied
+    #   note: there are multiple different versions of crate `rand_core`
+    #         in the dependency graph
+    #
+    # THE EXIT, so this is a pin and not a burial: `pgp` moving off rand 0.8.
+    # Its latest release — 0.21.0 — still requires `rand ^0.8.6`. When it
+    # moves, delete this ignore and bump pgp, rand and rand_chacha in ONE PR;
+    # separately each is broken by construction. Tracked in #240.
+    ignore:
+      - dependency-name: rand
+        versions:
+          - ">=0.9"
+      - dependency-name: rand_chacha
+        versions:
+          - ">=0.4"
+
   # The one that actually matters here. Every workflow pins its actions by full
   # commit SHA — `actions/checkout@3d3c42e5…` — which is the right thing for a
   # repository whose subject is supply-chain integrity, and which means they go
