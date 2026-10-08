@@ -23,7 +23,7 @@ publish = false
 # with ZERO build dependencies. `default-features = false` drops the bzip2
 # default, which serves compressed messages and never a detached signature.
 # The RUSTSEC-2023-0071 cost this carries is recorded in deny.toml.
-pgp = { version = "0.20.0", default-features = false }
+pgp = { version = "0.21.0", default-features = false }
 anyhow = "1.0.104"
 # This crate reports to a CLI through `anyhow`, which is right for a command.
 # `pgpsums` is a verification boundary and uses TYPED errors instead: a caller
