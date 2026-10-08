@@ -34,7 +34,7 @@ ureq = "3"
 # put the trickiest parser in the workspace in the trusted base. Only the
 # `decoding` feature is taken: no `wat` text parser, no serde surface, and no
 # encoder at all — nothing in varve writes a WIT package.
-wit-parser = { version = "0.259.0", default-features = false, features = ["decoding"] }
+wit-parser = { version = "0.261.0", default-features = false, features = ["decoding"] }
 wsc = "0.11.0"
 
 [dev-dependencies]
