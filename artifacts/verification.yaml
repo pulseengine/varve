@@ -3390,3 +3390,38 @@ artifacts:
       model: claude-opus-5
       timestamp: 2026-10-07T21:49:33Z
     release: v0.41.0
+
+  - id: VER-AUTOBUMP-001
+    type: verification
+    title: "All three kinds in one real scan: proven bumps, hub reports, opt-in reports — each with its own reason"
+    status: verified
+    description: |-
+      REQ-AUTOBUMP-001, clause by clause, with the mutation that falsifies each claim.
+
+      (1) A hub payload is never auto-bumped. `a_hub_payload_is_reported_but_never_auto_bumped` already held this before the change and still does, which is the point: the fix must not buy the new rule by loosening the old one.
+
+      (2) An opt-in payload is never auto-bumped. `an_opt_in_payload_is_reported_but_never_auto_bumped` scans a manifest whose `wac` entry carries a reason and whose upstream has moved, and asserts `auto_bumpable()` is false. IT WAS WATCHED FAILING FIRST, and specifically failing on the ASSERTION rather than on a compile error: the field and the reporting method were added first with `auto_bumpable` deliberately left alone, so the red run proved the test discriminates on behaviour. NEGATIVE CONTROL: reverting the rule to `payload_version.is_none()` — the defect — turns it red.
+
+      (3) One definition, consumed by both renderings. `main.rs` matched `payload_version` itself for the human output, so it marked the hub case and silently called an opt-in bumpable. Both now read `why_a_person()`. The duplication was found by looking for other deciders, not by a test failing — the recurring local defect shape.
+
+      (4) The report names WHICH work a person must do, and the two cases stay distinguishable. The test asserts the opt-in note mentions the orphaned reason rather than merely saying "not automatic". NEGATIVE CONTROL: returning a bare "not auto-bumpable" for the opt-in case turns it red — which is why the assertion is on the text's content and not on its presence.
+
+      (5) The note tells the reader to drop a no-longer-needed opt-in rather than renew it. Carried in the message text.
+
+      MEASURED END TO END against the real upstream, with the real wasm-layers manifest, which is what the fixtures cannot establish:
+
+        wasm-tools   v1.260.0 -> v1.261.0  auto_bumpable=true
+        wac          v0.11.0  -> v0.12.0   auto_bumpable=false  (opt-in: re-measure)
+        wasmtime     v49.0.1  -> v49.0.2   auto_bumpable=false  (hub: read release notes)
+
+      All three kinds in one scan, each with the right answer and the right reason. The `wac` row needed a self-consistent manifest to produce: pinning it back alone ALSO orphans the reason, so `scan` refuses the manifest outright — which incidentally measures how tight the wedge is. Once a bad bump lands, the realm cannot even be scanned.
+
+      SCOPE OF WHAT THIS DOES NOT SHOW. No realm has yet run this. The realm-side half — proposing a PR instead of pushing to main, so a refused manifest can never land — is not in varve and is not verified here. Until that lands, a realm whose scanner commits directly is still only as safe as this flag makes it, and a payload with NEITHER a hub version nor an opt-in is still bumped unattended, which is the intended behaviour and not an oversight.
+    links:
+      - type: verifies
+        target: REQ-AUTOBUMP-001
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-08T21:04:11Z
+    release: v0.42.0

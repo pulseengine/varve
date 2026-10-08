@@ -30,6 +30,14 @@ pub struct Moved {
     /// `pulseengine/jess` tags `v0.7.2` and ships `with-device` at `0.2.2` —
     /// and those cannot be bumped automatically. See [`Moved::auto_bumpable`].
     pub payload_version: Option<String>,
+    /// The opt-in reason this payload carries, if it carries one.
+    ///
+    /// Present means a bump would ORPHAN it. An `unverified-reason` is a
+    /// measurement of ONE release (REQ-INGEST-001 clause 3, enforced in
+    /// `parse_layer_manifest`), so rewriting the pin while the words stay
+    /// behind yields a manifest varve refuses — and the refusal's own text
+    /// names a scanner as the usual cause (varve#249).
+    pub unverified_reason: Option<String>,
 }
 
 impl Moved {
@@ -45,7 +53,35 @@ impl Moved {
     ///
     /// So it is REPORTED and not acted on. A human reads the release notes.
     pub fn auto_bumpable(&self) -> bool {
-        self.payload_version.is_none()
+        self.payload_version.is_none() && self.unverified_reason.is_none()
+    }
+
+    /// What a person must do, when this pin is not the scanner's to move.
+    ///
+    /// The two cases need different work and must not collapse into one
+    /// another: a hub needs upstream's release notes READ, an opt-in needs the
+    /// new release's proof RE-MEASURED. A report that says only "not
+    /// automatic" leaves the reader to guess which.
+    pub fn why_a_person(&self) -> Option<String> {
+        if self.payload_version.is_some() {
+            return Some(format!(
+                "{}'s payload version is its own number, not the release tag, so \
+                 only upstream's release notes say what {} ships",
+                self.name, self.latest
+            ));
+        }
+        if self.unverified_reason.is_some() {
+            return Some(format!(
+                "{} is carried on an explicit opt-in, and its `unverified-reason` \
+                 is a measurement of {} — not of {}. Bumping the pin while those \
+                 words stay behind produces a manifest varve refuses. RE-MEASURE \
+                 {} upstream and say what you found; if it now publishes \
+                 cosign-signed sums or build provenance, drop the opt-in instead \
+                 of renewing it.",
+                self.name, self.pinned, self.latest, self.latest
+            ));
+        }
+        None
     }
 }
 
@@ -144,6 +180,13 @@ pub fn compare(
         .iter()
         .map(|t| (t.name.as_str(), t.release.as_deref()))
         .collect();
+    // Carried alongside, because whether a pin may move unattended depends on
+    // it: an opt-in reason measures one release and does not survive a bump.
+    let reasons: std::collections::BTreeMap<&str, Option<&str>> = manifest
+        .tools
+        .iter()
+        .map(|t| (t.name.as_str(), t.unverified_reason.as_deref()))
+        .collect();
 
     for (name, repo_field, version) in entries {
         let t = ToolRef {
@@ -169,6 +212,11 @@ pub fn compare(
                         pinned,
                         latest: newest.clone(),
                         payload_version: t.release.map(|_| t.version.to_string()),
+                        unverified_reason: reasons
+                            .get(t.name)
+                            .copied()
+                            .flatten()
+                            .map(str::to_string),
                     });
                 }
             }
@@ -384,6 +432,14 @@ mod tests {
         );
     }
 
+    /// A third-party payload carried on an explicit opt-in, as every
+    /// bytecodealliance entry in the `pulseengine-wasm` realm is.
+    const OPTIN: &str = "[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\n\
+         version = \"v0.12.0\"\nlayout = \"raw-per-platform\"\nasset = \"wac-cli-%T\"\n\
+         unverified-reason = \"bytecodealliance/wac v0.12.0 publishes neither \
+         cosign-signed sums nor build provenance (measured 2026-10-02). Accepted \
+         for the rolling channel only.\"\n";
+
     const HUB: &str = "[[tool]]\nname = \"with-device\"\nrepo = \"pulseengine/jess\"\n\
                        version = \"0.2.1\"\nrelease = \"v0.7.1\"\n\
                        asset = \"with-device-%V-%T.tar.gz\"\n";
@@ -468,6 +524,45 @@ mod tests {
             .expect_err("an unreachable vsix upstream is not 'nothing moved'");
     }
 
+    /// An OPT-IN payload is reported and never auto-bumped.
+    ///
+    /// `scan` and `parse_layer_manifest` disagreed about the same bump, and the
+    /// scanner was the optimistic one (varve#249). An `unverified-reason` is a
+    /// measurement of ONE release — who published it, what they did not sign,
+    /// and when that was checked — so bumping the pin while the words stay
+    /// behind produces a manifest varve itself refuses:
+    ///
+    ///   tool "wac" is pinned at v0.13.0 and its `unverified-reason` never
+    ///   mentions v0.13.0 ... the usual way to arrive here is a scanner
+    ///   bumping the version while the justification stayed behind.
+    ///
+    /// The refusal names the scanner as the hazard, and the scanner called the
+    /// bump safe. A realm acting on that answer pushes an unparseable manifest
+    /// to its own main branch, and then EVERY later tick fails the same way —
+    /// measured on wasm-layers, where 18 of 20 payloads carry a reason.
+    // rivet: verifies REQ-AUTOBUMP-001
+    #[test]
+    fn an_opt_in_payload_is_reported_but_never_auto_bumped() {
+        let optin = compare(
+            &manifest(OPTIN, "rolling"),
+            &seen(&[("bytecodealliance/wac", Ok("v0.13.0"))]),
+        )
+        .expect("complete");
+        assert_eq!(optin.len(), 1, "{optin:?}");
+        assert!(
+            !optin[0].auto_bumpable(),
+            "bumping this pin orphans its reason and the manifest stops parsing"
+        );
+        // And the report must say WHICH of the two reasons it is, because a
+        // person does different work for each: a hub needs release notes read,
+        // an opt-in needs the new release's proof re-measured.
+        let why = optin[0].why_a_person().expect("a reason to report");
+        assert!(
+            why.contains("unverified-reason") || why.contains("measurement"),
+            "the report must name the orphaned reason: {why}"
+        );
+    }
+
     /// THE ONE THAT MATTERS. An unattended depositor must not bump a hub
     /// payload: the new tag is known, the new payload VERSION is not, and it
     /// cannot be derived — only upstream's release notes say what version of
@@ -477,6 +572,7 @@ mod tests {
     /// for a binary answering `0.2.2` — the layer stating something untrue
     /// about its own contents.
     // rivet: verifies REQ-SCAN-001
+    // rivet: verifies REQ-AUTOBUMP-001
     #[test]
     fn a_hub_payload_is_reported_but_never_auto_bumped() {
         let hub = compare(

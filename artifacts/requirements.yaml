@@ -4893,3 +4893,67 @@ artifacts:
       model: claude-opus-5
       timestamp: 2026-10-07T21:52:53Z
     release: v0.41.0
+
+  - id: REQ-AUTOBUMP-001
+    type: requirement
+    title: What an unattended scanner may move by itself, decided once and reported with the reason
+    status: verified
+    description: |-
+      What an unattended scanner may move by itself, and what it must hand to a person — decided in ONE place and reported with the reason.
+
+      REQ-SCAN-001 says a scanner reports what moved. It never says which of those a depositor may act on without a person, and the rule lived only in code: `Moved::auto_bumpable()` returned `payload_version.is_none()`, which encodes the hub case (REQ-PAYLOADID-001) and nothing else.
+
+      THE DEFECT THAT FOLLOWED (varve#249). v0.41.0 made an `unverified-reason` a measurement of ONE release, enforced in `parse_layer_manifest`. The scanner did not know. So for a payload carrying an opt-in, `scan` answered "auto-bumpable" while `parse_layer_manifest` refused the manifest that bumping it produces — two parts of varve giving opposite answers about the same edit, and the refusal's own text names a scanner as the usual cause.
+
+      Measured 2026-10-08 against pulseengine/wasm-layers: `wac` has no `release` key and carries a reason, so it reported as auto-bumpable; rewriting its pin version-only yields a manifest `varve-producer plan` refuses. 18 of that realm's 20 payloads carry a reason. pulseengine-layers has 16 payloads and ZERO, which is the only reason its 15-minute cron has been safe — there is nothing there to orphan.
+
+      WHAT THE CONSEQUENCE IS, because "one red job" understates it. A realm scanner's shape is scan, rewrite, commit, push, deposit. A bad bump lands on main, the deposit fails, and every later tick fails identically — and the manifest is then unparseable, so the realm cannot even be SCANNED until a person fixes it by hand. The realm stops receiving releases with a red job as the only signal.
+
+      Clauses:
+
+      (1) A payload whose own version cannot be derived from the release tag shall not be auto-bumped. Only upstream's release notes say what a hub release ships, and writing the tag into `version` would sign a claim the payload does not make.
+
+      (2) A payload carrying an `unverified-reason` shall not be auto-bumped. The reason measures the pinned release; a bump orphans it and the result is a manifest varve refuses. This is not a lint — the scanner and the parser must agree about the same edit.
+
+      (3) The decision shall have ONE definition, consumed by every rendering. The JSON and the human-readable output each decided it separately, and the human one marked the hub case while calling an opt-in bumpable — the same split answer, in the half a person reads.
+
+      (4) A pin that is not the scanner's to move shall be reported WITH WHICH WORK A PERSON MUST DO, and the two cases shall remain distinguishable: a hub needs release notes read, an opt-in needs the new release's proof re-measured. A report that says only "not automatic" leaves the reader to guess, and the two have different answers.
+
+      (5) Where an opt-in payload has moved, the report shall say that an upstream which has STARTED publishing proof should have its opt-in dropped rather than renewed. Renewal is the likelier action and the wrong one when the measurement has changed.
+
+      NOT IN SCOPE HERE. Re-measuring the new release's proof so a proposal can carry a true reason, rather than only naming the work. The ingestion ladder already performs exactly those probes (sums, bundle, `gh attestation verify` with a control), so it is reachable — but a generated measurement is a claim varve signs, and it needs its own requirement rather than riding in on this one.
+    links:
+      - type: traces-to
+        target: REQ-SCAN-001
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-08T21:03:44Z
+    release: v0.42.0
+
+  - id: DD-039
+    type: design-decision
+    title: Auto-bumpability is one method on Moved, and every rendering asks it rather than re-deciding
+    status: accepted
+    description: |-
+      REQ-AUTOBUMP-001 says what a scanner may move. This says where the decision lives, decided 2026-10-08.
+
+      THE DECISION IS A METHOD ON `Moved`, AND EVERY RENDERING ASKS IT. `auto_bumpable()` answers whether, and `why_a_person()` answers which work — and the JSON output, the human-readable output and any realm consuming the JSON all read those two rather than inspecting the fields themselves.
+
+      WHY NOT A FLAG PER CASE IN EACH CONSUMER. That is what existed: `main.rs` matched `payload_version` to decide whether to print "hub: NOT auto-bumpable", while the JSON called `auto_bumpable()`. Two deciders, and they disagreed the moment a third case appeared — the human output marked the hub and called an opt-in bumpable. A realm reading the human output would have bumped exactly the pin that wedges it. This is the same shape as the platform rule answered differently by deposit and install, and the store root computed twice.
+
+      WHY THE REASON IS PROSE AND NOT AN ENUM. The caller is a person reading a report, or a scanner composing a pull-request body for a person. What they need is the WORK — read upstream's release notes, or re-measure the new release's proof and say what you found — and an enum variant name carries none of that. The two messages are deliberately different sentences; a shared "not auto-bumpable" string would make the cases indistinguishable, which clause 4 forbids.
+
+      WHY `scan` AND NOT THE REALM. Each realm would otherwise re-derive the rule in its own scanner, in whatever language that repository happens to use, and they would drift — which is precisely the argument REQ-SCAN-001 already made for putting the scanner in the producer rather than in a YAML heredoc. A realm asks; it does not decide.
+
+      WHAT THIS DEFERS. Re-measuring upstream so a proposal can carry a TRUE reason rather than naming the work. The ladder already performs those probes, so it is reachable — but a generated measurement is a claim varve signs, and it must not arrive as a side effect of a scanner fix.
+    fields:
+      rationale: "Two renderings decided it separately and disagreed the moment a third case appeared: the human output marked the hub case and called an opt-in bumpable, so a realm reading it would bump exactly the pin that wedges its own main branch. The reason is prose rather than an enum because the consumer is a person, or a scanner writing for one, and what they need is the work to do."
+    links:
+      - type: satisfies
+        target: REQ-AUTOBUMP-001
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-08T21:04:33Z
+    release: v0.42.0

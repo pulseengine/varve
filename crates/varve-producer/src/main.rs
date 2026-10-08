@@ -286,6 +286,11 @@ fn main() -> anyhow::Result<()> {
                                     "pinned": x.pinned, "latest": x.latest,
                                     "payload_version": x.payload_version,
                                     "auto_bumpable": x.auto_bumpable(),
+                                    // WHY not, when it is not. A consumer that
+                                    // proposes a bump needs to know which work
+                                    // a person must do: read release notes, or
+                                    // re-measure the new release's proof.
+                                    "needs_a_person": x.why_a_person(),
                                 })
                             })
                             .collect();
@@ -298,11 +303,13 @@ fn main() -> anyhow::Result<()> {
                         println!("nothing moved");
                     } else {
                         for x in &moved {
-                            // A hub payload is marked, because it must not be
-                            // bumped by anything that is not reading upstream's
-                            // release notes.
-                            let note = match &x.payload_version {
-                                Some(v) => format!("\t(hub: payload {v}, NOT auto-bumpable)"),
+                            // ONE decider for both renderings. This arm used to
+                            // match `payload_version` itself, so it marked the
+                            // hub case and silently called an opt-in payload
+                            // bumpable — the same split answer varve#249 is
+                            // about, in the half a person actually reads.
+                            let note = match x.why_a_person() {
+                                Some(why) => format!("\tNOT auto-bumpable: {why}"),
                                 None => String::new(),
                             };
                             println!("{}\t{}\t{}{}", x.name, x.pinned, x.latest, note);
