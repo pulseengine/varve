@@ -90,6 +90,24 @@ pub struct ManifestTool {
     /// Absent = `tarball`.
     #[serde(default)]
     pub layout: Option<String>,
+    /// The platforms this tool is carried for, when it is NOT every platform
+    /// the layer declares. Absent = all of them, the ordinary case.
+    ///
+    /// This is for an upstream whose build for some platform cannot be carried
+    /// as a varve payload at all, which is a different fact from not building
+    /// it. `WebAssembly/binaryen` 133 is the measured case: its Linux binaries
+    /// are statically linked and stand alone (18.7 MB), while its macOS
+    /// binaries are 1.7 MB stubs needing a 15 MB `@rpath/libbinaryen.dylib`
+    /// at `@loader_path/../lib`. A varve `tool` payload is ONE executable, so
+    /// a macOS payload would pass install and verification and then fail at
+    /// the first exec.
+    ///
+    /// An asset the release does not publish is already skipped, silently and
+    /// correctly. That is the wrong mechanism here, because the macOS asset
+    /// DOES exist: expressing this by naming a file that is not there would
+    /// make a 404 enact a policy and leave the real reason recorded nowhere.
+    #[serde(default)]
+    pub platforms: Option<Vec<String>>,
     /// Why this tool is ingested with NO proof of origin (REQ-INGEST-001
     /// clause 3). Present only for a release that offers neither a
     /// cosign-signed sums file nor a build attestation.
@@ -483,6 +501,13 @@ pub enum LayerSpecError {
     /// The encoding has no field for the upstream digest manifest, and losing
     /// it downgrades how the release is verified rather than how it is named.
     UpstreamSumsNotEncodable { tool: String, asset: String },
+    /// The encoding has no field for a per-tool platform restriction, and
+    /// losing it would carry the tool on a platform the realm deliberately
+    /// excluded (REQ-TOOLPLAT-001).
+    PlatformsNotEncodable {
+        tool: String,
+        platforms: Vec<String>,
+    },
     /// An opt-in that states no reason.
     UnverifiedWithoutReason { tool: String },
     /// An opt-in whose reason is about a DIFFERENT release than the one
@@ -574,6 +599,20 @@ impl fmt::Display for LayerSpecError {
                  survives the trip and the entry looks ordinary.\n\n\
                  Deposit this realm with `varve-producer deposit --manifest \
                  layer.toml`, which reads the mechanism directly."
+            ),
+            LayerSpecError::PlatformsNotEncodable { tool, platforms } => write!(
+                f,
+                "tool {tool:?} is carried for {} only, and the env encoding \
+                 has no field for that.\n\
+                 Translating it away does not rename anything — it CARRIES THE \
+                 TOOL ON PLATFORMS THE REALM EXCLUDED, and those are the \
+                 platforms where the payload cannot work. binaryen's macOS \
+                 build is the case this exists for: a 1.7 MB stub needing a \
+                 dylib a single-executable payload cannot carry, so the layer \
+                 would install, verify, and fail at the first exec.\n\
+                 Deposit this realm with `varve-producer deposit --manifest \
+                 layer.toml`, which reads the restriction directly.",
+                platforms.join(", ")
             ),
             LayerSpecError::LayoutNotEncodable { tool, layout } => write!(
                 f,
@@ -910,6 +949,17 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
             return Err(LayerSpecError::UpstreamSumsNotEncodable {
                 tool: t.name.clone(),
                 asset: sums.clone(),
+            });
+        }
+        // Same rule again, and this one is not about naming at all: a
+        // restriction the encoding drops means the tool is assembled for a
+        // platform the realm deliberately excluded. For binaryen that is a
+        // payload which passes every check and then cannot exec
+        // (REQ-TOOLPLAT-001 clause 1).
+        if let Some(only) = &t.platforms {
+            return Err(LayerSpecError::PlatformsNotEncodable {
+                tool: t.name.clone(),
+                platforms: only.clone(),
             });
         }
         // Already VALIDATED at parse time (`check_unverified`); this only
@@ -2042,6 +2092,32 @@ asset=\"toolchain_gnu_%U_arm-zephyr-eabi.tar.xz\"\n"
         .expect_err("must refuse");
         let msg = e.to_string();
         assert!(msg.contains("none for a LAYOUT"), "{msg}");
+        assert!(msg.contains("varve-producer deposit"), "{msg}");
+    }
+
+    /// A per-tool platform restriction stops at the env boundary too, and the
+    /// stake here is not a name but a payload that cannot run.
+    ///
+    /// The sdk and upstream-sums cases established the rule: a field the
+    /// encoding cannot carry must refuse rather than vanish. Dropping this one
+    /// would assemble binaryen for macOS — a 1.7 MB stub needing a dylib a
+    /// single-executable payload cannot carry — and that layer installs,
+    /// verifies, and fails at the first exec, with every check that could have
+    /// caught it passing.
+    // rivet: verifies REQ-TOOLPLAT-001
+    #[test]
+    fn a_platform_restriction_refuses_to_translate_into_the_env_encoding() {
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"wasm-opt\"\nrepo=\"WebAssembly/binaryen\"\n\
+version=\"133\"\nrelease=\"version_133\"\n\
+platforms=[\"x86_64-unknown-linux-gnu\"]\n"
+        ))
+        .expect_err("must refuse rather than widen the platform set");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("x86_64-unknown-linux-gnu"),
+            "the refusal must name the restriction it cannot carry: {msg}"
+        );
         assert!(msg.contains("varve-producer deposit"), "{msg}");
     }
 

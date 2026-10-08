@@ -3323,3 +3323,70 @@ artifacts:
     links:
       - type: verifies
         target: REQ-LAYERDIFF-001
+
+  - id: VER-PROVSHAPE-001
+    type: verification
+    title: Both attestation shapes are ingested, the batch still costs one verification, and a proof over another file vouches for nothing
+    status: verified
+    description: |-
+      REQ-PROVSHAPE-001, clause by clause, with the negative control for each claim.
+
+      (1) A release attested per asset is ingested whole. `an_upstream_that_attests_each_asset_separately_is_ingested_whole` plans two payloads from one release whose statements each name exactly one file, and asserts both resolve, each recorded at the digest its own proof carries, both under `build-provenance` rather than downgraded. IT WAS WATCHED FAILING FIRST, which is the only reason it is known to test the right thing: before the fix it panicked with `NotCoveredByProof { asset: "second.tar.gz", mechanism: "build-provenance" }` — the exact production error, reproduced in a fixture.
+
+      (2) A digest comes from a statement that names its asset. `a_statement_naming_another_asset_does_not_vouch_for_this_one` has upstream answer the question about `second.tar.gz` with a valid statement naming only `first.tar.gz`, and asserts the error is `NotCoveredByProof` for `second.tar.gz`. THE ERROR KIND IS THE ASSERTION, not the message text, and that mattered: the first version of this test only checked that the message mentioned the asset, which passes under the wrong implementation too — crediting `second` with `first`'s digest also fails, as a `DigestMismatch`. NEGATIVE CONTROL: with the merge replaced by "record the asset at whatever digest came back" (mutation confirmed present in the file before the verdict was read), this test goes red and the weak version would have stayed green.
+
+      (3) A batched statement still costs ONE verification. `a_batched_attestation_still_answers_for_every_asset_it_names` asserts the per-asset lookup is not entered at all when the probe's statement already names the asset. This is a COST property, so it is invisible to a correctness test — the naive "verify every asset always" implementation produces identical layers. NEGATIVE CONTROL: removing the short-circuit (mutation confirmed present) turns this red while every other test stays green.
+
+      (4) An asset nothing attests stays refused. `an_asset_no_attestation_names_is_still_refused_when_its_siblings_have_one` publishes and serves an asset that no statement covers, in a release whose sibling is attested, and asserts the run stops naming it. The per-asset lookup is a second place to ask, never a lower bar.
+
+      (5) No silent downgrade. An asset whose own attestation does not verify propagates the error out of `verify_release`; it does not fall to a weaker rung.
+
+      MEASURED END TO END AGAINST THE REAL UPSTREAM, which is what the fixtures cannot establish. `varve-producer deposit` — the subcommand that fetches, verifies and stages WITHOUT publishing — run against pulseengine/wasm-layers at `1bd9905`, layer 2026.10.0:
+
+      * before: `Error: bytecodealliance/wasmtime: wasmtime-v49.0.1-aarch64-macos.tar.xz is not named by the build-provenance proof.`
+      * after: zero provenance refusals, and `stage/tools/wasmtime-{aarch64,x86_64}-{apple-darwin,unknown-linux-gnu}` all present — the release ingested for ALL FOUR platforms, where before at most the probed one could pass.
+
+      The same binary reproduces the batch shape it must not regress: `bytecodealliance/wasm-tools` v1.260.0 publishes one statement carrying ten subjects and still ingests on one verification.
+
+      SCOPE OF WHAT THIS DOES NOT SHOW. The pre-flight stops after wasmtime on an unrelated wasm-layers manifest defect — the `binaryen` entry names no `binary`, so varve looks for a file called `binaryen` in an archive that ships `wasm-opt`, `wasm-as` and friends. That is a realm manifest bug, not varve's, and it means THIS PRE-FLIGHT HAS NOT EXERCISED THE FULL 32-PAYLOAD ASSEMBLY — only everything up to and including wasmtime, which is the payload under test. The deposit itself remains unproven until that entry is corrected.
+    links:
+      - type: verifies
+        target: REQ-PROVSHAPE-001
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-07T11:15:09Z
+    release: v0.41.0
+
+  - id: VER-TOOLPLAT-001
+    type: verification
+    title: A restricted tool is planned only for its platforms, an undeclared one is refused, and the env translation refuses to widen it
+    status: verified
+    description: |-
+      REQ-TOOLPLAT-001, clause by clause, each claim with the mutation that falsifies it.
+
+      HOW THIS WAS BUILT, stated because it differs from the provenance fix beside it. The implementation was written BEFORE the tests here, so "watched it fail first" is not available as evidence. Every claim is instead backed by a mutation that was confirmed present in the file before the verdict was read, and that reddened EXACTLY its own test while the other 28 stayed green. That is the same discriminating power, obtained the other way round, and saying so is part of the record.
+
+      (1) A tool is carried only for the platforms it names. `a_tool_is_carried_only_for_the_platforms_it_names` plans a binaryen tool restricted to `x86_64-unknown-linux-gnu` against a two-platform layer and asserts ONE payload, for that platform. MUTANT 1 — ignore the restriction (`let carried = platforms.to_vec()`) — turns it red.
+
+      (2) Absent, every platform the layer declares. `a_tool_naming_no_platforms_is_carried_for_all_of_them` holds the ordinary case, which a filter must not quietly narrow.
+
+      (3) A platform the layer does not declare is REFUSED, naming the tool, the platform and what IS declared. `a_platform_the_layer_does_not_declare_is_refused_not_ignored` asserts the error KIND, not the message, and also that the message lists the declared platforms — without that an operator cannot tell a mistyped triple from a layer missing the platform. MUTANT 2 — `continue` instead of the refusal — turns it red. This is the clause that matters: an ignored entry reads exactly like a typo, and layer 2026.09.18 shipped without a single Linux build of five tools because two conditions read as the same note.
+
+      (4) The payloads keep the LAYER's platform order. `the_carried_platforms_keep_the_layers_order` passes the two platforms reversed in the manifest and asserts the plan still follows the layer. MUTANT 3 — filter in the manifest's order — turns it red.
+
+      (5) THE SECOND READER, which is where this requirement was nearly lost. `assembler_env` translates a layer.toml into the legacy env encoding, and that encoding has no field for a platform restriction. Dropping it there does not rename anything: it assembles binaryen FOR MACOS, the one platform the realm excluded, and that payload passes install and verification and fails at the first exec. So the translation now refuses, beside the existing `sdk` and `upstream-sums` refusals that established the rule. `a_platform_restriction_refuses_to_translate_into_the_env_encoding` asserts the refusal names the restriction and points at `varve-producer deposit`. MUTANT 4 — drop the restriction silently — turns it red.
+
+      Clause 5 was found by asking what ELSE reads this field rather than by a test failing, which is the check this repository keeps needing: the dominant local defect shape is an invariant that is real, correct and tested, and enforced somewhere it cannot act.
+
+      NOT COVERED HERE. No system-level gate exercises a platform-restricted deposit end to end; the evidence is source-level. The real binaryen entries are a wasm-layers change and the deposit that would exercise them has not run, so what this verifies is that varve can EXPRESS and ENFORCE the restriction, not that the pulseengine-wasm layer carrying thirteen Linux-only binaryen tools assembles. That remains unproven until the deposit runs.
+
+      Also not covered: the payload model itself is unchanged. A tool needing a runtime library beside it still cannot be carried on ANY platform. This makes binaryen's macOS omission deliberate and visible; it does not make binaryen available on macOS.
+    links:
+      - type: verifies
+        target: REQ-TOOLPLAT-001
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-07T21:49:33Z
+    release: v0.41.0

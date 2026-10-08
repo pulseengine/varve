@@ -275,6 +275,32 @@ impl<R: CommandRunner> Source for GhSource<R> {
             })
     }
 
+    fn attestation_json_for(
+        &self,
+        repo: &str,
+        version: &str,
+        asset: &str,
+    ) -> Result<String, RunError> {
+        // Verified against THIS asset's bytes, which is the whole point: the
+        // statement that comes back names the file it was asked about, so the
+        // digest recorded for these bytes is one an attestation actually
+        // vouches for rather than one inherited from a sibling.
+        let path = self.download(repo, version, asset)?;
+        let argv = gh::attestation_verify_argv(&path.to_string_lossy(), repo);
+        let out = self.runner.run("gh", &argv, &gh::forge_env(&self.forge));
+        if !out.ok() {
+            return Err(io_err(
+                &format!("{repo} {version}: {asset}"),
+                &format!(
+                    "`gh attestation verify` did not accept this asset's own \
+                     attestation: {}",
+                    out.stderr.trim()
+                ),
+            ));
+        }
+        Ok(out.stdout)
+    }
+
     fn asset_bytes(&self, repo: &str, version: &str, asset: &str) -> Result<Vec<u8>, RunError> {
         let path = self.download(repo, version, asset)?;
         read(&path)
@@ -477,6 +503,70 @@ mod tests {
             assert_eq!(p.has_cosign_bundle, bundle, "{names:?}");
             assert!(p.cosign.is_none(), "cosign must not run for {names:?}");
         }
+    }
+
+    /// `attestation_json_for` verifies THE NAMED ASSET and hands back what
+    /// `gh` actually said.
+    ///
+    /// The orchestrator's tests drive this through a double, so the real
+    /// implementation had no coverage at all: cargo-mutants replaced its whole
+    /// body with `Ok(String::new())` and with `Ok("xyzzy".into())` and nothing
+    /// noticed. A statement is the only thing standing between a payload and
+    /// an unproven digest, so a stub returning nothing must not pass.
+    // rivet: verifies REQ-PROVSHAPE-001
+    #[test]
+    fn one_assets_attestation_is_verified_against_that_asset_and_returned() {
+        let dir = scratch("perasset");
+        const DOC: &str = r#"[{"verificationResult":{"statement":{"subject":[]}}}]"#;
+        let gh = FakeGh::new()
+            .file("two.tar.gz", b"bytes of two")
+            .reply("gh attestation", out(0, DOC, ""));
+        let src = GhSource::new(gh, Forge::github_com(), &dir);
+
+        let json = src
+            .attestation_json_for("o/r", "v1", "two.tar.gz")
+            .expect("gh accepted it");
+
+        assert_eq!(json, DOC, "the caller must get gh's own statement");
+        let verified: Vec<_> = src
+            .runner
+            .log()
+            .into_iter()
+            .filter(|c| c.starts_with("gh attestation"))
+            .collect();
+        assert_eq!(verified.len(), 1, "{verified:?}");
+        assert!(
+            verified[0].contains("two.tar.gz"),
+            "verified the wrong file: {verified:?}"
+        );
+    }
+
+    /// A `gh attestation verify` that did NOT accept the asset is an error,
+    /// not an empty statement.
+    ///
+    /// Deleting the `!` from this check survived the mutation gate. It has to
+    /// fail closed: continuing with whatever `gh` printed on a rejection would
+    /// hand the caller a document to parse, and a parse of nothing is how an
+    /// unproven payload acquires a digest.
+    // rivet: verifies REQ-PROVSHAPE-001
+    #[test]
+    fn an_asset_whose_own_attestation_is_rejected_is_an_error() {
+        let dir = scratch("perasset-bad");
+        let gh = FakeGh::new().file("two.tar.gz", b"bytes of two").reply(
+            "gh attestation",
+            out(1, "", "no attestations found for subject"),
+        );
+        let src = GhSource::new(gh, Forge::github_com(), &dir);
+
+        let e = src
+            .attestation_json_for("o/r", "v1", "two.tar.gz")
+            .expect_err("a rejected attestation must not read as an accepted one");
+        let msg = e.to_string();
+        assert!(msg.contains("two.tar.gz"), "must name the asset: {msg}");
+        assert!(
+            msg.contains("no attestations found for subject"),
+            "must carry what gh said: {msg}"
+        );
     }
 
     /// The asset an attestation is verified against must be a real payload —
