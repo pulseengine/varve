@@ -93,7 +93,7 @@ jobs:
       # here turns the existing push/pull round trip into the strongest
       # rehearsal available: the action installs the client, and the client
       # then pushes and pulls a real layer through a real registry.
-      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v1 as of 2026-08-07
+      - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v1 as of 2026-08-07
       - name: the installed oras is the one the round trip uses
         run: |
           set -euo pipefail
@@ -211,7 +211,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: systest
-      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v1 as of 2026-08-07
+      - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v1 as of 2026-08-07
       - name: publish a signed index to a real registry, then ask what is newer
         # REQ-INDEXAUTH-001 has been verified since 2026-09-06 and its own
         # notes say what was missing: "a fetch path with no publisher is a
