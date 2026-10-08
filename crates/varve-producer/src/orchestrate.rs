@@ -854,6 +854,55 @@ mod tests {
         );
     }
 
+    /// An asset the release does not publish is SKIPPED, not asked about.
+    ///
+    /// "This platform has no build" is routine and belongs to the caller to
+    /// report. Asking upstream for an attestation over a file that does not
+    /// exist would turn a normal omission into a failed deposit — and deleting
+    /// the `!` from that guard survived the mutation gate, because nothing
+    /// exercised a wanted asset the release never published.
+    // rivet: verifies REQ-PROVSHAPE-001
+    #[test]
+    fn an_asset_the_release_does_not_publish_is_skipped_not_asked_about() {
+        let mut f =
+            Fixture::attested_per_asset("o/r", "v1", &[("first.tar.gz", A), ("second.tar.gz", B)]);
+        // The release does not publish `second.tar.gz` at all: no build for
+        // that platform. Remove it from the listing AND from what upstream
+        // would answer about, so asking would be an error.
+        f.probes.get_mut("o/r@v1").expect("probed").published = vec!["first.tar.gz".into()];
+        f.per_asset.remove("o/r@v1/second.tar.gz");
+        f.blobs.remove("o/r@v1/second.tar.gz");
+
+        // ONE tool across two platforms, so the tool itself still matches
+        // something: a tool matching nothing ANYWHERE is a different refusal
+        // (`NothingMatched`) and would mask the skip under test.
+        let mut absent = plan("t", "o/r", "v1", "second.tar.gz");
+        absent.platform = Some("aarch64-apple-darwin".into());
+        let got = run(
+            &f,
+            &Forge::github_com(),
+            &[plan("t", "o/r", "v1", "first.tar.gz"), absent],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &never,
+            &no_reuse,
+        )
+        .expect("an unpublished asset is an omission, not a failure");
+
+        assert_eq!(got.len(), 1, "only the published asset resolves: {got:?}");
+        assert_eq!(got[0].plan.asset, "first.tar.gz");
+        // And upstream was never asked about the absent one.
+        let asked: Vec<String> = f
+            .log()
+            .into_iter()
+            .filter(|c| c.contains("second.tar.gz"))
+            .collect();
+        assert!(
+            asked.is_empty(),
+            "asked upstream about a file it does not publish: {asked:?}"
+        );
+    }
+
     /// An asset with no proof of its own, in a release whose other assets
     /// have one, is still refused.
     ///
