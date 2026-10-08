@@ -46,7 +46,7 @@ tempfile = "3.27.0"
 # invented. Deliberately a dev-dependency: varve decodes WIT packages, it never
 # produces them, and an encoder in the production path would be an export
 # adapter wearing a parser's name.
-wit-component = "0.259.0"
+wit-component = "0.261.0"
 
 [[bench]]
 name = "resolve"
