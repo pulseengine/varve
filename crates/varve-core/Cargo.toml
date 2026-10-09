@@ -34,7 +34,7 @@ ureq = "3"
 # put the trickiest parser in the workspace in the trusted base. Only the
 # `decoding` feature is taken: no `wat` text parser, no serde surface, and no
 # encoder at all — nothing in varve writes a WIT package.
-wit-parser = { version = "0.259.0", default-features = false, features = ["decoding"] }
+wit-parser = { version = "0.261.0", default-features = false, features = ["decoding"] }
 wsc = "0.11.0"
 
 [dev-dependencies]
@@ -46,7 +46,7 @@ tempfile = "3.27.0"
 # invented. Deliberately a dev-dependency: varve decodes WIT packages, it never
 # produces them, and an encoder in the production path would be an export
 # adapter wearing a parser's name.
-wit-component = "0.259.0"
+wit-component = "0.261.0"
 
 [[bench]]
 name = "resolve"

@@ -483,9 +483,17 @@ mod tests {
                 top_id = Some(id);
             }
         }
+        // `canonical_names: false` reproduces what 0.259's `encode` did, which
+        // is what these fixtures were built against. Verified by reading both
+        // implementations rather than assuming the new flag defaults off:
+        // 0.261's `false` branch yields the plain name with
+        // `version_suffix: None`, exactly as 0.259's `component_extern_name`
+        // produced. `true` switches to canonicalised ids with a version
+        // suffix and would change the encoding these tests compare.
         wit_component::encode(
             &resolve,
             top_id.expect("fixture must define the top package"),
+            false,
         )
         .expect("fixture must encode")
     }
