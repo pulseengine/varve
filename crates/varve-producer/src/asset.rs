@@ -455,126 +455,130 @@ pub fn select(
 
 #[cfg(test)]
 mod tests {
-/// The derivations, against the REAL pins of all three realms.
-///
-/// The oracle for "a bump arrives prepared" is not a fixture: it is that every
-/// payload the org actually carries yields an answer. varve called 15 of them
-/// unanswerable, and 15 of 15 were derivable (varve#251).
-mod deriving_what_a_scanner_can_know {
-    use super::super::{version_from_assets, version_from_tag};
-
-    /// The ordinary case: the tag is the version.
-    // rivet: verifies REQ-AUTOBUMP-001
-    #[test]
-    fn a_tag_that_is_the_version_yields_the_new_tags_version() {
-        assert_eq!(
-            version_from_tag("v1.260.0", "v1.260.0", "v1.261.0").as_deref(),
-            Some("1.261.0")
-        );
-        // wasmtime: payload 49.0.1 from tag v49.0.1. varve called this a hub
-        // and refused to bump it, because it has a `release` key at all.
-        assert_eq!(
-            version_from_tag("49.0.1", "v49.0.1", "v49.0.2").as_deref(),
-            Some("49.0.2")
-        );
-    }
-
-    /// Decoration: binaryen ships `version_133` for version `133`, for all 13
-    /// of its tools. These are 13 of the 15 payloads varve wrongly called
-    /// manual.
-    // rivet: verifies REQ-AUTOBUMP-001
-    #[test]
-    fn a_tag_that_merely_decorates_the_version_still_yields_it() {
-        assert_eq!(
-            version_from_tag("133", "version_133", "version_134").as_deref(),
-            Some("134")
-        );
-    }
-
-    /// THE control, and the reason this is a function rather than a strip.
+    /// The derivations, against the REAL pins of all three realms.
     ///
-    /// Current version `10`, current tag `v1.2.10`: the tag ends with the
-    /// version, so a naive suffix rule "derives" `10` from a new tag — a
-    /// plausible number that is not the payload's. The digit-free-prefix
-    /// requirement is what rejects it.
-    // rivet: verifies REQ-AUTOBUMP-001
-    #[test]
-    fn a_tag_whose_prefix_carries_digits_is_refused_not_guessed() {
-        assert_eq!(version_from_tag("10", "v1.2.10", "v1.2.11"), None);
-    }
+    /// The oracle for "a bump arrives prepared" is not a fixture: it is that every
+    /// payload the org actually carries yields an answer. varve called 15 of them
+    /// unanswerable, and 15 of 15 were derivable (varve#251).
+    mod deriving_what_a_scanner_can_know {
+        use super::super::{version_from_assets, version_from_tag};
 
-    /// An upstream that changes how it spells releases is a person's problem,
-    /// not something to pattern-match through.
-    // rivet: verifies REQ-AUTOBUMP-001
-    #[test]
-    fn a_new_tag_that_abandons_the_old_shape_is_refused() {
-        // was `version_133`, now plain `134`: the prefix is gone.
-        assert_eq!(version_from_tag("133", "version_133", "134"), None);
-    }
+        /// The ordinary case: the tag is the version.
+        // rivet: verifies REQ-AUTOBUMP-001
+        #[test]
+        fn a_tag_that_is_the_version_yields_the_new_tags_version() {
+            assert_eq!(
+                version_from_tag("v1.260.0", "v1.260.0", "v1.261.0").as_deref(),
+                Some("1.261.0")
+            );
+            // wasmtime: payload 49.0.1 from tag v49.0.1. varve called this a hub
+            // and refused to bump it, because it has a `release` key at all.
+            assert_eq!(
+                version_from_tag("49.0.1", "v49.0.1", "v49.0.2").as_deref(),
+                Some("49.0.2")
+            );
+        }
 
-    /// The hub case varve declared unanswerable: `pulseengine/jess` tags
-    /// `v0.7.2` and ships `with-device` at `0.2.2`. The version is in the
-    /// asset name, and the manifest already declares the shape.
-    // rivet: verifies REQ-AUTOBUMP-001
-    #[test]
-    fn a_hub_payloads_version_comes_out_of_its_own_asset_names() {
-        let published: Vec<String> = [
-            "SHA256SUMS.txt",
-            "SHA256SUMS.txt.cosign.bundle",
-            "with-device-0.2.2-aarch64-apple-darwin.tar.gz",
-            "with-device-0.2.2-aarch64-unknown-linux-gnu.tar.gz",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        /// Decoration: binaryen ships `version_133` for version `133`, for all 13
+        /// of its tools. These are 13 of the 15 payloads varve wrongly called
+        /// manual.
+        // rivet: verifies REQ-AUTOBUMP-001
+        #[test]
+        fn a_tag_that_merely_decorates_the_version_still_yields_it() {
+            assert_eq!(
+                version_from_tag("133", "version_133", "version_134").as_deref(),
+                Some("134")
+            );
+        }
 
-        assert_eq!(
-            version_from_assets(
-                "with-device-%V-%T.tar.gz",
-                &["aarch64-apple-darwin", "aarch64-unknown-linux-gnu"],
-                &published,
-            )
-            .as_deref(),
-            Some("0.2.2"),
-            "the version is in the asset name the manifest's own template describes"
-        );
-    }
+        /// THE control, and the reason this is a function rather than a strip.
+        ///
+        /// Current version `10`, current tag `v1.2.10`: the tag ends with the
+        /// version, so a naive suffix rule "derives" `10` from a new tag — a
+        /// plausible number that is not the payload's. The digit-free-prefix
+        /// requirement is what rejects it.
+        // rivet: verifies REQ-AUTOBUMP-001
+        #[test]
+        fn a_tag_whose_prefix_carries_digits_is_refused_not_guessed() {
+            assert_eq!(version_from_tag("10", "v1.2.10", "v1.2.11"), None);
+        }
 
-    /// ONE release must not carry two versions of one payload. Whichever был
-    /// picked would be SIGNED, so disagreement is a refusal.
-    // rivet: verifies REQ-AUTOBUMP-001
-    #[test]
-    fn two_platforms_disagreeing_about_the_version_is_a_refusal() {
-        let published: Vec<String> = [
-            "with-device-0.2.2-aarch64-apple-darwin.tar.gz",
-            "with-device-0.3.0-aarch64-unknown-linux-gnu.tar.gz",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        assert_eq!(
-            version_from_assets(
-                "with-device-%V-%T.tar.gz",
-                &["aarch64-apple-darwin", "aarch64-unknown-linux-gnu"],
-                &published,
-            ),
-            None,
-            "picking one of two would sign a number the other platform contradicts"
-        );
-    }
+        /// An upstream that changes how it spells releases is a person's problem,
+        /// not something to pattern-match through.
+        // rivet: verifies REQ-AUTOBUMP-001
+        #[test]
+        fn a_new_tag_that_abandons_the_old_shape_is_refused() {
+            // was `version_133`, now plain `134`: the prefix is gone.
+            assert_eq!(version_from_tag("133", "version_133", "134"), None);
+        }
 
-    /// A release that publishes nothing matching the template yields nothing,
-    /// rather than something.
-    // rivet: verifies REQ-AUTOBUMP-001
-    #[test]
-    fn a_release_with_no_matching_asset_yields_no_version() {
-        let published: Vec<String> = vec!["notes.md".to_string()];
-        assert_eq!(
-            version_from_assets("with-device-%V-%T.tar.gz", &["aarch64-apple-darwin"], &published),
-            None
-        );
+        /// The hub case varve declared unanswerable: `pulseengine/jess` tags
+        /// `v0.7.2` and ships `with-device` at `0.2.2`. The version is in the
+        /// asset name, and the manifest already declares the shape.
+        // rivet: verifies REQ-AUTOBUMP-001
+        #[test]
+        fn a_hub_payloads_version_comes_out_of_its_own_asset_names() {
+            let published: Vec<String> = [
+                "SHA256SUMS.txt",
+                "SHA256SUMS.txt.cosign.bundle",
+                "with-device-0.2.2-aarch64-apple-darwin.tar.gz",
+                "with-device-0.2.2-aarch64-unknown-linux-gnu.tar.gz",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+            assert_eq!(
+                version_from_assets(
+                    "with-device-%V-%T.tar.gz",
+                    &["aarch64-apple-darwin", "aarch64-unknown-linux-gnu"],
+                    &published,
+                )
+                .as_deref(),
+                Some("0.2.2"),
+                "the version is in the asset name the manifest's own template describes"
+            );
+        }
+
+        /// ONE release must not carry two versions of one payload. Whichever был
+        /// picked would be SIGNED, so disagreement is a refusal.
+        // rivet: verifies REQ-AUTOBUMP-001
+        #[test]
+        fn two_platforms_disagreeing_about_the_version_is_a_refusal() {
+            let published: Vec<String> = [
+                "with-device-0.2.2-aarch64-apple-darwin.tar.gz",
+                "with-device-0.3.0-aarch64-unknown-linux-gnu.tar.gz",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            assert_eq!(
+                version_from_assets(
+                    "with-device-%V-%T.tar.gz",
+                    &["aarch64-apple-darwin", "aarch64-unknown-linux-gnu"],
+                    &published,
+                ),
+                None,
+                "picking one of two would sign a number the other platform contradicts"
+            );
+        }
+
+        /// A release that publishes nothing matching the template yields nothing,
+        /// rather than something.
+        // rivet: verifies REQ-AUTOBUMP-001
+        #[test]
+        fn a_release_with_no_matching_asset_yields_no_version() {
+            let published: Vec<String> = vec!["notes.md".to_string()];
+            assert_eq!(
+                version_from_assets(
+                    "with-device-%V-%T.tar.gz",
+                    &["aarch64-apple-darwin"],
+                    &published
+                ),
+                None
+            );
+        }
     }
-}
 
     use super::*;
 

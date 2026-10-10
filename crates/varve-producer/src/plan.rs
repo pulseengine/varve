@@ -281,7 +281,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             // independent, or its kind carries no per-platform naming at all.
             named_explicitly: false,
             kind,
-            unverified_reason: t.unverified_reason.clone(),
+            unverified_reason: t.opt_in_reason(),
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
             title: None,
@@ -341,7 +341,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             platform: Some((*p).to_string()),
             named_explicitly: explicit.is_some(),
             kind,
-            unverified_reason: t.unverified_reason.clone(),
+            unverified_reason: t.opt_in_reason(),
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
             title: None,
