@@ -8,8 +8,8 @@
 use clap::{CommandFactory, Parser};
 use varve_producer::cli::{Cli, Cmd};
 use varve_producer::{
-    asset, binfmt, deposit, docs, forge::Forge, gh::CommandRunner, immutable, ingest, nextlayer,
-    orchestrate, plan, registry, scan, source,
+    asset, binfmt, deposit, docs, forge::Forge, gh, gh::CommandRunner, immutable, ingest,
+    nextlayer, orchestrate, plan, registry, scan, source,
 };
 
 /// `GH_HOST` is what `gh` itself uses to target an instance, so varve reads
@@ -275,7 +275,35 @@ fn main() -> anyhow::Result<()> {
             let forge = forge_from_env();
             let answers = scan::latest_releases(&source::Spawn, &forge, &m);
 
-            match scan::compare(&m, &answers) {
+            // TWO PASSES, so the network cost stays proportional to the
+            // problem. The first derives every version the TAG implies, which
+            // is almost all of them and costs nothing. Only for a payload the
+            // tag cannot answer do we ask what the new release actually
+            // publishes — a hub's own number is in its asset names
+            // (REQ-AUTOBUMP-001), and asking for all of them would spend a
+            // request per repository on every scan to learn nothing.
+            let none_published: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            let mut published: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            if let Ok(first) = scan::compare(&m, &answers, &none_published) {
+                for x in first.iter().filter(|x| x.derived_version.is_none()) {
+                    let argv = gh::release_assets_argv(&x.repo, &x.latest);
+                    let out = source::Spawn.run("gh", &argv, &gh::forge_env(&forge));
+                    if !out.ok() {
+                        // Not fatal: the tag already failed to answer, and a
+                        // failed listing simply leaves this payload without a
+                        // derivation — which `why_a_person` then reports. It
+                        // must never silently become a different answer.
+                        continue;
+                    }
+                    if let Ok(names) = gh::parse_release_assets(&out.stdout) {
+                        published.insert(x.repo.clone(), names);
+                    }
+                }
+            }
+
+            match scan::compare(&m, &answers, &published) {
                 Ok(moved) => {
                     if json {
                         let out: Vec<_> = moved
@@ -285,6 +313,13 @@ fn main() -> anyhow::Result<()> {
                                     "name": x.name, "repo": x.repo,
                                     "pinned": x.pinned, "latest": x.latest,
                                     "payload_version": x.payload_version,
+                                    // THE PROPOSAL. A realm applies this
+                                    // rather than deriving a version of its
+                                    // own, so the rule lives in one place
+                                    // (REQ-AUTOBUMP-001). Absent means no
+                                    // derivation applied, and `needs_a_person`
+                                    // then says so.
+                                    "derived_version": x.derived_version,
                                     "auto_bumpable": x.auto_bumpable(),
                                     // WHY not, when it is not. A consumer that
                                     // proposes a bump needs to know which work

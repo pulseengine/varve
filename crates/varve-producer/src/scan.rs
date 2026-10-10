@@ -30,6 +30,14 @@ pub struct Moved {
     /// `pulseengine/jess` tags `v0.7.2` and ships `with-device` at `0.2.2` —
     /// and those cannot be bumped automatically. See [`Moved::auto_bumpable`].
     pub payload_version: Option<String>,
+    /// The version to WRITE, derived rather than guessed.
+    ///
+    /// `None` means no derivation applied and there is nothing to propose —
+    /// which is the only honest "a person must look". It is NOT the same as
+    /// "this entry has a `release` key", which is what `auto_bumpable` used to
+    /// test and which marked 15 payloads manual that are all derivable
+    /// (varve#251).
+    pub derived_version: Option<String>,
     /// The opt-in reason this payload carries, if it carries one.
     ///
     /// Present means a bump would ORPHAN it. An `unverified-reason` is a
@@ -53,7 +61,15 @@ impl Moved {
     ///
     /// So it is REPORTED and not acted on. A human reads the release notes.
     pub fn auto_bumpable(&self) -> bool {
-        self.payload_version.is_none() && self.unverified_reason.is_none()
+        // Two questions, and both must be yes: do I know what to write, and
+        // would writing it leave the manifest something varve accepts?
+        //
+        // It used to ask whether the entry had a `release` key, which answers
+        // neither. A hub payload's version is derivable from its own asset
+        // names, and a decorated tag (`version_133` for `133`) is derivable
+        // from the tag — so the presence of the field proved nothing either
+        // way, while 15 real payloads sat marked manual.
+        self.derived_version.is_some() && self.unverified_reason.is_none()
     }
 
     /// What a person must do, when this pin is not the scanner's to move.
@@ -63,10 +79,12 @@ impl Moved {
     /// new release's proof RE-MEASURED. A report that says only "not
     /// automatic" leaves the reader to guess which.
     pub fn why_a_person(&self) -> Option<String> {
-        if self.payload_version.is_some() {
+        if self.derived_version.is_none() {
             return Some(format!(
-                "{}'s payload version is its own number, not the release tag, so \
-                 only upstream's release notes say what {} ships",
+                "no derivation yields {}'s version at {}: the tag does not imply \
+                 it, and the release publishes no asset the manifest's own \
+                 template matches. Upstream has changed how it names things, so \
+                 a person must look at what it publishes now",
                 self.name, self.latest
             ));
         }
@@ -82,6 +100,74 @@ impl Moved {
             ));
         }
         None
+    }
+}
+
+/// What a re-probe of a MOVED release establishes about its proof of origin.
+///
+/// An `unverified-reason`'s measurement is true of one release and false of
+/// the next, so a scanner that bumps a pin has to establish the fact again.
+/// The reasons are written as mechanically checkable claims — "no
+/// SHA256SUMS, .sig or .pem, and `gh attestation verify` returns 404 for its
+/// assets" — and the ingestion ladder already performs exactly those probes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Remeasured {
+    /// The new release publishes proof. The opt-in should be REMOVED, not
+    /// renewed — and this is the outcome a person renewing text by hand would
+    /// most likely miss, because renewal is the habit.
+    ProofNowExists { mechanism: &'static str },
+    /// Still nothing vouches for it. Here is what was probed, as a sentence
+    /// fit to replace the `measured` field and nothing else.
+    StillUnproven { measured: String },
+}
+
+/// Render what a probe found as the `measured` line of a split opt-in.
+///
+/// PURE, and that is the point: this text goes into a SIGNED layer, so what it
+/// says must be decidable from the probe without a network and testable
+/// without one. It states only what was observed — no acceptance, no exit, no
+/// judgement. Those are the operator's and live in their own fields, which a
+/// scanner never touches (REQ-PREPARED-001 clause 2).
+pub fn remeasure(
+    repo: &str,
+    release: &str,
+    today: &str,
+    has_sums: bool,
+    has_cosign_bundle: bool,
+    cosign_accepted: Option<bool>,
+    attested: bool,
+) -> Remeasured {
+    if cosign_accepted == Some(true) {
+        return Remeasured::ProofNowExists {
+            mechanism: "a cosign-signed SHA256SUMS.txt",
+        };
+    }
+    if attested {
+        return Remeasured::ProofNowExists {
+            mechanism: "GitHub build provenance",
+        };
+    }
+
+    // What was LOOKED FOR and what was there, in the terms the ladder used.
+    // Each clause is a fact the probe established, and none of them is
+    // inferred from another.
+    let sums = match (has_sums, has_cosign_bundle) {
+        (false, false) => "no SHA256SUMS.txt and no cosign bundle".to_string(),
+        (true, false) => "a SHA256SUMS.txt but no cosign bundle, so nothing signed it".to_string(),
+        (false, true) => "a cosign bundle but no SHA256SUMS.txt for it to cover".to_string(),
+        (true, true) => match cosign_accepted {
+            // Both present and cosign REFUSED them. A different fact from
+            // absence, and a far more serious one — recorded as what it is.
+            Some(false) => "a SHA256SUMS.txt and a cosign bundle that cosign REFUSED".to_string(),
+            _ => "a SHA256SUMS.txt and a cosign bundle that could not be checked".to_string(),
+        },
+    };
+    Remeasured::StillUnproven {
+        measured: format!(
+            "{repo} {release} publishes no proof of origin this assembler accepts \
+             (measured {today}: the release carries {sums}, and no build \
+             provenance covers its assets)."
+        ),
     }
 }
 
@@ -155,6 +241,14 @@ struct ToolRef<'a> {
 pub fn compare(
     manifest: &LayerManifest,
     latest: &BTreeMap<String, Result<String, String>>,
+    // What the NEW release of each repository publishes, keyed by repo. Used
+    // only where the tag does not imply the payload's version — a hub's number
+    // is in its own asset names, and the manifest already declares the
+    // template that describes them (REQ-AUTOBUMP-001).
+    //
+    // Injected rather than fetched here, so every derivation stays decidable
+    // without a network, like `latest` already is.
+    published: &BTreeMap<String, Vec<String>>,
 ) -> Result<Vec<Moved>, ScanError> {
     let mut moved = Vec::new();
     let mut unreachable = Vec::new();
@@ -187,6 +281,14 @@ pub fn compare(
         .iter()
         .map(|t| (t.name.as_str(), t.unverified_reason.as_deref()))
         .collect();
+    // And the asset template, for the same reason: it is what says where a
+    // payload's own version appears in the names upstream publishes.
+    let templates: std::collections::BTreeMap<&str, Option<&str>> = manifest
+        .tools
+        .iter()
+        .map(|t| (t.name.as_str(), t.asset.as_deref()))
+        .collect();
+    let platforms: Vec<&str> = crate::asset::DEFAULT_PLATFORMS.to_vec();
 
     for (name, repo_field, version) in entries {
         let t = ToolRef {
@@ -212,6 +314,20 @@ pub fn compare(
                         pinned,
                         latest: newest.clone(),
                         payload_version: t.release.map(|_| t.version.to_string()),
+                        // THE TAG FIRST, because it is pure and answers almost
+                        // every payload. Only when the tag does not imply the
+                        // version do we look at what the release actually
+                        // publishes.
+                        derived_version: crate::asset::version_from_tag(
+                            t.version,
+                            t.release.unwrap_or(t.version),
+                            newest,
+                        )
+                        .or_else(|| {
+                            let template = templates.get(t.name).copied().flatten()?;
+                            let names = published.get(&repo_of(t.name, t.repo))?;
+                            crate::asset::version_from_assets(template, &platforms, names)
+                        }),
                         unverified_reason: reasons
                             .get(t.name)
                             .copied()
@@ -306,6 +422,24 @@ mod tests {
         varve_core::layerspec::parse_layer_manifest(&src).expect("fixture manifest parses")
     }
 
+    /// No release-asset listings. Every derivation that needs one is then
+    /// unavailable, which is the right default for a test about the TAG rule:
+    /// an asset list arriving silently would make a tag test pass for the
+    /// wrong reason.
+    fn no_assets() -> BTreeMap<String, Vec<String>> {
+        BTreeMap::new()
+    }
+
+    /// What one repository's new release publishes.
+    fn publishes(repo: &str, names: &[&str]) -> BTreeMap<String, Vec<String>> {
+        let mut m = BTreeMap::new();
+        m.insert(
+            repo.to_string(),
+            names.iter().map(|s| s.to_string()).collect(),
+        );
+        m
+    }
+
     fn seen(pairs: &[(&str, Result<&str, &str>)]) -> BTreeMap<String, Result<String, String>> {
         pairs
             .iter()
@@ -334,6 +468,7 @@ mod tests {
                 ("pulseengine/meld", Ok("v0.55.1")),
                 ("pulseengine/loom", Ok("v1.4.1")),
             ]),
+            &no_assets(),
         )
         .expect("a complete scan");
         assert_eq!(got.len(), 1, "{got:?}");
@@ -352,6 +487,7 @@ mod tests {
                 ("pulseengine/meld", Ok("v0.53.0")),
                 ("pulseengine/loom", Ok("v1.4.1")),
             ]),
+            &no_assets(),
         )
         .expect("a complete scan");
         assert!(got.is_empty(), "{got:?}");
@@ -369,6 +505,7 @@ mod tests {
                 ("pulseengine/meld", Err("HTTP 403: rate limited")),
                 ("pulseengine/loom", Ok("v1.4.1")),
             ]),
+            &no_assets(),
         )
         .expect_err("an incomplete scan must not report movement");
         let ScanError::Unreachable { repos } = &err;
@@ -391,6 +528,7 @@ mod tests {
         let err = compare(
             &manifest(TWO, "rolling"),
             &seen(&[("pulseengine/meld", Ok("v0.53.0"))]),
+            &no_assets(),
         )
         .expect_err("a short answer map is an incomplete scan");
         let ScanError::Unreachable { repos } = &err;
@@ -408,6 +546,7 @@ mod tests {
                 ("pulseengine/meld", Err("no such repo")),
                 ("pulseengine/loom", Err("timeout")),
             ]),
+            &no_assets(),
         )
         .expect_err("incomplete");
         let ScanError::Unreachable { repos } = &err;
@@ -458,6 +597,7 @@ mod tests {
         let same = compare(
             &manifest(HUB, "rolling"),
             &seen(&[("pulseengine/jess", Ok("v0.7.1"))]),
+            &no_assets(),
         )
         .expect("complete");
         assert!(
@@ -474,6 +614,7 @@ mod tests {
         let moved = compare(
             &manifest(HUB, "rolling"),
             &seen(&[("pulseengine/jess", Ok("v0.7.2"))]),
+            &no_assets(),
         )
         .expect("complete");
         assert_eq!(moved.len(), 1);
@@ -499,7 +640,12 @@ mod tests {
              version = \"v0.35.0\"\nasset = \"rivet-sdlc-%V.vsix\"\n",
             "rolling",
         );
-        let moved = compare(&m, &seen(&[("pulseengine/rivet", Ok("v0.37.0"))])).expect("complete");
+        let moved = compare(
+            &m,
+            &seen(&[("pulseengine/rivet", Ok("v0.37.0"))]),
+            &no_assets(),
+        )
+        .expect("complete");
         assert_eq!(
             moved.len(),
             1,
@@ -520,8 +666,165 @@ mod tests {
              version = \"v0.40.0\"\nasset = \"spar-aadl-%P-%V.vsix\"\n",
             "rolling",
         );
-        compare(&m, &seen(&[("pulseengine/spar", Err("timeout"))]))
-            .expect_err("an unreachable vsix upstream is not 'nothing moved'");
+        compare(
+            &m,
+            &seen(&[("pulseengine/spar", Err("timeout"))]),
+            &no_assets(),
+        )
+        .expect_err("an unreachable vsix upstream is not 'nothing moved'");
+    }
+
+    /// A release that has STARTED publishing proof should have its opt-in
+    /// DROPPED, not renewed.
+    ///
+    /// This is the outcome that matters most and the one a person renewing
+    /// text by hand would most likely miss, because renewal is the habit: you
+    /// edit the version in the sentence and move on. The upstream improving is
+    /// the good news the process must not swallow.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn an_upstream_that_started_signing_loses_its_opt_in() {
+        assert_eq!(
+            remeasure("o/r", "v2", "2026-10-10", true, true, Some(true), false),
+            Remeasured::ProofNowExists {
+                mechanism: "a cosign-signed SHA256SUMS.txt"
+            }
+        );
+        // Provenance counts too, and the rung is named rather than blurred.
+        assert_eq!(
+            remeasure("o/r", "v2", "2026-10-10", false, false, None, true),
+            Remeasured::ProofNowExists {
+                mechanism: "GitHub build provenance"
+            }
+        );
+    }
+
+    /// A fresh measurement states what was PROBED, carries today's date, and
+    /// contains no judgement at all.
+    ///
+    /// The text replaces `measured` and nothing else. If it leaked an
+    /// acceptance — "the toolchain is unusable without this" — a scanner would
+    /// be authoring the operator's reasoning into a signed layer.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn a_fresh_measurement_names_the_release_the_date_and_only_facts() {
+        let Remeasured::StillUnproven { measured } = remeasure(
+            "bytecodealliance/wac",
+            "v0.13.0",
+            "2026-10-10",
+            false,
+            false,
+            None,
+            false,
+        ) else {
+            panic!("nothing vouched for it, so it is still unproven");
+        };
+        // It must satisfy varve's own release-naming rule, or the manifest it
+        // lands in will not parse.
+        assert!(measured.contains("v0.13.0"), "{measured}");
+        assert!(measured.contains("2026-10-10"), "{measured}");
+        assert!(measured.contains("bytecodealliance/wac"), "{measured}");
+        // And carry NO judgement.
+        for forbidden in ["Accepted", "unusable", "Removed by", "rolling channel"] {
+            assert!(
+                !measured.contains(forbidden),
+                "a measurement must not carry judgement ({forbidden:?}): {measured}"
+            );
+        }
+    }
+
+    /// A cosign bundle that REFUSED the sums is a different fact from no
+    /// bundle at all, and the measurement says which.
+    ///
+    /// Collapsing them would record "nothing was published" about a release
+    /// that published a signature which did not verify — the more serious
+    /// finding, written down as the milder one.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn a_refused_signature_is_not_recorded_as_an_absent_one() {
+        let Remeasured::StillUnproven { measured } =
+            remeasure("o/r", "v2", "2026-10-10", true, true, Some(false), false)
+        else {
+            panic!("a refused signature does not make a release proven");
+        };
+        assert!(measured.contains("REFUSED"), "{measured}");
+
+        let Remeasured::StillUnproven { measured: absent } =
+            remeasure("o/r", "v2", "2026-10-10", false, false, None, false)
+        else {
+            panic!("still unproven");
+        };
+        assert!(!absent.contains("REFUSED"), "{absent}");
+        assert_ne!(measured, absent, "the two findings read the same");
+    }
+
+    /// Half a mechanism is reported as half, not as none.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn sums_without_a_bundle_says_nothing_signed_it() {
+        let Remeasured::StillUnproven { measured } =
+            remeasure("o/r", "v2", "2026-10-10", true, false, None, false)
+        else {
+            panic!("unsigned sums are not proof");
+        };
+        assert!(measured.contains("nothing signed it"), "{measured}");
+    }
+
+    /// A HUB PAYLOAD BECOMES PREPARABLE once the release's own asset names are
+    /// available — which is the whole of varve#251.
+    ///
+    /// `auto_bumpable`'s doc comment said only upstream's release notes say
+    /// what version `v0.7.2` ships. It is in the asset name, and the manifest
+    /// already declares the template that describes it. Without the listing
+    /// there is nothing to derive from and the payload is correctly reported;
+    /// WITH it, the scanner knows what to write and proposes it.
+    ///
+    /// Both halves are asserted here on purpose. A test that only showed the
+    /// success would pass if the derivation ran on stale data.
+    // rivet: verifies REQ-AUTOBUMP-001
+    #[test]
+    fn a_hub_payload_is_preparable_from_its_own_asset_names() {
+        // Without the listing: no derivation, so a person is told.
+        let blind = compare(
+            &manifest(HUB, "rolling"),
+            &seen(&[("pulseengine/jess", Ok("v0.8.0"))]),
+            &no_assets(),
+        )
+        .expect("complete");
+        assert!(!blind[0].auto_bumpable());
+        assert!(
+            blind[0]
+                .why_a_person()
+                .expect("a reason")
+                .contains("no derivation"),
+            "{:?}",
+            blind[0].why_a_person()
+        );
+
+        // With it: the version is in the names upstream publishes.
+        let seeing = compare(
+            &manifest(HUB, "rolling"),
+            &seen(&[("pulseengine/jess", Ok("v0.8.0"))]),
+            &publishes(
+                "pulseengine/jess",
+                &[
+                    "SHA256SUMS.txt",
+                    "with-device-0.3.0-aarch64-apple-darwin.tar.gz",
+                    "with-device-0.3.0-x86_64-unknown-linux-gnu.tar.gz",
+                ],
+            ),
+        )
+        .expect("complete");
+        assert_eq!(
+            seeing[0].derived_version.as_deref(),
+            Some("0.3.0"),
+            "the payload version is in its own asset names"
+        );
+        assert!(
+            seeing[0].auto_bumpable(),
+            "nothing is left for a person: the version is known and no reason is orphaned"
+        );
+        assert_eq!(seeing[0].why_a_person(), None);
     }
 
     /// An OPT-IN payload is reported and never auto-bumped.
@@ -546,6 +849,7 @@ mod tests {
         let optin = compare(
             &manifest(OPTIN, "rolling"),
             &seen(&[("bytecodealliance/wac", Ok("v0.13.0"))]),
+            &no_assets(),
         )
         .expect("complete");
         assert_eq!(optin.len(), 1, "{optin:?}");
@@ -578,6 +882,7 @@ mod tests {
         let hub = compare(
             &manifest(HUB, "rolling"),
             &seen(&[("pulseengine/jess", Ok("v0.7.2"))]),
+            &no_assets(),
         )
         .expect("complete");
         assert!(
@@ -592,6 +897,7 @@ mod tests {
                 ("pulseengine/meld", Ok("v0.55.1")),
                 ("pulseengine/loom", Ok("v1.4.1")),
             ]),
+            &no_assets(),
         )
         .expect("complete");
         assert!(plain[0].auto_bumpable());
