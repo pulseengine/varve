@@ -108,6 +108,27 @@ pub struct ManifestTool {
     /// make a 404 enact a policy and leave the real reason recorded nowhere.
     #[serde(default)]
     pub platforms: Option<Vec<String>>,
+    /// The opt-in, split into the part that EXPIRES and the parts that do not
+    /// (REQ-PREPARED-001).
+    ///
+    /// `unverified-reason` below is one string carrying three different kinds
+    /// of claim, and only one of them is about a particular release. Measured
+    /// across the realms 2026-10-09: all 18 opt-ins follow the same three-part
+    /// shape, in the same order.
+    ///
+    ///   * a MEASUREMENT — what was probed, when, what was found. True of ONE
+    ///     release and false of the next.
+    ///   * an ACCEPTANCE — why the operator carries it anyway. A standing
+    ///     judgement about this upstream.
+    ///   * an EXIT — what would remove the need. Also standing.
+    ///
+    /// Splitting them is what lets a scanner re-measure without touching the
+    /// operator's judgement: it rewrites `measured` and never parses the rest.
+    /// The alternative was a heuristic on free prose — replace everything up to
+    /// the first full stop — which would mangle an unusually punctuated reason
+    /// and then SIGN the result.
+    #[serde(default)]
+    pub unverified: Option<Unverified>,
     /// Why this tool is ingested with NO proof of origin (REQ-INGEST-001
     /// clause 3). Present only for a release that offers neither a
     /// cosign-signed sums file nor a build attestation.
@@ -508,6 +529,12 @@ pub enum LayerSpecError {
         tool: String,
         platforms: Vec<String>,
     },
+    /// Both opt-in forms on one entry. Which one counts would be a coin toss,
+    /// and the loser is dropped silently out of a SIGNED layer.
+    TwoOptInForms { tool: String },
+    /// The encoding has one field for the whole reason, and flattening a split
+    /// opt-in loses WHICH part is the measurement (REQ-PREPARED-001).
+    SplitOptInNotEncodable { tool: String },
     /// An opt-in that states no reason.
     UnverifiedWithoutReason { tool: String },
     /// An opt-in whose reason is about a DIFFERENT release than the one
@@ -599,6 +626,23 @@ impl fmt::Display for LayerSpecError {
                  survives the trip and the entry looks ordinary.\n\n\
                  Deposit this realm with `varve-producer deposit --manifest \
                  layer.toml`, which reads the mechanism directly."
+            ),
+            LayerSpecError::TwoOptInForms { tool } => write!(
+                f,
+                "tool {tool:?} carries BOTH `unverified-reason` and \
+                 `[tool.unverified]`. Only one can reach the signed layer, and \
+                 whichever lost would vanish silently from a document every \
+                 consumer reads as the operator's own words. Keep one."
+            ),
+            LayerSpecError::SplitOptInNotEncodable { tool } => write!(
+                f,
+                "tool {tool:?} declares a split opt-in (`[tool.unverified]`), and \
+                 the env encoding has ONE field for the whole reason.\n\
+                 Flattening it would lose which part is the MEASUREMENT — and \
+                 that boundary is the only thing standing between a scanner \
+                 re-measuring a release and a scanner rewriting the operator's \
+                 judgement. Deposit this realm with `varve-producer deposit \
+                 --manifest layer.toml`, which reads the parts directly."
             ),
             LayerSpecError::PlatformsNotEncodable { tool, platforms } => write!(
                 f,
@@ -742,6 +786,49 @@ impl AssemblerEnv {
     }
 }
 
+/// An opt-in with its measurement separated from the judgement around it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Unverified {
+    /// What was probed, when, and what was found. A scanner rewrites THIS and
+    /// nothing else, and it is the part the release-naming rule checks.
+    pub measured: String,
+    /// Why the operator carries it anyway. Never rewritten.
+    pub accepted: String,
+    /// What would remove the need. Never rewritten.
+    pub exit: String,
+}
+
+impl ManifestTool {
+    /// The opt-in as one prose string, however it was written.
+    ///
+    /// Everything downstream — the signed layer, `varve inspect`, the ladder's
+    /// recorded `proof-asserts` — consumed a single string before this split
+    /// existed and still does. Joining here rather than at each reader keeps
+    /// ONE answer to "what does this layer say about these bytes", which is the
+    /// property the opt-in exists to carry.
+    pub fn opt_in_reason(&self) -> Option<String> {
+        if let Some(u) = &self.unverified {
+            return Some(format!(
+                "{} {} {}",
+                u.measured.trim(),
+                u.accepted.trim(),
+                u.exit.trim()
+            ));
+        }
+        self.unverified_reason.clone()
+    }
+
+    /// The part the release-naming rule applies to: the MEASUREMENT alone
+    /// where the entry is split, and the whole string where it is not.
+    pub fn opt_in_measurement(&self) -> Option<&str> {
+        if let Some(u) = &self.unverified {
+            return Some(u.measured.as_str());
+        }
+        self.unverified_reason.as_deref()
+    }
+}
+
 pub fn parse_layer_manifest(text: &str) -> Result<LayerManifest, LayerSpecError> {
     let manifest: LayerManifest =
         toml::from_str(text).map_err(|e| LayerSpecError::Parse(e.to_string()))?;
@@ -767,10 +854,22 @@ pub fn parse_layer_manifest(text: &str) -> Result<LayerManifest, LayerSpecError>
 fn check_unverified(tools: &[ManifestTool]) -> Result<(), LayerSpecError> {
     let mut seen: Vec<(String, String)> = Vec::new();
     for t in tools {
-        let Some(why) = &t.unverified_reason else {
+        // BOTH forms is not a preference to resolve: it is two different
+        // answers to "what does this layer say about these bytes", one of
+        // which would disappear.
+        if t.unverified.is_some() && t.unverified_reason.is_some() {
+            return Err(LayerSpecError::TwoOptInForms {
+                tool: t.name.clone(),
+            });
+        }
+        let Some(measured) = t.opt_in_measurement() else {
             continue;
         };
-        let why = why.trim();
+        // THE RELEASE-NAMING RULE APPLIES TO THE MEASUREMENT. Where the entry
+        // is split, that is `measured` alone — an acceptance reading "the
+        // component-model toolchain is unusable without wac" names no release
+        // and must not be able to satisfy a check about one.
+        let why = measured.trim();
         if why.is_empty() {
             return Err(LayerSpecError::UnverifiedWithoutReason {
                 tool: t.name.clone(),
@@ -808,8 +907,12 @@ fn check_unverified(tools: &[ManifestTool]) -> Result<(), LayerSpecError> {
             Some(r) => r.clone(),
             None => format!("pulseengine/{}", t.name),
         };
+        // Compared on the WHOLE reason, not the measurement: two tools from
+        // one release must agree about the acceptance and the exit too, or one
+        // operator judgement would be recorded and the other dropped.
+        let whole = t.opt_in_reason().unwrap_or_default();
         if let Some((_, prev)) = seen.iter().find(|(r, _)| *r == full) {
-            if prev != why {
+            if *prev != whole {
                 return Err(LayerSpecError::ConflictingReason {
                     repo: full,
                     first: prev.clone(),
@@ -817,7 +920,7 @@ fn check_unverified(tools: &[ManifestTool]) -> Result<(), LayerSpecError> {
                 });
             }
         } else {
-            seen.push((full, why.to_string()));
+            seen.push((full, whole));
         }
     }
     Ok(())
@@ -956,6 +1059,16 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
         // platform the realm deliberately excluded. For binaryen that is a
         // payload which passes every check and then cannot exec
         // (REQ-TOOLPLAT-001 clause 1).
+        // Same rule as `platforms`, `sdk` and `upstream-sums`: a field the
+        // encoding cannot carry stops at the boundary. Here what would be lost
+        // is the BOUNDARY itself — which part of the reason is the measurement
+        // — and that is the only thing keeping a scanner from rewriting the
+        // operator's judgement (REQ-PREPARED-001).
+        if t.unverified.is_some() {
+            return Err(LayerSpecError::SplitOptInNotEncodable {
+                tool: t.name.clone(),
+            });
+        }
         if let Some(only) = &t.platforms {
             return Err(LayerSpecError::PlatformsNotEncodable {
                 tool: t.name.clone(),
@@ -964,7 +1077,7 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
         }
         // Already VALIDATED at parse time (`check_unverified`); this only
         // collects what the assembler must pass on, deduplicated per repo.
-        if let Some(why) = &t.unverified_reason {
+        if let Some(why) = &t.opt_in_reason() {
             let why = why.trim();
             let full = match &t.repo {
                 Some(r) => r.clone(),
@@ -2092,6 +2205,104 @@ asset=\"toolchain_gnu_%U_arm-zephyr-eabi.tar.xz\"\n"
         .expect_err("must refuse");
         let msg = e.to_string();
         assert!(msg.contains("none for a LAYOUT"), "{msg}");
+        assert!(msg.contains("varve-producer deposit"), "{msg}");
+    }
+
+    /// A SPLIT OPT-IN joins into exactly the prose a consumer read before.
+    ///
+    /// The split exists so a scanner can re-measure without parsing the
+    /// operator's judgement. It must not change what the layer SAYS: every
+    /// consumer — `varve inspect`, the signed `proof-asserts` — read one
+    /// string, and still does.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn a_split_opt_in_reads_as_one_reason() {
+        let m = parse_layer_manifest(&format!(
+            "{HEAD}\n[[tool]]\nname=\"wac\"\nrepo=\"bytecodealliance/wac\"\n\
+version=\"v0.12.0\"\n\
+[tool.unverified]\n\
+measured=\"wac v0.12.0 publishes no sums and no provenance (measured 2026-10-09).\"\n\
+accepted=\"Accepted for rolling only; the toolchain is unusable without wac.\"\n\
+exit=\"Removed by upstream adding attest-build-provenance.\"\n"
+        ))
+        .expect("a split opt-in parses");
+        let t = &m.tools[0];
+        assert_eq!(
+            t.opt_in_reason().as_deref(),
+            Some(
+                "wac v0.12.0 publishes no sums and no provenance (measured 2026-10-09). \
+                 Accepted for rolling only; the toolchain is unusable without wac. \
+                 Removed by upstream adding attest-build-provenance."
+            )
+        );
+        // And the measurement is reachable on its own, which is what a scanner
+        // rewrites.
+        assert!(t.opt_in_measurement().unwrap().contains("2026-10-09"));
+        assert!(!t.opt_in_measurement().unwrap().contains("unusable"));
+    }
+
+    /// THE SUBTLE ONE. The release-naming rule applies to the MEASUREMENT,
+    /// not to the whole reason.
+    ///
+    /// An acceptance clause may legitimately mention a version — "unusable
+    /// without wac v0.12.0" — and if the rule looked at the joined text, that
+    /// mention would satisfy a check about a release nothing was measured
+    /// against. The stale measurement would then travel into the signed layer
+    /// behind a rule that passed.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn an_acceptance_naming_the_release_does_not_satisfy_the_measurement_rule() {
+        let e = parse_layer_manifest(&format!(
+            "{HEAD}\n[[tool]]\nname=\"wac\"\nrepo=\"bytecodealliance/wac\"\n\
+version=\"v0.13.0\"\n\
+[tool.unverified]\n\
+measured=\"wac v0.12.0 publishes no sums and no provenance (measured 2026-10-02).\"\n\
+accepted=\"Accepted for rolling only; v0.13.0 is unusable without it.\"\n\
+exit=\"Removed by upstream adding attest-build-provenance.\"\n"
+        ))
+        .expect_err("the measurement is about v0.12.0 while the pin is v0.13.0");
+        assert!(
+            matches!(e, LayerSpecError::ReasonIsAboutAnotherRelease { .. }),
+            "{e:?}"
+        );
+    }
+
+    /// Both forms on one entry is refused, because one of them would vanish.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn carrying_both_opt_in_forms_is_refused() {
+        let e = parse_layer_manifest(&format!(
+            "{HEAD}\n[[tool]]\nname=\"wac\"\nrepo=\"bytecodealliance/wac\"\n\
+version=\"v0.12.0\"\n\
+unverified-reason=\"wac v0.12.0 publishes nothing verifiable.\"\n\
+[tool.unverified]\n\
+measured=\"wac v0.12.0 publishes no sums (measured 2026-10-09).\"\n\
+accepted=\"Accepted for rolling only.\"\n\
+exit=\"Removed by upstream adding provenance.\"\n"
+        ))
+        .expect_err("two answers to one question");
+        assert!(matches!(e, LayerSpecError::TwoOptInForms { .. }), "{e:?}");
+    }
+
+    /// The env encoding cannot carry the boundary, so it refuses rather than
+    /// flattening it away.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn a_split_opt_in_refuses_to_translate_into_the_env_encoding() {
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"wac\"\nrepo=\"bytecodealliance/wac\"\n\
+version=\"v0.12.0\"\n\
+[tool.unverified]\n\
+measured=\"wac v0.12.0 publishes no sums (measured 2026-10-09).\"\n\
+accepted=\"Accepted for rolling only.\"\n\
+exit=\"Removed by upstream adding provenance.\"\n"
+        ))
+        .expect_err("the boundary is what would be lost");
+        let msg = e.to_string();
+        // The refusal must name WHAT is lost — the boundary — not merely that
+        // something is unsupported. Case-insensitive because the message
+        // emphasises the word in capitals.
+        assert!(msg.to_lowercase().contains("measurement"), "{msg}");
         assert!(msg.contains("varve-producer deposit"), "{msg}");
     }
 

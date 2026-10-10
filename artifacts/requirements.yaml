@@ -4603,7 +4603,7 @@ artifacts:
       created-by: ai-assisted
       model: claude-opus-5
       timestamp: 2026-09-30T13:12:53Z
-    release: v0.42.0
+    release: v0.45.0
 
   - id: REQ-TOOLCHAIN-001
     type: requirement
@@ -4627,7 +4627,7 @@ artifacts:
       created-by: ai-assisted
       model: claude-opus-5
       timestamp: 2026-09-30T13:13:14Z
-    release: v0.42.0
+    release: v0.45.0
 
   - id: DD-034
     type: design-decision
@@ -4956,4 +4956,46 @@ artifacts:
       created-by: ai-assisted
       model: claude-opus-5
       timestamp: 2026-10-08T21:04:33Z
+    release: v0.42.0
+
+  - id: REQ-PREPARED-001
+    type: requirement
+    title: A moved pin arrives prepared as a change to approve, not as a report of work to do
+    status: verified
+    description: |-
+      A pin that moved arrives PREPARED, as a change to approve — never as a report of work for a person to do.
+
+      THE OPERATING CONSTRAINT, stated by the maintainer 2026-10-09: nothing manual. A realm that needs hand work per upstream release is a realm that stops being maintained. REQ-AUTOBUMP-001 made the scanner stop proposing a bump that varve would refuse; that is necessary and it is not automation — it tells a person what to do instead of doing it. In wasm-layers that was 18 payloads.
+
+      WHAT WAS CALLED IMPOSSIBLE AND WAS NOT. Measured across the three realms 2026-10-09: of 15 payloads varve reported as needing a person, 15 were mechanically derivable.
+
+        * 14 from the release TAG. `wasmtime` (v49.0.1 -> 49.0.1) and all 13 binaryen tools (`version_133` -> 133). varve called them manual because the entry had a `release` key, which answers nothing; the rule that decides it correctly had existed, tested, in `tools/pins.py` — copied into three realm repositories, and since drifted.
+        * 1 from the release's own ASSET NAMES. `auto_bumpable`'s doc comment asserted that only upstream's release notes say what version a hub release ships. It is in the asset name, and the manifest already declares the template: `with-device-%V-%T.tar.gz` against a published `with-device-0.2.2-aarch64-apple-darwin.tar.gz`. `%T` comes from the layer's own platform list, so solving for `%V` is unambiguous.
+
+      Both of those claims were in comments, unexamined, and both were false for every payload this organisation carries.
+
+      Clauses:
+
+      (1) Where a moved pin's new version is derivable, the scanner shall derive it and emit it as the value to write. Derivation shall be from the tag where the tag implies it, and otherwise from the asset names the new release actually publishes.
+
+      (2) Where a moved payload carries an `unverified-reason`, the scanner shall RE-MEASURE the new release's proof and emit either a fresh reason naming that release, with the date and what was found, or the removal of the opt-in where the upstream has begun publishing cosign-signed sums or build provenance. The reasons are mechanically checkable claims and the ingestion ladder already performs exactly those probes.
+
+      (3) The old reason's words shall never be carried forward with a new version substituted in. That signs a measurement nobody made, which is what REQ-INGEST-001 clause 3 forbids. The distinction this requirement rests on is between GENERATING a claim and RE-ESTABLISHING it.
+
+      (4) Where a composition edge has moved, the proposal shall carry the new layer id AND its manifest digest, both read from the realm's signed index. This does not weaken DD-027 or `pins.NOT_PAYLOADS`: their argument is that moving a composition is a REVIEWED decision, never an unattended rewrite, and a pull request is the review. What was wrong was equating "reviewed" with "typed by hand".
+
+      (5) A rewrite shall be validated before it can reach a commit. A manifest varve refuses must not be able to land: once one does, the realm cannot even be scanned, because `scan` reads through `parse_layer_manifest`.
+
+      (6) Every derivation shall live in varve, once. Four tools are presently triplicated across three realm repositories and one copy has already diverged. REQ-SCAN-001 already argued that a scanner deciding what gets SIGNED belongs where the tests and the mutation gate are.
+
+      (7) Where no derivation applies, that shall be reported with the specific reason — upstream has changed how it names things — and never as a bump.
+
+      THE ORACLE IS THE REAL REALMS, not fixtures. Every payload the organisation carries must yield either a complete proposal or a named reason none applies, and the count of the latter must be zero for the manifests as they stand. A test asserting "we reported it correctly" passes while the realm rots.
+    links:
+      - type: traces-to
+        target: REQ-AUTOBUMP-001
+    provenance:
+      created-by: ai-assisted
+      model: claude-opus-5
+      timestamp: 2026-10-09T10:10:57Z
     release: v0.42.0
