@@ -563,6 +563,52 @@ mod tests {
             );
         }
 
+        /// An asset that matches the template with NOTHING where the version goes
+        /// yields no version — not an empty one.
+        ///
+        /// `with-device--aarch64-apple-darwin.tar.gz` satisfies both the prefix
+        /// and the suffix, so the solve succeeds with an empty `%V`. Writing ""
+        /// into a signed manifest as a payload's version is worse than failing to
+        /// derive: `version = ""` names nothing and would be signed as if it did.
+        // rivet: verifies REQ-PREPARED-001
+        #[test]
+        fn an_empty_match_is_not_a_version() {
+            let published: Vec<String> =
+                vec!["with-device--aarch64-apple-darwin.tar.gz".to_string()];
+            assert_eq!(
+                version_from_assets(
+                    "with-device-%V-%T.tar.gz",
+                    &["aarch64-apple-darwin"],
+                    &published
+                ),
+                None,
+                "an empty %V is not a version"
+            );
+        }
+
+        /// A match that swallows a path separator is refused.
+        ///
+        /// The two halves of this guard are independent, and the mutation gate
+        /// proved it: with `||` turned into `&&`, neither an empty candidate nor a
+        /// slashed one was rejected and nothing noticed. A separator inside a
+        /// derived version means the template matched across something it should
+        /// not have.
+        // rivet: verifies REQ-PREPARED-001
+        #[test]
+        fn a_match_spanning_a_separator_is_not_a_version() {
+            let published: Vec<String> =
+                vec!["with-device-0.2.2/evil-aarch64-apple-darwin.tar.gz".to_string()];
+            assert_eq!(
+                version_from_assets(
+                    "with-device-%V-%T.tar.gz",
+                    &["aarch64-apple-darwin"],
+                    &published
+                ),
+                None,
+                "a version containing a path separator is not one"
+            );
+        }
+
         /// A release that publishes nothing matching the template yields nothing,
         /// rather than something.
         // rivet: verifies REQ-AUTOBUMP-001
