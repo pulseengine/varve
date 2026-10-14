@@ -7052,3 +7052,25 @@ fn the_timing_report_goes_to_stderr_and_not_to_stdout() {
          to skip:\n{body}"
     );
 }
+
+/// covalent-layers installed varve as `varve-bin`, and every `varve-bin
+/// outdated` ran as the SHIM for a tool called varve-bin, failing with
+/// "layer … is not installed" — true, and no help at all. A shim failure must
+/// say it was one, and why this binary thought it was one.
+// rivet: verifies REQ-NOPINNOTOOL-001
+#[test]
+fn a_failure_while_dispatching_as_a_shim_says_it_was_a_shim() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let renamed = fx.project.join("varve-bin");
+    std::fs::copy(assert_cmd::cargo::cargo_bin("varve"), &renamed).unwrap();
+    let mut cmd = Command::new(&renamed);
+    cmd.env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &fx.root)
+        .current_dir(&fx.project)
+        .args(["outdated", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invoked as 'varve-bin'"))
+        .stderr(predicate::str::contains("shim"))
+        .stderr(predicate::str::contains("name the binary 'varve'"));
+}
