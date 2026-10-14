@@ -387,6 +387,7 @@ jobs:
               -f crates/varve-producer/src/pgpsums.rs
           - shard: varve-producer
             files: >-
+              -f crates/varve-producer/src/apply.rs
               -f crates/varve-producer/src/asset.rs
               -f crates/varve-producer/src/scan.rs
               -f crates/varve-producer/src/nextlayer.rs

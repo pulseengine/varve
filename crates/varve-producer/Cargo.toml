@@ -37,6 +37,12 @@ serde_json = "1.0.151"
 sha2 = "0.11.0"
 hex = "0.4"
 toml = { version = "1.1.4", features = ["serde"] }
+# Format-preserving edits for `scan --apply` (REQ-PREPARED-001): layer.toml is
+# mostly comments, and re-serialising through `toml`/serde discards every one
+# of them. `toml_edit` is the sibling crate in the same toml-rs release train
+# as `toml` above — both carry the `+spec-1.1.0` suffix for the TOML version
+# they implement — so the two parse the same grammar.
+toml_edit = "0.25.17"
 varve-core.workspace = true
 base64 = "0.23.1"
 
