@@ -5836,6 +5836,163 @@ fn env_enters_every_declared_environment_in_the_order_that_inverts_the_file() {
         .stderr(predicate::str::contains("varve.toml"));
 }
 
+// rivet: verifies REQ-ENVQUOTE-001
+#[cfg(unix)]
+#[test]
+fn env_quotes_a_hostile_root_so_eval_cannot_run_embedded_commands() {
+    // `varve env` tells you to `eval "$(varve env)"`. The store root — read
+    // from $VARVE_ROOT, so attacker-controlled in exactly the environments
+    // that matter (CI, a container, a shared machine) — used to be
+    // interpolated inside sh DOUBLE quotes, where `$`, backticks and `"`
+    // stay live: a crafted root became code the moment the result was
+    // eval'd (pulseengine/varve#46).
+    let tmp = tempfile::tempdir().unwrap();
+    let canary_dollar = tmp.path().join("pwned-dollar");
+    let canary_tick = tmp.path().join("pwned-tick");
+    let touch_dollar = format!("touch {}", canary_dollar.display());
+    let touch_tick = format!("touch {}", canary_tick.display());
+    // One root, every sh metacharacter that is live inside the OLD double
+    // quoting at once: `$(...)`, a backtick command substitution, a double
+    // quote, a single quote, a backslash, a space and a semicolon.
+    let hostile_root = format!(
+        "{}/vr$({touch_dollar})x`{touch_tick}`\"dq\"'sq'\\bs sp;semi",
+        tmp.path().display()
+    );
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &hostile_root)
+        .current_dir(&project)
+        .args(["env", "--shell", "sh"]);
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "varve env failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let script = String::from_utf8(out.stdout).unwrap();
+    let shims = format!("{hostile_root}/shims");
+    // The script text itself contains the quoted form, not the raw path
+    // verbatim — `'sq'`'s embedded `'` is correctly escaped as `'\''`, which
+    // is why the round-trip claim below is checked by actually RUNNING the
+    // script, not by searching for `shims` as a raw substring.
+    assert!(
+        !canary_dollar.exists() && !canary_tick.exists(),
+        "merely PRINTING the script must never run anything embedded in the root"
+    );
+
+    for shell in ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/dash"] {
+        let _ = std::fs::remove_file(&canary_dollar);
+        let _ = std::fs::remove_file(&canary_tick);
+        let probe = std::process::Command::new(shell)
+            .arg("-c")
+            .arg("eval \"$VARVE_ENV\"; printf '%s' \"$PATH\"")
+            .env("VARVE_ENV", &script)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap_or_else(|e| panic!("cannot run {shell}: {e}"));
+        assert!(
+            probe.status.success(),
+            "{shell} failed to eval the emitted script: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let path = String::from_utf8_lossy(&probe.stdout).into_owned();
+        assert!(
+            path.split(':').any(|e| e == shims),
+            "{shell}: the literal shim dir must be on PATH verbatim: {path}"
+        );
+        assert!(
+            !canary_dollar.exists(),
+            "{shell}: evaluating the emitted script must not run the embedded \
+             $(...) command"
+        );
+        assert!(
+            !canary_tick.exists(),
+            "{shell}: evaluating the emitted script must not run the embedded \
+             `...` command"
+        );
+    }
+}
+
+// rivet: verifies REQ-ENVQUOTE-001
+#[cfg(unix)]
+#[test]
+fn env_quotes_a_hostile_project_path_for_declared_sourced_exports() {
+    // `varve_core::env_lines` has the same class of defect as the shim line:
+    // a declared sourced export's script path is ALSO interpolated inside sh
+    // double quotes (". \"{path}\""), so a project whose path contains a
+    // command substitution turns `eval "$(varve env)"` into code execution
+    // too.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("varve-root"); // an ordinary, non-hostile root
+    let canary = tmp.path().join("pwned-export-path");
+    let hostile_name = format!("proj$(touch {})x", canary.display());
+    let project = tmp.path().join(&hostile_name);
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\n\
+         layer = \"2026.07.0\"\n\
+         \n[[export]]\nkind = \"sdk\"\nout = \"sdk\"\n\
+         \n[export.env]\nscript = \"setup.sh\"\npath = \"before-shims\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("sdk")).unwrap();
+    std::fs::write(
+        project.join("sdk").join("setup.sh"),
+        "export SDK_MARKER=yes\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &root)
+        .current_dir(&project)
+        .arg("env");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "varve env failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let script = String::from_utf8(out.stdout).unwrap();
+
+    let script_path = project.join("sdk").join("setup.sh");
+    let raw_double_quoted_form = format!(". \"{}\"", script_path.display());
+    assert!(
+        !script.contains(&raw_double_quoted_form),
+        "the sourced export's path must no longer be interpolated inside \
+         double quotes, where $(...) stays live:\n{script}"
+    );
+    assert!(
+        !canary.exists(),
+        "merely printing the script must not run it"
+    );
+
+    let probe = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("eval \"$VARVE_ENV\" 2>/dev/null; printf '%s' \"$PATH\"")
+        .env("VARVE_ENV", &script)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        !canary.exists(),
+        "sourcing the declared export must not run a command embedded in its \
+         own path, even though the (bogus, literal) path cannot actually be \
+         sourced"
+    );
+    let path = String::from_utf8_lossy(&probe.stdout);
+    let shims = root.join("shims");
+    assert!(
+        path.split(':').any(|e| e == shims.to_str().unwrap()),
+        "the shims must still land on PATH even though sourcing the literal \
+         export path fails to find a file: {path}"
+    );
+}
+
 // rivet: verifies REQ-PIN-001
 #[test]
 fn a_schema_mistake_in_the_pin_is_reported_once_not_twice() {

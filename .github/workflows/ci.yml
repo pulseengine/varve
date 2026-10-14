@@ -288,6 +288,7 @@ jobs:
               -f crates/varve-core/src/install.rs
               -f crates/varve-core/src/selfverify.rs
               -f crates/varve-core/src/reverify.rs
+              -f crates/varve-core/src/shellquote.rs
           # SPLIT AGAIN at v0.35.0, and the third time this job has said the
           # same thing. REQ-LAYERDOCS-001 added four files to `varve-core
           # (trust)` — manifestversions, docsexport, and the viewer's two — and
