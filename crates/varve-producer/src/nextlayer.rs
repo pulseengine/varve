@@ -326,6 +326,27 @@ mod tests {
         assert_eq!(current_line(), line_from_unix_secs(now));
     }
 
+    /// The clock-reading date wrapper agrees with the pure function. The
+    /// clock is read on both sides so a run straddling UTC midnight still
+    /// has one of the two days to match.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn today_is_the_date_of_now() {
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+        };
+        let before = date_from_unix_secs(now());
+        let got = today();
+        let after = date_from_unix_secs(now());
+        assert!(
+            got == before || got == after,
+            "today() = {got:?}, now is {before}..{after}"
+        );
+    }
+
     fn tags(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
