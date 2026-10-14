@@ -175,6 +175,21 @@ pub struct ToolSource {
     /// `DepositError::UnverifiedWithoutReason`.
     #[serde(rename = "proof-asserts", default)]
     pub proof_asserts: Option<String>,
+    /// The upstream repository's DECLARED SPDX license (REQ-SBOMFIELDS-001
+    /// clause 5) — GitHub's statement, recorded at deposit, never a concluded
+    /// audit of what the binary bundles. `None` on a spec written before the
+    /// requirement, or where GitHub itself has nothing to say; absence must
+    /// not read as "no license".
+    #[serde(default)]
+    pub license: Option<String>,
+    /// The file name of a CycloneDX SBOM upstream published in the SAME
+    /// release this payload came from (REQ-SBOMFIELDS-001 clause 4), relative
+    /// to that release — paired with `sbom_sha256`.
+    #[serde(default)]
+    pub sbom: Option<String>,
+    /// The sha256 (bare hex) of `sbom` as the producer fetched it.
+    #[serde(rename = "sbom-sha256", default)]
+    pub sbom_sha256: Option<String>,
 }
 
 /// How a deposit treats a destination that is not empty (REQ-NODESTROY-001).
@@ -545,6 +560,28 @@ pub enum DepositError {
         repo: String,
         detail: &'static str,
     },
+    #[error(
+        "payload '{name}' from {repo} declares sbom-sha256 {sha256:?}, which is not 64 hex \
+         characters — this is signed into the layer as a digest a reader will compare bytes \
+         against, so a malformed one would be believed and never match anything. Record the \
+         SBOM's actual sha256, or drop both `sbom` and `sbom-sha256`."
+    )]
+    SbomSha256Malformed {
+        name: String,
+        repo: String,
+        sha256: String,
+    },
+    #[error(
+        "payload '{name}' from {repo} declares {detail} but not its partner — `sbom` (the file \
+         name) and `sbom-sha256` (its digest) are recorded together or not at all, so a \
+         reference without a checkable digest, or a digest with nothing to name, is never \
+         signed in half."
+    )]
+    SbomFieldIncomplete {
+        name: String,
+        repo: String,
+        detail: &'static str,
+    },
     #[error(transparent)]
     Sign(#[from] VerifyError),
     #[error("io error at {path}: {source}")]
@@ -810,6 +847,44 @@ fn check_ingest_proofs(tools: &[&DepositTool]) -> Result<(), DepositError> {
     Ok(())
 }
 
+/// The upstream SBOM reference must be a checkable pair, or absent entirely
+/// (REQ-SBOMFIELDS-001 clauses 4 and 6).
+///
+/// `sbom-sha256` is signed into the layer as a digest a consumer will compare
+/// bytes against, so a malformed one — not 64 hex characters — is refused
+/// here rather than signed and never matching anything. And `sbom` /
+/// `sbom-sha256` travel together: a name with no digest cannot be checked,
+/// and a digest naming nothing is unreadable, so either both are present or
+/// neither is — never a default, which is exactly the silent upgrade clause 6
+/// forbids for a layer that carries neither.
+fn check_sbom_fields(tools: &[&DepositTool]) -> Result<(), DepositError> {
+    for tool in tools {
+        let Some(source) = &tool.source else { continue };
+        if let Some(sha) = &source.sbom_sha256
+            && (sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(DepositError::SbomSha256Malformed {
+                name: tool.name.clone(),
+                repo: source.repo.clone(),
+                sha256: sha.clone(),
+            });
+        }
+        let detail = match (&source.sbom, &source.sbom_sha256) {
+            (Some(_), None) => Some("sbom"),
+            (None, Some(_)) => Some("sbom-sha256"),
+            _ => None,
+        };
+        if let Some(detail) = detail {
+            return Err(DepositError::SbomFieldIncomplete {
+                name: tool.name.clone(),
+                repo: source.repo.clone(),
+                detail,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Assemble, sign, and write a layer as an OCI image layout at `dest`,
 /// refusing a destination that already carries signed work (REQ-NODESTROY-001).
 pub fn deposit(
@@ -857,6 +932,7 @@ pub fn deposit_with_options(
     check_sdk_prefixes(&tools)?;
     check_docs_metadata(&tools)?;
     check_ingest_proofs(&tools)?;
+    check_sbom_fields(&tools)?;
 
     // Assemble the payload deterministically: sorted tools, fixed key order
     // (serde_json sorts map keys), no timestamps beyond the caller-supplied
@@ -931,6 +1007,22 @@ pub fn deposit_with_options(
                         crate::ingest::ANN_PROOF_ASSERTS.into(),
                         asserts.clone().into(),
                     );
+                }
+                // REQ-SBOMFIELDS-001 clauses 4–6: stamped only when the spec
+                // declares them. Absent is a layer deposited before the
+                // requirement (or a repo/release that genuinely carries
+                // neither), and it must read as `unrecorded` rather than as
+                // a license nobody declared or an SBOM nobody published —
+                // synthesising either here would be exactly the silent
+                // upgrade clause 6 forbids.
+                if let Some(license) = &source.license {
+                    annotations.insert(crate::ingest::ANN_LICENSE.into(), license.clone().into());
+                }
+                if let Some(sbom) = &source.sbom {
+                    annotations.insert(crate::ingest::ANN_SBOM.into(), sbom.clone().into());
+                }
+                if let Some(sha) = &source.sbom_sha256 {
+                    annotations.insert(crate::ingest::ANN_SBOM_SHA256.into(), sha.clone().into());
                 }
             }
             // Stamp the payload kind only when it is non-default: a `tool`
@@ -1519,7 +1611,26 @@ mod tests {
                     "NOTHING — operator opt-in: needed for the 2026.09 bring-up".to_string()
                 }
             }),
+            license: None,
+            sbom: None,
+            sbom_sha256: None,
         });
+        tool
+    }
+
+    /// `ingested`, with an upstream-declared license and SBOM reference
+    /// (REQ-SBOMFIELDS-001 clauses 4 and 5).
+    fn with_sbom_fields(
+        mut tool: DepositTool,
+        license: Option<&str>,
+        sbom: Option<(&str, &str)>,
+    ) -> DepositTool {
+        let source = tool.source.as_mut().expect("ingested() sets a source");
+        source.license = license.map(str::to_string);
+        if let Some((name, sha256)) = sbom {
+            source.sbom = Some(name.to_string());
+            source.sbom_sha256 = Some(sha256.to_string());
+        }
         tool
     }
 
@@ -1722,6 +1833,122 @@ mod tests {
         assert_eq!(
             entry.ingest_proof(),
             Err(crate::ingest::UnknownProof("notary-v2".into()))
+        );
+    }
+
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn a_declared_license_and_upstream_sbom_become_exactly_those_three_annotations() {
+        // Clauses 4 and 5: present in the spec, present as signed annotations
+        // — and nothing else is stamped alongside them.
+        use crate::ingest::{ANN_LICENSE, ANN_SBOM, ANN_SBOM_SHA256};
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        let tool = with_sbom_fields(
+            ingested(
+                "rivet",
+                "pulseengine/rivet",
+                crate::ingest::IngestProof::CosignSums,
+            ),
+            Some("Apache-2.0"),
+            Some(("rivet-v1.0.0.cdx.json", &"b".repeat(64))),
+        );
+        spec.tools = vec![tool];
+        let outcome = deposit(&spec, &sk, "k", &tmp.path().join("d")).unwrap();
+        let hex = outcome.digest.strip_prefix("sha256:").unwrap();
+        let bytes = std::fs::read(tmp.path().join("d/blobs/sha256").join(hex)).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let entry = json["manifests"].as_array().unwrap()[0].clone();
+        assert_eq!(entry["annotations"][ANN_LICENSE], "Apache-2.0");
+        assert_eq!(entry["annotations"][ANN_SBOM], "rivet-v1.0.0.cdx.json");
+        assert_eq!(entry["annotations"][ANN_SBOM_SHA256], "b".repeat(64));
+    }
+
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn a_spec_without_license_or_sbom_signs_none_of_the_three_annotations() {
+        // Clause 6: absence must stay absence — no default, no
+        // "NOASSERTION" the deposit itself invents.
+        use crate::ingest::{ANN_LICENSE, ANN_SBOM, ANN_SBOM_SHA256};
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        spec.tools = vec![ingested(
+            "rivet",
+            "pulseengine/rivet",
+            crate::ingest::IngestProof::CosignSums,
+        )];
+        let outcome = deposit(&spec, &sk, "k", &tmp.path().join("d")).unwrap();
+        let hex = outcome.digest.strip_prefix("sha256:").unwrap();
+        let bytes = std::fs::read(tmp.path().join("d/blobs/sha256").join(hex)).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let entry = json["manifests"].as_array().unwrap()[0].clone();
+        assert!(entry["annotations"][ANN_LICENSE].is_null());
+        assert!(entry["annotations"][ANN_SBOM].is_null());
+        assert!(entry["annotations"][ANN_SBOM_SHA256].is_null());
+    }
+
+    /// A malformed digest must be refused BEFORE signing, not signed as a
+    /// claim nothing can ever match.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn a_malformed_sbom_sha256_is_refused_rather_than_signed() {
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in ["not-hex-at-all", &"a".repeat(63), &"a".repeat(65), ""] {
+            let mut spec = spec();
+            spec.tools = vec![with_sbom_fields(
+                ingested(
+                    "rivet",
+                    "pulseengine/rivet",
+                    crate::ingest::IngestProof::CosignSums,
+                ),
+                None,
+                Some(("rivet-v1.0.0.cdx.json", bad)),
+            )];
+            let err =
+                deposit(&spec, &sk, "k", &tmp.path().join(format!("d{}", bad.len()))).unwrap_err();
+            assert!(
+                matches!(&err, DepositError::SbomSha256Malformed { name, .. } if name == "rivet"),
+                "{bad:?} got: {err}"
+            );
+        }
+    }
+
+    /// `sbom` and `sbom-sha256` travel together; either one alone is a
+    /// reference that cannot be checked, or a digest naming nothing.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn sbom_and_its_digest_are_refused_when_only_one_is_present() {
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut name_only = ingested(
+            "rivet",
+            "pulseengine/rivet",
+            crate::ingest::IngestProof::CosignSums,
+        );
+        name_only.source.as_mut().unwrap().sbom = Some("rivet-v1.0.0.cdx.json".into());
+        let mut spec_a = spec();
+        spec_a.tools = vec![name_only];
+        let err = deposit(&spec_a, &sk, "k", &tmp.path().join("a")).unwrap_err();
+        assert!(
+            matches!(&err, DepositError::SbomFieldIncomplete { detail, .. } if *detail == "sbom"),
+            "got: {err}"
+        );
+
+        let mut digest_only = ingested(
+            "rivet",
+            "pulseengine/rivet",
+            crate::ingest::IngestProof::CosignSums,
+        );
+        digest_only.source.as_mut().unwrap().sbom_sha256 = Some("c".repeat(64));
+        let mut spec_b = spec();
+        spec_b.tools = vec![digest_only];
+        let err = deposit(&spec_b, &sk, "k", &tmp.path().join("b")).unwrap_err();
+        assert!(
+            matches!(&err, DepositError::SbomFieldIncomplete { detail, .. } if *detail == "sbom-sha256"),
+            "got: {err}"
         );
     }
 
