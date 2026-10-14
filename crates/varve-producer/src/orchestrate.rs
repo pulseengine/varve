@@ -218,6 +218,66 @@ pub fn admit(v: &Verified, repo: &str, asset: &str, bytes: &[u8]) -> Result<Stri
     Ok(expected.to_string())
 }
 
+/// The release's CycloneDX SBOM, admitted through the release's proof, with
+/// the license its `metadata.component` states (REQ-SBOMFIELDS-001).
+///
+/// The proof decides, exactly as for a payload: an SBOM the verified sums do
+/// not name is not recorded (it is optional — a note, not a refusal); one
+/// whose bytes disagree with the sums is a tampered file and REFUSES the run,
+/// as `admit` does for a payload. Where nothing vouches for the release (an
+/// unverified opt-in), nothing is recorded: there is no proof to spend.
+pub fn release_sbom<S: Source>(
+    src: &S,
+    v: &Verified,
+    repo: &str,
+    version: &str,
+) -> Result<Option<(SbomRef, Option<String>)>, RunError> {
+    let Some(name) = select_release_sbom(&v.published, version) else {
+        return Ok(None);
+    };
+    let Some(sums) = &v.sums else {
+        eprintln!(
+            "note: {repo} {version} publishes {name}, but nothing vouches for this release, \
+             so no upstream SBOM is recorded"
+        );
+        return Ok(None);
+    };
+    if sums.digest_of(name).is_none() {
+        eprintln!(
+            "note: {repo} {version} publishes {name}, but the {} proof does not cover it, \
+             so no upstream SBOM is recorded",
+            v.accepted.mechanism.as_str()
+        );
+        return Ok(None);
+    }
+    let bytes = src.asset_bytes(repo, version, name)?;
+    let sha256 = admit(v, repo, name, &bytes)?;
+    Ok(Some((
+        SbomRef {
+            name: name.to_string(),
+            sha256,
+        },
+        sbom_declared_license(&bytes),
+    )))
+}
+
+/// The license an SBOM states for its own subject, if it states exactly one.
+/// Several entries have no agreed reading (AND? OR? per file?), so they are
+/// not collapsed into a guess.
+pub fn sbom_declared_license(bytes: &[u8]) -> Option<String> {
+    let doc: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let entries = doc.pointer("/metadata/component/licenses")?.as_array()?;
+    let [only] = entries.as_slice() else {
+        return None;
+    };
+    only.get("expression")
+        .or_else(|| only.pointer("/license/id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "NOASSERTION")
+        .map(str::to_string)
+}
+
 /// Verify one release, once.
 pub fn verify_release<S: Source>(
     src: &S,
@@ -363,28 +423,25 @@ pub fn select_release_sbom<'a>(published: &'a [String], version: &str) -> Option
         .filter(|n| n.ends_with(".cdx.json"))
         .map(String::as_str)
         .collect();
-    match candidates.len() {
-        0 => None,
-        1 => Some(candidates[0]),
-        _ => {
-            let narrowed: Vec<&str> = candidates
-                .iter()
-                .copied()
-                .filter(|n| n.contains(version))
-                .collect();
-            if narrowed.len() == 1 {
-                Some(narrowed[0])
-            } else {
-                eprintln!(
-                    "note: {} CycloneDX SBOM candidates published for release {version:?} and \
-                     none of them uniquely names it — recording no upstream SBOM rather than \
-                     guessing: {candidates:?}",
-                    candidates.len()
-                );
-                None
-            }
-        }
+    // None or exactly one: that is the answer, whatever it is named.
+    if candidates.len() < 2 {
+        return candidates.first().copied();
     }
+    let narrowed: Vec<&str> = candidates
+        .iter()
+        .copied()
+        .filter(|n| n.contains(version))
+        .collect();
+    if let [only] = narrowed.as_slice() {
+        return Some(only);
+    }
+    eprintln!(
+        "note: {} CycloneDX SBOM candidates published for release {version:?} and none of \
+         them uniquely names it — recording no upstream SBOM rather than guessing: \
+         {candidates:?}",
+        candidates.len()
+    );
+    None
 }
 
 /// Group a plan by the release its payloads come from, preserving the order
@@ -441,27 +498,28 @@ pub fn run<S: Source>(
         let v = verify_release(src, forge, &repo, &version, optins, sums_asset, &wanted)?;
         seen.record(&repo, &version, v.accepted.clone())?;
 
-        let license = match license_cache.get(&repo) {
-            Some(cached) => cached.clone(),
-            None => {
-                let l = src.repo_license(&repo)?;
-                license_cache.insert(repo.clone(), l.clone());
-                l
-            }
+        // Clause 4: a property of the RELEASE, ADMITTED through the same
+        // proof as its payloads — an SBOM nothing vouched for would be signed
+        // into the layer as if something had.
+        let admitted = release_sbom(src, &v, &repo, &version)?;
+        let (sbom, sbom_license) = match admitted {
+            Some((r, l)) => (Some(r), l),
+            None => (None, None),
         };
-
-        // Clause 4: a property of the RELEASE — computed once from the
-        // listing the probe already fetched, and shared by every payload
-        // this release resolves.
-        let sbom = match select_release_sbom(&v.published, &version) {
-            Some(name) => {
-                let bytes = src.asset_bytes(&repo, &version, name)?;
-                Some(SbomRef {
-                    name: name.to_string(),
-                    sha256: sha256_hex(&bytes),
-                })
-            }
-            None => None,
+        // Clause 5: the license the proof-covered SBOM states wins over
+        // GitHub's repository guess, which is unsigned and, for several
+        // PulseEngine repos, `null` where their SBOM says Apache-2.0 or MIT.
+        // GitHub is asked ONCE per repository, and only when needed.
+        let license = match sbom_license {
+            Some(l) => Some(l),
+            None => match license_cache.get(&repo) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let l = src.repo_license(&repo)?;
+                    license_cache.insert(repo.clone(), l.clone());
+                    l
+                }
+            },
         };
 
         for i in idxs {
@@ -1759,12 +1817,7 @@ mod tests {
     #[test]
     fn a_releases_sole_cyclonedx_sbom_is_recorded_with_its_digest() {
         const SBOM: &[u8] = b"{\"bomFormat\":\"CycloneDX\"}";
-        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)]).publish(
-            "o/r",
-            "v1",
-            "rivet-v1.cdx.json",
-            SBOM,
-        );
+        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A), ("rivet-v1.cdx.json", SBOM)]);
         let got = run(
             &f,
             &Forge::github_com(),
@@ -1804,9 +1857,15 @@ mod tests {
     // rivet: verifies REQ-SBOMFIELDS-001
     #[test]
     fn two_ambiguous_sbom_candidates_record_nothing_rather_than_guess() {
-        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)])
-            .publish("o/r", "v1", "one.cdx.json", b"one")
-            .publish("o/r", "v1", "two.cdx.json", b"two");
+        let f = Fixture::signed(
+            "o/r",
+            "v1",
+            &[
+                ("a.tar.gz", A),
+                ("one.cdx.json", b"one"),
+                ("two.cdx.json", b"two"),
+            ],
+        );
         let got = run(
             &f,
             &Forge::github_com(),
@@ -1825,9 +1884,15 @@ mod tests {
     // rivet: verifies REQ-SBOMFIELDS-001
     #[test]
     fn two_candidates_disambiguated_by_the_release_version_are_not_ambiguous() {
-        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)])
-            .publish("o/r", "v1", "rivet-v1.cdx.json", b"one")
-            .publish("o/r", "v1", "rivet-v2.cdx.json", b"two");
+        let f = Fixture::signed(
+            "o/r",
+            "v1",
+            &[
+                ("a.tar.gz", A),
+                ("rivet-v1.cdx.json", b"one"),
+                ("rivet-v2.cdx.json", b"two"),
+            ],
+        );
         let got = run(
             &f,
             &Forge::github_com(),
@@ -1843,5 +1908,133 @@ mod tests {
             .as_ref()
             .expect("disambiguated by the release's own version string");
         assert_eq!(sbom.name, "rivet-v1.cdx.json");
+    }
+
+    fn run_one(f: &Fixture) -> Result<Vec<Resolved>, RunError> {
+        run(
+            f,
+            &Forge::github_com(),
+            &[plan("t", "o/r", "v1", "a.tar.gz")],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &never,
+            &no_reuse,
+        )
+    }
+
+    /// Security review of this work: an SBOM the signed sums do not name was
+    /// recorded anyway, and its digest signed into the layer as if vouched
+    /// for. It is now recorded only through the proof.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn an_sbom_the_proof_does_not_cover_is_not_recorded() {
+        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)]).publish(
+            "o/r",
+            "v1",
+            "r-v1.cdx.json",
+            b"{}",
+        );
+        let got = run_one(&f).expect("an uncovered optional file is a note, not a refusal");
+        assert!(got[0].sbom.is_none(), "{:?}", got[0].sbom);
+    }
+
+    /// Bytes that disagree with the signed sums are a replaced file: the run
+    /// refuses, exactly as it would for a payload.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn an_sbom_whose_bytes_disagree_with_the_proof_refuses_the_run() {
+        let mut f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A), ("r-v1.cdx.json", b"{}")]);
+        f.blobs
+            .insert("o/r@v1/r-v1.cdx.json".into(), b"{\"evil\":1}".to_vec());
+        let e = run_one(&f).expect_err("a tampered SBOM must not be signed");
+        assert!(matches!(e, RunError::DigestMismatch { .. }), "{e:?}");
+    }
+
+    /// Where nothing vouches for the release there is no proof to spend.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn an_unverified_release_records_no_sbom() {
+        let mut f = Fixture::default();
+        f.blobs
+            .insert("o/r@v1/r-v1.cdx.json".into(), b"{}".to_vec());
+        let v = Verified {
+            published: vec!["r-v1.cdx.json".into()],
+            accepted: Accepted {
+                mechanism: Mechanism::Unverified,
+                signer: None,
+                asserts: "no proof was offered".into(),
+            },
+            sums: None,
+        };
+        assert_eq!(release_sbom(&f, &v, "o/r", "v1").unwrap(), None);
+        assert!(
+            f.log().iter().all(|c| !c.contains("cdx.json")),
+            "{:?}",
+            f.log()
+        );
+    }
+
+    /// The license a proof-covered SBOM states wins over GitHub's unsigned
+    /// repository guess — measured: GitHub says null for pulseengine/rivet
+    /// and pulseengine/sigil, whose release SBOMs say Apache-2.0 and MIT.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn the_covered_sboms_license_wins_and_github_is_not_asked() {
+        const SBOM: &[u8] =
+            br#"{"metadata":{"component":{"name":"rivet-cli","licenses":[{"expression":"Apache-2.0"}]}}}"#;
+        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A), ("r-v1.cdx.json", SBOM)])
+            .license("o/r", Some("MIT"));
+        let got = run_one(&f).unwrap();
+        assert_eq!(got[0].license.as_deref(), Some("Apache-2.0"));
+        assert!(
+            f.log().iter().all(|c| !c.starts_with("license ")),
+            "GitHub was asked although the SBOM answered: {:?}",
+            f.log()
+        );
+    }
+
+    /// No covered SBOM, or one that states no single license: GitHub's
+    /// declared license is the fallback.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn without_a_covered_license_github_is_the_fallback() {
+        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A), ("r-v1.cdx.json", b"{}")])
+            .license("o/r", Some("MIT"));
+        assert_eq!(run_one(&f).unwrap()[0].license.as_deref(), Some("MIT"));
+    }
+
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn a_sole_sbom_is_recorded_whatever_it_is_named() {
+        let names = vec!["a.tar.gz".to_string(), "bom.cdx.json".to_string()];
+        assert_eq!(select_release_sbom(&names, "v1"), Some("bom.cdx.json"));
+        assert_eq!(select_release_sbom(&names[..1], "v1"), None);
+    }
+
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn an_sbom_license_is_read_only_when_it_states_exactly_one() {
+        let one = |v: &str| sbom_declared_license(v.as_bytes());
+        assert_eq!(
+            one(r#"{"metadata":{"component":{"licenses":[{"expression":"MIT OR Apache-2.0"}]}}}"#)
+                .as_deref(),
+            Some("MIT OR Apache-2.0")
+        );
+        assert_eq!(
+            one(r#"{"metadata":{"component":{"licenses":[{"license":{"id":"MIT"}}]}}}"#).as_deref(),
+            Some("MIT")
+        );
+        assert_eq!(
+            one(
+                r#"{"metadata":{"component":{"licenses":[{"license":{"id":"MIT"}},{"license":{"id":"BSD-3-Clause"}}]}}}"#
+            ),
+            None
+        );
+        assert_eq!(
+            one(r#"{"metadata":{"component":{"licenses":[{"expression":"NOASSERTION"}]}}}"#),
+            None
+        );
+        assert_eq!(one(r#"{"metadata":{"component":{}}}"#), None);
+        assert_eq!(one("not json"), None);
     }
 }
