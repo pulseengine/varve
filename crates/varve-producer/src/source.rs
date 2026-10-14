@@ -305,6 +305,16 @@ impl<R: CommandRunner> Source for GhSource<R> {
         let path = self.download(repo, version, asset)?;
         read(&path)
     }
+
+    fn repo_license(&self, repo: &str) -> Result<Option<String>, RunError> {
+        let out = self.gh(gh::repo_info_argv(repo))?;
+        gh::parse_repo_license(&out).map_err(|e| {
+            io_err(
+                &format!("{repo}: reading the repository's declared license"),
+                &e.to_string(),
+            )
+        })
+    }
 }
 
 #[cfg(test)]

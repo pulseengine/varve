@@ -189,6 +189,8 @@ fn what_layer_toml_declares_is_what_the_signed_layer_says() {
             decision: Decision::Fetch {
                 why: FetchReason::NoPrevious,
             },
+            license: None,
+            sbom: None,
         };
         let out = stage_one(
             &NoCommands,
@@ -433,6 +435,8 @@ unverified-reason = "wac v0.11.0 publishes neither cosign-signed sums nor build 
             decision: Decision::Fetch {
                 why: FetchReason::NoPrevious,
             },
+            license: None,
+            sbom: None,
         };
         staged.push(
             // A tool payload is unpacked for real: `Spawn` is the runner the
@@ -586,6 +590,8 @@ asset   = "ordeal-%V-%T.tar.gz"
             decision: Decision::Fetch {
                 why: FetchReason::NoPrevious,
             },
+            license: None,
+            sbom: None,
         };
         staged.push(
             stage_one(
