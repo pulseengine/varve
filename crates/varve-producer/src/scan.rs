@@ -299,10 +299,13 @@ pub fn compare(
         .collect();
     // Carried alongside, because whether a pin may move unattended depends on
     // it: an opt-in reason measures one release and does not survive a bump.
-    let reasons: std::collections::BTreeMap<&str, Option<&str>> = manifest
+    // Through the ACCESSOR, so a `[tool.unverified]` entry counts. Reading the
+    // legacy string directly made a migrated entry look as though it carried
+    // no opt-in at all (varve#259).
+    let reasons: std::collections::BTreeMap<&str, Option<String>> = manifest
         .tools
         .iter()
-        .map(|t| (t.name.as_str(), t.unverified_reason.as_deref()))
+        .map(|t| (t.name.as_str(), t.opt_in_reason()))
         .collect();
     // And the asset template, for the same reason: it is what says where a
     // payload's own version appears in the names upstream publishes.
@@ -351,11 +354,7 @@ pub fn compare(
                             let names = published.get(&repo_of(t.name, t.repo))?;
                             crate::asset::version_from_assets(template, &platforms, names)
                         }),
-                        unverified_reason: reasons
-                            .get(t.name)
-                            .copied()
-                            .flatten()
-                            .map(str::to_string),
+                        unverified_reason: reasons.get(t.name).cloned().flatten(),
                         // Pure: `compare` never probes. See `remeasured`.
                         remeasured: None,
                     });
@@ -874,6 +873,45 @@ mod tests {
             "nothing is left for a person: the version is known and no reason is orphaned"
         );
         assert_eq!(seeing[0].why_a_person(), None);
+    }
+
+    /// A SPLIT-FORM opt-in is an opt-in. varve#259.
+    ///
+    /// `compare` read the legacy `unverified-reason` string directly, so an
+    /// entry migrated to `[tool.unverified]` looked as though it carried no
+    /// opt-in at all — reported auto-bumpable with nothing re-measured, which
+    /// would bump the version and orphan the measurement. Caught end to end by
+    /// `scan --apply`, whose own validation refused to write the result.
+    ///
+    /// The same accessor rule was already applied to `plan.rs` and to the env
+    /// translation. It was missed here, which is the recurring shape: a rule
+    /// fixed at some of the places that decide it.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn a_split_form_opt_in_is_still_an_opt_in() {
+        let m = manifest(
+            "[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\n\
+             version = \"v0.12.0\"\nlayout = \"raw-per-platform\"\nasset = \"wac-cli-%T\"\n\
+             [tool.unverified]\n\
+             measured = \"bytecodealliance/wac v0.12.0 publishes no sums (measured 2026-10-02).\"\n\
+             accepted = \"Accepted for the rolling channel only.\"\n\
+             exit = \"Removed by upstream adding provenance.\"\n",
+            "rolling",
+        );
+        let moved = compare(
+            &m,
+            &seen(&[("bytecodealliance/wac", Ok("v0.13.0"))]),
+            &no_assets(),
+        )
+        .expect("complete");
+        assert!(
+            moved[0].unverified_reason.is_some(),
+            "a [tool.unverified] entry carries an opt-in"
+        );
+        assert!(
+            !moved[0].auto_bumpable(),
+            "until it is re-measured, bumping it orphans the measurement"
+        );
     }
 
     /// An OPT-IN payload is reported and never auto-bumped.
