@@ -655,6 +655,79 @@ version = "v1.4.1"
         );
     }
 
+    /// The other half of the guard above: two tools from one release that
+    /// AGREE on the re-measurement are the normal case, and both are bumped.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn two_tools_sharing_a_release_with_the_same_measurement_are_both_bumped() {
+        let text = format!(
+            "{BASIC}\n\
+             [[tool]]\nname = \"wit-bindgen-wrpc\"\nrepo = \"bytecodealliance/wrpc\"\n\
+             version = \"v0.17.0\"\n\
+             [tool.unverified]\n\
+             measured = \"bytecodealliance/wrpc v0.17.0 publishes no sums.\"\n\
+             accepted = \"a\"\nexit = \"a\"\n\
+             [[tool]]\nname = \"wrpc-wasmtime\"\nrepo = \"bytecodealliance/wrpc\"\n\
+             version = \"v0.17.0\"\n\
+             [tool.unverified]\n\
+             measured = \"bytecodealliance/wrpc v0.17.0 publishes no sums.\"\n\
+             accepted = \"a\"\nexit = \"a\"\n"
+        );
+        let same = Remeasured::StillUnproven {
+            measured: "bytecodealliance/wrpc v0.18.0 publishes no sums.".to_string(),
+        };
+        let base = Moved {
+            name: String::new(),
+            repo: "bytecodealliance/wrpc".to_string(),
+            pinned: "v0.17.0".to_string(),
+            latest: "v0.18.0".to_string(),
+            payload_version: None,
+            derived_version: Some("v0.18.0".to_string()),
+            unverified_reason: Some("x".to_string()),
+            remeasured: Some(same),
+        };
+        let first = Moved {
+            name: "wit-bindgen-wrpc".to_string(),
+            ..base.clone()
+        };
+        let second = Moved {
+            name: "wrpc-wasmtime".to_string(),
+            ..base
+        };
+        let (new_text, changes) =
+            apply(&text, &[first, second]).expect("agreeing measurements are applied");
+        assert_eq!(new_text.matches("v0.18.0 publishes no sums.").count(), 2);
+        assert!(!new_text.contains("v0.17.0"), "{new_text}");
+        assert_eq!(changes.len(), 4, "{changes:?}");
+    }
+
+    /// What `--apply` prints on refusal is the only thing the person reading
+    /// a failed scan sees, so each message names what it refused.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn a_refusal_names_what_it_refused() {
+        let shown = ApplyError::ToolNotFound {
+            name: "wac".to_string(),
+        }
+        .to_string();
+        assert!(shown.contains("\"wac\""), "{shown}");
+        let shown = ApplyError::InconsistentRemeasurement {
+            repo: "bytecodealliance/wrpc".to_string(),
+            release: "v0.18.0".to_string(),
+            first: "measurement ONE".to_string(),
+            second: "measurement TWO".to_string(),
+        }
+        .to_string();
+        for part in [
+            "bytecodealliance/wrpc",
+            "v0.18.0",
+            "measurement ONE",
+            "measurement TWO",
+        ] {
+            assert!(shown.contains(part), "{part} missing from {shown}");
+        }
+    }
+
     /// If the rewritten manifest would not parse, `apply` returns an error
     /// and nothing is handed back to write — never a half-right result.
     // rivet: verifies REQ-PREPARED-001
