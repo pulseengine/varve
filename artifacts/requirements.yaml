@@ -4957,3 +4957,52 @@ artifacts:
       model: claude-opus-5
       timestamp: 2026-10-08T21:04:33Z
     release: v0.42.0
+
+  - id: REQ-COMPOSEWINDOW-001
+    type: requirement
+    title: A composition never promises support past the layers it composes, unless it says why
+    status: approved
+    release: v0.43.0
+    description: "Measured on varve#254: covalent 2026.10.0 signed support-until 2026-11-02 while the wasm-layers layer it includes is supported until 2026-10-24, nine days less. The composition's window is derived from its own channel alone, so it signs a promise about bytes whose own realm has stopped vouching for them. varve#226 is the same defect stated generally. Clauses: (1) The support horizon of a layer that includes other layers shall be capped at the earliest support-until among its includes, read from each include's own signed line-status and verified against that include's realm root. (2) An include whose line-status is missing, unverifiable or states no window shall refuse the horizon rather than be skipped, because skipping it is how the cap becomes vacuous. (3) Exceeding the cap shall require an explicit override carrying a reason, so a longer promise is a decision on the record and not a default. (4) The cap shall be applied by the command the deposit already calls, so every layers repository gets it by taking the next varve and changing nothing else."
+    links:
+      - type: satisfies
+        target: REQ-SUPPORTUNTIL-001
+      - type: satisfies
+        target: REQ-COMPOSE-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-14T19:09:24Z
+
+  - id: REQ-ENVQUOTE-001
+    type: requirement
+    title: varve env emits the store root quoted, so the line a user is told to eval cannot execute it
+    status: approved
+    release: v0.43.0
+    description: "varve#46: env_script_sh interpolates the store root inside sh double quotes, where $ and backticks stay live; VARVE_ROOT='/tmp/vr$(id)x' runs id when the user follows 'eval \"$(varve env)\"'. The same injection class v0.19.0 removed from shim dispatch, surviving where the user is told to eval. Clauses: (1) Every shell varve env supports shall receive the path in that shell's literal quoting (sh/bash/zsh single quotes with '\\'' escaping; fish and PowerShell by their own rules). (2) A root containing each shell's metacharacters shall round-trip as the literal path, shown by running the emitted script in that shell."
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-14T19:09:24Z
+
+  - id: REQ-NOPINNOTOOL-001
+    type: requirement
+    title: With no pin in scope, which, run and the shims refuse as status does
+    status: approved
+    release: v0.43.0
+    description: "varve#198: in a directory with no varve.toml, varve status refused (no trust root) while varve which ordeal resolved an old ordeal from the legacy pre-realm store ~/.varve/core with no verification, and the shims on PATH did the same. Two code paths answering one question differently. Clauses: (1) With no pin in scope, which, run and shim dispatch shall refuse with the same reason status gives. (2) No resolution shall read the legacy pre-realm store. (3) varve shall say the legacy store exists and that nothing in it verifies, without deleting it."
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-14T19:09:24Z
+
+  - id: REQ-MUTANTDEBT-001
+    type: requirement
+    title: Declared mutation debt is measured in full, not cut off at a time cap
+    status: approved
+    release: v0.43.0
+    description: "varve#181: the nightly advisory mutation run is cancelled at its 90-minute cap every night after ~32% of 2,675 mutants, so 11 of the 22 not-yet files are never reached. The instrument that makes declared debt counted rather than hidden counts half of it. Clauses: (1) Every not-yet file in mutation-scope.toml shall be tested by some scheduled run that completes. (2) A run that does not complete shall be reported as incomplete, never as a measurement."
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-14T19:09:24Z
