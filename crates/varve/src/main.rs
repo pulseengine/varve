@@ -4867,7 +4867,15 @@ fn list(store: &Store) -> anyhow::Result<()> {
         println!("no layers installed in {}", store.root().display());
         return Ok(());
     }
-    for (realm, entry) in rows {
+    // REQ-NOPINNOTOOL-001 clause 3: an entry with no realm label is one `list`
+    // found at the TOP of the core rather than under `realms/<fingerprint>` —
+    // i.e. one laid down before realms existed, or installed realmless on
+    // purpose. Nothing resolves it without a realmless pin naming it
+    // explicitly (clauses 1 and 2), so a reader seeing it listed here needs
+    // telling why it is not also reachable the way a realm's layers are, and
+    // that varve has not quietly removed it.
+    let legacy_count = rows.iter().filter(|(realm, _)| realm.is_empty()).count();
+    for (realm, entry) in &rows {
         if realm.is_empty() {
             println!("{}  {}  {}", entry.layer, entry.channel, entry.digest);
         } else {
@@ -4876,6 +4884,14 @@ fn list(store: &Store) -> anyhow::Result<()> {
                 entry.layer, entry.channel, entry.digest
             );
         }
+    }
+    if legacy_count > 0 {
+        println!(
+            "note: {legacy_count} layer(s) above are in the pre-realm store ({}): they \
+             belong to no realm, so no realm's root vouches for them; varve does not use \
+             them outside a realmless pin and has not deleted them.",
+            store.root().join("core").display()
+        );
     }
     Ok(())
 }
