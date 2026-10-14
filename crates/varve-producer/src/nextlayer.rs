@@ -29,6 +29,35 @@
 /// Civil-from-days (Howard Hinnant's algorithm), shifted to a March-based year
 /// so leap days fall at the end and need no special case.
 pub fn line_from_unix_secs(secs: i64) -> String {
+    let (y, m, _) = civil_from_unix_secs(secs);
+    format!("{y:04}.{m:02}")
+}
+
+/// The UTC calendar date of a moment, `YYYY-MM-DD`.
+///
+/// What a re-measured opt-in records as WHEN it was measured
+/// (REQ-PREPARED-001). It shares one civil conversion with
+/// [`line_from_unix_secs`] rather than carrying a second copy of the
+/// arithmetic: a measurement dated in one month while the deposit lands on
+/// another month's line would be two answers to the same clock.
+pub fn date_from_unix_secs(secs: i64) -> String {
+    let (y, m, d) = civil_from_unix_secs(secs);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Today in UTC, `YYYY-MM-DD`.
+pub fn today() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_secs() as i64;
+    date_from_unix_secs(secs)
+}
+
+/// Civil-from-days (Howard Hinnant's algorithm), shifted to a March-based year
+/// so leap days fall at the end and need no special case. ONE copy, used by
+/// every caller that turns a clock into a calendar.
+fn civil_from_unix_secs(secs: i64) -> (i64, i64, i64) {
     let days = secs.div_euclid(86_400);
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -37,9 +66,10 @@ pub fn line_from_unix_secs(secs: i64) -> String {
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}.{m:02}")
+    (y, m, d)
 }
 
 /// The current release line, `YYYY.MM` in UTC.
@@ -226,6 +256,48 @@ mod tests {
                 line_from_unix_secs(secs),
                 want,
                 "unix {secs} should be line {want}"
+            );
+        }
+    }
+
+    /// The DATE a re-measurement records, against values taken from
+    /// `date -u -r <secs>` rather than from the arithmetic under test.
+    ///
+    /// Leap days are where a civil-date conversion goes wrong, so three of the
+    /// five are 29 February — including 2000, the century year that IS a leap
+    /// year — and one is the last second of a leap day, where an off-by-one in
+    /// the day-of-year arithmetic would land on 1 March.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn the_date_is_the_utc_calendar_day_of_that_instant() {
+        for (secs, want) in [
+            (1_791_158_400, "2026-10-05"),
+            (1_709_164_800, "2024-02-29"), // first second of a leap day
+            (1_709_251_199, "2024-02-29"), // last second of it
+            (1_735_689_599, "2024-12-31"), // last second of a leap year
+            (951_782_400, "2000-02-29"),   // the century year that IS leap
+        ] {
+            assert_eq!(date_from_unix_secs(secs), want, "{secs}");
+        }
+    }
+
+    /// The date and the line come from one conversion, so they cannot name
+    /// different months for the same instant.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn the_date_and_the_line_agree_about_the_month() {
+        for secs in [
+            1_709_164_800_i64,
+            1_709_251_199,
+            1_735_689_599,
+            1_791_158_400,
+        ] {
+            let date = date_from_unix_secs(secs);
+            let line = line_from_unix_secs(secs);
+            assert_eq!(
+                date[..7].replace('-', "."),
+                line,
+                "{secs}: {date} vs {line}"
             );
         }
     }

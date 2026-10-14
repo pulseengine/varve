@@ -304,7 +304,72 @@ fn main() -> anyhow::Result<()> {
             }
 
             match scan::compare(&m, &answers, &published) {
-                Ok(moved) => {
+                Ok(mut moved) => {
+                    // RE-MEASURE every moved opt-in, through the SAME
+                    // ingestion ladder a deposit trusts (REQ-PREPARED-001
+                    // clause 2). An `unverified-reason` is a measurement of ONE
+                    // release; the scanner establishes the fact again for the
+                    // new one rather than carrying the old words forward.
+                    //
+                    // Through `GhSource::probe`, not a second implementation of
+                    // the probes: a scanner that judged "is this release
+                    // proven?" by its own rules would be a second opinion on
+                    // the exact question the deposit answers, and the two
+                    // would drift.
+                    let scratch = std::env::temp_dir()
+                        .join(format!("varve-scan-remeasure-{}", std::process::id()));
+                    // ONE date and ONE probe per RELEASE, not per payload.
+                    //
+                    // Two tools can come from one release — `wit-bindgen-wrpc`
+                    // and `wrpc-wasmtime` both from wrpc v0.17.0 — and varve
+                    // REQUIRES them to carry byte-identical reasons. Probing
+                    // each separately would ask the same question twice, and a
+                    // second answer that differed (a flaky download, the clock
+                    // crossing midnight between probes) would yield two
+                    // measurements of one release and a manifest varve refuses.
+                    let today = nextlayer::today();
+                    let mut by_release: std::collections::BTreeMap<
+                        (String, String),
+                        Option<scan::Remeasured>,
+                    > = std::collections::BTreeMap::new();
+                    for x in moved.iter_mut().filter(|x| x.unverified_reason.is_some()) {
+                        let key = (x.repo.clone(), x.latest.clone());
+                        if let Some(done) = by_release.get(&key) {
+                            x.remeasured = done.clone();
+                            continue;
+                        }
+                        let src = source::GhSource::new(source::Spawn, forge.clone(), &scratch);
+                        let probe =
+                            match orchestrate::Source::probe(&src, &forge, &x.repo, &x.latest) {
+                                Ok(p) => p,
+                                // A probe that could not run leaves the payload
+                                // un-remeasured, which `why_a_person` reports. It
+                                // must never become a guessed answer — and it is
+                                // remembered, so a sibling tool is not probed again
+                                // and given a different answer.
+                                Err(_) => {
+                                    by_release.insert(key, None);
+                                    continue;
+                                }
+                            };
+                        let r = Some(scan::remeasure(
+                            &x.repo,
+                            &x.latest,
+                            &today,
+                            probe.has_sums,
+                            probe.has_cosign_bundle,
+                            probe.cosign.as_ref().map(|r| r.is_ok()),
+                            match probe.attestation {
+                                ingest::AttestationProbe::Verified { .. } => Some(true),
+                                ingest::AttestationProbe::Rejected(_) => Some(false),
+                                _ => None,
+                            },
+                        ));
+                        by_release.insert(key, r.clone());
+                        x.remeasured = r;
+                    }
+                    let _ = std::fs::remove_dir_all(&scratch);
+                    let moved = moved;
                     if json {
                         let out: Vec<_> = moved
                             .iter()
@@ -326,6 +391,18 @@ fn main() -> anyhow::Result<()> {
                                     // a person must do: read release notes, or
                                     // re-measure the new release's proof.
                                     "needs_a_person": x.why_a_person(),
+                                    // The re-measurement, for a payload that
+                                    // carries an opt-in. A realm writes
+                                    // `measured` into `[tool.unverified]`, or
+                                    // removes the opt-in when proof now exists.
+                                    "remeasured": x.remeasured.as_ref().map(|r| match r {
+                                        scan::Remeasured::ProofNowExists { mechanism } => {
+                                            serde_json::json!({ "proof_now_exists": mechanism })
+                                        }
+                                        scan::Remeasured::StillUnproven { measured } => {
+                                            serde_json::json!({ "measured": measured })
+                                        }
+                                    }),
                                 })
                             })
                             .collect();

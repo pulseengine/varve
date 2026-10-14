@@ -46,6 +46,15 @@ pub struct Moved {
     /// behind yields a manifest varve refuses — and the refusal's own text
     /// names a scanner as the usual cause (varve#249).
     pub unverified_reason: Option<String>,
+    /// What a re-probe of the NEW release established, where this payload
+    /// carries an opt-in (REQ-PREPARED-001 clause 2).
+    ///
+    /// `None` means nobody looked — `compare` is pure and never probes. The
+    /// caller fills this in from the ingestion ladder. Once it is present the
+    /// opt-in no longer blocks the bump: the proposal carries a TRUE
+    /// measurement of the new release (or the opt-in's removal), so nothing is
+    /// orphaned.
+    pub remeasured: Option<Remeasured>,
 }
 
 impl Moved {
@@ -69,7 +78,11 @@ impl Moved {
         // names, and a decorated tag (`version_133` for `133`) is derivable
         // from the tag — so the presence of the field proved nothing either
         // way, while 15 real payloads sat marked manual.
-        self.derived_version.is_some() && self.unverified_reason.is_none()
+        // An opt-in no longer blocks once the new release has been
+        // re-measured: the proposal then replaces the expired measurement
+        // with a true one, or removes the opt-in, instead of orphaning it.
+        self.derived_version.is_some()
+            && (self.unverified_reason.is_none() || self.remeasured.is_some())
     }
 
     /// What a person must do, when this pin is not the scanner's to move.
@@ -88,7 +101,7 @@ impl Moved {
                 self.name, self.latest
             ));
         }
-        if self.unverified_reason.is_some() {
+        if self.unverified_reason.is_some() && self.remeasured.is_none() {
             return Some(format!(
                 "{} is carried on an explicit opt-in, and its `unverified-reason` \
                  is a measurement of {} — not of {}. Bumping the pin while those \
@@ -135,14 +148,18 @@ pub fn remeasure(
     has_sums: bool,
     has_cosign_bundle: bool,
     cosign_accepted: Option<bool>,
-    attested: bool,
+    // THREE states, for the same reason `cosign_accepted` has three: an
+    // attestation that EXISTS and did not verify is a different and graver
+    // fact from one that is absent. `Some(true)` verified, `Some(false)`
+    // present and refused, `None` absent or not probed.
+    attestation: Option<bool>,
 ) -> Remeasured {
     if cosign_accepted == Some(true) {
         return Remeasured::ProofNowExists {
             mechanism: "a cosign-signed SHA256SUMS.txt",
         };
     }
-    if attested {
+    if attestation == Some(true) {
         return Remeasured::ProofNowExists {
             mechanism: "GitHub build provenance",
         };
@@ -162,11 +179,17 @@ pub fn remeasure(
             _ => "a SHA256SUMS.txt and a cosign bundle that could not be checked".to_string(),
         },
     };
+    // The provenance clause, kept as distinct as the sums clause above: an
+    // attestation that was REFUSED is not "no attestation", and writing it
+    // down as the milder fact would hide the finding that matters most.
+    let provenance = match attestation {
+        Some(false) => "build provenance for its assets that GitHub REFUSED",
+        _ => "no build provenance covering its assets",
+    };
     Remeasured::StillUnproven {
         measured: format!(
             "{repo} {release} publishes no proof of origin this assembler accepts \
-             (measured {today}: the release carries {sums}, and no build \
-             provenance covers its assets)."
+             (measured {today}: the release carries {sums}, and {provenance})."
         ),
     }
 }
@@ -333,6 +356,8 @@ pub fn compare(
                             .copied()
                             .flatten()
                             .map(str::to_string),
+                        // Pure: `compare` never probes. See `remeasured`.
+                        remeasured: None,
                     });
                 }
             }
@@ -685,14 +710,14 @@ mod tests {
     #[test]
     fn an_upstream_that_started_signing_loses_its_opt_in() {
         assert_eq!(
-            remeasure("o/r", "v2", "2026-10-10", true, true, Some(true), false),
+            remeasure("o/r", "v2", "2026-10-10", true, true, Some(true), None),
             Remeasured::ProofNowExists {
                 mechanism: "a cosign-signed SHA256SUMS.txt"
             }
         );
         // Provenance counts too, and the rung is named rather than blurred.
         assert_eq!(
-            remeasure("o/r", "v2", "2026-10-10", false, false, None, true),
+            remeasure("o/r", "v2", "2026-10-10", false, false, None, Some(true)),
             Remeasured::ProofNowExists {
                 mechanism: "GitHub build provenance"
             }
@@ -715,7 +740,7 @@ mod tests {
             false,
             false,
             None,
-            false,
+            None,
         ) else {
             panic!("nothing vouched for it, so it is still unproven");
         };
@@ -743,14 +768,14 @@ mod tests {
     #[test]
     fn a_refused_signature_is_not_recorded_as_an_absent_one() {
         let Remeasured::StillUnproven { measured } =
-            remeasure("o/r", "v2", "2026-10-10", true, true, Some(false), false)
+            remeasure("o/r", "v2", "2026-10-10", true, true, Some(false), None)
         else {
             panic!("a refused signature does not make a release proven");
         };
         assert!(measured.contains("REFUSED"), "{measured}");
 
         let Remeasured::StillUnproven { measured: absent } =
-            remeasure("o/r", "v2", "2026-10-10", false, false, None, false)
+            remeasure("o/r", "v2", "2026-10-10", false, false, None, None)
         else {
             panic!("still unproven");
         };
@@ -758,12 +783,36 @@ mod tests {
         assert_ne!(measured, absent, "the two findings read the same");
     }
 
+    /// A REFUSED attestation is recorded as refused, not as absent — the same
+    /// distinction the cosign rung already draws, applied to provenance.
+    ///
+    /// Found while auditing the first version, which took `attested: bool`
+    /// and so could only say "no build provenance covers its assets" about a
+    /// release whose provenance existed and failed to verify. That is the
+    /// graver finding written down as the milder one.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn a_refused_attestation_is_not_recorded_as_an_absent_one() {
+        let Remeasured::StillUnproven { measured: refused } =
+            remeasure("o/r", "v2", "2026-10-14", false, false, None, Some(false))
+        else {
+            panic!("a refused attestation does not make a release proven");
+        };
+        let Remeasured::StillUnproven { measured: absent } =
+            remeasure("o/r", "v2", "2026-10-14", false, false, None, None)
+        else {
+            panic!("still unproven");
+        };
+        assert!(refused.contains("REFUSED"), "{refused}");
+        assert!(!absent.contains("REFUSED"), "{absent}");
+    }
+
     /// Half a mechanism is reported as half, not as none.
     // rivet: verifies REQ-PREPARED-001
     #[test]
     fn sums_without_a_bundle_says_nothing_signed_it() {
         let Remeasured::StillUnproven { measured } =
-            remeasure("o/r", "v2", "2026-10-10", true, false, None, false)
+            remeasure("o/r", "v2", "2026-10-10", true, false, None, None)
         else {
             panic!("unsigned sums are not proof");
         };
