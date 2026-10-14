@@ -52,13 +52,6 @@ pub fn quote_fish(s: &str) -> String {
     out
 }
 
-/// PowerShell: wrap `s` in single quotes, doubling any embedded `'` — a
-/// PowerShell single-quoted string has no other metacharacter, so that is
-/// the whole rule.
-pub fn quote_powershell(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,16 +92,5 @@ mod tests {
         // single quotes, so they pass through unescaped.
         let hostile = r#"/tmp/vr$(id>|/tmp/pwned)x`id`"dq" sp;semi"#;
         assert_eq!(quote_fish(hostile), format!("'{hostile}'"));
-    }
-
-    // rivet: verifies REQ-ENVQUOTE-001
-    #[test]
-    fn quote_powershell_doubles_embedded_single_quotes_only() {
-        assert_eq!(quote_powershell("plain"), "'plain'");
-        assert_eq!(quote_powershell("it's"), "'it''s'");
-        // `$`, backticks, `"`, space and `;` are NOT special inside a
-        // PowerShell single-quoted string.
-        let hostile = r#"/tmp/vr$(id>|/tmp/pwned)x`id`"dq" sp;semi"#;
-        assert_eq!(quote_powershell(hostile), format!("'{hostile}'"));
     }
 }
