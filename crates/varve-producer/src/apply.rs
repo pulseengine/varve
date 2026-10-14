@@ -220,10 +220,23 @@ fn apply_one(
 
     // CLAUSE 3. `version` always, since only an auto-bumpable entry (which
     // requires `derived_version.is_some()`) ever reaches here.
-    let new_version = m
+    //
+    // BUT WHICH VALUE depends on whether the entry has a `release` key. With
+    // one, `version` is the payload's own number and `release` is the tag, so
+    // `version` takes the bare derived number. WITHOUT one, `version` is BOTH
+    // the payload's number and the tag the deposit asks the forge for — so it
+    // must keep the tag's own spelling, `v1.262.0`, not the bare `1.262.0`.
+    // Writing the bare form handed the next deposit a tag that does not exist,
+    // and `plan` accepted it because `plan` never fetches.
+    let derived = m
         .derived_version
         .as_deref()
         .expect("auto_bumpable() requires derived_version to be Some");
+    let new_version: &str = if table.contains_key("release") {
+        derived
+    } else {
+        &m.latest
+    };
     let old_version = table
         .get("version")
         .and_then(toml_edit::Item::as_str)
@@ -343,6 +356,39 @@ mod tests {
             unverified_reason: None,
             remeasured: None,
         }
+    }
+
+    /// An entry WITHOUT a `release` key keeps the tag's own spelling.
+    ///
+    /// For such an entry `version` is not just the payload's number — it is
+    /// the RELEASE TAG the deposit will ask the forge for. `derived_version` is
+    /// the bare number (`1.262.0`), and writing that gave the next deposit a
+    /// tag that does not exist (`1.262.0`, not `v1.262.0`). `plan` accepted
+    /// the result because it never fetches; only the deposit would have
+    /// found out — after the PR was merged.
+    ///
+    /// Found end to end against the real wasm-layers manifest. The realms'
+    /// Python scanner had this right: it wrote the new tag verbatim.
+    // rivet: verifies REQ-PREPARED-001
+    #[test]
+    fn a_version_that_is_also_the_tag_keeps_the_tags_spelling() {
+        let text = "[[tool]]\nname = \"wasm-tools\"\nrepo = \"bytecodealliance/wasm-tools\"\nversion = \"v1.260.0\"\n";
+        let m = moved_ordinary(
+            "wasm-tools",
+            "bytecodealliance/wasm-tools",
+            "v1.260.0",
+            "v1.262.0",
+            "1.262.0",
+        );
+        let full = format!(
+            "[varve]\nversion = \"v0.41.0\"\n\n[realm]\nname = \"r\"\nchannel = \"rolling\"\nregistry = \"oci://x/y\"\n\n{text}"
+        );
+        let (out, _) = apply(&full, &[m]).expect("applies");
+        assert!(
+            out.contains("version = \"v1.262.0\""),
+            "the tag is v1.262.0, and for this entry version IS the tag:\n{out}"
+        );
+        assert!(!out.contains("version = \"1.262.0\""), "{out}");
     }
 
     const BASIC: &str = r#"# What the realm carries.
