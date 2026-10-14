@@ -2536,10 +2536,11 @@ fn sbom_cmd(
         format.parse().map_err(|e: String| anyhow::anyhow!(e))?;
     // Trust first: an SBOM for a layer we cannot verify would describe bytes
     // nobody vouched for — worse than none, because it looks authoritative.
-    let entry = export_target(store, layer)?.entry;
+    let target = export_target(store, layer)?;
+    let entry = target.entry;
     let payload = std::fs::read(entry.root.join("layer.json"))?;
     let manifest = varve_core::LayerManifest::parse(&payload)?;
-    let doc = varve_core::sbom::emit(&manifest, &entry.digest, format);
+    let doc = varve_core::sbom::emit(&manifest, &entry.digest, format, &target.realm);
     match out {
         Some(path) => {
             std::fs::write(path, &doc)
