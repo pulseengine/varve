@@ -300,9 +300,14 @@ pub fn include_window(
     }
     let manifest = crate::manifest::LayerManifest::parse(&payload)
         .map_err(|e| fail(format!("its manifest does not parse: {e}")))?;
-    let status =
-        crate::linestatus::current_line_status(source, &layer_ref, manifest.layer.line(), root_pk)
-            .map_err(|e| fail(format!("layer {}: its line-status: {e}", manifest.layer)))?;
+    let status = crate::linestatus::current_line_status(
+        source,
+        &layer_ref,
+        manifest.layer.line(),
+        root_pk,
+        crate::linestatus::Published::Required,
+    )
+    .map_err(|e| fail(format!("layer {}: its line-status: {e}", manifest.layer)))?;
     Ok(IncludeWindow {
         layer: manifest.layer.to_string(),
         realm: realm.to_string(),
@@ -805,6 +810,48 @@ mod tests {
                 err.to_string().contains("2026.10.0") || err.to_string().contains("sha256:"),
                 "{err}"
             );
+        }
+
+        /// A source that cannot SAY whether a correction was published must
+        /// not be read as "none was". A correction can only shorten what the
+        /// baseline promised, so treating a failed fetch as absence fails open:
+        /// the composition would sign the longer, superseded window. Install
+        /// tolerates that (best-effort floor); a signed promise must not.
+        // rivet: verifies REQ-COMPOSEWINDOW-001
+        #[test]
+        fn a_correction_that_cannot_be_fetched_refuses_rather_than_reading_as_none() {
+            use crate::source::{LayerRef, LayerSource, SourceError};
+            struct CorrectionUnreachable(MemorySource);
+            impl LayerSource for CorrectionUnreachable {
+                fn fetch_manifest(&self, l: &LayerRef) -> Result<Vec<u8>, SourceError> {
+                    self.0.fetch_manifest(l)
+                }
+                fn fetch_blob(&self, d: &str) -> Result<Vec<u8>, SourceError> {
+                    self.0.fetch_blob(d)
+                }
+                fn fetch_line_status(&self, l: &LayerRef) -> Result<Option<Vec<u8>>, SourceError> {
+                    self.0.fetch_line_status(l)
+                }
+                fn fetch_published_line_status(
+                    &self,
+                    _: &str,
+                ) -> Result<Option<Vec<u8>>, SourceError> {
+                    Err(SourceError::Transport("connection reset".into()))
+                }
+            }
+            let (sk, pk) = generate_root_keypair();
+            let bytes = wasm_layer();
+            let source = CorrectionUnreachable(
+                MemorySource::new().with_manifest(&bytes).with_line_status(
+                    status(1, Some("2026-10-24"))
+                        .sign(&sk, "k")
+                        .unwrap()
+                        .as_bytes(),
+                ),
+            );
+            let err = include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm")
+                .unwrap_err();
+            assert!(err.reason.contains("connection reset"), "{err}");
         }
 
         /// No status at all is a window nobody stated — carried as `None`, so
