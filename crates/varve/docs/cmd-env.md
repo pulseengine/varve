@@ -44,10 +44,15 @@ meant to win — is therefore sourced **after** the shims, and one declared
 ```sh
 varve env
 # # varve's shims
-# case ":$PATH:" in *:"/w/.varve/shims":*) ;; *) export PATH="/w/.varve/shims:$PATH" ;; esac
+# case ":$PATH:" in *:'/w/.varve/shims':*) ;; *) export PATH='/w/.varve/shims':"$PATH" ;; esac
 # # sdk export toolchains/poky — declared before-shims (REQ-EXPORTDECL-001 clause 5)
-# . "/w/toolchains/poky/environment-setup-cortexa53-poky-linux"
+# . '/w/toolchains/poky/environment-setup-cortexa53-poky-linux'
 ```
+
+Every interpolated path is single-quoted LITERALLY (REQ-ENVQUOTE-001) — `$VARVE_ROOT`
+(or `$HOME`) ends up in this script, and double-quoting it would leave `$`,
+backticks and `"` live inside a root an attacker controls. Only `$PATH` itself
+still expands.
 
 Emitting them in declaration order would produce exactly the PATH the project
 said it did not want — and `varve verify` would then report the shadowing the

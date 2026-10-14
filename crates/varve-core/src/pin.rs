@@ -754,7 +754,15 @@ pub fn env_lines(pin: &Pin, project_root: &Path, shim_env: Option<&Path>) -> Vec
                     decl.out,
                     order.as_str()
                 ));
-                lines.push(format!(". \"{}\"", script.display()));
+                // `project_root` is the directory holding varve.toml — not
+                // attacker-controlled the way `$VARVE_ROOT` is, but still
+                // interpolated into shell text, so it gets the same literal
+                // quoting (REQ-ENVQUOTE-001): double-quoting left `$` and
+                // backticks in the path live.
+                lines.push(format!(
+                    ". {}",
+                    crate::shellquote::quote_sh(&script.display().to_string())
+                ));
             }
         }
     };
@@ -762,7 +770,10 @@ pub fn env_lines(pin: &Pin, project_root: &Path, shim_env: Option<&Path>) -> Vec
     sourced(ShimOrder::AfterShims, &mut lines);
     if let Some(env) = shim_env {
         lines.push("# varve's shims".to_string());
-        lines.push(format!(". \"{}\"", env.display()));
+        lines.push(format!(
+            ". {}",
+            crate::shellquote::quote_sh(&env.display().to_string())
+        ));
     }
     // Sourced LAST so this environment's bin lands ahead of the shims — which
     // is what `before-shims` asked for.
@@ -1560,9 +1571,9 @@ path   = "before-shims"
         assert_eq!(
             sourced,
             vec![
-                ". \"/repo/late/env-setup-late\"".to_string(),
-                ". \"/home/u/.varve/env\"".to_string(),
-                ". \"/repo/early/env-setup-early\"".to_string(),
+                ". '/repo/late/env-setup-late'".to_string(),
+                ". '/home/u/.varve/env'".to_string(),
+                ". '/repo/early/env-setup-early'".to_string(),
             ],
             "after-shims is sourced FIRST so the shims land ahead of it"
         );

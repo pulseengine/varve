@@ -1008,11 +1008,15 @@ fn report(json: bool, human: &str, machine: serde_json::Value) {
 
 /// The idempotent sh fragment for a shim dir; the guard keeps repeated
 /// evaluation (login shells, nested shells) from stacking PATH entries.
+///
+/// `shim_dir` is derived from `$VARVE_ROOT` (or `$HOME`), so it is
+/// attacker-controlled in exactly the environments that matter — CI, a
+/// container, a shared machine. It is quoted LITERALLY (REQ-ENVQUOTE-001):
+/// double-quoting it, as this used to, leaves `$`, backticks and `"` live, so
+/// a crafted root becomes code the moment `eval "$(varve env)"` runs it.
 fn env_script_sh(shim_dir: &std::path::Path) -> String {
-    format!(
-        "case \":$PATH:\" in\n  *:\"{dir}\":*) ;;\n  *) export PATH=\"{dir}:$PATH\" ;;\nesac\n",
-        dir = shim_dir.display()
-    )
+    let dir = varve_core::shellquote::quote_sh(&shim_dir.display().to_string());
+    format!("case \":$PATH:\" in\n  *:{dir}:*) ;;\n  *) export PATH={dir}:\"$PATH\" ;;\nesac\n")
 }
 
 /// `varve env` — the whole environment in one command (REQ-EXPORTDECL-001
@@ -1059,11 +1063,15 @@ fn print_env(store: &Store, shell: &str) -> anyhow::Result<()> {
                 print!("{}", env_script_sh(&shim_dir));
                 return Ok(());
             };
+            let env_file_line = format!(
+                ". {}",
+                varve_core::shellquote::quote_sh(&env_file.display().to_string())
+            );
             for line in varve_core::env_lines(pin, root, Some(&env_file)) {
                 // The shims, inline: the sourced scripts must land around this
                 // exact position, which is why the line is REPLACED rather than
                 // appended somewhere convenient.
-                if line == format!(". \"{}\"", env_file.display()) {
+                if line == env_file_line {
                     print!("{}", env_script_sh(&shim_dir));
                 } else {
                     println!("{line}");
@@ -1085,10 +1093,8 @@ fn print_env(store: &Store, shell: &str) -> anyhow::Result<()> {
                     first.out
                 );
             }
-            println!(
-                "if not contains \"{dir}\" $PATH\n    set -gx PATH \"{dir}\" $PATH\nend",
-                dir = shim_dir.display()
-            );
+            let dir = varve_core::shellquote::quote_fish(&shim_dir.display().to_string());
+            println!("if not contains {dir} $PATH\n    set -gx PATH {dir} $PATH\nend");
         }
         other => bail!("unknown shell '{other}' — supported: sh, bash, zsh, fish"),
     }
