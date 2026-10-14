@@ -52,6 +52,19 @@ pub const ANN_PROOF_SIGNER: &str = "eu.pulseengine.source.proof-signer";
 /// for shipping bytes nothing vouched for.
 pub const ANN_PROOF_ASSERTS: &str = "eu.pulseengine.source.proof-asserts";
 
+/// The upstream repository's DECLARED license, as an SPDX expression
+/// (REQ-SBOMFIELDS-001 clause 5). The repository's statement, recorded at
+/// deposit — not a concluded audit of what the binary bundles. Absent on every
+/// layer deposited before it existed, and absent must not read as "none".
+pub const ANN_LICENSE: &str = "eu.pulseengine.source.license";
+/// The file name of a CycloneDX SBOM upstream published in the SAME release
+/// the payload came from (REQ-SBOMFIELDS-001 clause 4); relative to that
+/// release, like `eu.pulseengine.source.asset`.
+pub const ANN_SBOM: &str = "eu.pulseengine.source.sbom";
+/// The sha256 (bare hex) of that SBOM file as the deposit fetched it, so a
+/// reader following the reference can tell it was not replaced afterwards.
+pub const ANN_SBOM_SHA256: &str = "eu.pulseengine.source.sbom.sha256";
+
 /// How the assembler established that an upstream artifact was genuine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
