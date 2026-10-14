@@ -785,6 +785,30 @@ pub fn cache_baseline_from_source(
     root_pk: &[u8],
     store_root: &Path,
 ) -> Result<Option<u64>, LineStatusError> {
+    match current_line_status(source, layer, line, root_pk)? {
+        Some((envelope, doc)) => {
+            StatusCache::at_root(store_root).update(line, &envelope, &doc)?;
+            Ok(Some(doc.counter))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The line-status that currently speaks for `layer`: the baseline deposited
+/// beside it or the document later published under the line's own tag,
+/// whichever VERIFIES and carries the higher counter. `Ok(None)` when the
+/// source carries neither; `Err` when something was present but bad.
+///
+/// One rule for every reader. The install cache and a composition reading its
+/// includes' windows (REQ-COMPOSEWINDOW-001) must agree about which document
+/// is current, or a correction that shortened a window would bind one and
+/// not the other.
+pub fn current_line_status(
+    source: &dyn crate::source::LayerSource,
+    layer: &crate::source::LayerRef,
+    line: &Line,
+    root_pk: &[u8],
+) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
     let baseline = source
         .fetch_line_status(layer)
         .map_err(|e| LineStatusError::Payload(format!("fetching baseline line-status: {e}")))?;
@@ -830,10 +854,7 @@ pub fn cache_baseline_from_source(
     }
 
     match best {
-        Some((counter, envelope, doc)) => {
-            StatusCache::at_root(store_root).update(line, &envelope, &doc)?;
-            Ok(Some(counter))
-        }
+        Some((_, envelope, doc)) => Ok(Some((envelope, doc))),
         // Nothing usable. If something was PRESENT but bad, that is a finding
         // and is raised; if both were simply absent, the source carries none.
         None => match first_error {

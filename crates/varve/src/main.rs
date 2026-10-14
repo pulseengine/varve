@@ -205,6 +205,16 @@ enum Cmd {
         /// The layer's issued-at, RFC 3339.
         #[arg(long = "issued-at")]
         issued_at: String,
+        /// The layer's `layer.toml`. When it composes other layers, the
+        /// horizon is capped at the earliest window among them, read from each
+        /// include's own realm (REQ-COMPOSEWINDOW-001).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Promise support past an include's window anyway, for this reason.
+        /// The reason is printed beside the date so the decision is on the
+        /// record.
+        #[arg(long = "past-includes", value_name = "REASON")]
+        past_includes: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -871,24 +881,16 @@ fn run() -> anyhow::Result<Outcome> {
         Cmd::SupportHorizon {
             channel,
             issued_at,
+            manifest,
+            past_includes,
             json,
-        } => {
-            let until = varve_core::support::horizon(&issued_at, &channel)?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "command": "support-horizon",
-                        "channel": channel,
-                        "issued_at": issued_at,
-                        "support_until": until,
-                    })
-                );
-            } else {
-                println!("{until}");
-            }
-            Ok(())
-        }
+        } => support_horizon(
+            &channel,
+            &issued_at,
+            manifest.as_deref(),
+            past_includes.as_deref(),
+            json,
+        ),
         Cmd::Keygen { out, public } => keygen(&out, public.as_deref()),
         Cmd::Pubkey { key } => pubkey(&key),
         Cmd::LayerSpec { manifest, json } => layer_spec(&manifest, json),
@@ -3380,6 +3382,101 @@ fn today_rfc3339() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02}T00:00:00Z")
+}
+
+/// `varve support-horizon` — the channel's window, capped at the earliest
+/// window among the layers this one composes (REQ-SUPPORTUNTIL-001,
+/// REQ-COMPOSEWINDOW-001).
+///
+/// The date alone goes to stdout, as it always has, so a workflow's
+/// `SUPPORT_UNTIL="$(varve support-horizon ...)"` keeps working; what bound
+/// it goes to stderr, where a deposit log keeps it.
+fn support_horizon(
+    channel: &str,
+    issued_at: &str,
+    manifest: Option<&std::path::Path>,
+    past_includes: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    use varve_core::support::{self, Bound};
+    let own = support::horizon(issued_at, channel)?;
+    let includes = match manifest {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            varve_core::layerspec::parse_layer_manifest(&text)
+                .with_context(|| format!("{} does not parse", path.display()))?
+                .includes
+        }
+        None => Vec::new(),
+    };
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    let mut windows = Vec::new();
+    for inc in &includes {
+        let Some(realm_name) = inc.realm.as_deref() else {
+            bail!(
+                "include {} names no realm, so no root vouches for its support window",
+                inc.digest
+            );
+        };
+        let realm = varve_core::resolve_realm(&cwd, realm_name).with_context(|| {
+            format!(
+                "include {} names realm '{realm_name}', which is not defined here",
+                inc.digest
+            )
+        })?;
+        let source = varve_core::RegistrySource::parse(&realm.registry)?;
+        let verifier = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        windows.push(support::include_window(
+            &source,
+            &verifier,
+            &realm.trust_root,
+            &inc.digest,
+            realm_name,
+        )?);
+    }
+    let capped = support::cap_by_includes(&own, &windows, past_includes)?;
+    let note = match &capped.bound_by {
+        Bound::Own => None,
+        Bound::Include { layer, realm } => Some(format!(
+            "support capped at {} by included layer {layer} (realm '{realm}'); the {channel} \
+             policy alone would say {own}",
+            capped.until
+        )),
+        Bound::PastIncludes { earliest, reason } => Some(format!(
+            "support stated past an included layer's window ({earliest}) to {}, because: {reason}",
+            capped.until
+        )),
+    };
+    if json {
+        let bound_by = match &capped.bound_by {
+            Bound::Own => serde_json::json!({ "kind": "own" }),
+            Bound::Include { layer, realm } => {
+                serde_json::json!({ "kind": "include", "layer": layer, "realm": realm })
+            }
+            Bound::PastIncludes { earliest, reason } => {
+                serde_json::json!({ "kind": "past-includes", "earliest": earliest, "reason": reason })
+            }
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "command": "support-horizon",
+                "channel": channel,
+                "issued_at": issued_at,
+                "support_until": capped.until,
+                "policy_until": own,
+                "bound_by": bound_by,
+            })
+        );
+    } else {
+        if let Some(note) = &note {
+            eprintln!("{note}");
+        }
+        println!("{}", capped.until);
+    }
+    Ok(())
 }
 
 /// Fetch one layer a composition names, from the realm that vouches for it.
