@@ -1,5 +1,79 @@
 # Changelog
 
+## v0.42.0 — 2026-10-15
+
+*A moved pin arrives prepared: the scanner derives the version, re-measures the
+proof, and writes the change for a person to approve.*
+
+`rivet release status v0.42.0` — 4 artifacts, 3 verified, 1 accepted, cuttable.
+
+### Every "needs a person" case was mechanically derivable
+
+Until now `varve-producer scan` reported what had moved and stopped: a payload
+whose version the tag did not spell, or an `unverified` opt-in whose reason
+named the old release, came back as work for someone to do by hand
+(REQ-AUTOBUMP-001, REQ-PREPARED-001, #251).
+
+* **The version is derived.** From the tag where the tag implies it
+  (`v1.262.0` → `1.262.0`, a digit-free prefix rule), otherwise from the asset
+  names the new release actually publishes, solved against the entry's asset
+  template. A disagreement between assets, an empty solution or a `/` in it is
+  refused, never guessed.
+* **An opt-in is re-measured.** A moved `unverified` payload is probed through
+  the same ingestion ladder a deposit trusts (`GhSource::probe`), once per
+  release. If proof now exists the opt-in is dropped; if not, the measurement
+  is restated for the new release.
+* **`scan --apply` writes it.** The proposal is applied to `layer.toml` with
+  `toml_edit`, so every comment and the operator's `accepted`/`exit` prose
+  survive byte for byte, and the result is re-parsed by varve's own validator
+  before it is returned — a manifest varve would refuse is never written.
+  Where `version` is also the release tag (no `release` field), the tag's
+  spelling is kept.
+
+Measured against wasm-layers' real manifest: wasm-tools `v1.260.0 → v1.262.0`,
+wac `v0.11.0 → v0.12.0` with its opt-in re-measured, wasmtime `49.0.1 → 49.0.2`
+with `release = "v49.0.2"`; every tag exists upstream and `plan` accepts the
+result.
+
+### An opt-in reason is split into what was measured, accepted and would end it
+
+```toml
+[tool.unverified]
+measured = "bytecodealliance/wac v0.12.0 publishes no sums and no provenance."
+accepted = "..."
+exit     = "..."
+```
+
+Only `measured` is restated by the scanner; the operator's judgement is never
+edited by heuristic. The one-string `unverified-reason` still parses; giving
+both forms is refused. A split-form opt-in is an opt-in everywhere it is read
+(#259 found one reader that missed it).
+
+**wasm-layers needs this release:** its `layer.toml` already uses
+`[tool.unverified]`, which v0.41.0 rejects (`unknown field 'unverified'`).
+
+### Security
+
+rustls 0.23.46, for RUSTSEC-2026-0346, -0347, -0348 and -0349 (lockfile only).
+
+### Falsification
+
+This release is wrong if any of these is observed in the field:
+
+* a scan proposing a version the release does not publish, or a tag spelling
+  upstream does not have;
+* `scan --apply` writing a manifest `varve-producer plan` refuses, or changing
+  any byte of an entry it did not report as moved;
+* an opt-in carried forward to a new release without being re-measured, or two
+  tools of one release given different measurements;
+* an `accepted` or `exit` text altered by the scanner.
+
+### Not in this release
+
+Composition support windows (#254), `varve env` quoting (#46), the SBOM's
+supplier/author/license/dependency fields, and the shim and no-pin messages are
+in review for v0.43.0.
+
 ## v0.41.0 — 2026-10-08
 
 *An upstream that proves each file separately is proven, a tool is carried only
