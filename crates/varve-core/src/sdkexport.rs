@@ -516,6 +516,21 @@ fn component_fault(value: &str) -> Option<String> {
     None
 }
 
+/// Does this member name the archive ROOT itself — `./`, `.`, `././`?
+///
+/// `tar -C dir .` writes the root as its first member, and a Yocto SDK
+/// installer's payload is made exactly that way. As a DIRECTORY it names the
+/// export directory, which already exists, so the loops skip it. A file or a
+/// symlink with this name is not skipped and meets `safe_member_path`'s
+/// refusal like any other member.
+pub(crate) fn names_archive_root(raw: &str) -> bool {
+    let mut p = raw.trim_end_matches('/');
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest.trim_start_matches('/');
+    }
+    p == "."
+}
+
 /// Validate a member path and return it normalised (no trailing slash).
 ///
 /// `pub(crate)` so the docs exporter uses THIS rule rather than a second copy
@@ -765,6 +780,9 @@ pub fn export_members(
     let mut links: BTreeSet<String> = BTreeSet::new();
     let mut planned: Vec<(String, &Member)> = Vec::with_capacity(members.len());
     for m in members {
+        if matches!(m.body, MemberBody::Dir) && names_archive_root(&m.path) {
+            continue;
+        }
         let path = safe_member_path(&m.path)?;
         if !placed.insert(path.clone()) {
             return Err(SdkExportError::Collision { path });
@@ -975,6 +993,70 @@ mod tests {
                 },
             },
         ]
+    }
+
+    /// A Yocto SDK installer packs its payload with `tar -C dir .`, so the
+    /// archive's FIRST member is the bare root directory `./`. Found by
+    /// exporting the real Zephyr SDK host tools: the whole export was refused
+    /// with "a relative path element". The root entry names the export
+    /// directory itself, which already exists; it is skipped, not written.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn the_archive_root_directory_entry_is_not_a_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = out_of_len(tmp.path(), BUILT.len());
+        let mut members = vec![
+            Member {
+                path: "./".into(),
+                body: MemberBody::Dir,
+            },
+            Member {
+                path: ".".into(),
+                body: MemberBody::Dir,
+            },
+        ];
+        members.extend(synthetic_sdk());
+        let report =
+            export_members(&members, BUILT, &out).expect("a `tar -C dir .` archive exports");
+        assert!(out.join("sysroots").is_dir());
+        assert_eq!(
+            report.dirs,
+            synthetic_sdk()
+                .iter()
+                .filter(|m| matches!(m.body, MemberBody::Dir))
+                .count()
+        );
+    }
+
+    /// Only a DIRECTORY may name the root. A file or link claiming to BE the
+    /// export root is still the refusal it always was.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn only_a_directory_may_name_the_archive_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = out_of_len(tmp.path(), BUILT.len());
+        for body in [
+            MemberBody::File {
+                mode: 0o644,
+                bytes: b"x".to_vec(),
+            },
+            MemberBody::Symlink {
+                target: "/etc".into(),
+            },
+        ] {
+            let members = vec![Member {
+                path: "./".into(),
+                body,
+            }];
+            let err = export_members(&members, BUILT, &out).unwrap_err();
+            assert!(matches!(err, SdkExportError::UnsafeMember { .. }), "{err}");
+        }
+        // And a traversal dressed as the root is still a traversal.
+        let members = vec![Member {
+            path: "./../".into(),
+            body: MemberBody::Dir,
+        }];
+        assert!(export_members(&members, BUILT, &out).is_err());
     }
 
     /// An export root of a chosen length, so the fit check is exercised against
