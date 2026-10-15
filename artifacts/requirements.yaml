@@ -4999,3 +4999,17 @@ artifacts:
       model: claude-opus-5
       timestamp: 2026-10-09T10:10:57Z
     release: v0.42.0
+
+  - id: REQ-SBOMFIELDS-001
+    type: requirement
+    title: The layer SBOM carries supplier, author, license and dependency relationships, each from a signed statement
+    status: approved
+    release: v0.43.0
+    description: "Measured 2026-10-14 against a published layer's SBOM with an NTIA minimum elements / BSI TR-03183-2 field-completeness check: name, version, purl, SHA-256 and timestamp 54/54, but license 0/54, supplier 0/54, dependency relationships absent, SBOM author absent. REQ-SBOM-001 makes the SBOM a transcription of the signed manifest; the gaps are fields the emitter never wrote (supplier, author, dependencies) and one the manifest never carried (license). Clauses: (1) Each component shall name its supplier, derived from the signed upstream repository and, where present, the signed proof signer. (2) The document shall name its author as the realm whose root signed the layer. (3) The layer component shall depend on every component it carries, with that list stated complete; each component's own dependencies shall be stated as unknown through a CycloneDX composition — varve has not read them — with the upstream SBOM of clause (4), where recorded, referenced as the place they are stated. An empty list is never left to be read as 'no dependencies'. (4) Where upstream publishes a CycloneDX SBOM in the release a payload came from, the deposit shall record its digest and location as signed annotations and the component shall reference it. (5) The deposit shall record upstream's declared SPDX license as a signed annotation — the license upstream's proof-covered SBOM states for its subject where it states exactly one, else the repository's declared license — and the SBOM shall emit it with acknowledgement 'declared': upstream's statement, not a concluded audit of what the binary bundles. (4) and (5) spend the release's proof: an upstream SBOM the verified sums do not cover is not recorded, and one whose bytes disagree with them refuses the deposit. (6) A layer deposited before this carries none of (4) or (5), and its SBOM shall say so rather than imply absence of a license. (7) Re-emission stays byte-identical for the same signed manifest."
+    links:
+      - type: satisfies
+        target: REQ-SBOM-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-14T20:07:55Z

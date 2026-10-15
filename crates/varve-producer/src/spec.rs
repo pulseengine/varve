@@ -34,6 +34,18 @@ pub struct SourceOut {
     pub proof_signer: Option<String>,
     #[serde(rename = "proof-asserts", skip_serializing_if = "Option::is_none")]
     pub proof_asserts: Option<String>,
+    /// The upstream repository's DECLARED SPDX license (REQ-SBOMFIELDS-001
+    /// clause 5) — GitHub's own statement, never a default this assembler
+    /// invents when GitHub has nothing to say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// The CycloneDX SBOM this payload's release published, by file name
+    /// (REQ-SBOMFIELDS-001 clause 4) — paired with `sbom-sha256`, or absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sbom: Option<String>,
+    /// sha256 (bare hex) of `sbom` as fetched.
+    #[serde(rename = "sbom-sha256", skip_serializing_if = "Option::is_none")]
+    pub sbom_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -126,6 +138,9 @@ mod tests {
             proof: Some("cosign-sums".into()),
             proof_signer: Some("https://github.com/pulseengine/rivet/".into()),
             proof_asserts: Some("SHA256SUMS.txt signed by an identity under …".into()),
+            license: None,
+            sbom: None,
+            sbom_sha256: None,
         }
     }
 
@@ -209,6 +224,36 @@ mod tests {
                 .proof_signer
                 .is_none()
         );
+    }
+
+    /// REQ-SBOMFIELDS-001 clauses 4 and 5, round-tripped through the REAL
+    /// parser: a declared license and an upstream SBOM reference survive,
+    /// and a payload that carries neither omits all three keys rather than
+    /// emitting them blank.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn license_and_sbom_fields_round_trip_when_present_and_are_omitted_when_absent() {
+        let mut spec = SpecOut::new("2026.08.4", "rolling", 5);
+        let mut t = tool();
+        t.source.license = Some("Apache-2.0".into());
+        t.source.sbom = Some("rivet-v0.34.0.cdx.json".into());
+        t.source.sbom_sha256 = Some("d".repeat(64));
+        spec.tools.push(t);
+        spec.tools.push(tool()); // no license/sbom at all
+        let text = spec.render().expect("renders and parses");
+        let parsed = varve_core::parse_deposit_spec(&text).unwrap();
+        let with_fields = parsed.tools[0].source.as_ref().unwrap();
+        assert_eq!(with_fields.license.as_deref(), Some("Apache-2.0"));
+        assert_eq!(with_fields.sbom.as_deref(), Some("rivet-v0.34.0.cdx.json"));
+        assert_eq!(
+            with_fields.sbom_sha256.as_deref(),
+            Some("d".repeat(64).as_str())
+        );
+
+        let without_fields = parsed.tools[1].source.as_ref().unwrap();
+        assert!(without_fields.license.is_none());
+        assert!(without_fields.sbom.is_none());
+        assert!(without_fields.sbom_sha256.is_none());
     }
 
     /// A platform-independent payload must omit `platform`, not emit `""` —

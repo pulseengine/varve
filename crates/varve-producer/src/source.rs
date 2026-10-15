@@ -305,6 +305,16 @@ impl<R: CommandRunner> Source for GhSource<R> {
         let path = self.download(repo, version, asset)?;
         read(&path)
     }
+
+    fn repo_license(&self, repo: &str) -> Result<Option<String>, RunError> {
+        let out = self.gh(gh::repo_info_argv(repo))?;
+        gh::parse_repo_license(&out).map_err(|e| {
+            io_err(
+                &format!("{repo}: reading the repository's declared license"),
+                &e.to_string(),
+            )
+        })
+    }
 }
 
 #[cfg(test)]
@@ -747,5 +757,26 @@ mod tests {
         let src = GhSource::new(Scripted(vec![]), Forge::github_com(), "/w");
         let e = src.attestation_json("o/r", "v1").expect_err("must refuse");
         assert!(e.to_string().contains("caller ordering error"), "{e}");
+    }
+    /// The live `repo_license` is the one a deposit actually calls: the
+    /// repository's own declared SPDX id comes back, GitHub's "I cannot tell"
+    /// comes back as absent, and a gh that cannot answer is an ERROR — never
+    /// "this repository declares no license" (REQ-SBOMFIELDS-001 clause 5).
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn the_live_repo_license_reads_what_github_declares_and_refuses_when_it_cannot() {
+        let src = |reply: RunOutput| {
+            GhSource::new(
+                Scripted(vec![("gh api".into(), reply)]),
+                Forge::github_com(),
+                "/w",
+            )
+        };
+        let mit = src(out(0, r#"{"license":{"spdx_id":"MIT"}}"#, ""));
+        assert_eq!(mit.repo_license("o/r").unwrap().as_deref(), Some("MIT"));
+        let unsure = src(out(0, r#"{"license":{"spdx_id":"NOASSERTION"}}"#, ""));
+        assert_eq!(unsure.repo_license("o/r").unwrap(), None);
+        let down = src(out(1, "", "HTTP 502"));
+        assert!(down.repo_license("o/r").is_err());
     }
 }

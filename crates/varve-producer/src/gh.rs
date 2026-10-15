@@ -249,6 +249,34 @@ pub fn parse_release_assets(stdout: &str) -> Result<Vec<String>, GhError> {
     Ok(names)
 }
 
+/// `gh api repos/<repo>` — the repository resource, whose `license.spdx_id`
+/// carries GitHub's own classification of what the repo declared
+/// (REQ-SBOMFIELDS-001 clause 5).
+pub fn repo_info_argv(repo: &str) -> Vec<String> {
+    vec!["api".into(), format!("repos/{repo}")]
+}
+
+/// The repository's DECLARED SPDX license, out of `gh api repos/<repo>`.
+///
+/// GitHub answers `"license": null` when nothing was detected, and
+/// `license.spdx_id == "NOASSERTION"` when it found a LICENSE file it could
+/// not classify. Both read as "nothing declared" — never as a license this
+/// assembler invents on GitHub's behalf (REQ-SBOMFIELDS-001 clause 6).
+pub fn parse_repo_license(stdout: &str) -> Result<Option<String>, GhError> {
+    let v: serde_json::Value = serde_json::from_str(stdout).map_err(|e| GhError::Unparseable {
+        program: "gh".into(),
+        detail: format!("repo info returned unreadable JSON: {e}"),
+    })?;
+    let spdx = v
+        .get("license")
+        .and_then(|l| l.get("spdx_id"))
+        .and_then(|s| s.as_str());
+    Ok(match spdx {
+        Some(id) if !id.trim().is_empty() && id != "NOASSERTION" => Some(id.trim().to_string()),
+        _ => None,
+    })
+}
+
 /// The environment a command needs to reach the right forge.
 ///
 /// `GH_HOST` is what `gh` itself uses; passing it rather than assuming
@@ -437,6 +465,38 @@ mod tests {
         assert_eq!(
             forge_env(&Forge::enterprise("ghe.example.com")),
             vec![("GH_HOST".to_string(), "ghe.example.com".to_string())]
+        );
+    }
+
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn a_real_spdx_license_is_read_from_the_repo_info() {
+        let out = parse_repo_license(r#"{"license":{"spdx_id":"Apache-2.0"}}"#).unwrap();
+        assert_eq!(out, Some("Apache-2.0".into()));
+    }
+
+    /// GitHub's own "we could not classify this" answer must read as nothing
+    /// declared — recording it verbatim would sign a non-license as if it
+    /// were one.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn noassertion_and_a_null_license_both_read_as_absent() {
+        for stdout in [
+            r#"{"license":{"spdx_id":"NOASSERTION"}}"#,
+            r#"{"license":null}"#,
+            r#"{}"#,
+            r#"{"license":{"spdx_id":null}}"#,
+        ] {
+            assert_eq!(parse_repo_license(stdout).unwrap(), None, "{stdout}");
+        }
+    }
+
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn repo_info_is_asked_for_by_name() {
+        assert_eq!(
+            repo_info_argv("pulseengine/rivet"),
+            vec!["api", "repos/pulseengine/rivet"]
         );
     }
 

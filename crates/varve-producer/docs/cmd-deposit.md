@@ -25,6 +25,27 @@ omitted. A payload matching **nothing on any platform** stops the run — going
 green with four notices is exactly how a tool went missing from a published
 layer.
 
+## License and upstream SBOM (REQ-SBOMFIELDS-001)
+
+Two more facts are recorded in `[tool.source]` when upstream actually states
+them, and never guessed when it does not:
+
+* **`license`** — the repository's own DECLARED SPDX license
+  (`GET /repos/<repo>`). Fetched once per distinct repository, however many
+  payloads of it this run resolves. GitHub's `license: null` and
+  `spdx_id == "NOASSERTION"` both read as "nothing declared" and record
+  nothing — never a license this assembler invents.
+* **`sbom`** / **`sbom-sha256`** — the file name and sha256 of a CycloneDX
+  SBOM (`*.cdx.json`) the SAME release publishes. Recorded only when exactly
+  one such asset exists; zero is a release that ships none, and several are
+  ambiguous unless exactly one of them names the release's own version —
+  guessing between the rest would be signed into the layer as fact, so
+  nothing is recorded instead and a one-line note says why.
+
+A layer deposited before this requirement, or a repo/release that genuinely
+carries neither, has all three fields absent — absence that must never be
+read as "no license" or "no SBOM" rather than "nobody said".
+
 ## Carry-forward
 
 `--previous <spec>` and `--present-digests <file>` let an unchanged payload be

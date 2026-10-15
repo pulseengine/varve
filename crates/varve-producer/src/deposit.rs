@@ -76,6 +76,18 @@ pub fn previous_from_spec(text: &str) -> anyhow::Result<BTreeMap<String, Previou
         #[serde(rename = "proof-asserts", default)]
         #[allow(dead_code)]
         proof_asserts: Option<String>,
+        // Carried only so a spec this run itself wrote does not trip
+        // `deny_unknown_fields` next time around; carry-forward does not
+        // need either value — the fresh probe decides them again.
+        #[serde(default)]
+        #[allow(dead_code)]
+        license: Option<String>,
+        #[serde(default)]
+        #[allow(dead_code)]
+        sbom: Option<String>,
+        #[serde(rename = "sbom-sha256", default)]
+        #[allow(dead_code)]
+        sbom_sha256: Option<String>,
         repo: String,
         release: String,
         asset: String,
@@ -313,6 +325,9 @@ pub fn stage_one<R: CommandRunner>(
             proof: Some(r.accepted.mechanism.as_str().to_string()),
             proof_signer: r.accepted.signer.clone(),
             proof_asserts: Some(r.accepted.asserts.clone()),
+            license: r.license.clone(),
+            sbom: r.sbom.as_ref().map(|s| s.name.clone()),
+            sbom_sha256: r.sbom.as_ref().map(|s| s.sha256.clone()),
         },
     })
 }
@@ -496,6 +511,8 @@ mod tests {
             decision: crate::carryforward::Decision::Fetch {
                 why: crate::carryforward::FetchReason::NoPrevious,
             },
+            license: None,
+            sbom: None,
         }
     }
 
@@ -560,6 +577,70 @@ mod tests {
         assert_eq!(t.kind, None, "a tool must not be labelled a vsix");
         assert!(root.join(&t.path).exists());
         assert_eq!(t.source.proof.as_deref(), Some("cosign-sums"));
+    }
+
+    /// `stage_one` carries `Resolved::license` and `Resolved::sbom` straight
+    /// into the spec's `[tool.source]` (REQ-SBOMFIELDS-001 clauses 4 and 5) —
+    /// and a payload that resolved neither must not acquire them here either.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn stage_one_carries_the_resolved_license_and_sbom_into_the_sources() {
+        let root = scratch("sbomfields");
+        let dl = root.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        std::fs::write(dl.join("rivet-linux.tar.gz"), b"archive").unwrap();
+
+        let mut with_fields = resolved(
+            PayloadKind::Tarball,
+            "rivet-linux.tar.gz",
+            Some("x86_64-unknown-linux-gnu"),
+        );
+        with_fields.license = Some("Apache-2.0".into());
+        with_fields.sbom = Some(crate::orchestrate::SbomRef {
+            name: "rivet-v0.34.0.cdx.json".into(),
+            sha256: "e".repeat(64),
+        });
+        let t = stage_one(
+            &Unpacker,
+            &with_fields,
+            "0.34.0",
+            &root,
+            &dl,
+            &root.join("extract"),
+            Names {
+                deposited: "rivet",
+                binary: "rivet",
+            },
+        )
+        .expect("stages");
+        assert_eq!(t.source.license.as_deref(), Some("Apache-2.0"));
+        assert_eq!(t.source.sbom.as_deref(), Some("rivet-v0.34.0.cdx.json"));
+        assert_eq!(
+            t.source.sbom_sha256.as_deref(),
+            Some("e".repeat(64).as_str())
+        );
+
+        let without_fields = resolved(
+            PayloadKind::Tarball,
+            "rivet-linux.tar.gz",
+            Some("x86_64-unknown-linux-gnu"),
+        );
+        let t2 = stage_one(
+            &Unpacker,
+            &without_fields,
+            "0.34.0",
+            &root,
+            &dl,
+            &root.join("extract"),
+            Names {
+                deposited: "rivet",
+                binary: "rivet",
+            },
+        )
+        .expect("stages");
+        assert!(t2.source.license.is_none());
+        assert!(t2.source.sbom.is_none());
+        assert!(t2.source.sbom_sha256.is_none());
     }
 
     /// The libc floor recorded in the spec is MEASURED from the staged bytes.
@@ -928,6 +1009,9 @@ mod tests {
             proof: Some("cosign-sums".into()),
             proof_signer: Some("https://github.com/pulseengine/rivet/".into()),
             proof_asserts: Some("signed".into()),
+            license: None,
+            sbom: None,
+            sbom_sha256: None,
         };
         let tool = |platform: &str, asset: &str, sha: &str| ToolOut {
             name: "rivet".into(),
@@ -991,6 +1075,43 @@ mod tests {
         assert_eq!(prev["rivet@aarch64-apple-darwin"].sha256, "bbbb");
         assert_eq!(prev["rivet@aarch64-apple-darwin"].repo, "pulseengine/rivet");
         assert_eq!(prev["rivet@aarch64-apple-darwin"].release, "v0.34.0");
+    }
+
+    /// A spec this run itself wrote now carries `license` / `sbom` /
+    /// `sbom-sha256` (REQ-SBOMFIELDS-001). Reading it back must not trip
+    /// `deny_unknown_fields` — the reader has to know the keys exist even
+    /// though carry-forward does not need their values.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn a_previous_spec_carrying_the_new_source_fields_still_reads_back() {
+        let mut spec = SpecOut::new("2026.09.1", "rolling", 7);
+        spec.tools.push(ToolOut {
+            name: "rivet".into(),
+            version: "0.34.0".into(),
+            platform: None,
+            path: "tools/rivet".into(),
+            kind: None,
+            docs_format: None,
+            docs_entry: None,
+            docs_title: None,
+            docs_documents: None,
+            libc: None,
+            source: SourceOut {
+                repo: "pulseengine/rivet".into(),
+                release: "v0.34.0".into(),
+                asset: "rivet-v0.34.0.tar.gz".into(),
+                sha256: "a".repeat(64),
+                proof: Some("cosign-sums".into()),
+                proof_signer: Some("https://github.com/pulseengine/rivet/".into()),
+                proof_asserts: Some("signed".into()),
+                license: Some("MIT".into()),
+                sbom: Some("rivet-v0.34.0.cdx.json".into()),
+                sbom_sha256: Some("f".repeat(64)),
+            },
+        });
+        let text = spec.render().expect("renders");
+        let prev = previous_from_spec(&text).expect("deny_unknown_fields must not trip on these");
+        assert_eq!(prev["rivet"].repo, "pulseengine/rivet");
     }
 
     /// One layer carries the same tool for four platforms, so a previous-entry
@@ -1084,6 +1205,8 @@ mod tests {
             decision: crate::carryforward::Decision::Fetch {
                 why: crate::carryforward::FetchReason::NoPrevious,
             },
+            license: None,
+            sbom: None,
         }];
         let m = omitted(&planned, &resolved);
         assert_eq!(m.notes.len(), 1, "{:?}", m.notes);
@@ -1154,6 +1277,8 @@ mod tests {
             decision: crate::carryforward::Decision::Fetch {
                 why: crate::carryforward::FetchReason::NoPrevious,
             },
+            license: None,
+            sbom: None,
         }];
         let m = omitted(&planned, &resolved);
         assert!(

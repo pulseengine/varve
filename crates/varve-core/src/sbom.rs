@@ -119,6 +119,21 @@ fn component(entry: &crate::manifest::ManifestEntry) -> serde_json::Value {
         c["purl"] = serde_json::json!(format!("pkg:github/{owner}/{name}@{version}"));
     }
 
+    // Clause 1: the supplier is the upstream organisation the signed repo
+    // annotation names. Without one there is no supplier to name, and
+    // inventing one would be the scan-shaped guess this document exists to
+    // avoid.
+    if let Some((owner, _)) = entry
+        .annotations
+        .get("eu.pulseengine.source.repo")
+        .and_then(|r| r.split_once('/'))
+    {
+        c["supplier"] = serde_json::json!({
+            "name": owner,
+            "url": [format!("https://github.com/{owner}")]
+        });
+    }
+
     // A composed layer points at its own document rather than restating it.
     if entry.kind() == Ok(crate::kind::PayloadKind::Layer) {
         c["externalReferences"] = serde_json::json!([{
@@ -144,7 +159,33 @@ fn component(entry: &crate::manifest::ManifestEntry) -> serde_json::Value {
                 "url": format!("https://github.com/{repo}/releases/download/{release}/{asset}")
             }));
         }
+        // Clause 4: upstream's own SBOM, pinned by the digest the deposit saw.
+        if let (Some(sbom), Some(release), Some(sha)) = (
+            entry.annotations.get(crate::ingest::ANN_SBOM),
+            entry.annotations.get("eu.pulseengine.source.release"),
+            entry.annotations.get(crate::ingest::ANN_SBOM_SHA256),
+        ) {
+            refs.push(serde_json::json!({
+                "type": "bom",
+                "url": format!("https://github.com/{repo}/releases/download/{release}/{sbom}"),
+                "hashes": [{"alg": "SHA-256", "content": sha}]
+            }));
+        }
         c["externalReferences"] = serde_json::Value::Array(refs);
+    }
+    // Clauses 5 and 6: upstream's DECLARED license, said to be declared; and
+    // where none was recorded, a statement that none was — absence must not
+    // read as "unlicensed".
+    match entry.annotations.get(crate::ingest::ANN_LICENSE) {
+        Some(expr) => {
+            c["licenses"] =
+                serde_json::json!([{"expression": expr, "acknowledgement": "declared"}]);
+        }
+        None => props.push(serde_json::json!({
+            "name": "eu.pulseengine.varve.license",
+            "value": "not recorded: this layer was deposited before varve recorded upstream licenses, \
+                      or upstream declares none GitHub can identify"
+        })),
     }
     if !props.is_empty() {
         c["properties"] = serde_json::Value::Array(props);
@@ -154,11 +195,19 @@ fn component(entry: &crate::manifest::ManifestEntry) -> serde_json::Value {
 
 /// Emit an SBOM for a verified layer manifest. Deterministic: same manifest in,
 /// byte-identical document out.
-pub fn emit(manifest: &LayerManifest, manifest_digest: &str, format: SbomFormat) -> String {
+/// `author` names the realm whose root signed the layer (REQ-SBOMFIELDS-001
+/// clause 2) — the caller knows it from the pin; the manifest does not say.
+pub fn emit(
+    manifest: &LayerManifest,
+    manifest_digest: &str,
+    format: SbomFormat,
+    author: &str,
+) -> String {
     let SbomFormat::CycloneDx = format;
     let mut components: Vec<serde_json::Value> = manifest.entries.iter().map(component).collect();
     // Stable order by bom-ref (the digest), so the document is diffable.
     components.sort_by(|a, b| a["bom-ref"].as_str().cmp(&b["bom-ref"].as_str()));
+    let refs: Vec<serde_json::Value> = components.iter().map(|c| c["bom-ref"].clone()).collect();
     let doc = serde_json::json!({
         "bomFormat": "CycloneDX",
         "specVersion": "1.6",
@@ -169,6 +218,7 @@ pub fn emit(manifest: &LayerManifest, manifest_digest: &str, format: SbomFormat)
             // The layer's own issued-at, not "now" — the document describes a
             // released artifact, not the moment someone asked about it.
             "timestamp": manifest.issued_at,
+            "authors": [{"name": format!("varve realm {author} (whose root signed this layer)")}],
             "component": {
                 "type": "firmware",
                 "name": format!("varve-layer-{}", manifest.layer),
@@ -182,6 +232,17 @@ pub fn emit(manifest: &LayerManifest, manifest_digest: &str, format: SbomFormat)
             ],
         },
         "components": components,
+        // Clause 3. The layer's own contents are COMPLETE — every component
+        // is a signed entry, and none can be missing. What each component was
+        // built from is not recorded anywhere varve can see, so it is stated
+        // as unknown: a component absent from `dependencies` means unknown in
+        // CycloneDX, but a reader skimming for empty lists should not have to
+        // know that.
+        "dependencies": [{"ref": manifest_digest, "dependsOn": refs}],
+        "compositions": [
+            {"aggregate": "complete", "dependencies": [manifest_digest]},
+            {"aggregate": "unknown", "dependencies": refs},
+        ],
     });
     serde_json::to_string_pretty(&doc).expect("sbom serialises")
 }
@@ -236,7 +297,7 @@ mod tests {
     fn every_component_is_transcribed_from_the_signed_manifest() {
         let (m, digest) = manifest();
         let doc: serde_json::Value =
-            serde_json::from_str(&emit(&m, &digest, SbomFormat::CycloneDx)).unwrap();
+            serde_json::from_str(&emit(&m, &digest, SbomFormat::CycloneDx, "pulseengine")).unwrap();
         let comps = doc["components"].as_array().unwrap();
         assert_eq!(
             comps.len(),
@@ -275,7 +336,8 @@ mod tests {
         );
         let m = LayerManifest::parse(&bytes).unwrap();
         let doc: serde_json::Value =
-            serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx)).unwrap();
+            serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx, "pulseengine"))
+                .unwrap();
         let comps = doc["components"].as_array().unwrap();
         assert_eq!(comps.len(), 2);
         let platforms: Vec<&str> = comps
@@ -315,7 +377,8 @@ mod tests {
         let m = LayerManifest::parse(bytes).unwrap();
         assert_eq!(m.entries.len(), 3, "fixture sanity");
         let doc: serde_json::Value =
-            serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx)).unwrap();
+            serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx, "pulseengine"))
+                .unwrap();
         let comps = doc["components"].as_array().unwrap();
         assert_eq!(
             comps.len(),
@@ -336,8 +399,8 @@ mod tests {
     #[test]
     fn emission_is_deterministic() {
         let (m, digest) = manifest();
-        let a = emit(&m, &digest, SbomFormat::CycloneDx);
-        let b = emit(&m, &digest, SbomFormat::CycloneDx);
+        let a = emit(&m, &digest, SbomFormat::CycloneDx, "pulseengine");
+        let b = emit(&m, &digest, SbomFormat::CycloneDx, "pulseengine");
         assert_eq!(a, b, "the same layer must emit a byte-identical document");
         // …and it carries the layer's own issued-at, not the wall clock.
         let doc: serde_json::Value = serde_json::from_str(&a).unwrap();
@@ -349,7 +412,7 @@ mod tests {
     fn the_document_binds_itself_to_the_layer_it_describes() {
         let (m, digest) = manifest();
         let doc: serde_json::Value =
-            serde_json::from_str(&emit(&m, &digest, SbomFormat::CycloneDx)).unwrap();
+            serde_json::from_str(&emit(&m, &digest, SbomFormat::CycloneDx, "pulseengine")).unwrap();
         // An SBOM that does not say which signed artifact it describes cannot
         // be checked against one.
         assert_eq!(doc["metadata"]["component"]["bom-ref"], digest);
@@ -375,5 +438,169 @@ mod tests {
         assert!("cyclonedx".parse::<SbomFormat>().is_ok());
         assert!("spdx".parse::<SbomFormat>().is_err());
         assert!("".parse::<SbomFormat>().is_err());
+    }
+
+    /// A layer like the ones on the registry today: two tools from one
+    /// upstream, one recorded with the new license and upstream-SBOM
+    /// annotations, one deposited before they existed.
+    const FIELDS: &[u8] = br#"{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "artifactType": "application/vnd.pulseengine.varve.layer.v1+json",
+  "annotations": {
+    "eu.pulseengine.varve.layer": "2026.10.0",
+    "eu.pulseengine.varve.channel": "rolling",
+    "eu.pulseengine.varve.counter": "0",
+    "org.opencontainers.image.created": "2026-10-01T00:00:00Z"
+  },
+  "manifests": [
+    { "digest": "sha256:aaaa", "annotations": {
+        "eu.pulseengine.tool": "kilnd", "eu.pulseengine.tool.version": "0.5.0",
+        "eu.pulseengine.source.repo": "pulseengine/kiln",
+        "eu.pulseengine.source.release": "v0.5.0",
+        "eu.pulseengine.source.asset": "kiln-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
+        "eu.pulseengine.source.license": "Apache-2.0 OR MIT",
+        "eu.pulseengine.source.sbom": "kiln-0.5.0.cdx.json",
+        "eu.pulseengine.source.sbom.sha256": "5555555555555555555555555555555555555555555555555555555555555555" } },
+    { "digest": "sha256:bbbb", "annotations": {
+        "eu.pulseengine.tool": "rivet", "eu.pulseengine.tool.version": "0.40.0",
+        "eu.pulseengine.source.repo": "pulseengine/rivet",
+        "eu.pulseengine.source.release": "v0.40.0" } },
+    { "digest": "sha256:cccc", "annotations": { "eu.pulseengine.platform": "riscv64-unknown-none" } }
+  ]
+}"#;
+
+    fn fields_doc() -> serde_json::Value {
+        let m = LayerManifest::parse(FIELDS).unwrap();
+        serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx, "pulseengine")).unwrap()
+    }
+
+    fn comp<'a>(doc: &'a serde_json::Value, digest: &str) -> &'a serde_json::Value {
+        doc["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["bom-ref"] == digest)
+            .unwrap()
+    }
+
+    /// Clause 1: the supplier is the upstream organisation the signed repo
+    /// annotation names. No repo, no supplier — never an invented one.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn each_component_names_the_upstream_that_supplied_it() {
+        let doc = fields_doc();
+        assert_eq!(
+            comp(&doc, "sha256:aaaa")["supplier"],
+            serde_json::json!({"name": "pulseengine", "url": ["https://github.com/pulseengine"]})
+        );
+        assert!(comp(&doc, "sha256:cccc").get("supplier").is_none());
+    }
+
+    /// Clause 2: the author is the realm whose root signed the layer.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn the_document_names_the_realm_that_signed_it_as_author() {
+        let doc = fields_doc();
+        let authors = doc["metadata"]["authors"].as_array().unwrap();
+        assert_eq!(authors.len(), 1);
+        assert!(
+            authors[0]["name"].as_str().unwrap().contains("pulseengine"),
+            "{authors:?}"
+        );
+    }
+
+    /// Clause 3: the layer depends on every component, and nothing says a
+    /// component has NO dependencies — that is stated as unknown.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn the_layer_depends_on_every_component_and_their_own_are_unknown() {
+        let doc = fields_doc();
+        assert_eq!(
+            doc["dependencies"],
+            serde_json::json!([{
+                "ref": "sha256:dd",
+                "dependsOn": ["sha256:aaaa", "sha256:bbbb", "sha256:cccc"]
+            }])
+        );
+        assert_eq!(
+            doc["compositions"],
+            serde_json::json!([
+                {"aggregate": "complete", "dependencies": ["sha256:dd"]},
+                {"aggregate": "unknown", "dependencies": ["sha256:aaaa", "sha256:bbbb", "sha256:cccc"]}
+            ])
+        );
+    }
+
+    /// Clause 5: the license is upstream's DECLARED statement, said so.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn a_recorded_license_is_emitted_as_declared() {
+        let doc = fields_doc();
+        assert_eq!(
+            comp(&doc, "sha256:aaaa")["licenses"],
+            serde_json::json!([{"expression": "Apache-2.0 OR MIT", "acknowledgement": "declared"}])
+        );
+    }
+
+    /// Clause 6: a layer deposited before licenses were recorded says so,
+    /// rather than leaving a gap a reader takes for "no license".
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn an_unrecorded_license_is_said_to_be_unrecorded() {
+        let doc = fields_doc();
+        let c = comp(&doc, "sha256:bbbb");
+        assert!(c.get("licenses").is_none());
+        let props = c["properties"].as_array().unwrap();
+        assert!(
+            props
+                .iter()
+                .any(|p| p["name"] == "eu.pulseengine.varve.license"
+                    && p["value"].as_str().unwrap().contains("not recorded")),
+            "{props:?}"
+        );
+    }
+
+    /// Clause 4: upstream's own SBOM is referenced, pinned by the digest the
+    /// deposit saw.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn a_recorded_upstream_sbom_is_referenced_with_its_digest() {
+        let doc = fields_doc();
+        let refs = comp(&doc, "sha256:aaaa")["externalReferences"]
+            .as_array()
+            .unwrap();
+        assert!(
+            refs.contains(&serde_json::json!({
+                "type": "bom",
+                "url": "https://github.com/pulseengine/kiln/releases/download/v0.5.0/kiln-0.5.0.cdx.json",
+                "hashes": [{"alg": "SHA-256", "content": "5555555555555555555555555555555555555555555555555555555555555555"}]
+            })),
+            "{refs:?}"
+        );
+        assert!(
+            !comp(&doc, "sha256:bbbb")["externalReferences"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["type"] == "bom")
+        );
+    }
+
+    /// The serial number is a function of the layer digest, RFC 9562 v8
+    /// shaped: version nibble 8, variant 10x. Pinned by value, not only by
+    /// re-emission being stable, so a constant serial cannot pass.
+    // rivet: verifies REQ-SBOM-001
+    #[test]
+    fn the_serial_number_is_derived_from_the_digest() {
+        let digest = format!("sha256:{}", "0123456789abcdef".repeat(4));
+        assert_eq!(
+            uuid_from_digest(&digest),
+            "01234567-89ab-8def-a123-456789abcdef"
+        );
+        assert_ne!(
+            uuid_from_digest(&digest),
+            uuid_from_digest(&format!("sha256:{}", "f".repeat(64)))
+        );
     }
 }
