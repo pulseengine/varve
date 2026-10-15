@@ -49,6 +49,14 @@ pub enum Cmd {
         /// Machine-readable result on stdout — the only consumer is a gate.
         #[arg(long)]
         format: Option<String>,
+        /// Write the prepared proposal into `--manifest`, in place.
+        ///
+        /// Only an entry whose bump is auto-bumpable is touched; every other
+        /// pin, every comment and every blank line survives byte-for-byte
+        /// (REQ-PREPARED-001). Refuses — and leaves the file untouched — if
+        /// the result is one `varve` itself would not accept.
+        #[arg(long)]
+        apply: bool,
     },
     /// Embedded, queryable documentation (offline).
     ///

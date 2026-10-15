@@ -255,7 +255,11 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Cmd::Scan { manifest, format } => {
+        Cmd::Scan {
+            manifest,
+            format,
+            apply,
+        } => {
             let json = match format.as_deref() {
                 None | Some("text") => false,
                 Some("json") => true,
@@ -370,6 +374,53 @@ fn main() -> anyhow::Result<()> {
                     }
                     let _ = std::fs::remove_dir_all(&scratch);
                     let moved = moved;
+
+                    // `--apply` writes the manifest IN PLACE, after `moved`
+                    // is fully computed and re-measured — never before, since
+                    // the proposal it writes is exactly what the rest of this
+                    // arm is about to report. `apply` itself is pure; all the
+                    // I/O (and the atomic write) lives here.
+                    if apply {
+                        match varve_producer::apply::apply(&text, &moved) {
+                            Ok((new_text, changes)) => {
+                                if changes.is_empty() {
+                                    // CLAUSE 7: nothing auto-bumpable. Do not
+                                    // even touch the file.
+                                } else {
+                                    // Write to a temp file in the SAME
+                                    // directory, then rename over the
+                                    // original — so a failure anywhere after
+                                    // this point (or a process killed mid-
+                                    // write) never leaves a half-written
+                                    // manifest on disk.
+                                    let mut tmp_name = manifest
+                                        .file_name()
+                                        .map(std::ffi::OsString::from)
+                                        .unwrap_or_else(|| std::ffi::OsString::from("layer.toml"));
+                                    tmp_name.push(format!(".tmp-{}", std::process::id()));
+                                    let tmp_path = manifest.with_file_name(tmp_name);
+                                    std::fs::write(&tmp_path, &new_text).map_err(|e| {
+                                        anyhow::anyhow!("cannot write {}: {e}", tmp_path.display())
+                                    })?;
+                                    std::fs::rename(&tmp_path, &manifest).map_err(|e| {
+                                        let _ = std::fs::remove_file(&tmp_path);
+                                        anyhow::anyhow!(
+                                            "cannot replace {} with the prepared proposal: {e}",
+                                            manifest.display()
+                                        )
+                                    })?;
+                                    for c in &changes {
+                                        eprintln!("applied: {c}");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("error: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+
                     if json {
                         let out: Vec<_> = moved
                             .iter()

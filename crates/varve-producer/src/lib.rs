@@ -10,6 +10,7 @@
 //! without a process, and the binary is the seam where external services
 //! (`gh`, `cosign`, `oras`) are invoked.
 
+pub mod apply;
 pub mod asset;
 pub mod attestation;
 pub mod binfmt;
