@@ -19,7 +19,8 @@
 #   tar:<binary>:upstream  a .tar.gz holding <asset-without-.tar.gz>/<binary> —
 #                          the layout bytecodealliance ships (verified by
 #                          untarring the real wasm-tools 1.257.1 macos asset)
-#   tar:none               a .tar.gz holding no binary at all
+#   tar:<a>+<b>:flat       as flat, holding several binaries at the root
+#   tar:none             a .tar.gz holding no binary at all
 #   raw                    a bare downloadable file (sigil's wsc binaries)
 #   blob                   an opaque package file (a .vsix)
 #
@@ -75,12 +76,14 @@ pulseengine/loom	v1.2.0	loom-v1.2.0-x86_64-apple-darwin.tar.gz	tar:loom:flat
 pulseengine/loom	v1.2.0	loom-v1.2.0-aarch64-unknown-linux-gnu.tar.gz	tar:loom:flat
 pulseengine/loom	v1.2.0	loom-v1.2.0-x86_64-unknown-linux-gnu.tar.gz	tar:loom:flat
 
-# kiln — the tool is `kiln`, the binary inside is `kilnd`. The `:binary`
-# field of a TARBALL_TOOLS entry is what makes that work.
-pulseengine/kiln	v0.4.4	kiln-v0.4.4-aarch64-apple-darwin.tar.gz	tar:kilnd:nested
-pulseengine/kiln	v0.4.4	kiln-v0.4.4-x86_64-apple-darwin.tar.gz	tar:kilnd:nested
-pulseengine/kiln	v0.4.4	kiln-v0.4.4-aarch64-unknown-linux-gnu.tar.gz	tar:kilnd:nested
-pulseengine/kiln	v0.4.4	kiln-v0.4.4-x86_64-unknown-linux-gnu.tar.gz	tar:kilnd:nested
+# kiln v0.6.0 — the archive is flat and carries BOTH `kiln` (the CLI) and
+# `kilnd` (its deprecated alias, removed in v0.7.0): one archive, two payloads.
+# Verified against the real v0.6.0 x86_64-unknown-linux-gnu archive, whose
+# members are ./kiln ./kilnd ./LICENSE ./README.md.
+pulseengine/kiln	v0.6.0	kiln-v0.6.0-aarch64-apple-darwin.tar.gz	tar:kiln+kilnd:flat
+pulseengine/kiln	v0.6.0	kiln-v0.6.0-x86_64-apple-darwin.tar.gz	tar:kiln+kilnd:flat
+pulseengine/kiln	v0.6.0	kiln-v0.6.0-aarch64-unknown-linux-gnu.tar.gz	tar:kiln+kilnd:flat
+pulseengine/kiln	v0.6.0	kiln-v0.6.0-x86_64-unknown-linux-gnu.tar.gz	tar:kiln+kilnd:flat
 
 # sigil — raw per-platform binaries, named sigil's way rather than by triple.
 pulseengine/sigil	v0.10.0	wsc-macos-aarch64	raw

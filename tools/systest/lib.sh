@@ -155,8 +155,12 @@ echo \"varve-systest-fixture repo=$repo release=$version asset=$asset\"
           chmod +x "$stagedir/${asset%.tar.gz}/$binname"
           printf 'Apache-2.0 WITH LLVM-exception\n' > "$stagedir/${asset%.tar.gz}/LICENSE-APACHE"
         else
-          printf '%s' "$body" > "$stagedir/$binname"
-          chmod +x "$stagedir/$binname"
+          # `a+b` names several binaries in one archive (kiln v0.6.0 ships
+          # `kiln` and its deprecated alias `kilnd` side by side).
+          for b in $(printf '%s' "$binname" | tr '+' ' '); do
+            printf '%s' "$body" > "$stagedir/$b"
+            chmod +x "$stagedir/$b"
+          done
         fi
         tar czf "$dir/$asset" -C "$stagedir" .
         ;;
