@@ -59,6 +59,7 @@ pub mod sbom;
 pub mod sdkexport;
 pub mod selfverify;
 pub mod shadow;
+pub mod shellquote;
 pub mod source;
 pub mod store;
 pub mod support;
