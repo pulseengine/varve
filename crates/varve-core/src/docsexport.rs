@@ -278,6 +278,11 @@ pub fn export(payload: &DocsPayload, out: &Path) -> Result<DocsExportReport, Doc
     }
 
     for m in members_of(payload)? {
+        // `tar -C dir .` writes the root itself first; as a directory it is
+        // the export directory, which already exists.
+        if matches!(m.body, MemberBody::Dir) && crate::sdkexport::names_archive_root(&m.path) {
+            continue;
+        }
         let rel = crate::sdkexport::safe_member_path(&m.path).map_err(|source| {
             DocsExportError::Archive {
                 name: payload.name.clone(),
@@ -537,6 +542,18 @@ mod tests {
                 d.set_cksum();
                 b.append_data(&mut d, "./sub/", std::io::empty())
                     .expect("append dir");
+            }
+            // The ROOT itself, first, as `tar -C dir .` writes it. It names
+            // the export directory and must neither refuse the export nor
+            // count as a directory written.
+            {
+                let mut d = tar::Header::new_gnu();
+                d.set_size(0);
+                d.set_mode(0o755);
+                d.set_entry_type(tar::EntryType::Directory);
+                d.set_cksum();
+                b.append_data(&mut d, "./", std::io::empty())
+                    .expect("append root");
             }
             for (path, body) in [
                 ("./index.html", "<h1>root</h1>"),
