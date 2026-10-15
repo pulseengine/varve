@@ -134,6 +134,22 @@ pub enum SdkExportError {
         needed: usize,
         capacity: usize,
     },
+    #[error(
+        "{member}: the loader's SYSDIRS table (.sysdirs) names the sdk's build prefix but its \
+         length array (.sysdirslen) was not found, so moving to a path of a different length \
+         would leave ld.so stepping through the table by the old lengths — refusing rather than \
+         produce a loader that opens empty file names"
+    )]
+    SysdirsWithoutLengths { member: String },
+    #[error(
+        "{member}: .sysdirs holds {paths} path(s) but .sysdirslen has room for {slots} length(s) \
+         — the two tables disagree, so neither can be rewritten safely"
+    )]
+    SysdirsLengthsDisagree {
+        member: String,
+        paths: usize,
+        slots: usize,
+    },
     #[error("sdk member {member:?} is not a usable path ({why}) — refusing to lay the tree down")]
     UnsafeMember { member: String, why: String },
     #[error(
@@ -255,9 +271,19 @@ pub fn relocate_bytes(
     }
 
     let mut out = bytes.to_vec();
-    let mut fields = 0;
+    // The loader's SYSDIRS table first: its paths are packed back to back and
+    // indexed by a parallel length array, so they are rewritten as a TABLE,
+    // and the generic per-string patching below must not touch that range.
+    let sysdirs = relocate_sysdirs(member, &mut out, built, dest)?;
+    let mut fields = sysdirs.as_ref().map_or(0, |(_, n)| *n);
     let mut cursor = 0;
     while let Some(hit) = find_sub(&out, built, cursor) {
+        if let Some((range, _)) = &sysdirs
+            && range.contains(&hit)
+        {
+            cursor = range.end;
+            continue;
+        }
         // The C string the occurrence belongs to: from just past the previous
         // NUL to the next one. `LD_LIBRARY_PATH=/opt/poky/…` is one string, and
         // patching from the occurrence rather than the string start would leave
@@ -326,6 +352,148 @@ pub fn relocate_bytes(
         fields,
         substitutions: 0,
     })
+}
+
+/// One ELF section's file range, by name, with the file's class and byte
+/// order. `None` for anything that is not a well-formed ELF with a readable
+/// section-header table — such a file has no SYSDIRS table to rewrite, and the
+/// generic patching handles it as before. Every read is bounds-checked.
+fn elf_section(bytes: &[u8], name: &[u8]) -> Option<(usize, usize, bool, bool)> {
+    if bytes.get(..4)? != b"\x7fELF" {
+        return None;
+    }
+    let class64 = match *bytes.get(4)? {
+        1 => false,
+        2 => true,
+        _ => return None,
+    };
+    let little = match *bytes.get(5)? {
+        1 => true,
+        2 => false,
+        _ => return None,
+    };
+    // An unsigned integer of `n` bytes at `at`, in the file's byte order.
+    let rd = |at: usize, n: usize| -> Option<usize> {
+        let field = bytes.get(at..at.checked_add(n)?)?;
+        let mut buf = [0u8; 8];
+        let v = if little {
+            buf[..n].copy_from_slice(field);
+            u64::from_le_bytes(buf)
+        } else {
+            buf[8 - n..].copy_from_slice(field);
+            u64::from_be_bytes(buf)
+        };
+        usize::try_from(v).ok()
+    };
+    let word = if class64 { 8 } else { 4 };
+    let (shoff, shentsize, shnum, shstrndx) = if class64 {
+        (rd(0x28, 8)?, rd(0x3A, 2)?, rd(0x3C, 2)?, rd(0x3E, 2)?)
+    } else {
+        (rd(0x20, 4)?, rd(0x2E, 2)?, rd(0x30, 2)?, rd(0x32, 2)?)
+    };
+    // (name, offset, size) of section header `i`. The offset and size fields
+    // sit after sh_name/sh_type and sh_flags/sh_addr, each `word` wide.
+    let header = |i: usize| -> Option<(usize, usize, usize)> {
+        let base = shoff.checked_add(i.checked_mul(shentsize)?)?;
+        let off_at = base.checked_add(8 + 2 * word)?;
+        Some((
+            rd(base, 4)?,
+            rd(off_at, word)?,
+            rd(off_at.checked_add(word)?, word)?,
+        ))
+    };
+    let (_, str_off, str_size) = header(shstrndx)?;
+    let strtab = bytes.get(str_off..str_off.checked_add(str_size)?)?;
+    (0..shnum).find_map(|i| {
+        let (name_at, off, size) = header(i)?;
+        let tail = strtab.get(name_at..)?;
+        let this = tail.split(|b| *b == 0).next()?;
+        (this == name && bytes.get(off..off.checked_add(size)?).is_some())
+            .then_some((off, size, class64, little))
+    })
+}
+
+/// Rewrite a glibc loader's SYSDIRS table the way `relocate_sdk.py`'s
+/// `change_dl_sysdirs` does, transcribed: split `.sysdirs` on NUL and stop at
+/// the first empty entry, substitute the prefix in each path, pack them back
+/// to back NUL-terminated, zero-pad to the section size, and write each new
+/// length into `.sysdirslen` (u32 for ELFCLASS32, u64 for ELFCLASS64).
+///
+/// Returns the `.sysdirs` range (so the caller leaves it alone) and how many
+/// paths were rewritten, or `None` when there is no table naming the prefix.
+fn relocate_sysdirs(
+    member: &str,
+    out: &mut [u8],
+    built: &[u8],
+    dest: &[u8],
+) -> Result<Option<(std::ops::Range<usize>, usize)>, SdkExportError> {
+    let Some((off, size, class64, little)) = elf_section(out, b".sysdirs") else {
+        return Ok(None);
+    };
+    let table = &out[off..off + size];
+    if find_sub(table, built, 0).is_none() {
+        return Ok(None);
+    }
+    let Some((len_off, len_size, _, _)) = elf_section(out, b".sysdirslen") else {
+        if built.len() == dest.len() {
+            // Every length is unchanged, so the generic in-place patching is
+            // exactly right — the one case that always worked.
+            return Ok(None);
+        }
+        return Err(SdkExportError::SysdirsWithoutLengths {
+            member: member.to_string(),
+        });
+    };
+    let paths: Vec<Vec<u8>> = table
+        .split(|b| *b == 0)
+        .take_while(|p| !p.is_empty())
+        .map(|p| {
+            let mut new = Vec::with_capacity(p.len());
+            let mut i = 0;
+            while let Some(h) = find_sub(p, built, i) {
+                new.extend_from_slice(&p[i..h]);
+                new.extend_from_slice(dest);
+                i = h + built.len();
+            }
+            new.extend_from_slice(&p[i..]);
+            new
+        })
+        .collect();
+    let width = if class64 { 8 } else { 4 };
+    let slots = len_size / width;
+    if paths.len() != slots {
+        return Err(SdkExportError::SysdirsLengthsDisagree {
+            member: member.to_string(),
+            paths: paths.len(),
+            slots,
+        });
+    }
+    let mut packed = Vec::with_capacity(size);
+    for p in &paths {
+        packed.extend_from_slice(p);
+        packed.push(0);
+    }
+    if packed.len() > size {
+        return Err(SdkExportError::FieldTooSmall {
+            member: member.to_string(),
+            offset: off,
+            needed: packed.len(),
+            capacity: size,
+        });
+    }
+    packed.resize(size, 0);
+    out[off..off + size].copy_from_slice(&packed);
+    let slots_bytes = &mut out[len_off..len_off + slots * width];
+    for (slot, p) in slots_bytes.chunks_exact_mut(width).zip(&paths) {
+        let len = p.len() as u64;
+        match (class64, little) {
+            (true, true) => slot.copy_from_slice(&len.to_le_bytes()),
+            (true, false) => slot.copy_from_slice(&len.to_be_bytes()),
+            (false, true) => slot.copy_from_slice(&(len as u32).to_le_bytes()),
+            (false, false) => slot.copy_from_slice(&(len as u32).to_be_bytes()),
+        }
+    }
+    Ok(Some((off..off + size, paths.len())))
 }
 
 /// Refuse a path component that is not a single, safe name — the same rule
@@ -1699,5 +1867,237 @@ mod xz_tests {
             decompress(cut).is_err(),
             "a truncated stream decoded anyway"
         );
+    }
+
+    /// A minimal ELF file with real section headers holding a glibc loader's
+    /// `.sysdirs` (paths packed back to back) and `.sysdirslen` (each path's
+    /// length) — the layout measured in the Yocto-built
+    /// `ld-linux-x86-64.so.2` of the Zephyr SDK 1.0.1 host tools — in either
+    /// class and either byte order.
+    fn loader(
+        dirs: &[&str],
+        sysdirs_size: usize,
+        class64: bool,
+        little: bool,
+    ) -> (Vec<u8>, usize, usize) {
+        let word = if class64 { 8 } else { 4 };
+        let put = |v: &mut Vec<u8>, at: usize, n: usize, x: u64| {
+            let b = if little {
+                x.to_le_bytes()
+            } else {
+                x.to_be_bytes()
+            };
+            let b = if little { &b[..n] } else { &b[8 - n..] };
+            v[at..at + n].copy_from_slice(b);
+        };
+        let shstrtab = b"\0.shstrtab\0.sysdirslen\0.sysdirs\0".to_vec();
+        let mut packed = Vec::new();
+        for d in dirs {
+            packed.extend_from_slice(d.as_bytes());
+            packed.push(0);
+        }
+        packed.resize(sysdirs_size, 0);
+        let mut lens = vec![0u8; dirs.len() * word];
+        for (i, d) in dirs.iter().enumerate() {
+            put(&mut lens, i * word, word, d.len() as u64);
+        }
+
+        let mut v = vec![0u8; 64];
+        v[..4].copy_from_slice(b"\x7fELF");
+        v[4] = if class64 { 2 } else { 1 };
+        v[5] = if little { 1 } else { 2 };
+        v[6] = 1;
+        let shstr_off = v.len();
+        v.extend_from_slice(&shstrtab);
+        let lens_off = v.len();
+        v.extend_from_slice(&lens);
+        let sys_off = v.len();
+        v.extend_from_slice(&packed);
+        let shoff = v.len();
+        let entsize = if class64 { 64 } else { 40 };
+        for (name, off, size) in [
+            (0u64, 0usize, 0usize),
+            (1, shstr_off, shstrtab.len()),
+            (11, lens_off, lens.len()),
+            (23, sys_off, packed.len()),
+        ] {
+            let mut h = vec![0u8; entsize];
+            put(&mut h, 0, 4, name);
+            put(&mut h, 8 + 2 * word, word, off as u64);
+            put(&mut h, 8 + 3 * word, word, size as u64);
+            v.extend_from_slice(&h);
+        }
+        let (shoff_at, ent_at) = if class64 { (0x28, 0x3A) } else { (0x20, 0x2E) };
+        put(&mut v, shoff_at, word, shoff as u64);
+        put(&mut v, ent_at, 2, entsize as u64);
+        put(&mut v, ent_at + 2, 2, 4);
+        put(&mut v, ent_at + 4, 2, 1);
+        (v, lens_off, sys_off)
+    }
+
+    fn loader_with_sysdirs(dirs: &[&str], sysdirs_size: usize) -> (Vec<u8>, usize, usize) {
+        loader(dirs, sysdirs_size, true, true)
+    }
+
+    fn read_len(b: &[u8], at: usize, width: usize, little: bool) -> u64 {
+        let mut buf = [0u8; 8];
+        if little {
+            buf[..width].copy_from_slice(&b[at..at + width]);
+            u64::from_le_bytes(buf)
+        } else {
+            buf[8 - width..].copy_from_slice(&b[at..at + width]);
+            u64::from_be_bytes(buf)
+        }
+    }
+
+    const ZBUILT: &str = "/usr/local/oe-sdk-hardcoded-buildpath";
+    const ZDIRS: [&str; 2] = [
+        "/usr/local/oe-sdk-hardcoded-buildpath/sysroots/x86_64-pokysdk-linux/lib/",
+        "/usr/local/oe-sdk-hardcoded-buildpath/sysroots/x86_64-pokysdk-linux/usr/lib/",
+    ];
+
+    /// Every class and byte order a loader can have gets the same rewrite,
+    /// with lengths in its own word size and byte order.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn sysdirs_are_rewritten_for_every_class_and_byte_order() {
+        for (class64, little) in [(true, true), (true, false), (false, true), (false, false)] {
+            let (elf, lens_off, sys_off) = loader(&ZDIRS, 512, class64, little);
+            let r = relocate_bytes("ld.so", &elf, ZBUILT, "/opt/s").unwrap();
+            let width = if class64 { 8 } else { 4 };
+            let want = [
+                "/opt/s/sysroots/x86_64-pokysdk-linux/lib/",
+                "/opt/s/sysroots/x86_64-pokysdk-linux/usr/lib/",
+            ];
+            assert_eq!(
+                (
+                    read_len(&r.bytes, lens_off, width, little),
+                    read_len(&r.bytes, lens_off + width, width, little)
+                ),
+                (want[0].len() as u64, want[1].len() as u64),
+                "class64={class64} little={little}"
+            );
+            let got = &r.bytes[sys_off..sys_off + want[0].len()];
+            assert_eq!(got, want[0].as_bytes(), "class64={class64} little={little}");
+            assert_eq!(r.fields, 2, "two table entries, nothing else in this file");
+        }
+    }
+
+    /// The table is rewritten as a table and EVERYTHING ELSE in the file still
+    /// gets the per-string patch — a real loader also carries its own
+    /// interpreter path, which must move with the SDK.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn a_prefix_outside_the_table_is_still_patched() {
+        let (mut elf, _, sys_off) = loader(&ZDIRS, 512, true, true);
+        let tail = elf.len();
+        elf.extend_from_slice(b"/usr/local/oe-sdk-hardcoded-buildpath/lib/ld.so\0\0\0\0");
+        let r = relocate_bytes("ld.so", &elf, ZBUILT, "/opt/s").unwrap();
+        assert_eq!(r.fields, 3, "two table entries and the trailing path");
+        assert_eq!(&r.bytes[tail..tail + 17], b"/opt/s/lib/ld.so\0");
+        assert!(sys_off < tail);
+    }
+
+    /// A table that exactly fills its section is not too big; one byte more is.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn a_table_that_exactly_fills_its_section_fits_and_one_byte_more_does_not() {
+        let dest = "/opt/s";
+        let exact: usize = ZDIRS
+            .iter()
+            .map(|d| d.len() - ZBUILT.len() + dest.len() + 1)
+            .sum();
+        // The ORIGINAL table must fit too, so size the section for it and
+        // relocate to a destination that grows the table to exactly `size`.
+        let size = ZDIRS.iter().map(|d| d.len() + 1).sum::<usize>();
+        let grow = (size - exact) / 2 + dest.len();
+        let longer = format!("/{}", "x".repeat(grow - 1));
+        let (elf, _, _) = loader(&ZDIRS, size, true, true);
+        let fits = relocate_bytes("ld.so", &elf, ZBUILT, &longer).expect("exactly fills");
+        assert_eq!(fits.fields, 2);
+        let over = format!("{longer}y");
+        let err = relocate_bytes("ld.so", &elf, ZBUILT, &over).unwrap_err();
+        assert!(matches!(err, SdkExportError::FieldTooSmall { .. }), "{err}");
+    }
+
+    /// Something that merely starts like an ELF, or is shorter than a header,
+    /// is patched as a plain binary rather than read past its end.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn a_truncated_elf_is_not_read_past_its_end() {
+        let mut short = b"\x7fELF\x02\x01".to_vec();
+        short.extend_from_slice(b"/usr/local/oe-sdk-hardcoded-buildpath/lib\0\0\0");
+        let r = relocate_bytes("x", &short, ZBUILT, "/opt/s").unwrap();
+        assert_eq!(r.fields, 1);
+        let tiny = b"\x7fE\0".to_vec();
+        assert!(relocate_bytes("x", &tiny, ZBUILT, "/opt/s").is_ok());
+    }
+
+    /// Reported against varve 0.39: an SDK exported to a path SHORTER than the
+    /// one it was built under could not start its tools (`dtc`: "cannot read
+    /// file data: Error 21"). varve shortened each SYSDIRS path in place and
+    /// NUL-padded it, but left `.sysdirslen` alone, so ld.so stepped through
+    /// the table by the OLD lengths, landed in the padding and opened a file
+    /// with an empty name in the library directory. `relocate_sdk.py` repacks
+    /// the paths and rewrites the lengths; so must varve.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn a_shorter_destination_repacks_sysdirs_and_rewrites_their_lengths() {
+        let built = "/usr/local/oe-sdk-hardcoded-buildpath";
+        let dirs = [
+            "/usr/local/oe-sdk-hardcoded-buildpath/sysroots/x86_64-pokysdk-linux/lib/",
+            "/usr/local/oe-sdk-hardcoded-buildpath/sysroots/x86_64-pokysdk-linux/usr/lib/",
+        ];
+        let (elf, lens_off, sys_off) = loader_with_sysdirs(&dirs, 4096);
+        let r = relocate_bytes("lib/ld-linux-x86-64.so.2", &elf, built, "/opt/short").unwrap();
+        assert_eq!(r.bytes.len(), elf.len());
+        let want_a = "/opt/short/sysroots/x86_64-pokysdk-linux/lib/";
+        let want_b = "/opt/short/sysroots/x86_64-pokysdk-linux/usr/lib/";
+        let mut packed = format!("{want_a}\0{want_b}\0").into_bytes();
+        packed.resize(4096, 0);
+        assert_eq!(
+            &r.bytes[sys_off..sys_off + 4096],
+            &packed[..],
+            "paths packed back to back"
+        );
+        let len = |i: usize| {
+            u64::from_le_bytes(
+                r.bytes[lens_off + 8 * i..lens_off + 8 * i + 8]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        assert_eq!((len(0), len(1)), (want_a.len() as u64, want_b.len() as u64));
+    }
+
+    /// The same length is the one case that always worked; it must still.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn an_equal_length_destination_leaves_the_lengths_equal() {
+        let built = "/tmp/zephyr-sdk-1.0.1";
+        let dirs = [
+            "/tmp/zephyr-sdk-1.0.1/lib/",
+            "/tmp/zephyr-sdk-1.0.1/usr/lib/",
+        ];
+        let (elf, lens_off, _) = loader_with_sysdirs(&dirs, 256);
+        let r = relocate_bytes("ld.so", &elf, built, "/opt/zephyr-sdk-1.0.1").unwrap();
+        let len0 = u64::from_le_bytes(r.bytes[lens_off..lens_off + 8].try_into().unwrap());
+        assert_eq!(len0, dirs[0].len() as u64);
+    }
+
+    /// A `.sysdirs` without its `.sysdirslen` cannot be relocated correctly —
+    /// the lengths live somewhere varve cannot see — so it refuses rather than
+    /// produce a loader that opens empty file names.
+    // rivet: verifies REQ-SDK-001
+    #[test]
+    fn sysdirs_without_their_lengths_refuse_a_change_of_length() {
+        let built = "/tmp/zephyr-sdk-1.0.1";
+        let dirs = ["/tmp/zephyr-sdk-1.0.1/lib/"];
+        let (mut elf, _, _) = loader_with_sysdirs(&dirs, 128);
+        // Rename `.sysdirslen` so it is no longer found.
+        let at = elf.windows(11).position(|w| w == b".sysdirslen").unwrap();
+        elf[at + 1] = b'X';
+        let err = relocate_bytes("ld.so", &elf, built, "/opt/z").unwrap_err();
+        assert!(err.to_string().contains(".sysdirslen"), "{err}");
     }
 }

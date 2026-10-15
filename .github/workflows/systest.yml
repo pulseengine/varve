@@ -201,6 +201,39 @@ jobs:
         # enough to fail inside wit-bindgen with a message about an interface.
         run: tools/systest/wit-export.sh "$RUNNER_TEMP/wit-export"
 
+  sdk-relocation:
+    name: an sdk exported to a shorter path still runs (REQ-SDK-001)
+    # GitHub-HOSTED, deliberately: it needs an x86_64 Linux host to execute
+    # the relocated loader, and nothing a self-hosted runner has. Reported
+    # against varve 0.39 — zephyr-sdk 1.0.1 exported to a shorter path could
+    # not start `dtc` ("cannot read file data: Error 21") because the loader's
+    # .sysdirslen kept the old lengths. Only RUNNING a relocated tool proves
+    # the loader; the unit tests prove the bytes.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SDK_TAG: v1.0.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: systest-sdk
+      - name: fetch the real Yocto-built Zephyr SDK host tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$SDK_TAG" --repo zephyrproject-rtos/sdk-ng \
+            -p hosttools_linux-x86_64.tar.xz -D "$RUNNER_TEMP"
+          tar xJf "$RUNNER_TEMP/hosttools_linux-x86_64.tar.xz" -C "$RUNNER_TEMP"
+          ls "$RUNNER_TEMP"/zephyr-sdk-x86_64-hosttools-standalone-*.sh
+      - name: export to a shorter and to an equal-length path, then run dtc
+        run: |
+          set -euo pipefail
+          VARVE_SDK_SHAR="$(ls "$RUNNER_TEMP"/zephyr-sdk-x86_64-hosttools-standalone-*.sh)" \
+            cargo test -p varve-core --test sdk_relocation_runs -- --ignored --test-threads=1
+
   line-index:
     name: a published signed line index, read and acted on (REQ-LAYERDIFF-001 clause 1)
     runs-on: [self-hosted, linux, x64, rust-cpu]
