@@ -739,7 +739,22 @@ fn run() -> anyhow::Result<Outcome> {
         // Arguments pass through as OsString: a shim must hand the tool the
         // exact bytes the caller typed, and unix arguments are arbitrary bytes.
         let rest: Vec<std::ffi::OsString> = args.collect();
-        run_tool(&store, None, &tool, &rest)?;
+        // Say WHY this ran as a shim. Under any name but `varve` this binary
+        // is the shim for a tool of that name — so a copy installed as
+        // `varve-bin` turned `varve-bin outdated` into "run the tool
+        // varve-bin", and the only thing it said was "layer … is not
+        // installed" (covalent-layers, 2026-10-14). True, and no help.
+        run_tool(&store, None, &tool, &rest).with_context(|| {
+            let hint = if tool.starts_with("varve") {
+                " If you meant varve itself, name the binary 'varve'."
+            } else {
+                ""
+            };
+            format!(
+                "invoked as '{tool}', so this ran as the shim for a tool named '{tool}' \
+                 (varve is the CLI only when invoked as 'varve').{hint}"
+            )
+        })?;
         return Ok(Outcome::Ok);
     }
     let cli = Cli::parse();
