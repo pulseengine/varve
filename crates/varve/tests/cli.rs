@@ -5883,7 +5883,15 @@ fn env_quotes_a_hostile_root_so_eval_cannot_run_embedded_commands() {
         "merely PRINTING the script must never run anything embedded in the root"
     );
 
+    // sh and bash are on every Linux and macOS host and are REQUIRED here;
+    // zsh and dash are exercised wherever they are installed (the Ubuntu CI
+    // runner has no zsh — this test failed there with "cannot run /bin/zsh").
     for shell in ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/dash"] {
+        let required = matches!(shell, "/bin/sh" | "/bin/bash");
+        if !required && !std::path::Path::new(shell).exists() {
+            eprintln!("skipping {shell}: not installed on this host");
+            continue;
+        }
         let _ = std::fs::remove_file(&canary_dollar);
         let _ = std::fs::remove_file(&canary_tick);
         let probe = std::process::Command::new(shell)
