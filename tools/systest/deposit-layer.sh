@@ -76,7 +76,7 @@ reset_layer_env() {
   # proof, and a mechanism only exercised by its own scenario is not first
   # class. It is also the entry that drives the foreign-owner and
   # asset-template forms of a TARBALL_TOOLS entry.
-  export TARBALL_TOOLS="rivet:v0.33.1 spar:v0.36.0 loom:v1.2.0 kiln:v0.4.4:kilnd \
+  export TARBALL_TOOLS="rivet:v0.33.1 spar:v0.36.0 loom:v1.2.0 kiln:v0.6.0 kiln:v0.6.0:kilnd \
 bytecodealliance/wasm-tools:v1.257.1:wasm-tools:wasm-tools-%V-%U.tar.gz"
   export WSC_VERSION=v0.10.0
   export VSIX_PACKAGES="rivet:v0.33.1:rivet-sdlc:rivet-sdlc-%V.vsix spar:v0.36.0:spar-aadl:spar-aadl-%P-%V.vsix"
@@ -169,7 +169,7 @@ printf 'manifest-version = 1\n[toolchain]\nchannel = "rolling"\nlayer = "%s"\n' 
 export VARVE_ROOT="$WORK/varve-root"
 export VARVE_TRUST_ROOT="$WORK/root.pub"
 # A PATH with nothing of the developer's on it. The layer carries `rivet`,
-# `spar` and `kilnd`, which a PulseEngine developer also has in ~/.cargo/bin,
+# `spar`, `kiln` and `kilnd`, which a PulseEngine developer also has in ~/.cargo/bin,
 # and `varve verify` correctly reports those as shadowed (REQ-SHADOW-001). That
 # is a true finding about the machine and has nothing to do with whether the
 # layer assembled, so the gate must not depend on whose laptop it runs on.
@@ -245,6 +245,7 @@ def want(name, mechanism, signer_contains, asserts_contains):
 # A cosign-signed repo and an attested one must be DISTINGUISHABLE from inside
 # the layer — that is the whole clause.
 want("rivet", "cosign-sums", "https://github.com/pulseengine/rivet/", "SHA256SUMS.txt")
+want("kiln", "cosign-sums", "https://github.com/pulseengine/kiln/", "SHA256SUMS.txt")
 want("kilnd", "cosign-sums", "https://github.com/pulseengine/kiln/", "SHA256SUMS.txt")
 want("wsc", "cosign-sums", "https://github.com/pulseengine/sigil/", "SHA256SUMS.txt")
 want("rivet-sdlc", "cosign-sums", "https://github.com/pulseengine/rivet/", "SHA256SUMS.txt")

@@ -56,7 +56,12 @@ env:
   # ordeal is EXCLUDED until its releases carry cosign-signed sums
   # ordeal rejoined at v0.18.0 — its first cosign-signed release (ordeal#116).
   # Entry shape: repo_tool:version[:binary] — binary defaults to the tool
-  # name; kiln ships its CLI as `kilnd`.
+  # name. kiln v0.6.0 renamed its CLI from `kilnd` to `kiln` (kiln#524) and its
+  # archive carries BOTH; `kilnd` is a deprecated alias kept dispatchable for
+  # consumers (jess#287) for one layer cycle and is removed in kiln v0.7.0 —
+  # drop the `kiln:v0.6.0:kilnd` entry when the layer moves to v0.7.0
+  # (varve#258). Two entries, one repo, one archive: the payload is named for
+  # the binary, so they are distinct.
   # varve-producer rides in the layer like any other tool, so a layers
   # repository gets a PINNED, signature-verified assembler instead of fetching
   # one ad hoc. Its asset is not `<tool>-<version>-<triple>` — the repo is
@@ -74,7 +79,7 @@ env:
   # `version = "0.7.1"` in the signed manifest for a binary that answers
   # `with-device 0.2.1` — the layer stating something untrue about its own
   # contents, which is the one thing it exists not to do.
-  TARBALL_TOOLS: "rivet:v0.35.0 spar:v0.40.0 synth:v0.61.0 witness:v0.43.0 ordeal:v0.19.0 loom:v1.4.1 meld:v0.53.0 kiln:v0.4.4:kilnd pulseengine/varve:v0.32.0:varve-producer:varve-producer-v%V-%T.tar.gz pulseengine/jess:v0.7.1:with-device:with-device-%V-%T.tar.gz:0.2.1"
+  TARBALL_TOOLS: "rivet:v0.35.0 spar:v0.40.0 synth:v0.61.0 witness:v0.43.0 ordeal:v0.19.0 loom:v1.4.1 meld:v0.53.0 kiln:v0.6.0 kiln:v0.6.0:kilnd pulseengine/varve:v0.32.0:varve-producer:varve-producer-v%V-%T.tar.gz pulseengine/jess:v0.7.1:with-device:with-device-%V-%T.tar.gz:0.2.1"
   WSC_VERSION: v0.11.0
   # VS Code extensions carried as kind="vsix" payloads (REQ-VSIX-001).
   # Entry shape: repo:version:extension-name:asset-template, where the
