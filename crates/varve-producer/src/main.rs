@@ -8,8 +8,8 @@
 use clap::{CommandFactory, Parser};
 use varve_producer::cli::{Cli, Cmd};
 use varve_producer::{
-    asset, binfmt, deposit, docs, forge::Forge, gh::CommandRunner, immutable, ingest, nextlayer,
-    orchestrate, plan, registry, scan, source,
+    asset, binfmt, deposit, docs, forge::Forge, gh, gh::CommandRunner, immutable, ingest,
+    nextlayer, orchestrate, plan, registry, scan, source,
 };
 
 /// `GH_HOST` is what `gh` itself uses to target an instance, so varve reads
@@ -275,8 +275,101 @@ fn main() -> anyhow::Result<()> {
             let forge = forge_from_env();
             let answers = scan::latest_releases(&source::Spawn, &forge, &m);
 
-            match scan::compare(&m, &answers) {
-                Ok(moved) => {
+            // TWO PASSES, so the network cost stays proportional to the
+            // problem. The first derives every version the TAG implies, which
+            // is almost all of them and costs nothing. Only for a payload the
+            // tag cannot answer do we ask what the new release actually
+            // publishes — a hub's own number is in its asset names
+            // (REQ-AUTOBUMP-001), and asking for all of them would spend a
+            // request per repository on every scan to learn nothing.
+            let none_published: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            let mut published: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            if let Ok(first) = scan::compare(&m, &answers, &none_published) {
+                for x in first.iter().filter(|x| x.derived_version.is_none()) {
+                    let argv = gh::release_assets_argv(&x.repo, &x.latest);
+                    let out = source::Spawn.run("gh", &argv, &gh::forge_env(&forge));
+                    if !out.ok() {
+                        // Not fatal: the tag already failed to answer, and a
+                        // failed listing simply leaves this payload without a
+                        // derivation — which `why_a_person` then reports. It
+                        // must never silently become a different answer.
+                        continue;
+                    }
+                    if let Ok(names) = gh::parse_release_assets(&out.stdout) {
+                        published.insert(x.repo.clone(), names);
+                    }
+                }
+            }
+
+            match scan::compare(&m, &answers, &published) {
+                Ok(mut moved) => {
+                    // RE-MEASURE every moved opt-in, through the SAME
+                    // ingestion ladder a deposit trusts (REQ-PREPARED-001
+                    // clause 2). An `unverified-reason` is a measurement of ONE
+                    // release; the scanner establishes the fact again for the
+                    // new one rather than carrying the old words forward.
+                    //
+                    // Through `GhSource::probe`, not a second implementation of
+                    // the probes: a scanner that judged "is this release
+                    // proven?" by its own rules would be a second opinion on
+                    // the exact question the deposit answers, and the two
+                    // would drift.
+                    let scratch = std::env::temp_dir()
+                        .join(format!("varve-scan-remeasure-{}", std::process::id()));
+                    // ONE date and ONE probe per RELEASE, not per payload.
+                    //
+                    // Two tools can come from one release — `wit-bindgen-wrpc`
+                    // and `wrpc-wasmtime` both from wrpc v0.17.0 — and varve
+                    // REQUIRES them to carry byte-identical reasons. Probing
+                    // each separately would ask the same question twice, and a
+                    // second answer that differed (a flaky download, the clock
+                    // crossing midnight between probes) would yield two
+                    // measurements of one release and a manifest varve refuses.
+                    let today = nextlayer::today();
+                    let mut by_release: std::collections::BTreeMap<
+                        (String, String),
+                        Option<scan::Remeasured>,
+                    > = std::collections::BTreeMap::new();
+                    for x in moved.iter_mut().filter(|x| x.unverified_reason.is_some()) {
+                        let key = (x.repo.clone(), x.latest.clone());
+                        if let Some(done) = by_release.get(&key) {
+                            x.remeasured = done.clone();
+                            continue;
+                        }
+                        let src = source::GhSource::new(source::Spawn, forge.clone(), &scratch);
+                        let probe =
+                            match orchestrate::Source::probe(&src, &forge, &x.repo, &x.latest) {
+                                Ok(p) => p,
+                                // A probe that could not run leaves the payload
+                                // un-remeasured, which `why_a_person` reports. It
+                                // must never become a guessed answer — and it is
+                                // remembered, so a sibling tool is not probed again
+                                // and given a different answer.
+                                Err(_) => {
+                                    by_release.insert(key, None);
+                                    continue;
+                                }
+                            };
+                        let r = Some(scan::remeasure(
+                            &x.repo,
+                            &x.latest,
+                            &today,
+                            probe.has_sums,
+                            probe.has_cosign_bundle,
+                            probe.cosign.as_ref().map(|r| r.is_ok()),
+                            match probe.attestation {
+                                ingest::AttestationProbe::Verified { .. } => Some(true),
+                                ingest::AttestationProbe::Rejected(_) => Some(false),
+                                _ => None,
+                            },
+                        ));
+                        by_release.insert(key, r.clone());
+                        x.remeasured = r;
+                    }
+                    let _ = std::fs::remove_dir_all(&scratch);
+                    let moved = moved;
                     if json {
                         let out: Vec<_> = moved
                             .iter()
@@ -285,12 +378,31 @@ fn main() -> anyhow::Result<()> {
                                     "name": x.name, "repo": x.repo,
                                     "pinned": x.pinned, "latest": x.latest,
                                     "payload_version": x.payload_version,
+                                    // THE PROPOSAL. A realm applies this
+                                    // rather than deriving a version of its
+                                    // own, so the rule lives in one place
+                                    // (REQ-AUTOBUMP-001). Absent means no
+                                    // derivation applied, and `needs_a_person`
+                                    // then says so.
+                                    "derived_version": x.derived_version,
                                     "auto_bumpable": x.auto_bumpable(),
                                     // WHY not, when it is not. A consumer that
                                     // proposes a bump needs to know which work
                                     // a person must do: read release notes, or
                                     // re-measure the new release's proof.
                                     "needs_a_person": x.why_a_person(),
+                                    // The re-measurement, for a payload that
+                                    // carries an opt-in. A realm writes
+                                    // `measured` into `[tool.unverified]`, or
+                                    // removes the opt-in when proof now exists.
+                                    "remeasured": x.remeasured.as_ref().map(|r| match r {
+                                        scan::Remeasured::ProofNowExists { mechanism } => {
+                                            serde_json::json!({ "proof_now_exists": mechanism })
+                                        }
+                                        scan::Remeasured::StillUnproven { measured } => {
+                                            serde_json::json!({ "measured": measured })
+                                        }
+                                    }),
                                 })
                             })
                             .collect();
