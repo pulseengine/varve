@@ -5013,3 +5013,52 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-10-14T20:07:55Z
+
+  - id: REQ-COMPOSEWINDOW-001
+    type: requirement
+    title: A composition never promises support past the layers it composes, unless it says why
+    status: approved
+    release: v0.43.0
+    description: Measured on varve#25(4) The cap shall be applied by the command the deposit already calls (varve support-horizon), given the layer's manifest; a layers repository adopts it with one argument and the realm definitions it already downloads, and no second command decides the window.
+    links:
+      - type: satisfies
+        target: REQ-SUPPORTUNTIL-001
+      - type: satisfies
+        target: REQ-COMPOSE-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-14T19:09:24Z
+
+  - id: REQ-ENVQUOTE-001
+    type: requirement
+    title: varve env emits the store root quoted, so the line a user is told to eval cannot execute it
+    status: approved
+    release: v0.43.0
+    description: "varve#46: env_script_sh interpolates the store root inside sh double quotes, where $ and backticks stay live; VARVE_ROOT='/tmp/vr$(id)x' runs id when the user follows 'eval \"$(varve env)\"'. The same injection class v0.19.0 removed from shim dispatch, surviving where the user is told to eval. Clauses: (1) Every shell varve env supports shall receive the path in that shell's literal quoting (sh/bash/zsh single quotes with '\\'' escaping; fish and PowerShell by their own rules). (2) A root containing each shell's metacharacters shall round-trip as the literal path, shown by running the emitted script in that shell."
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-14T19:09:24Z
+
+  - id: REQ-NOPINNOTOOL-001
+    type: requirement
+    title: With no pin in scope, which, run and the shims refuse as status does
+    status: approved
+    release: v0.43.0
+    description: "varve#198: in a directory with no varve.toml, varve status refused (no trust root) while varve which ordeal resolved an old ordeal from the legacy pre-realm store ~/.varve/core with no verification, and the shims on PATH did the same. Two code paths answering one question differently. Clauses: (1) With no pin in scope, which, run and shim dispatch shall refuse with the same reason status gives. (2) No resolution shall read the legacy pre-realm store. (3) varve shall say the legacy store exists and that nothing in it verifies, without deleting it."
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-14T19:09:24Z
+
+  - id: REQ-MUTANTDEBT-001
+    type: requirement
+    title: Declared mutation debt is measured in full, not cut off at a time cap
+    status: approved
+    release: v0.43.0
+    description: "varve#181: the nightly advisory mutation run is cancelled at its 90-minute cap every night after ~32% of 2,675 mutants, so 11 of the 22 not-yet files are never reached. The instrument that makes declared debt counted rather than hidden counts half of it. Clauses: (1) Every not-yet file in mutation-scope.toml shall be tested by some scheduled run that completes. (2) A run that does not complete shall be reported as incomplete, never as a measurement."
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-14T19:09:24Z

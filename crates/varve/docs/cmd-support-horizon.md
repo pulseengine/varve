@@ -8,7 +8,17 @@ varve support-horizon --channel rolling --issued-at 2026-09-03T00:00:00Z
 # 2027-03-03
 ```
 
-`--json` emits `{"channel", "issued_at", "support_until"}` for a pipeline.
+`--json` emits `{"channel", "issued_at", "support_until", "policy_until",
+"bound_by"}` for a pipeline.
+
+A layer that composes others passes its `layer.toml`:
+
+```sh
+varve support-horizon --channel rolling --issued-at 2026-10-02T10:00:00Z \
+  --manifest layer.toml
+# support capped at 2026-10-24 by included layer 2026.09.0 (realm 'pulseengine-wasm'); ...   (stderr)
+# 2026-10-24                                                                                 (stdout)
+```
 
 ## Why this is derived and not typed
 
@@ -46,10 +56,37 @@ is pointed at, and the one whose contents are deliberately frozen.
 An unknown channel is refused rather than given a default. A horizon nobody
 decided is a promise nobody made, and it would be signed with the realm's root.
 
+## A composition cannot outlast what it composes
+
+covalent 2026.10.0 signed support until **2026-11-02** while the wasm-layers
+layer it includes was supported only until **2026-10-24** (varve#254). The
+composition promised nine days of support for bytes whose own realm had stopped
+vouching for them, and signed that promise with its root.
+
+With `--manifest`, every `[[include]]` is read from **its own realm**: the
+include's manifest is fetched by digest and verified against that realm's
+root, then its current line-status (the baseline, or a later published
+correction, whichever verifies and is newer) supplies its window. The horizon
+is the earliest of the channel's policy and every include's window.
+
+- **Capping is the default**, so an automatic deposit states the true window
+  without a person.
+- **An include that states no window refuses.** Skipping it would make the cap
+  vacuous: the include nobody vouched for is exactly the one that would have
+  bound it.
+- **`--past-includes "<reason>"` promises longer anyway.** The reason is
+  printed beside the date, so a longer promise is a decision on the record.
+  An empty reason is refused.
+
+The realms the includes name must be defined in a `varve-realms.toml` found
+from the working directory, exactly as for `install`.
+
 ## What it does not do
 
+
 It does not sample a clock beyond the `--issued-at` you give it, and it does
-not write anything. The caller puts the result in the status document, and
+not write anything. Without `--manifest` it makes no network request; with
+one, it reads only the includes' manifests and line-statuses. The caller puts the result in the status document, and
 `varve sign-status` refuses a document without one.
 
 ## Reading it back

@@ -216,6 +216,40 @@ fn find_sub(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     (from..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
 }
 
+/// Every occurrence of `from` in `hay` replaced by `to`, and how many there
+/// were. ONE copy, used by the text path, the per-string binary path and the
+/// SYSDIRS table.
+///
+/// Written without index arithmetic on purpose. The three loops this replaced
+/// advanced with `i = hit + from.len()`, and cargo-mutants' `+` → `*` turned
+/// that into a loop that never advances when the hit is at 0 — while
+/// appending on every pass. It did not just hang: it grew a buffer until the
+/// CI runner ran out of memory and was shut down, twice, taking the whole
+/// mutation shard with it. Slicing with `get` leaves no operator for that
+/// mutant, and the loop below cannot run without consuming input.
+fn replace_all(hay: &[u8], from: &[u8], to: &[u8]) -> (Vec<u8>, usize) {
+    let mut out = Vec::with_capacity(hay.len());
+    let mut rest = hay;
+    let mut count = 0;
+    // Every pass must CONSUME input or stop. Advancing only past a match
+    // that lies wholly inside `rest` makes termination independent of what
+    // `find_sub` answers: a mutant `find_sub` that always says `Some(0)`
+    // once spun this loop forever on an empty `rest`, appending each time,
+    // until the CI runner ran out of memory — the failure it was written to
+    // end, reached by a different mutant (2026-10-16).
+    while let Some(at) = find_sub(rest, from, 0) {
+        let Some(tail) = rest.get(at..).and_then(|t| t.get(from.len()..)) else {
+            break;
+        };
+        out.extend_from_slice(&rest[..at]);
+        out.extend_from_slice(to);
+        rest = tail;
+        count += 1;
+    }
+    out.extend_from_slice(rest);
+    (out, count)
+}
+
 /// What relocating one member's bytes produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relocation {
@@ -253,16 +287,7 @@ pub fn relocate_bytes(
 
     if !is_binary(bytes) {
         // The `sed -i` half: no field to overflow, so the text may change length.
-        let mut out = Vec::with_capacity(bytes.len());
-        let mut i = 0;
-        let mut substitutions = 0;
-        while let Some(hit) = find_sub(bytes, built, i) {
-            out.extend_from_slice(&bytes[i..hit]);
-            out.extend_from_slice(dest);
-            i = hit + built.len();
-            substitutions += 1;
-        }
-        out.extend_from_slice(&bytes[i..]);
+        let (out, substitutions) = replace_all(bytes, built, dest);
         return Ok(Relocation {
             bytes: out,
             fields: 0,
@@ -278,6 +303,12 @@ pub fn relocate_bytes(
     let mut fields = sysdirs.as_ref().map_or(0, |(_, n)| *n);
     let mut cursor = 0;
     while let Some(hit) = find_sub(&out, built, cursor) {
+        // A hit behind the cursor is a search that did not advance; stop
+        // rather than re-patch the same field forever (a mutant `find_sub`
+        // returning a fixed position hung here until the test timed out).
+        if hit < cursor {
+            break;
+        }
         if let Some((range, _)) = &sysdirs
             && range.contains(&hit)
         {
@@ -317,15 +348,7 @@ pub fn relocate_bytes(
         let capacity = pad_end - start;
 
         // Replace every occurrence of the prefix WITHIN this one string.
-        let old = out[start..end].to_vec();
-        let mut new = Vec::with_capacity(old.len());
-        let mut i = 0;
-        while let Some(h) = find_sub(&old, built, i) {
-            new.extend_from_slice(&old[i..h]);
-            new.extend_from_slice(dest);
-            i = h + built.len();
-        }
-        new.extend_from_slice(&old[i..]);
+        let (new, _) = replace_all(&out[start..end], built, dest);
 
         // `if len(new_dl_path) >= p_filesz: ERROR` — transcribed, not
         // paraphrased. The destination check has already made this
@@ -447,17 +470,7 @@ fn relocate_sysdirs(
     let paths: Vec<Vec<u8>> = table
         .split(|b| *b == 0)
         .take_while(|p| !p.is_empty())
-        .map(|p| {
-            let mut new = Vec::with_capacity(p.len());
-            let mut i = 0;
-            while let Some(h) = find_sub(p, built, i) {
-                new.extend_from_slice(&p[i..h]);
-                new.extend_from_slice(dest);
-                i = h + built.len();
-            }
-            new.extend_from_slice(&p[i..]);
-            new
-        })
+        .map(|p| replace_all(p, built, dest).0)
         .collect();
     let width = if class64 { 8 } else { 4 };
     let slots = len_size / width;

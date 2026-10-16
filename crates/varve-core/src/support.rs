@@ -67,7 +67,18 @@ impl Policy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupportError {
     UnknownChannel(String),
-    BadDate { field: &'static str, value: String },
+    BadDate {
+        field: &'static str,
+        value: String,
+    },
+    /// An include's own signed line-status states no window, so nothing
+    /// bounds what the composition may promise about it.
+    IncludeStatesNoWindow {
+        layer: String,
+        realm: String,
+    },
+    /// `--past-includes` was given with nothing in it.
+    OverrideWithoutReason,
 }
 
 impl fmt::Display for SupportError {
@@ -84,6 +95,18 @@ impl fmt::Display for SupportError {
                 "{field} `{value}` is not a date (expected YYYY-MM-DD). This \
                  field has never been validated, so an unparseable value would \
                  sign cleanly and then be unusable by everything that reads it."
+            ),
+            SupportError::IncludeStatesNoWindow { layer, realm } => write!(
+                f,
+                "included layer {layer} (realm '{realm}') states no support window, so \
+                 nothing bounds how long this composition may promise to support it. \
+                 Refusing rather than skipping it: the include nobody vouched for is \
+                 the one that would have set the cap."
+            ),
+            SupportError::OverrideWithoutReason => write!(
+                f,
+                "promising support past an included layer's window needs a reason on \
+                 the record; an empty one is not a decision"
             ),
         }
     }
@@ -128,6 +151,168 @@ fn days_in_month(y: i64, m: i64) -> i64 {
             }
         }
     }
+}
+
+/// One included layer's stated window, read from that layer's OWN signed
+/// line-status and verified against ITS realm's root by the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeWindow {
+    pub layer: String,
+    pub realm: String,
+    /// `None` when the include's line-status states no window.
+    pub support_until: Option<String>,
+}
+
+/// What set a composition's horizon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bound {
+    /// The layer's own channel policy; no include ends sooner.
+    Own,
+    /// This include ends sooner, and the composition promises no more.
+    Include { layer: String, realm: String },
+    /// The composition promises past `earliest`, deliberately, for `reason`.
+    PastIncludes { earliest: String, reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capped {
+    pub until: String,
+    pub bound_by: Bound,
+}
+
+/// Cap a composition's horizon at the earliest window among its includes
+/// (REQ-COMPOSEWINDOW-001).
+///
+/// A composition's window was derived from its own channel alone, so covalent
+/// 2026.10.0 signed support until 2026-11-02 over a wasm layer whose own realm
+/// stops vouching for it on 2026-10-24 (varve#254). The composition cannot
+/// support bytes longer than the realm that publishes them does.
+///
+/// Capping, not refusing, is the default: an auto-deposit should produce the
+/// true window without a person. Promising longer is possible and takes a
+/// `past_includes` reason, which the caller prints beside the signed date.
+pub fn cap_by_includes(
+    own: &str,
+    includes: &[IncludeWindow],
+    past_includes: Option<&str>,
+) -> Result<Capped, SupportError> {
+    let own_days = epoch_days(own).ok_or_else(|| SupportError::BadDate {
+        field: "support-until",
+        value: own.to_string(),
+    })?;
+    let mut earliest: Option<(i64, &IncludeWindow, &str)> = None;
+    for inc in includes {
+        let until =
+            inc.support_until
+                .as_deref()
+                .ok_or_else(|| SupportError::IncludeStatesNoWindow {
+                    layer: inc.layer.clone(),
+                    realm: inc.realm.clone(),
+                })?;
+        let days = epoch_days(until).ok_or_else(|| SupportError::BadDate {
+            field: "include support-until",
+            value: until.to_string(),
+        })?;
+        if earliest.is_none_or(|(e, _, _)| days < e) {
+            earliest = Some((days, inc, until));
+        }
+    }
+    let own_stands = Capped {
+        until: own.to_string(),
+        bound_by: Bound::Own,
+    };
+    let Some((_, inc, until)) = earliest.filter(|(d, _, _)| *d < own_days) else {
+        return Ok(own_stands);
+    };
+    match past_includes {
+        Some(reason) if reason.trim().is_empty() => Err(SupportError::OverrideWithoutReason),
+        Some(reason) => Ok(Capped {
+            until: own.to_string(),
+            bound_by: Bound::PastIncludes {
+                earliest: until.to_string(),
+                reason: reason.trim().to_string(),
+            },
+        }),
+        None => Ok(Capped {
+            until: until.to_string(),
+            bound_by: Bound::Include {
+                layer: inc.layer.clone(),
+                realm: inc.realm.clone(),
+            },
+        }),
+    }
+}
+
+/// Why one include's window could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeWindowError {
+    /// The include, by digest — all that is known before its manifest verifies.
+    pub include: String,
+    pub realm: String,
+    pub reason: String,
+}
+
+impl fmt::Display for IncludeWindowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "cannot read the support window of included layer {} (realm '{}'): {}",
+            self.include, self.realm, self.reason
+        )
+    }
+}
+
+impl std::error::Error for IncludeWindowError {}
+
+/// Read one include's stated window from the realm that vouches for it.
+///
+/// `source`, `verifier` and `root_pk` are THAT realm's — never the composing
+/// realm's. The manifest is verified first, so the layer id the window is
+/// reported against is one the realm signed; the line-status is then chosen by
+/// [`crate::linestatus::current_line_status`], the same rule install uses, so
+/// a correction that shortened the window binds here too.
+///
+/// No status at all yields `support_until: None`, which `cap_by_includes`
+/// refuses. A status that is present and bad is an error.
+pub fn include_window(
+    source: &dyn crate::source::LayerSource,
+    verifier: &dyn crate::install::ManifestVerifier,
+    root_pk: &[u8],
+    digest: &str,
+    realm: &str,
+) -> Result<IncludeWindow, IncludeWindowError> {
+    let fail = |reason: String| IncludeWindowError {
+        include: digest.to_string(),
+        realm: realm.to_string(),
+        reason,
+    };
+    let layer_ref = crate::source::LayerRef::Digest(digest.to_string());
+    let fetched = source
+        .fetch_manifest(&layer_ref)
+        .map_err(|e| fail(format!("fetching its manifest: {e}")))?;
+    let payload = verifier
+        .verify(&fetched)
+        .map_err(|e| fail(format!("its manifest does not verify: {}", e.0)))?;
+    if crate::store::manifest_digest(&payload) != digest {
+        return Err(fail(
+            "the manifest served for this digest hashes to something else".to_string(),
+        ));
+    }
+    let manifest = crate::manifest::LayerManifest::parse(&payload)
+        .map_err(|e| fail(format!("its manifest does not parse: {e}")))?;
+    let status = crate::linestatus::current_line_status(
+        source,
+        &layer_ref,
+        manifest.layer.line(),
+        root_pk,
+        crate::linestatus::Published::Required,
+    )
+    .map_err(|e| fail(format!("layer {}: its line-status: {e}", manifest.layer)))?;
+    Ok(IncludeWindow {
+        layer: manifest.layer.to_string(),
+        realm: realm.to_string(),
+        support_until: status.and_then(|(_, doc)| doc.report_for(&manifest.layer).support_until),
+    })
 }
 
 /// Where a layer stands against its stated horizon.
@@ -357,5 +542,348 @@ mod tests {
             standing("2027-09-20", "2026-09-03").unwrap(),
         );
         assert!(far.contains("(382 days)"), "{far}");
+    }
+
+    fn inc(layer: &str, until: Option<&str>) -> IncludeWindow {
+        IncludeWindow {
+            layer: layer.to_string(),
+            realm: "wasm".to_string(),
+            support_until: until.map(str::to_string),
+        }
+    }
+
+    /// The measured case from varve#254: covalent's own channel says
+    /// 2026-11-02, the wasm layer it includes says 2026-10-24.
+    // rivet: verifies REQ-COMPOSEWINDOW-001
+    #[test]
+    fn a_composition_is_capped_at_its_earliest_include() {
+        let got = cap_by_includes(
+            "2026-11-02",
+            &[
+                inc("2026.10.0", Some("2026-10-24")),
+                inc("2026.10.3", Some("2026-10-30")),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(got.until, "2026-10-24");
+        assert_eq!(
+            got.bound_by,
+            Bound::Include {
+                layer: "2026.10.0".into(),
+                realm: "wasm".into()
+            }
+        );
+    }
+
+    /// The earliest include binds wherever it is listed, and on a tie the
+    /// first listed is named, so the message is the same on every run.
+    // rivet: verifies REQ-COMPOSEWINDOW-001
+    #[test]
+    fn the_earliest_include_binds_wherever_it_is_listed() {
+        let got = cap_by_includes(
+            "2026-11-02",
+            &[
+                inc("late", Some("2026-10-30")),
+                inc("early", Some("2026-10-24")),
+                inc("tied", Some("2026-10-24")),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(got.until, "2026-10-24");
+        assert_eq!(
+            got.bound_by,
+            Bound::Include {
+                layer: "early".into(),
+                realm: "wasm".into()
+            }
+        );
+    }
+
+    /// An include supported for longer than the composition does not lengthen
+    /// it, and a layer with no includes keeps its own window.
+    // rivet: verifies REQ-COMPOSEWINDOW-001
+    #[test]
+    fn the_own_window_stands_when_it_is_already_the_shortest() {
+        let got = cap_by_includes("2026-11-02", &[inc("x", Some("2027-01-01"))], None).unwrap();
+        assert_eq!(
+            (got.until.as_str(), &got.bound_by),
+            ("2026-11-02", &Bound::Own)
+        );
+        let alone = cap_by_includes("2026-11-02", &[], None).unwrap();
+        assert_eq!(
+            (alone.until.as_str(), &alone.bound_by),
+            ("2026-11-02", &Bound::Own)
+        );
+    }
+
+    /// The same day is not an overshoot: "through that day" on both sides.
+    // rivet: verifies REQ-COMPOSEWINDOW-001
+    #[test]
+    fn an_include_ending_the_same_day_is_not_a_cap() {
+        let got = cap_by_includes("2026-11-02", &[inc("x", Some("2026-11-02"))], None).unwrap();
+        assert_eq!(got.bound_by, Bound::Own);
+    }
+
+    /// Clause 2: an include that states no window is not skipped. Skipping it
+    /// is how the cap goes vacuous — the one include nobody vouched for is
+    /// exactly the one that would have bound it.
+    // rivet: verifies REQ-COMPOSEWINDOW-001
+    #[test]
+    fn an_include_that_states_no_window_refuses_rather_than_being_skipped() {
+        let err = cap_by_includes(
+            "2026-11-02",
+            &[inc("a", Some("2026-12-01")), inc("b", None)],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            SupportError::IncludeStatesNoWindow {
+                layer: "b".into(),
+                realm: "wasm".into()
+            }
+        );
+        assert!(err.to_string().contains("b"), "{err}");
+    }
+
+    /// A malformed include date refuses rather than comparing as text.
+    // rivet: verifies REQ-COMPOSEWINDOW-001
+    #[test]
+    fn an_unparseable_include_window_refuses() {
+        let err = cap_by_includes("2026-11-02", &[inc("a", Some("soon"))], None).unwrap_err();
+        assert!(matches!(err, SupportError::BadDate { .. }), "{err:?}");
+    }
+
+    /// Clause 3: a longer promise is possible, and it is a decision with a
+    /// reason on the record — the reason is carried out so the caller can
+    /// print it beside the signed date.
+    // rivet: verifies REQ-COMPOSEWINDOW-001
+    #[test]
+    fn exceeding_the_cap_takes_a_stated_reason() {
+        let got = cap_by_includes(
+            "2026-11-02",
+            &[inc("2026.10.0", Some("2026-10-24"))],
+            Some("wasm-layers 2026.11.0 is staged and carries the same tools"),
+        )
+        .unwrap();
+        assert_eq!(got.until, "2026-11-02");
+        assert_eq!(
+            got.bound_by,
+            Bound::PastIncludes {
+                earliest: "2026-10-24".into(),
+                reason: "wasm-layers 2026.11.0 is staged and carries the same tools".into()
+            }
+        );
+    }
+
+    /// An override that says nothing is not a decision.
+    // rivet: verifies REQ-COMPOSEWINDOW-001
+    #[test]
+    fn an_override_without_a_reason_is_refused() {
+        let err =
+            cap_by_includes("2026-11-02", &[inc("a", Some("2026-10-24"))], Some("  ")).unwrap_err();
+        assert_eq!(err, SupportError::OverrideWithoutReason);
+        assert!(!err.to_string().is_empty());
+    }
+
+    /// An override that was not needed changes nothing: it must not be
+    /// recorded as though a longer promise had been made.
+    // rivet: verifies REQ-COMPOSEWINDOW-001
+    #[test]
+    fn an_unneeded_override_is_not_recorded() {
+        let got = cap_by_includes(
+            "2026-11-02",
+            &[inc("a", Some("2027-01-01"))],
+            Some("because"),
+        )
+        .unwrap();
+        assert_eq!(got.bound_by, Bound::Own);
+    }
+
+    mod from_source {
+        use super::super::*;
+        use crate::install::{ManifestVerifier, VerifyError};
+        use crate::linestatus::LineStatus;
+        use crate::manifest::fixtures::manifest_with_tools;
+        use crate::source::MemorySource;
+        use crate::store::manifest_digest;
+        use crate::verify::generate_root_keypair;
+
+        struct AcceptAll;
+        impl ManifestVerifier for AcceptAll {
+            fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {
+                Ok(fetched.to_vec())
+            }
+        }
+        struct RejectAll;
+        impl ManifestVerifier for RejectAll {
+            fn verify(&self, _: &[u8]) -> Result<Vec<u8>, VerifyError> {
+                Err(VerifyError("untrusted signature (test)".into()))
+            }
+        }
+
+        fn wasm_layer() -> Vec<u8> {
+            manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[])
+        }
+
+        fn status(counter: u64, until: Option<&str>) -> LineStatus {
+            LineStatus {
+                min_counter: None,
+                line: "2026.10".into(),
+                counter,
+                issued_at: "2026-09-24T00:00:00Z".into(),
+                support_until: until.map(str::to_string),
+                yanked: Default::default(),
+                known_problems: Vec::new(),
+            }
+        }
+
+        /// The include's window is read from ITS realm's signed status, and
+        /// names the layer the digest turned out to be.
+        // rivet: verifies REQ-COMPOSEWINDOW-001
+        #[test]
+        fn an_include_window_comes_from_its_own_signed_status() {
+            let (sk, pk) = generate_root_keypair();
+            let bytes = wasm_layer();
+            let source = MemorySource::new().with_manifest(&bytes).with_line_status(
+                status(1, Some("2026-10-24"))
+                    .sign(&sk, "k")
+                    .unwrap()
+                    .as_bytes(),
+            );
+            let w =
+                include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm").unwrap();
+            assert_eq!(
+                w,
+                IncludeWindow {
+                    layer: "2026.10.0".into(),
+                    realm: "wasm".into(),
+                    support_until: Some("2026-10-24".into()),
+                }
+            );
+        }
+
+        /// A later correction that SHORTENS the window binds the cap — the
+        /// same document install would cache.
+        // rivet: verifies REQ-COMPOSEWINDOW-001
+        #[test]
+        fn a_published_correction_overtakes_the_baseline_window() {
+            let (sk, pk) = generate_root_keypair();
+            let bytes = wasm_layer();
+            let source = MemorySource::new()
+                .with_manifest(&bytes)
+                .with_line_status(
+                    status(1, Some("2026-10-24"))
+                        .sign(&sk, "k")
+                        .unwrap()
+                        .as_bytes(),
+                )
+                .with_published_line_status(
+                    status(5, Some("2026-10-10"))
+                        .sign(&sk, "k")
+                        .unwrap()
+                        .as_bytes(),
+                );
+            let w =
+                include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm").unwrap();
+            assert_eq!(w.support_until.as_deref(), Some("2026-10-10"));
+        }
+
+        /// A status signed by any other key is not that realm speaking.
+        // rivet: verifies REQ-COMPOSEWINDOW-001
+        #[test]
+        fn a_status_not_signed_by_the_includes_realm_is_refused() {
+            let (sk_other, _) = generate_root_keypair();
+            let (_, pk) = generate_root_keypair();
+            let bytes = wasm_layer();
+            let source = MemorySource::new().with_manifest(&bytes).with_line_status(
+                status(1, Some("2027-12-31"))
+                    .sign(&sk_other, "k")
+                    .unwrap()
+                    .as_bytes(),
+            );
+            let err = include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm")
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("2026.10.0") || err.to_string().contains("sha256:"),
+                "{err}"
+            );
+        }
+
+        /// A source that cannot SAY whether a correction was published must
+        /// not be read as "none was". A correction can only shorten what the
+        /// baseline promised, so treating a failed fetch as absence fails open:
+        /// the composition would sign the longer, superseded window. Install
+        /// tolerates that (best-effort floor); a signed promise must not.
+        // rivet: verifies REQ-COMPOSEWINDOW-001
+        #[test]
+        fn a_correction_that_cannot_be_fetched_refuses_rather_than_reading_as_none() {
+            use crate::source::{LayerRef, LayerSource, SourceError};
+            struct CorrectionUnreachable(MemorySource);
+            impl LayerSource for CorrectionUnreachable {
+                fn fetch_manifest(&self, l: &LayerRef) -> Result<Vec<u8>, SourceError> {
+                    self.0.fetch_manifest(l)
+                }
+                fn fetch_blob(&self, d: &str) -> Result<Vec<u8>, SourceError> {
+                    self.0.fetch_blob(d)
+                }
+                fn fetch_line_status(&self, l: &LayerRef) -> Result<Option<Vec<u8>>, SourceError> {
+                    self.0.fetch_line_status(l)
+                }
+                fn fetch_published_line_status(
+                    &self,
+                    _: &str,
+                ) -> Result<Option<Vec<u8>>, SourceError> {
+                    Err(SourceError::Transport("connection reset".into()))
+                }
+            }
+            let (sk, pk) = generate_root_keypair();
+            let bytes = wasm_layer();
+            let source = CorrectionUnreachable(
+                MemorySource::new().with_manifest(&bytes).with_line_status(
+                    status(1, Some("2026-10-24"))
+                        .sign(&sk, "k")
+                        .unwrap()
+                        .as_bytes(),
+                ),
+            );
+            let err = include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm")
+                .unwrap_err();
+            assert!(err.reason.contains("connection reset"), "{err}");
+        }
+
+        /// No status at all is a window nobody stated — carried as `None`, so
+        /// `cap_by_includes` refuses it (clause 2) rather than skipping it.
+        // rivet: verifies REQ-COMPOSEWINDOW-001
+        #[test]
+        fn an_include_with_no_status_states_no_window() {
+            let (_, pk) = generate_root_keypair();
+            let bytes = wasm_layer();
+            let source = MemorySource::new().with_manifest(&bytes);
+            let w =
+                include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm").unwrap();
+            assert_eq!(w.support_until, None);
+            assert!(cap_by_includes("2026-11-02", &[w], None).is_err());
+        }
+
+        /// The include's manifest must verify under its realm before anything
+        /// it says about itself is believed.
+        // rivet: verifies REQ-COMPOSEWINDOW-001
+        #[test]
+        fn an_include_whose_manifest_does_not_verify_is_refused() {
+            let (sk, pk) = generate_root_keypair();
+            let bytes = wasm_layer();
+            let source = MemorySource::new().with_manifest(&bytes).with_line_status(
+                status(1, Some("2026-10-24"))
+                    .sign(&sk, "k")
+                    .unwrap()
+                    .as_bytes(),
+            );
+            assert!(
+                include_window(&source, &RejectAll, &pk, &manifest_digest(&bytes), "wasm").is_err()
+            );
+        }
     }
 }

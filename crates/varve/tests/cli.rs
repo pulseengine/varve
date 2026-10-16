@@ -7052,3 +7052,67 @@ fn the_timing_report_goes_to_stderr_and_not_to_stdout() {
          to skip:\n{body}"
     );
 }
+
+const LAYER_TOML_NO_INCLUDES: &str = r#"
+[varve]
+version = "v0.41.0"
+
+[realm]
+name     = "pulseengine"
+channel  = "rolling"
+registry = "oci://ghcr.io/pulseengine/layers"
+
+[[tool]]
+name    = "rivet"
+version = "v0.34.0"
+"#;
+
+/// A layer that composes nothing keeps its channel's window, and stdout stays
+/// the bare date a workflow captures with `$(...)`.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_with_a_manifest_that_composes_nothing_keeps_the_policy_date() {
+    let fx = fixture(None, &[]);
+    std::fs::write(fx.project.join("layer.toml"), LAYER_TOML_NO_INCLUDES).unwrap();
+    varve(&fx)
+        .args([
+            "support-horizon",
+            "--channel",
+            "rolling",
+            "--issued-at",
+            "2026-10-02T10:00:00Z",
+            "--manifest",
+            "layer.toml",
+        ])
+        .assert()
+        .success()
+        .stdout("2026-11-02\n")
+        .stderr("");
+}
+
+/// An include whose realm is not defined here cannot be read, and the horizon
+/// is refused rather than computed without it (clause 2).
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_refuses_an_include_from_an_undefined_realm() {
+    let fx = fixture(None, &[]);
+    let text = format!(
+        "{LAYER_TOML_NO_INCLUDES}\n[[include]]\ndigest = \"sha256:{}\"\nrealm = \"nowhere\"\nlayer = \"2026.09.0\"\n",
+        "a".repeat(64)
+    );
+    std::fs::write(fx.project.join("layer.toml"), text).unwrap();
+    varve(&fx)
+        .args([
+            "support-horizon",
+            "--channel",
+            "rolling",
+            "--issued-at",
+            "2026-10-02T10:00:00Z",
+            "--manifest",
+            "layer.toml",
+        ])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("nowhere"));
+}

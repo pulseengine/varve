@@ -785,6 +785,46 @@ pub fn cache_baseline_from_source(
     root_pk: &[u8],
     store_root: &Path,
 ) -> Result<Option<u64>, LineStatusError> {
+    match current_line_status(source, layer, line, root_pk, Published::BestEffort)? {
+        Some((envelope, doc)) => {
+            StatusCache::at_root(store_root).update(line, &envelope, &doc)?;
+            Ok(Some(doc.counter))
+        }
+        None => Ok(None),
+    }
+}
+
+/// What a failed fetch of the line's published correction means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Published {
+    /// Read as absence: the reader acts on the best document it can verify.
+    BestEffort,
+    /// Refuse: the reader will sign on the answer.
+    Required,
+}
+
+/// The line-status that currently speaks for `layer`: the baseline deposited
+/// beside it or the document later published under the line's own tag,
+/// whichever VERIFIES and carries the higher counter. `Ok(None)` when the
+/// source carries neither; `Err` when something was present but bad.
+///
+/// `published` says what a FAILED fetch of the correction means. Install
+/// reads it as absence ([`Published::BestEffort`]) and documents the residual.
+/// A reader about to SIGN something on the strength of the answer cannot:
+/// a correction only ever narrows what the baseline said, so "could not ask"
+/// read as "nothing newer" fails open ([`Published::Required`]).
+///
+/// One rule for every reader. The install cache and a composition reading its
+/// includes' windows (REQ-COMPOSEWINDOW-001) must agree about which document
+/// is current, or a correction that shortened a window would bind one and
+/// not the other.
+pub fn current_line_status(
+    source: &dyn crate::source::LayerSource,
+    layer: &crate::source::LayerRef,
+    line: &Line,
+    root_pk: &[u8],
+    published: Published,
+) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
     let baseline = source
         .fetch_line_status(layer)
         .map_err(|e| LineStatusError::Payload(format!("fetching baseline line-status: {e}")))?;
@@ -793,9 +833,18 @@ pub fn cache_baseline_from_source(
     // A source that cannot serve one must not be able to make that look like a
     // failure, so a transport error here is treated as absence — the baseline
     // path decides whether the consumer ends up with nothing.
-    let published = source
-        .fetch_published_line_status(&line.to_string())
-        .unwrap_or(None);
+    let published = match (
+        source.fetch_published_line_status(&line.to_string()),
+        published,
+    ) {
+        (Ok(doc), _) => doc,
+        (Err(_), Published::BestEffort) => None,
+        (Err(e), Published::Required) => {
+            return Err(LineStatusError::Payload(format!(
+                "cannot tell whether a correction was published for line {line}: {e}"
+            )));
+        }
+    };
 
     // VERIFY FIRST, RANK SECOND. Both documents are untrusted bytes from the
     // party this evidence exists to constrain. Choosing by counter before
@@ -830,10 +879,7 @@ pub fn cache_baseline_from_source(
     }
 
     match best {
-        Some((counter, envelope, doc)) => {
-            StatusCache::at_root(store_root).update(line, &envelope, &doc)?;
-            Ok(Some(counter))
-        }
+        Some((_, envelope, doc)) => Ok(Some((envelope, doc))),
         // Nothing usable. If something was PRESENT but bad, that is a finding
         // and is raised; if both were simply absent, the source carries none.
         None => match first_error {
