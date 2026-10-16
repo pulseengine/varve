@@ -225,16 +225,25 @@ fn find_sub(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 /// that into a loop that never advances when the hit is at 0 — while
 /// appending on every pass. It did not just hang: it grew a buffer until the
 /// CI runner ran out of memory and was shut down, twice, taking the whole
-/// mutation shard with it. `split_at` leaves no operator for that mutant.
+/// mutation shard with it. Slicing with `get` leaves no operator for that
+/// mutant, and the loop below cannot run without consuming input.
 fn replace_all(hay: &[u8], from: &[u8], to: &[u8]) -> (Vec<u8>, usize) {
     let mut out = Vec::with_capacity(hay.len());
     let mut rest = hay;
     let mut count = 0;
+    // Every pass must CONSUME input or stop. Advancing only past a match
+    // that lies wholly inside `rest` makes termination independent of what
+    // `find_sub` answers: a mutant `find_sub` that always says `Some(0)`
+    // once spun this loop forever on an empty `rest`, appending each time,
+    // until the CI runner ran out of memory — the failure it was written to
+    // end, reached by a different mutant (2026-10-16).
     while let Some(at) = find_sub(rest, from, 0) {
-        let (head, tail) = rest.split_at(at);
-        out.extend_from_slice(head);
+        let Some(tail) = rest.get(at..).and_then(|t| t.get(from.len()..)) else {
+            break;
+        };
+        out.extend_from_slice(&rest[..at]);
         out.extend_from_slice(to);
-        rest = tail.get(from.len()..).unwrap_or_default();
+        rest = tail;
         count += 1;
     }
     out.extend_from_slice(rest);
@@ -294,6 +303,12 @@ pub fn relocate_bytes(
     let mut fields = sysdirs.as_ref().map_or(0, |(_, n)| *n);
     let mut cursor = 0;
     while let Some(hit) = find_sub(&out, built, cursor) {
+        // A hit behind the cursor is a search that did not advance; stop
+        // rather than re-patch the same field forever (a mutant `find_sub`
+        // returning a fixed position hung here until the test timed out).
+        if hit < cursor {
+            break;
+        }
         if let Some((range, _)) = &sysdirs
             && range.contains(&hit)
         {
