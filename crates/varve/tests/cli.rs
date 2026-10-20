@@ -7390,8 +7390,13 @@ fn support_horizon_refuses_an_include_from_an_undefined_realm() {
 #[test]
 fn a_failure_while_dispatching_as_a_shim_says_it_was_a_shim() {
     let fx = fixture(Some(PIN_JULY), &[]);
+    // A SYMLINK, not a copy: varve reads the name it was invoked under from
+    // argv[0], so a link named varve-bin is exactly the case covalent hit.
+    // A copy raced on Linux — another test thread forked while the copy's
+    // write handle was open and exec failed with "Text file busy" (ETXTBSY,
+    // os error 26) on the CI runner, while passing on macOS.
     let renamed = fx.project.join("varve-bin");
-    std::fs::copy(assert_cmd::cargo::cargo_bin("varve"), &renamed).unwrap();
+    std::os::unix::fs::symlink(assert_cmd::cargo::cargo_bin("varve"), &renamed).unwrap();
     let mut cmd = Command::new(&renamed);
     cmd.env("PATH", "/usr/bin:/bin")
         .env("VARVE_ROOT", &fx.root)
