@@ -8,8 +8,8 @@
 use clap::{CommandFactory, Parser};
 use varve_producer::cli::{Cli, Cmd};
 use varve_producer::{
-    asset, binfmt, deposit, docs, forge::Forge, gh, gh::CommandRunner, immutable, ingest,
-    nextlayer, orchestrate, plan, registry, scan, source,
+    advisorywatch, asset, binfmt, deposit, docs, forge::Forge, gh, gh::CommandRunner, immutable,
+    ingest, nextlayer, orchestrate, plan, registry, scan, source,
 };
 
 /// `GH_HOST` is what `gh` itself uses to target an instance, so varve reads
@@ -785,6 +785,49 @@ fn main() -> anyhow::Result<()> {
                     "template {template:?} matched no asset on any platform — \
                      the payload would be dropped from a layer that still signs"
                 );
+            }
+            Ok(())
+        }
+        Cmd::Advisories {
+            manifest,
+            today,
+            json,
+        } => {
+            let repo_root = manifest
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let today = today.unwrap_or_else(nextlayer::today);
+            let forge = forge_from_env();
+
+            let text = std::fs::read_to_string(&manifest)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", manifest.display()))?;
+            let m = varve_core::layerspec::parse_layer_manifest(&text)?;
+            let registry = varve_core::RegistrySource::parse(&m.realm.registry)?;
+
+            let scratch =
+                std::env::temp_dir().join(format!("varve-advisories-{}", std::process::id()));
+            let gh_source = source::GhSource::new(source::Spawn, forge.clone(), &scratch);
+
+            let result = advisorywatch::run(&repo_root, &gh_source, &registry, &today);
+            let _ = std::fs::remove_dir_all(&scratch);
+
+            let report = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "command": "advisories", "report": report })
+                );
+            } else {
+                print!("{}", advisorywatch::human_summary(&report));
             }
             Ok(())
         }

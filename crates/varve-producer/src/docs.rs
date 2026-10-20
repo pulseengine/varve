@@ -64,6 +64,11 @@ pub fn topics() -> &'static [Topic] {
             "deposit — assemble and stage a layer",
             "cmd-deposit.md"
         ),
+        topic!(
+            "advisories",
+            "advisories — prepare a line-status from GHSA and RustSec",
+            "cmd-advisories.md"
+        ),
         topic!("docs", "docs — this documentation", "cmd-docs.md"),
         topic!(
             "ingest-ladder",

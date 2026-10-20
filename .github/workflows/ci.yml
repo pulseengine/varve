@@ -388,8 +388,11 @@ jobs:
               -f crates/varve-producer/src/pgpsums.rs
           - shard: varve-producer
             files: >-
+              -f crates/varve-producer/src/advisory.rs
+              -f crates/varve-producer/src/advisorywatch.rs
               -f crates/varve-producer/src/apply.rs
               -f crates/varve-producer/src/asset.rs
+              -f crates/varve-producer/src/cvss.rs
               -f crates/varve-producer/src/scan.rs
               -f crates/varve-producer/src/nextlayer.rs
               -f crates/varve-producer/src/docs.rs
@@ -409,6 +412,7 @@ jobs:
               -f crates/varve-producer/src/source.rs
               -f crates/varve-producer/src/spec.rs
               -f crates/varve-producer/src/stage.rs
+              -f crates/varve-producer/src/statusdraft.rs
               -f crates/varve-producer/src/sums.rs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -383,6 +383,136 @@ pub fn verify_release<S: Source>(
     })
 }
 
+/// What [`release_sbom`] established about a release's OWN upstream SBOM
+/// (REQ-ADVISORYWATCH-001 clause 4b's fallback, when no layer annotation
+/// records one).
+///
+/// Deliberately has NO error variant of its own: every way this can fail —
+/// the release offers no proof at all, the release offers no SBOM, or the
+/// SBOM exists but the proof does not cover it — is a FACT about that one
+/// release, not a reason to stop checking every other payload the run is
+/// looking at. The caller decides what "unchecked" means for its report;
+/// this function only ever decides what is true of the bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseSbomOutcome {
+    /// The release publishes exactly one `.cdx.json` candidate (or exactly
+    /// one naming the payload's own version among several), and the
+    /// release's own verified proof covers it with a matching digest.
+    Found(Vec<u8>),
+    /// The release publishes no `.cdx.json` asset at all.
+    NoSbom,
+    /// More than one `.cdx.json` asset is published, and none of them
+    /// uniquely names the payload's own version — picking one anyway would
+    /// be a GUESS, and checking the wrong SBOM silently reports nothing for
+    /// the payload whose embedded components actually needed checking.
+    Ambiguous,
+    /// A `.cdx.json` asset exists, but the release's verified proof does
+    /// not cover it — absent from the list, or present with a digest that
+    /// does not match the bytes actually downloaded. Either way, nothing
+    /// proves these are the bytes upstream published, so they are not used.
+    NotCovered,
+    /// The release itself could not be verified at all (no proof offered,
+    /// a rejected signature, an unreadable sums file, …) — carries what
+    /// `verify_release` or the asset fetch said, verbatim.
+    VerifyFailed(String),
+}
+
+/// What [`classify_release_sbom`] decided a release's published assets name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SbomSelection {
+    One(String),
+    None,
+    Ambiguous,
+}
+
+/// Picks the ONE `.cdx.json` asset a release's SBOM fallback should use —
+/// the same rule the deposit pipeline's own asset selection follows for an
+/// otherwise-ambiguous match: a single unqualified candidate wins outright;
+/// with more than one, only a candidate whose name contains the PAYLOAD's
+/// own bare version is good enough to break the tie, and only if EXACTLY
+/// one does. Anything else is `Ambiguous` — a release that happens to
+/// publish several `.cdx.json` files is not grounds to guess which one
+/// describes this payload.
+fn classify_release_sbom(published: &[String], version: &str) -> SbomSelection {
+    let mut candidates: Vec<&String> = published
+        .iter()
+        .filter(|a| a.ends_with(".cdx.json"))
+        .collect();
+    candidates.sort();
+    match candidates.len() {
+        0 => SbomSelection::None,
+        1 => SbomSelection::One(candidates[0].clone()),
+        _ => {
+            let naming_version: Vec<&&String> =
+                candidates.iter().filter(|a| a.contains(version)).collect();
+            match naming_version.len() {
+                1 => SbomSelection::One(naming_version[0].to_string()),
+                _ => SbomSelection::Ambiguous,
+            }
+        }
+    }
+}
+
+/// The SINGLE `.cdx.json` asset a release publishes, admitted through that
+/// release's own proof — the fallback this run uses for a payload whose
+/// layer manifest recorded no `ANN_SBOM` of its own (REQ-ADVISORYWATCH-001
+/// clause 4b).
+///
+/// `release` is the release TAG `verify_release` and `Source::asset_bytes`
+/// need; `version` is the PAYLOAD's own bare version, used only to break a
+/// tie among several published `.cdx.json` assets — the two differ for a
+/// hub repository, and a release tag ("v0.11.0") is not generally a
+/// substring of an asset name upstream wrote without the "v" ("wsc-0.11.0").
+///
+/// Reuses [`verify_release`] and [`admit`] rather than a second ladder:
+/// this is the SAME question `deposit` already answers for every payload —
+/// "does the proof cover these exact bytes" — asked about one more asset of
+/// a release this run is already looking at.
+///
+/// `optins` is always empty here, deliberately: an operator's recorded
+/// reason for ingesting a TOOL unverified is a decision about that payload,
+/// made in `layer.toml`, and this fallback has no business spending it on a
+/// DIFFERENT asset (the release's SBOM) nobody opted in for. A release with
+/// no stronger proof therefore yields `VerifyFailed`, never a silent
+/// `Unverified` admission of unproven bytes.
+pub fn release_sbom_outcome<S: Source>(
+    src: &S,
+    forge: &Forge,
+    repo: &str,
+    release: &str,
+    version: &str,
+) -> ReleaseSbomOutcome {
+    let verified = match verify_release(src, forge, repo, release, &BTreeMap::new(), None, &[]) {
+        Ok(v) => v,
+        Err(e) => return ReleaseSbomOutcome::VerifyFailed(e.to_string()),
+    };
+    let asset = match classify_release_sbom(&verified.published, version) {
+        SbomSelection::None => return ReleaseSbomOutcome::NoSbom,
+        SbomSelection::Ambiguous => return ReleaseSbomOutcome::Ambiguous,
+        SbomSelection::One(asset) => asset,
+    };
+
+    // `Mechanism::Unverified` is unreachable with empty optins (`choose`
+    // refuses rather than inventing a reason), but the check is explicit
+    // rather than relying on that: a release nothing vouches for must never
+    // read as "covered" because of a code path this function does not take.
+    if verified.sums.is_none() {
+        return ReleaseSbomOutcome::NotCovered;
+    }
+
+    let bytes = match src.asset_bytes(repo, release, &asset) {
+        Ok(b) => b,
+        Err(e) => return ReleaseSbomOutcome::VerifyFailed(e.to_string()),
+    };
+    match admit(&verified, repo, &asset, &bytes) {
+        Ok(_) => ReleaseSbomOutcome::Found(bytes),
+        Err(RunError::NotCoveredByProof { .. }) | Err(RunError::DigestMismatch { .. }) => {
+            ReleaseSbomOutcome::NotCovered
+        }
+        Err(e) => ReleaseSbomOutcome::VerifyFailed(e.to_string()),
+    }
+}
+
 /// One payload, resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
@@ -418,30 +548,20 @@ pub struct SbomRef {
 /// is still ambiguous after that, NOTHING is recorded — a guess here would be
 /// signed into the layer as fact — and a one-line note says why.
 pub fn select_release_sbom<'a>(published: &'a [String], version: &str) -> Option<&'a str> {
-    let candidates: Vec<&str> = published
-        .iter()
-        .filter(|n| n.ends_with(".cdx.json"))
-        .map(String::as_str)
-        .collect();
-    // None or exactly one: that is the answer, whatever it is named.
-    if candidates.len() < 2 {
-        return candidates.first().copied();
+    // ONE rule for the deposit and the advisory watcher: classify_release_sbom.
+    // This wrapper keeps the deposit's signature and its note on ambiguity.
+    match classify_release_sbom(published, version) {
+        SbomSelection::One(name) => published.iter().find(|p| **p == name).map(String::as_str),
+        SbomSelection::None => None,
+        SbomSelection::Ambiguous => {
+            eprintln!(
+                "note: several CycloneDX SBOM candidates published for release {version:?} and \
+                 none of them uniquely names it — recording no upstream SBOM rather than \
+                 guessing"
+            );
+            None
+        }
     }
-    let narrowed: Vec<&str> = candidates
-        .iter()
-        .copied()
-        .filter(|n| n.contains(version))
-        .collect();
-    if let [only] = narrowed.as_slice() {
-        return Some(only);
-    }
-    eprintln!(
-        "note: {} CycloneDX SBOM candidates published for release {version:?} and none of \
-         them uniquely names it — recording no upstream SBOM rather than guessing: \
-         {candidates:?}",
-        candidates.len()
-    );
-    None
 }
 
 /// Group a plan by the release its payloads come from, preserving the order
@@ -2036,5 +2156,228 @@ mod tests {
         );
         assert_eq!(one(r#"{"metadata":{"component":{}}}"#), None);
         assert_eq!(one("not json"), None);
+    }
+
+    // -------------------------------------------------------------
+    // release_sbom (REQ-ADVISORYWATCH-001 clause 4b's fallback)
+    // -------------------------------------------------------------
+
+    const SBOM: &[u8] =
+        br#"{"bomFormat":"CycloneDX","components":[{"name":"rustls","version":"0.23.34"}]}"#;
+
+    /// The real shape: pulseengine/sigil v0.11.0 publishes a `.cdx.json`
+    /// asset and lists it in its own cosign-signed SHA256SUMS.txt with a
+    /// matching digest.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn a_covered_release_sbom_is_found() {
+        let f = Fixture::signed(
+            "pulseengine/sigil",
+            "v0.11.0",
+            &[("wsc-0.11.0.cdx.json", SBOM), ("wsc-0.11.0.tar.gz", A)],
+        );
+        let outcome = release_sbom_outcome(
+            &f,
+            &Forge::github_com(),
+            "pulseengine/sigil",
+            "v0.11.0",
+            "0.11.0",
+        );
+        assert_eq!(outcome, ReleaseSbomOutcome::Found(SBOM.to_vec()));
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn a_release_with_no_cdx_asset_has_no_sbom() {
+        let f = Fixture::signed("o/r", "v1", &[("tool.tar.gz", A)]);
+        assert_eq!(
+            release_sbom_outcome(&f, &Forge::github_com(), "o/r", "v1", "1.0.0"),
+            ReleaseSbomOutcome::NoSbom
+        );
+    }
+
+    /// Published, but ABSENT from the verified sums list — the proof simply
+    /// never spoke about this asset, and it must not be used anyway.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn an_sbom_absent_from_the_verified_sums_is_not_covered() {
+        let mut f = Fixture::default();
+        let key = "o/r@v1".to_string();
+        // Signed, but the list covers only the OTHER asset.
+        f.sums
+            .insert(key.clone(), format!("{}  ./tool.tar.gz\n", sha256_hex(A)));
+        f.blobs.insert(format!("{key}/tool.tar.gz"), A.to_vec());
+        f.blobs
+            .insert(format!("{key}/sbom.cdx.json"), SBOM.to_vec());
+        f.probes.insert(
+            key,
+            ReleaseProbe {
+                published: vec!["tool.tar.gz".into(), "sbom.cdx.json".into()],
+                has_sums: true,
+                has_cosign_bundle: true,
+                cosign: Some(Ok(())),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            release_sbom_outcome(&f, &Forge::github_com(), "o/r", "v1", "1.0.0"),
+            ReleaseSbomOutcome::NotCovered
+        );
+    }
+
+    /// Published AND listed, but the bytes actually downloaded do not hash
+    /// to what the signed list says — a tampered or corrupted fetch, not a
+    /// proof this fallback may use.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn an_sbom_whose_bytes_do_not_match_its_signed_digest_is_not_covered() {
+        let mut f = Fixture::default();
+        let key = "o/r@v1".to_string();
+        // The signed list names a digest that is NOT sha256(SBOM) — as if
+        // the list was signed over different bytes than what got fetched.
+        f.sums.insert(
+            key.clone(),
+            "0000000000000000000000000000000000000000000000000000000000000000  ./sbom.cdx.json\n"
+                .to_string(),
+        );
+        f.blobs
+            .insert(format!("{key}/sbom.cdx.json"), SBOM.to_vec());
+        f.probes.insert(
+            key,
+            ReleaseProbe {
+                published: vec!["sbom.cdx.json".into()],
+                has_sums: true,
+                has_cosign_bundle: true,
+                cosign: Some(Ok(())),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            release_sbom_outcome(&f, &Forge::github_com(), "o/r", "v1", "1.0.0"),
+            ReleaseSbomOutcome::NotCovered
+        );
+    }
+
+    /// The release itself could not be verified at all — no probe was ever
+    /// scripted for it, which is exactly what an upstream `gh` failure or an
+    /// unknown release looks like to this function.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn a_release_that_cannot_be_verified_is_reported_not_aborted() {
+        let f = Fixture::default();
+        let outcome = release_sbom_outcome(&f, &Forge::github_com(), "o/r", "v1", "1.0.0");
+        assert!(
+            matches!(&outcome, ReleaseSbomOutcome::VerifyFailed(detail) if !detail.is_empty()),
+            "{outcome:?}"
+        );
+    }
+
+    /// A release offering NEITHER cosign sums nor build provenance, with no
+    /// opt-in recorded (this fallback never supplies one) — `choose` itself
+    /// refuses, which must read as `VerifyFailed`, never as an admitted
+    /// `Unverified` SBOM.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn a_release_with_no_proof_mechanism_at_all_is_verifyfailed_not_admitted() {
+        let mut f = Fixture::default();
+        let key = "o/r@v1".to_string();
+        f.blobs
+            .insert(format!("{key}/sbom.cdx.json"), SBOM.to_vec());
+        f.probes.insert(
+            key,
+            ReleaseProbe {
+                published: vec!["sbom.cdx.json".into()],
+                has_sums: false,
+                has_cosign_bundle: false,
+                cosign: None,
+                attestation: crate::ingest::AttestationProbe::NotAttested,
+            },
+        );
+        assert!(matches!(
+            release_sbom_outcome(&f, &Forge::github_com(), "o/r", "v1", "1.0.0"),
+            ReleaseSbomOutcome::VerifyFailed(_)
+        ));
+    }
+
+    /// A release whose SBOM asset is covered but could not actually be
+    /// downloaded — the proof is fine, the fetch is not.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn a_covered_sbom_that_cannot_be_downloaded_is_verifyfailed() {
+        let mut f = Fixture::default();
+        let key = "o/r@v1".to_string();
+        f.sums.insert(
+            key.clone(),
+            format!("{}  ./sbom.cdx.json\n", sha256_hex(SBOM)),
+        );
+        // Deliberately NOT inserted into `f.blobs` — the digest is covered,
+        // but the bytes cannot be fetched.
+        f.probes.insert(
+            key,
+            ReleaseProbe {
+                published: vec!["sbom.cdx.json".into()],
+                has_sums: true,
+                has_cosign_bundle: true,
+                cosign: Some(Ok(())),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            release_sbom_outcome(&f, &Forge::github_com(), "o/r", "v1", "1.0.0"),
+            ReleaseSbomOutcome::VerifyFailed(_)
+        ));
+    }
+
+    /// Two `.cdx.json` assets, NEITHER naming the payload's own version —
+    /// picking one anyway would be a guess, and checking the wrong SBOM
+    /// silently reports nothing for the payload that actually needed
+    /// checking. `Ambiguous`, not a deterministic pick.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn two_cdx_assets_naming_neither_payload_version_is_ambiguous() {
+        const OTHER: &[u8] = b"a different sbom";
+        let f = Fixture::signed("o/r", "v1", &[("b.cdx.json", OTHER), ("a.cdx.json", SBOM)]);
+        assert_eq!(
+            release_sbom_outcome(&f, &Forge::github_com(), "o/r", "v1", "9.9.9"),
+            ReleaseSbomOutcome::Ambiguous
+        );
+    }
+
+    /// Two `.cdx.json` assets, but exactly ONE names the payload's own
+    /// version — the tie-break the deposit's own asset selection already
+    /// uses, not a guess.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn two_cdx_assets_one_naming_the_payload_version_is_used() {
+        const OTHER: &[u8] = b"a different sbom";
+        let f = Fixture::signed(
+            "o/r",
+            "v1",
+            &[
+                ("other-tool-2.0.0.cdx.json", OTHER),
+                ("this-tool-1.0.0.cdx.json", SBOM),
+            ],
+        );
+        assert_eq!(
+            release_sbom_outcome(&f, &Forge::github_com(), "o/r", "v1", "1.0.0"),
+            ReleaseSbomOutcome::Found(SBOM.to_vec())
+        );
+    }
+
+    /// Both named the SAME version (or some other reason both still match)
+    /// — still ambiguous, never "pick the first one anyway".
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn two_cdx_assets_both_naming_the_payload_version_is_still_ambiguous() {
+        const OTHER: &[u8] = b"a different sbom";
+        let f = Fixture::signed(
+            "o/r",
+            "v1",
+            &[("b-1.0.0.cdx.json", OTHER), ("a-1.0.0.cdx.json", SBOM)],
+        );
+        assert_eq!(
+            release_sbom_outcome(&f, &Forge::github_com(), "o/r", "v1", "1.0.0"),
+            ReleaseSbomOutcome::Ambiguous
+        );
     }
 }

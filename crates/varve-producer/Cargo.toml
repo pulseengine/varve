@@ -45,6 +45,11 @@ toml = { version = "1.1.4", features = ["serde"] }
 toml_edit = "0.25.17"
 varve-core.workspace = true
 base64 = "0.23.1"
+# Decoding a DSSE envelope fetched from the registry (REQ-ADVISORYWATCH-001
+# clause 1), the same way varve-core's own registry and source modules do.
+# Pinned to the same version as varve-core so the two cannot read one
+# envelope shape two different ways.
+wsc = "0.11.0"
 
 
 [dev-dependencies]

@@ -189,4 +189,30 @@ pub enum Cmd {
         #[arg(long = "present-digests")]
         present_digests: Option<std::path::PathBuf>,
     },
+
+    /// Check every published layer of every committed line against GHSA and
+    /// RustSec, and prepare the next `line-status` document for anything a
+    /// person has not already stated (REQ-ADVISORYWATCH-001).
+    ///
+    /// Run from a layer repository's root: it reads `line-index/<line>.json`
+    /// and `line-status/<line>.json` beside `--manifest`, fetches each
+    /// layer's signed manifest from the realm registry `--manifest` names,
+    /// and writes a prepared `line-status/<line>.json` for any line with a
+    /// new finding. It never signs or publishes — a human reviews the
+    /// prepared document as a pull request, and MERGING is what signs and
+    /// publishes it.
+    ///
+    /// A source that cannot be read — GHSA, the RustSec advisory-db, the
+    /// registry, an upstream SBOM — fails the WHOLE run and writes nothing,
+    /// rather than reporting "nothing moved" from an incomplete scan.
+    Advisories {
+        #[arg(long, default_value = "layer.toml")]
+        manifest: std::path::PathBuf,
+        /// `YYYY-MM-DD`. Defaults to today, UTC.
+        #[arg(long)]
+        today: Option<String>,
+        /// Machine-readable result on stdout.
+        #[arg(long)]
+        json: bool,
+    },
 }

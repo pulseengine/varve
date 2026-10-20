@@ -77,7 +77,10 @@ pub use deposit::{
     DepositError, DepositFileSpec, DepositOptions, DepositOutcome, DepositSpec, DepositTool,
     RunnerSpec, ToolSource, deposit, deposit_with_options, parse_deposit_spec,
 };
-pub use ingest::{ANN_PROOF, ANN_PROOF_ASSERTS, ANN_PROOF_SIGNER, IngestProof, UnknownProof};
+pub use ingest::{
+    ANN_PROOF, ANN_PROOF_ASSERTS, ANN_PROOF_SIGNER, ANN_SBOM, ANN_SBOM_SHA256, IngestProof,
+    UnknownProof,
+};
 pub use install::{
     InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
     install_by_digest,

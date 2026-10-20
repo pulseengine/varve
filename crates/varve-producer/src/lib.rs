@@ -10,12 +10,15 @@
 //! without a process, and the binary is the seam where external services
 //! (`gh`, `cosign`, `oras`) are invoked.
 
+pub mod advisory;
+pub mod advisorywatch;
 pub mod apply;
 pub mod asset;
 pub mod attestation;
 pub mod binfmt;
 pub mod carryforward;
 pub mod cli;
+pub mod cvss;
 pub mod deposit;
 pub mod docs;
 pub mod extract;
@@ -32,4 +35,5 @@ pub mod scan;
 pub mod source;
 pub mod spec;
 pub mod stage;
+pub mod statusdraft;
 pub mod sums;

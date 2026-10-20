@@ -5062,3 +5062,17 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-10-14T19:09:24Z
+
+  - id: REQ-ADVISORYWATCH-001
+    type: requirement
+    title: An advisory against anything a published layer carries arrives as a prepared line-status, not as news someone has to notice
+    status: approved
+    release: v0.43.0
+    description: "Measured 2026-10-15: bytecodealliance/wasmtime published 15 repository security advisories on 2026-10-14 (1 high: GHSA-m9f7-9w4p-gv38, a filesystem sandbox escape), every one covering 49.0.1, which wasm-layers 2026.10.0 carries; nothing in the realm said so (varve#216). The same day RustSec published RUSTSEC-2026-0346..0349 against rustls < 0.23.46, and wsc 0.11.0 in the pulseengine realm embeds rustls 0.23.34 according to its own signed release SBOM. The global GitHub Advisory DB query returned neither; repository advisories and the RustSec advisory-db returned both on the day. Clauses: (1) For every layer a realm has published on a supported line, the watcher shall check each payload against its upstream repository's published security advisories and, for Rust crates, the RustSec advisory-db, by exact version range. (2) It shall check the components of each payload's upstream SBOM (REQ-SBOMFIELDS-001 clause 4) the same way, so a vulnerable library inside a binary is found, and say which payload carries it. (3) A match not already stated in the line's current line-status shall produce a prepared next line-status document (counter + 1, one known-problem per advisory naming the affected layers, severity and patched version) as a pull request in the layer repository, which merging signs and publishes; it shall never publish by itself. (4) A source that cannot be read shall fail the run rather than report no advisories (the covalent scanner's #16/#17 lesson). (5) Range matching shall be tested against the real advisory shapes, including multi-interval ranges such as <= 36.0.17, >= 37.0.0, <= 48.0.5, >= 49.0.0, <= 49.0.2."
+    links:
+      - type: satisfies
+        target: REQ-POSTDEPOSIT-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-15T04:12:18Z
