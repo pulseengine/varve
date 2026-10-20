@@ -263,6 +263,106 @@ fn list_shows_every_installed_layer() {
     );
 }
 
+// rivet: verifies REQ-NOPINNOTOOL-001
+#[test]
+fn list_with_a_legacy_entry_prints_exactly_one_note_naming_the_count() {
+    // `lay_down` writes straight into the top-level core — exactly the
+    // pre-realm/legacy layout clause 3 is about. `list` must say so, once,
+    // without deleting anything.
+    let fx = fixture(Some(PIN_JULY), &[(MANIFEST_JULY, &[("synth", b"a")])]);
+    let assert = varve(&fx).arg("list").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert_eq!(
+        stdout.matches("note:").count(),
+        1,
+        "exactly one note about the legacy entries, not one per entry:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("1 layer"),
+        "the note must name the count of legacy entries:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(fx.root.join("core").display().to_string().as_str()),
+        "the note must name the legacy store's path:\n{stdout}"
+    );
+    for needle in ["no realm", "has not deleted"] {
+        assert!(
+            stdout.contains(needle),
+            "the note must say the entries belong to no realm and were not deleted \
+             (missing {needle:?}):\n{stdout}"
+        );
+    }
+}
+
+// rivet: verifies REQ-NOPINNOTOOL-001
+#[test]
+fn list_with_only_realm_entries_prints_no_legacy_note() {
+    let fx = fixture(None, &[]);
+    let dir = fx.project.clone();
+    let key = dir.join("acme.key");
+    let pubf = dir.join("acme.pub");
+    varve(&fx)
+        .args(["keygen", "--out"])
+        .arg(&key)
+        .arg("--pub")
+        .arg(&pubf)
+        .assert()
+        .success();
+    let root = std::fs::read_to_string(&pubf).unwrap().trim().to_string();
+
+    let tool = dir.join("acme-tool");
+    std::fs::write(&tool, b"#!/bin/sh\necho acme\n").unwrap();
+    let layout = dir.join("layout");
+    varve(&fx)
+        .args([
+            "deposit",
+            "--layer",
+            "2026.08.0",
+            "--channel",
+            "qualified",
+            "--counter",
+            "1",
+            "--issued-at",
+            "2026-08-01T00:00:00Z",
+            "--key",
+        ])
+        .arg(&key)
+        .arg("--out")
+        .arg(&layout)
+        .arg("--tool")
+        .arg(format!("acme-tool@1.0.0={}", tool.display()))
+        .assert()
+        .success();
+    std::fs::write(
+        dir.join("varve-realms.toml"),
+        format!(
+            "[realm.acme]\nregistry = \"oci://example.invalid/acme\"\ntrust-root = \"{root}\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\nlayer = \"2026.08.0\"\n",
+    )
+    .unwrap();
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+
+    let assert = varve(&fx).arg("list").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("realm=acme"),
+        "the realm entry must be listed:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("note:"),
+        "an all-realm listing must carry no legacy note — nothing here is realmless:\n{stdout}"
+    );
+}
+
 /// Signed-layer fixture material for the install/verify tests.
 struct SignedLayer {
     archive: std::path::PathBuf,
@@ -5836,6 +5936,171 @@ fn env_enters_every_declared_environment_in_the_order_that_inverts_the_file() {
         .stderr(predicate::str::contains("varve.toml"));
 }
 
+// rivet: verifies REQ-ENVQUOTE-001
+#[cfg(unix)]
+#[test]
+fn env_quotes_a_hostile_root_so_eval_cannot_run_embedded_commands() {
+    // `varve env` tells you to `eval "$(varve env)"`. The store root — read
+    // from $VARVE_ROOT, so attacker-controlled in exactly the environments
+    // that matter (CI, a container, a shared machine) — used to be
+    // interpolated inside sh DOUBLE quotes, where `$`, backticks and `"`
+    // stay live: a crafted root became code the moment the result was
+    // eval'd (pulseengine/varve#46).
+    let tmp = tempfile::tempdir().unwrap();
+    let canary_dollar = tmp.path().join("pwned-dollar");
+    let canary_tick = tmp.path().join("pwned-tick");
+    let touch_dollar = format!("touch {}", canary_dollar.display());
+    let touch_tick = format!("touch {}", canary_tick.display());
+    // One root, every sh metacharacter that is live inside the OLD double
+    // quoting at once: `$(...)`, a backtick command substitution, a double
+    // quote, a single quote, a backslash, a space and a semicolon.
+    let hostile_root = format!(
+        "{}/vr$({touch_dollar})x`{touch_tick}`\"dq\"'sq'\\bs sp;semi",
+        tmp.path().display()
+    );
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &hostile_root)
+        .current_dir(&project)
+        .args(["env", "--shell", "sh"]);
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "varve env failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let script = String::from_utf8(out.stdout).unwrap();
+    let shims = format!("{hostile_root}/shims");
+    // The script text itself contains the quoted form, not the raw path
+    // verbatim — `'sq'`'s embedded `'` is correctly escaped as `'\''`, which
+    // is why the round-trip claim below is checked by actually RUNNING the
+    // script, not by searching for `shims` as a raw substring.
+    assert!(
+        !canary_dollar.exists() && !canary_tick.exists(),
+        "merely PRINTING the script must never run anything embedded in the root"
+    );
+
+    // sh and bash are on every Linux and macOS host and are REQUIRED here;
+    // zsh and dash are exercised wherever they are installed (the Ubuntu CI
+    // runner has no zsh — this test failed there with "cannot run /bin/zsh").
+    for shell in ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/dash"] {
+        let required = matches!(shell, "/bin/sh" | "/bin/bash");
+        if !required && !std::path::Path::new(shell).exists() {
+            eprintln!("skipping {shell}: not installed on this host");
+            continue;
+        }
+        let _ = std::fs::remove_file(&canary_dollar);
+        let _ = std::fs::remove_file(&canary_tick);
+        let probe = std::process::Command::new(shell)
+            .arg("-c")
+            .arg("eval \"$VARVE_ENV\"; printf '%s' \"$PATH\"")
+            .env("VARVE_ENV", &script)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap_or_else(|e| panic!("cannot run {shell}: {e}"));
+        assert!(
+            probe.status.success(),
+            "{shell} failed to eval the emitted script: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let path = String::from_utf8_lossy(&probe.stdout).into_owned();
+        assert!(
+            path.split(':').any(|e| e == shims),
+            "{shell}: the literal shim dir must be on PATH verbatim: {path}"
+        );
+        assert!(
+            !canary_dollar.exists(),
+            "{shell}: evaluating the emitted script must not run the embedded \
+             $(...) command"
+        );
+        assert!(
+            !canary_tick.exists(),
+            "{shell}: evaluating the emitted script must not run the embedded \
+             `...` command"
+        );
+    }
+}
+
+// rivet: verifies REQ-ENVQUOTE-001
+#[cfg(unix)]
+#[test]
+fn env_quotes_a_hostile_project_path_for_declared_sourced_exports() {
+    // `varve_core::env_lines` has the same class of defect as the shim line:
+    // a declared sourced export's script path is ALSO interpolated inside sh
+    // double quotes (". \"{path}\""), so a project whose path contains a
+    // command substitution turns `eval "$(varve env)"` into code execution
+    // too.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("varve-root"); // an ordinary, non-hostile root
+    let canary = tmp.path().join("pwned-export-path");
+    let hostile_name = format!("proj$(touch {})x", canary.display());
+    let project = tmp.path().join(&hostile_name);
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\n\
+         layer = \"2026.07.0\"\n\
+         \n[[export]]\nkind = \"sdk\"\nout = \"sdk\"\n\
+         \n[export.env]\nscript = \"setup.sh\"\npath = \"before-shims\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("sdk")).unwrap();
+    std::fs::write(
+        project.join("sdk").join("setup.sh"),
+        "export SDK_MARKER=yes\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("varve").unwrap();
+    cmd.env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &root)
+        .current_dir(&project)
+        .arg("env");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "varve env failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let script = String::from_utf8(out.stdout).unwrap();
+
+    let script_path = project.join("sdk").join("setup.sh");
+    let raw_double_quoted_form = format!(". \"{}\"", script_path.display());
+    assert!(
+        !script.contains(&raw_double_quoted_form),
+        "the sourced export's path must no longer be interpolated inside \
+         double quotes, where $(...) stays live:\n{script}"
+    );
+    assert!(
+        !canary.exists(),
+        "merely printing the script must not run it"
+    );
+
+    let probe = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("eval \"$VARVE_ENV\" 2>/dev/null; printf '%s' \"$PATH\"")
+        .env("VARVE_ENV", &script)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        !canary.exists(),
+        "sourcing the declared export must not run a command embedded in its \
+         own path, even though the (bogus, literal) path cannot actually be \
+         sourced"
+    );
+    let path = String::from_utf8_lossy(&probe.stdout);
+    let shims = root.join("shims");
+    assert!(
+        path.split(':').any(|e| e == shims.to_str().unwrap()),
+        "the shims must still land on PATH even though sourcing the literal \
+         export path fails to find a file: {path}"
+    );
+}
+
 // rivet: verifies REQ-PIN-001
 #[test]
 fn a_schema_mistake_in_the_pin_is_reported_once_not_twice() {
@@ -7115,4 +7380,149 @@ fn support_horizon_refuses_an_include_from_an_undefined_realm() {
         .failure()
         .stdout("")
         .stderr(predicate::str::contains("nowhere"));
+}
+
+/// covalent-layers installed varve as `varve-bin`, and every `varve-bin
+/// outdated` ran as the SHIM for a tool called varve-bin, failing with
+/// "layer … is not installed" — true, and no help at all. A shim failure must
+/// say it was one, and why this binary thought it was one.
+// rivet: verifies REQ-NOPINNOTOOL-001
+#[test]
+fn a_failure_while_dispatching_as_a_shim_says_it_was_a_shim() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    // A SYMLINK, not a copy: varve reads the name it was invoked under from
+    // argv[0], so a link named varve-bin is exactly the case covalent hit.
+    // A copy raced on Linux — another test thread forked while the copy's
+    // write handle was open and exec failed with "Text file busy" (ETXTBSY,
+    // os error 26) on the CI runner, while passing on macOS.
+    let renamed = fx.project.join("varve-bin");
+    std::os::unix::fs::symlink(assert_cmd::cargo::cargo_bin("varve"), &renamed).unwrap();
+    let mut cmd = Command::new(&renamed);
+    cmd.env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &fx.root)
+        .current_dir(&fx.project)
+        .args(["outdated", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invoked as 'varve-bin'"))
+        .stderr(predicate::str::contains("shim"))
+        .stderr(predicate::str::contains("name the binary 'varve'"));
+}
+
+// ──────────────── REQ-NOPINNOTOOL-001 ────────────────
+//
+// With no pin in scope, `which`, `run` and shim dispatch must refuse with the
+// SAME reason `status` gives, and none of them may fall back to the legacy
+// pre-realm store to answer anyway (clauses 1 and 2).
+
+/// Bytes a legacy-store tool would print if, and only if, something actually
+/// executed it. Used to catch a fallback that runs the tool rather than
+/// merely naming its path.
+const LEGACY_STORE_TOOL: &[u8] = b"#!/bin/sh\necho LEGACY_STORE_HIT\n";
+
+/// A VARVE_ROOT whose legacy pre-realm store (`<root>/core/sha256-...`,
+/// exactly what `lay_down` writes) holds an installed layer with a tool —
+/// but whose project directory has NO varve.toml, so no pin is in scope.
+/// Any resolution path that fell back to the legacy store when no pin is
+/// found would be able to find and report this tool; clause 1 and 2 say none
+/// may.
+fn no_pin_fixture() -> Fixture {
+    fixture(
+        None,
+        &[(MANIFEST_JULY, &[("legacytool", LEGACY_STORE_TOOL)])],
+    )
+}
+
+/// The refusal every command must share, word for word with what `status`
+/// gives for the identical situation (clause 1).
+fn assert_same_refusal_status_gives(stderr: &str) {
+    assert!(
+        stderr.contains("no varve.toml found walking up from")
+            && stderr.contains("this project has no pinned layer"),
+        "refusal must be the same reason `status` gives for no pin in scope:\n{stderr}"
+    );
+}
+
+// rivet: verifies REQ-NOPINNOTOOL-001
+#[test]
+fn status_refuses_with_no_pin_in_scope() {
+    let fx = no_pin_fixture();
+    let assert = varve(&fx).arg("status").assert().failure().code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert_same_refusal_status_gives(&stderr);
+    assert!(
+        stdout.is_empty(),
+        "status must not have read the legacy store to answer:\n{stdout}"
+    );
+}
+
+// rivet: verifies REQ-NOPINNOTOOL-001
+#[test]
+fn which_refuses_with_no_pin_in_scope_the_same_way_status_does() {
+    let fx = no_pin_fixture();
+    let assert = varve(&fx)
+        .args(["which", "legacytool"])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert_same_refusal_status_gives(&stderr);
+    assert!(
+        stdout.is_empty(),
+        "which must not print the legacy store's path for 'legacytool' on stdout:\n{stdout}"
+    );
+}
+
+// rivet: verifies REQ-NOPINNOTOOL-001
+#[test]
+fn run_refuses_with_no_pin_in_scope_the_same_way_status_does() {
+    let fx = no_pin_fixture();
+    let assert = varve(&fx)
+        .args(["run", "--", "legacytool"])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert_same_refusal_status_gives(&stderr);
+    assert!(
+        stdout.is_empty(),
+        "run must not have executed the legacy store's 'legacytool':\n{stdout}"
+    );
+}
+
+// rivet: verifies REQ-NOPINNOTOOL-001
+#[cfg(unix)]
+#[test]
+fn shim_dispatch_refuses_with_no_pin_in_scope_the_same_way_status_does() {
+    // No `shim install` here on purpose: that command itself resolves a pin
+    // first (to know which tools to shim), and this fixture's project has
+    // none. The shim mechanism is "this binary, reached under another name"
+    // (REQ-SHIM-002), so a symlink built by hand exercises exactly the same
+    // dispatch path (`dispatch_tool_name` + `run_tool`) a real shim would,
+    // without depending on `shim install` succeeding first.
+    let fx = no_pin_fixture();
+    let varve_bin = assert_cmd::cargo::cargo_bin("varve");
+    let shim = fx.root.join("legacytool");
+    std::os::unix::fs::symlink(&varve_bin, &shim).unwrap();
+    let output = std::process::Command::new(&shim)
+        .current_dir(&fx.project)
+        .env("VARVE_ROOT", &fx.root)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !output.status.success(),
+        "shim dispatch must fail with no pin in scope; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_same_refusal_status_gives(&stderr);
+    assert!(
+        stdout.is_empty(),
+        "shim dispatch must not have executed the legacy store's 'legacytool':\n{stdout}"
+    );
 }

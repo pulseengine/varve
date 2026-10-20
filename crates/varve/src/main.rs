@@ -749,7 +749,22 @@ fn run() -> anyhow::Result<Outcome> {
         // Arguments pass through as OsString: a shim must hand the tool the
         // exact bytes the caller typed, and unix arguments are arbitrary bytes.
         let rest: Vec<std::ffi::OsString> = args.collect();
-        run_tool(&store, None, &tool, &rest)?;
+        // Say WHY this ran as a shim. Under any name but `varve` this binary
+        // is the shim for a tool of that name — so a copy installed as
+        // `varve-bin` turned `varve-bin outdated` into "run the tool
+        // varve-bin", and the only thing it said was "layer … is not
+        // installed" (covalent-layers, 2026-10-14). True, and no help.
+        run_tool(&store, None, &tool, &rest).with_context(|| {
+            let hint = if tool.starts_with("varve") {
+                " If you meant varve itself, name the binary 'varve'."
+            } else {
+                ""
+            };
+            format!(
+                "invoked as '{tool}', so this ran as the shim for a tool named '{tool}' \
+                 (varve is the CLI only when invoked as 'varve').{hint}"
+            )
+        })?;
         return Ok(Outcome::Ok);
     }
     let cli = Cli::parse();
@@ -1008,11 +1023,15 @@ fn report(json: bool, human: &str, machine: serde_json::Value) {
 
 /// The idempotent sh fragment for a shim dir; the guard keeps repeated
 /// evaluation (login shells, nested shells) from stacking PATH entries.
+///
+/// `shim_dir` is derived from `$VARVE_ROOT` (or `$HOME`), so it is
+/// attacker-controlled in exactly the environments that matter — CI, a
+/// container, a shared machine. It is quoted LITERALLY (REQ-ENVQUOTE-001):
+/// double-quoting it, as this used to, leaves `$`, backticks and `"` live, so
+/// a crafted root becomes code the moment `eval "$(varve env)"` runs it.
 fn env_script_sh(shim_dir: &std::path::Path) -> String {
-    format!(
-        "case \":$PATH:\" in\n  *:\"{dir}\":*) ;;\n  *) export PATH=\"{dir}:$PATH\" ;;\nesac\n",
-        dir = shim_dir.display()
-    )
+    let dir = varve_core::shellquote::quote_sh(&shim_dir.display().to_string());
+    format!("case \":$PATH:\" in\n  *:{dir}:*) ;;\n  *) export PATH={dir}:\"$PATH\" ;;\nesac\n")
 }
 
 /// `varve env` — the whole environment in one command (REQ-EXPORTDECL-001
@@ -1059,11 +1078,15 @@ fn print_env(store: &Store, shell: &str) -> anyhow::Result<()> {
                 print!("{}", env_script_sh(&shim_dir));
                 return Ok(());
             };
+            let env_file_line = format!(
+                ". {}",
+                varve_core::shellquote::quote_sh(&env_file.display().to_string())
+            );
             for line in varve_core::env_lines(pin, root, Some(&env_file)) {
                 // The shims, inline: the sourced scripts must land around this
                 // exact position, which is why the line is REPLACED rather than
                 // appended somewhere convenient.
-                if line == format!(". \"{}\"", env_file.display()) {
+                if line == env_file_line {
                     print!("{}", env_script_sh(&shim_dir));
                 } else {
                     println!("{line}");
@@ -1085,10 +1108,8 @@ fn print_env(store: &Store, shell: &str) -> anyhow::Result<()> {
                     first.out
                 );
             }
-            println!(
-                "if not contains \"{dir}\" $PATH\n    set -gx PATH \"{dir}\" $PATH\nend",
-                dir = shim_dir.display()
-            );
+            let dir = varve_core::shellquote::quote_fish(&shim_dir.display().to_string());
+            println!("if not contains {dir} $PATH\n    set -gx PATH {dir} $PATH\nend");
         }
         other => bail!("unknown shell '{other}' — supported: sh, bash, zsh, fish"),
     }
@@ -4846,7 +4867,15 @@ fn list(store: &Store) -> anyhow::Result<()> {
         println!("no layers installed in {}", store.root().display());
         return Ok(());
     }
-    for (realm, entry) in rows {
+    // REQ-NOPINNOTOOL-001 clause 3: an entry with no realm label is one `list`
+    // found at the TOP of the core rather than under `realms/<fingerprint>` —
+    // i.e. one laid down before realms existed, or installed realmless on
+    // purpose. Nothing resolves it without a realmless pin naming it
+    // explicitly (clauses 1 and 2), so a reader seeing it listed here needs
+    // telling why it is not also reachable the way a realm's layers are, and
+    // that varve has not quietly removed it.
+    let legacy_count = rows.iter().filter(|(realm, _)| realm.is_empty()).count();
+    for (realm, entry) in &rows {
         if realm.is_empty() {
             println!("{}  {}  {}", entry.layer, entry.channel, entry.digest);
         } else {
@@ -4855,6 +4884,14 @@ fn list(store: &Store) -> anyhow::Result<()> {
                 entry.layer, entry.channel, entry.digest
             );
         }
+    }
+    if legacy_count > 0 {
+        println!(
+            "note: {legacy_count} layer(s) above are in the pre-realm store ({}): they \
+             belong to no realm, so no realm's root vouches for them; varve does not use \
+             them outside a realmless pin and has not deleted them.",
+            store.root().join("core").display()
+        );
     }
     Ok(())
 }
