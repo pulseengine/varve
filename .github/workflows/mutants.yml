@@ -1,7 +1,37 @@
-# Nightly full-workspace mutation run — advisory tier of REQ-MUTATE-001.
+# Nightly mutation run over the DECLARED DEBT — advisory tier of REQ-MUTATE-001,
+# and the instrument of REQ-MUTANTDEBT-001 (varve#181).
 # Adapted from pulseengine/rivet's templates/cargo-mutants/mutants.yml.
 # The per-PR gate (ci.yml `mutants` job) covers the trust-critical modules
-# with zero survivors; this covers everything else and preserves evidence.
+# with zero survivors; this measures the `[not-yet]` files of
+# mutation-scope.toml, the debt that gate honestly does not cover.
+#
+# WHY THIS SHARDS THE `[not-yet]` FILES AND NO LONGER MUTATES THE WORKSPACE.
+# MEASURED (varve#181): the previous shape was one job running
+# `cargo mutants --no-shuffle || true` over the whole workspace, 2,675 mutants
+# at ~7 mutants/minute on one runner. It was cancelled at its 90-minute cap
+# every night after ~32% of them, so 11 of the 22 `not-yet` files were never
+# reached — and `|| true` plus an upload step made the cancellation read as a
+# run. REQ-MUTANTDEBT-001 clause 1 asks that EVERY `not-yet` file be tested by
+# some scheduled run that completes. The files in the gate are already
+# measured on every PR with zero survivors, and the `bin-target` / `re-export`
+# files cannot be killed by `--lib` tests or have nothing to mutate, so
+# re-mutating them nightly buys evidence nobody reads. Keeping the
+# whole-workspace job beside the shards would keep the thing that never
+# completes, so it is gone, not kept "as well".
+#
+# THE FILE LIST IS NEVER NAMED HERE. `tools/mutant-debt-plan.py` reads
+# mutation-scope.toml on every run (REQ-MUTATE-003: a hand-kept list drifted
+# once and nothing noticed), counts each file's mutants with the cheap
+# `cargo mutants --list`, and packs them into shards of <= 300 mutants. 300 is
+# ~43 minutes at the MEASURED ~7 mutants/minute (`-j 4`, ubuntu-latest) against
+# a 90-minute cap: room for the baseline build and a slow-test file. A file
+# larger than that gets a shard to itself.
+#
+# THE RESULT IS "MEASURED" OR "INCOMPLETE", NEVER A ZERO. The `report` job runs
+# even when shards were cancelled, and a shard with no cargo-mutants summary —
+# killed, OOMed, timed out, or never uploaded — is INCOMPLETE and turns the run
+# red (clause 2). The workflow stays advisory: it is not a required check, but
+# it must not look green when it did not measure.
 
 name: Mutants
 
@@ -17,35 +47,125 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  mutants:
-    name: cargo mutants (full workspace, advisory)
-    runs-on: [self-hosted, linux, x64, lean-mem]
-    timeout-minutes: 90
+  plan:
+    name: plan (shard the not-yet files)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: mutants-nightly
+          key: mutants-plan
       - name: Install cargo-mutants
         run: cargo install --locked cargo-mutants
-      - name: Full-workspace mutation run
-        # Advisory: report and preserve evidence; the trust-critical gate
-        # lives in ci.yml and is required.
-        #
-        # The address-space cap is mandatory on the `lean-mem` class (org
-        # runbook) and doubly so here: this run mutates the WHOLE workspace,
-        # so it meets every memory-runaway mutant the sharded gate is scoped
-        # away from. Without it one such mutant OOM-kills the job and the
-        # advisory evidence is silently empty. `|| true` would hide that.
+      - name: Derive the shard matrix from mutation-scope.toml
+        id: plan
+        # `--list` builds nothing; it only enumerates mutants per file.
         run: |
           set -euo pipefail
+          python3 tools/mutant-debt-plan.py plan > matrix.json
+          cat matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+      - name: Upload the plan (the report needs the EXPECTED shards)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: mutants-plan
+          path: matrix.json
+          retention-days: 30
+
+  mutants:
+    name: cargo mutants (${{ matrix.shard }}, advisory)
+    needs: [plan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      # One shard's failure says nothing about the others; the point is to
+      # measure every file that can be measured.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: mutants-${{ matrix.shard }}
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants
+      - name: Mutate this shard's not-yet files
+        # Advisory: survivors are reported, not failed on. What DOES fail the
+        # job is a run with no summary — the one case where "nothing missed"
+        # would be a lie.
+        #
+        # TMPDIR on the work disk, not /tmp. MEASURED (see ci.yml `mutants`):
+        # on ubuntu 26.04 the same shard that passed in 9m died after the
+        # baseline with "Disk quota exceeded (os error 122)" writing its
+        # worker copies under /tmp; `-j 4` needs four builds' worth of space.
+        # $RUNNER_TEMP is on the work disk and is emptied after every job.
+        env:
+          FLAGS: ${{ matrix.flags }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -uo pipefail
+          # Address-space cap, as in ci.yml: a mutant that allocates without
+          # bound dies on the allocation failure and is reported, instead of
+          # OOM-killing the job into a log with no summary.
           ulimit -v 50331648
-          cargo mutants --no-shuffle || true
-      - name: Upload mutation evidence
+          # shellcheck disable=SC2086 -- FLAGS is a deliberate flag list
+          cargo mutants --no-shuffle -j 4 --timeout 120 $FLAGS 2>&1 | tee mutants.log
+          if ! grep -Eq '[0-9]+ mutants? tested in' mutants.log; then
+            echo "::error::cargo-mutants produced no summary — this shard is INCOMPLETE, not clean"
+            exit 1
+          fi
+          echo "::notice::$(grep -E '[0-9]+ mutants? tested in' mutants.log | tail -1)"
+      - name: Upload shard evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: mutants-report-${{ github.run_id }}
-          path: mutants.out
+          name: mutants-${{ matrix.shard }}
+          path: |
+            mutants.out
+            mutants.log
           retention-days: 30
+          if-no-files-found: ignore
+
+  report:
+    name: report (measured or incomplete)
+    needs: [plan, mutants]
+    # Runs after a cancelled or failed matrix too: that is exactly when the
+    # answer matters.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download the plan
+        id: plan
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: mutants-plan
+          path: plan
+      - name: Download every shard's evidence
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: mutants-debt-*
+          path: logs
+      - name: Report — INCOMPLETE shards fail the run
+        run: |
+          set -uo pipefail
+          if [ ! -f plan/matrix.json ]; then
+            {
+              echo "## Mutation debt (advisory)"
+              echo
+              echo "**No plan was produced: nothing was measured.**"
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          mkdir -p logs
+          python3 tools/mutant-debt-plan.py report --matrix plan/matrix.json --logs logs \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"

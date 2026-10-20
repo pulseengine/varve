@@ -3425,3 +3425,20 @@ artifacts:
       model: claude-opus-5
       timestamp: 2026-10-08T21:04:11Z
     release: v0.42.0
+
+  - id: VER-MUTANTDEBT-001
+    type: verification
+    title: Declared mutation debt is sharded from mutation-scope.toml and an unfinished shard reports INCOMPLETE, never zero
+    status: draft
+    release: v0.43.0
+    fields:
+      method: test
+      baseline: "Measured 2026-10-21 with cargo mutants --list: the 21 current not-yet files hold 850 mutants and pack into 4 shards of 314, 300, 298 and 27 (the whole workspace was 2,675 in one job). Falsified by negative control: a mutants.log truncated before its summary makes 'mutant-debt-plan.py report' exit 1 and print INCOMPLETE, a full log exits 0; a shard whose artifact is missing is INCOMPLETE too. The workflow itself has not yet run on GitHub."
+      steps: python3 -m unittest discover -s tools -p 'test_*.py'
+    links:
+      - type: verifies
+        target: REQ-MUTANTDEBT-001
+    provenance:
+      created-by: ai
+      model: claude-sonnet-5-5
+      timestamp: 2026-10-20T22:50:51Z
