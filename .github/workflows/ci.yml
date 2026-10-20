@@ -427,8 +427,17 @@ jobs:
         # duration. `--timeout 120` below is what separates a HANG from a slow
         # test, and it can only mean that on a machine that is not thrashing —
         # which is the other reason these shards belong on a dedicated VM.
+        #
+        # TMPDIR on the work disk, not /tmp. MEASURED: when ubuntu-latest moved
+        # from 24.04 to 26.04 (between 2026-10-16 and 2026-10-20) the same
+        # 73-mutant shard that passed in 9m died straight after the baseline
+        # with "Disk quota exceeded (os error 122)" writing its worker copies
+        # under /tmp. cargo-mutants puts one tree per job there, so `-j 4`
+        # needs four builds' worth of space, and the new /tmp has no room for
+        # them. $RUNNER_TEMP is on the work disk, and the runner empties it after every job.
         env:
           FILES: ${{ matrix.files }}
+          TMPDIR: ${{ runner.temp }}
         run: |
           set -euo pipefail
           # A SURVIVOR and a HANG are opposite facts and the exit code conflates
