@@ -136,6 +136,20 @@ mod tests {
         generate_root_keypair()
     }
 
+    /// The SBOM names its author by this key (REQ-SBOMFIELDS-001 clause 2), so
+    /// it must be the key the verifier accepts, not any stand-in bytes.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn the_verifier_reports_exactly_the_root_it_was_pinned_to() {
+        let (_, pk) = keys();
+        let (_, other) = keys();
+        let a = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+        let b = PinnedKeyVerifier::from_public_key_bytes(&other).unwrap();
+        assert_eq!(a.public_key(), pk.as_slice());
+        assert_eq!(b.public_key(), other.as_slice());
+        assert_ne!(a.public_key(), b.public_key());
+    }
+
     // rivet: verifies REQ-VERIFY-001
     #[test]
     fn a_signed_manifest_verifies_and_yields_its_payload() {
