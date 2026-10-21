@@ -7526,3 +7526,261 @@ fn shim_dispatch_refuses_with_no_pin_in_scope_the_same_way_status_does() {
         "shim dispatch must not have executed the legacy store's 'legacytool':\n{stdout}"
     );
 }
+
+// ──────────────── REQ-COMPOSEWINDOW-001, end to end ────────────────
+//
+// The two tests above only reach `support_horizon` before any include is read
+// ("no includes" and "undefined realm"). With the include windows replaced by
+// an empty slice at the `cap_by_includes` call, every one of them stayed green
+// — the cap could be deleted and nothing noticed. These run the binary against
+// a registry that really serves a signed include and a signed line-status, so
+// the cap is measured where it is applied.
+
+/// An OCI registry on a loopback port serving exactly one included layer: its
+/// signed manifest, and (optionally) a signed baseline line-status stating
+/// `support_until`. Returns (registry reference, payload digest, root key hex).
+fn serve_include_realm(support_until: Option<Option<&str>>) -> (String, String, String) {
+    use std::io::{BufRead, BufReader, Write};
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let payload = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{"eu.pulseengine.varve.layer":"2026.10.0","eu.pulseengine.varve.line":"2026.10","eu.pulseengine.varve.channel":"rolling","eu.pulseengine.varve.counter":"1","org.opencontainers.image.created":"2026-09-24T00:00:00Z"},"manifests":[]}"#;
+    let digest = varve_core::manifest_digest(payload);
+    let envelope = varve_core::sign_layer_manifest(payload, &sk, "test-root").unwrap();
+    let mut blobs = std::collections::BTreeMap::new();
+    let env_digest = varve_core::manifest_digest(envelope.as_bytes());
+    blobs.insert(env_digest.clone(), envelope.into_bytes());
+    let mut layers = vec![serde_json::json!({
+        "mediaType": "application/json", "digest": env_digest, "size": 0,
+        "annotations": { "eu.pulseengine.varve.role": "envelope" }
+    })];
+    if let Some(until) = support_until {
+        let status = varve_core::LineStatus {
+            line: "2026.10".into(),
+            counter: 1,
+            issued_at: "2026-09-24T00:00:00Z".into(),
+            support_until: until.map(str::to_string),
+            min_counter: None,
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        }
+        .sign(&sk, "k")
+        .unwrap()
+        .into_bytes();
+        let d = varve_core::manifest_digest(&status);
+        blobs.insert(d.clone(), status);
+        layers.push(serde_json::json!({
+            "mediaType": "application/json", "digest": d, "size": 0,
+            "annotations": { "eu.pulseengine.varve.role": "line-status" }
+        }));
+    }
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "layers": layers,
+    }))
+    .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let target = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let path = target.split('?').next().unwrap_or("");
+            let mut header = String::new();
+            while reader.read_line(&mut header).is_ok() && header != "\r\n" && !header.is_empty() {
+                header.clear();
+            }
+            let (status, body): (&str, Vec<u8>) = if path == "/v2/inc/layers/tags/list" {
+                (
+                    "200 OK",
+                    br#"{"name":"inc/layers","tags":["2026.10.0"]}"#.to_vec(),
+                )
+            } else if path == "/v2/inc/layers/manifests/2026.10.0" {
+                ("200 OK", manifest.clone())
+            } else if let Some(d) = path.strip_prefix("/v2/inc/layers/blobs/") {
+                match blobs.get(d) {
+                    Some(b) => ("200 OK", b.clone()),
+                    None => ("404 Not Found", b"{}".to_vec()),
+                }
+            } else {
+                ("404 Not Found", b"{}".to_vec())
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(&body);
+        }
+    });
+    (
+        format!("oci+http://{addr}/inc/layers"),
+        digest,
+        hex::encode(&pk),
+    )
+}
+
+/// A project whose layer includes the layer `serve_include_realm` serves.
+fn composing_project(support_until: Option<Option<&str>>) -> Fixture {
+    let fx = fixture(None, &[]);
+    let (registry, digest, root) = serve_include_realm(support_until);
+    std::fs::write(
+        fx.project.join("varve-realms.toml"),
+        format!("[realm.wasm]\nregistry = \"{registry}\"\ntrust-root = \"{root}\"\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        fx.project.join("layer.toml"),
+        format!(
+            "{LAYER_TOML_NO_INCLUDES}\n[[include]]\ndigest = \"{digest}\"\nrealm = \"wasm\"\nlayer = \"2026.10.0\"\n"
+        ),
+    )
+    .unwrap();
+    fx
+}
+
+fn support_horizon_args(extra: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "support-horizon",
+        "--channel",
+        "rolling",
+        "--issued-at",
+        "2026-10-02T10:00:00Z",
+        "--manifest",
+        "layer.toml",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.extend(extra.iter().map(|s| s.to_string()));
+    args
+}
+
+/// Clause 1: the covalent case. The channel alone says 2026-11-02; the
+/// included layer's own signed line-status says 2026-10-24; the date signed is
+/// the earlier one, and stderr names what bound it.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_caps_a_composition_at_its_includes_signed_window() {
+    let fx = composing_project(Some(Some("2026-10-24")));
+    varve(&fx)
+        .args(support_horizon_args(&[]))
+        .assert()
+        .success()
+        .stdout("2026-10-24\n")
+        .stderr(predicate::str::contains("support capped at 2026-10-24"))
+        .stderr(predicate::str::contains("2026.10.0"))
+        .stderr(predicate::str::contains("realm 'wasm'"))
+        .stderr(predicate::str::contains("2026-11-02"));
+}
+
+/// An include that outlives the composition does not lengthen it: the cap only
+/// ever shortens, and nothing is said about a bound that did not bind.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_keeps_its_own_date_when_the_include_outlives_it() {
+    let fx = composing_project(Some(Some("2027-06-30")));
+    varve(&fx)
+        .args(support_horizon_args(&[]))
+        .assert()
+        .success()
+        .stdout("2026-11-02\n")
+        .stderr("");
+}
+
+/// Clause 2: an include whose realm serves its layer but no line-status states
+/// no window, so the horizon is refused — not computed as if it were absent.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_refuses_an_include_with_no_line_status() {
+    let fx = composing_project(None);
+    varve(&fx)
+        .args(support_horizon_args(&[]))
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("2026.10.0"))
+        .stderr(predicate::str::contains("states no support window"))
+        .stderr(predicate::str::contains("Refusing rather than skipping"));
+}
+
+/// Clause 2, the other way a window goes unstated: a line-status that exists
+/// and is signed but names no `support-until`.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_refuses_an_include_whose_line_status_states_no_window() {
+    let fx = composing_project(Some(None));
+    varve(&fx)
+        .args(support_horizon_args(&[]))
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("states no support window"));
+}
+
+/// Clause 2: a line-status that the include's realm did not sign is
+/// unverifiable, and refuses rather than being skipped.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_refuses_an_include_whose_realm_root_does_not_verify() {
+    let fx = composing_project(Some(Some("2026-10-24")));
+    let (_, other_pk) = varve_core::generate_root_keypair();
+    let realms = std::fs::read_to_string(fx.project.join("varve-realms.toml")).unwrap();
+    let root_line = realms
+        .lines()
+        .find(|l| l.starts_with("trust-root"))
+        .unwrap();
+    std::fs::write(
+        fx.project.join("varve-realms.toml"),
+        realms.replace(
+            root_line,
+            &format!("trust-root = \"{}\"", hex::encode(&other_pk)),
+        ),
+    )
+    .unwrap();
+    varve(&fx)
+        .args(support_horizon_args(&[]))
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "cannot read the support window of included layer",
+        ));
+}
+
+/// Clause 3: exceeding the cap takes `--past-includes <reason>`; the longer
+/// date is then signed, and the reason and the window it overrode are said.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_past_includes_exceeds_the_cap_and_records_the_reason() {
+    let fx = composing_project(Some(Some("2026-10-24")));
+    varve(&fx)
+        .args(support_horizon_args(&[
+            "--past-includes",
+            "wasm-layers is re-signed monthly by agreement",
+        ]))
+        .assert()
+        .success()
+        .stdout("2026-11-02\n")
+        .stderr(predicate::str::contains(
+            "wasm-layers is re-signed monthly by agreement",
+        ))
+        .stderr(predicate::str::contains("2026-10-24"));
+}
+
+/// Clause 3: an override with no reason is not an override.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_past_includes_with_a_blank_reason_is_refused() {
+    let fx = composing_project(Some(Some("2026-10-24")));
+    varve(&fx)
+        .args(support_horizon_args(&["--past-includes", "  "]))
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("needs a reason"));
+}

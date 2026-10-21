@@ -5019,7 +5019,7 @@ artifacts:
     title: A composition never promises support past the layers it composes, unless it says why
     status: approved
     release: v0.43.0
-    description: Measured on varve#25(4) The cap shall be applied by the command the deposit already calls (varve support-horizon), given the layer's manifest; a layers repository adopts it with one argument and the realm definitions it already downloads, and no second command decides the window.
+    description: "Measured on varve#254: covalent 2026.10.0 signed support-until 2026-11-02 while the wasm-layers layer it includes is supported until 2026-10-24, nine days less. The composition's window is derived from its own channel alone, so it signs a promise about bytes whose own realm has stopped vouching for them. varve#226 is the same defect stated generally. Clauses: (1) The support horizon of a layer that includes other layers shall be capped at the earliest support-until among its includes, read from each include's own signed line-status and verified against that include's realm root. (2) An include whose line-status is missing, unverifiable or states no window shall refuse the horizon rather than be skipped, because skipping it is how the cap becomes vacuous. (3) Exceeding the cap shall require an explicit override carrying a reason, so a longer promise is a decision on the record and not a default. (4) The cap shall be applied by the command the deposit already calls (varve support-horizon), given the layer's manifest; a layers repository adopts it with one argument and the realm definitions it already downloads, and no second command decides the window."
     links:
       - type: satisfies
         target: REQ-SUPPORTUNTIL-001
