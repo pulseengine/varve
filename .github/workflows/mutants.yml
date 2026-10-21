@@ -113,8 +113,14 @@ jobs:
           # bound dies on the allocation failure and is reported, instead of
           # OOM-killing the job into a log with no summary.
           ulimit -v 50331648
+          # `|| true` is deliberate and is NOT the old `|| true`: the summary
+          # check below is the arbiter. MEASURED on the first dispatch of this
+          # workflow: debt-04 printed "27 mutants tested in 7m: 1 missed" and
+          # the step still went red, because cargo-mutants exits 2 on a
+          # survivor and Actions runs bash with -e. A survivor in declared debt
+          # is the measurement; only a MISSING summary fails this step.
           # shellcheck disable=SC2086 -- FLAGS is a deliberate flag list
-          cargo mutants --no-shuffle -j 4 --timeout 120 $FLAGS 2>&1 | tee mutants.log
+          cargo mutants --no-shuffle -j 4 --timeout 120 $FLAGS 2>&1 | tee mutants.log || true
           if ! grep -Eq '[0-9]+ mutants? tested in' mutants.log; then
             echo "::error::cargo-mutants produced no summary — this shard is INCOMPLETE, not clean"
             exit 1
