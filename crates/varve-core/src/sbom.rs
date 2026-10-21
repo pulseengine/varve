@@ -119,36 +119,41 @@ fn component(entry: &crate::manifest::ManifestEntry) -> serde_json::Value {
         c["purl"] = serde_json::json!(format!("pkg:github/{owner}/{name}@{version}"));
     }
 
-    // Clause 1: the supplier is whoever the signed annotations say supplied the
-    // bytes. Where a proof signer is recorded it is the identity that vouched
-    // for them (the certificate identity cosign matched, or the attestation's
-    // build signer), so it is read first; the repository owner is the fallback,
-    // and with neither there is no supplier to name — inventing one would be
-    // the scan-shaped guess this document exists to avoid.
+    // Clause 1: the supplier is derived from the signed upstream repository —
+    // its owner. With no repository there is no supplier to name; inventing
+    // one would be the scan-shaped guess this document exists to avoid.
     //
-    // The signer is a free-form identity. Only a GitHub URL names an
-    // organisation varve can read off it without guessing; anything else (an
-    // email-shaped certificate identity, say) is recorded as a property for a
-    // human to read and does not decide the supplier.
-    let signer = entry.annotations.get(crate::ingest::ANN_PROOF_SIGNER);
-    let supplier_org = signer.and_then(|s| github_owner_of(s)).or_else(|| {
-        entry
-            .annotations
-            .get("eu.pulseengine.source.repo")
-            .and_then(|r| r.split_once('/'))
-            .map(|(owner, _)| owner)
-    });
-    if let Some(owner) = supplier_org {
+    // The proof signer is supporting evidence, never an override. A Sigstore
+    // identity is the job_workflow_ref, and for a reusable workflow it names a
+    // DIFFERENT organisation from the one that supplied the bytes (every
+    // project calling slsa-framework/slsa-github-generator is "signed by"
+    // slsa-framework), so letting it decide would misattribute the supplier.
+    // It is recorded verbatim, and where it is a GitHub identity of another
+    // owner than the repository's, that is said too.
+    let repo_owner = entry
+        .annotations
+        .get("eu.pulseengine.source.repo")
+        .and_then(|r| r.split_once('/'))
+        .map(|(owner, _)| owner);
+    if let Some(owner) = repo_owner {
         c["supplier"] = serde_json::json!({
             "name": owner,
             "url": [format!("https://github.com/{owner}")]
         });
     }
-    if let Some(signer) = signer {
+    if let Some(signer) = entry.annotations.get(crate::ingest::ANN_PROOF_SIGNER) {
         props.push(serde_json::json!({
             "name": crate::ingest::ANN_PROOF_SIGNER,
             "value": signer
         }));
+        if let (Some(repo_owner), Some(signer_owner)) = (repo_owner, github_owner_of(signer))
+            && repo_owner != signer_owner
+        {
+            props.push(serde_json::json!({
+                "name": "eu.pulseengine.varve.supplier-signer-differs",
+                "value": signer_owner
+            }));
+        }
     }
 
     // A composed layer points at its own document rather than restating it.
@@ -529,13 +534,16 @@ mod tests {
         assert!(comp(&doc, "sha256:cccc").get("supplier").is_none());
     }
 
-    /// Clause 1: where a signed proof signer is present the supplier comes
-    /// from it — whoever vouched for the bytes — and not from the repository
-    /// slug; where it names no organisation varve can read, or is absent, the
-    /// repository owner stays the supplier.
+    /// Clause 1: the supplier is derived from the signed upstream repository.
+    /// The proof signer is supporting evidence on the record, never an
+    /// override: a Sigstore identity is the job_workflow_ref, and for a
+    /// reusable workflow it names a DIFFERENT organisation from the one that
+    /// supplied the bytes (slsa-framework/slsa-github-generator signs for
+    /// everyone). Where the signer is a GitHub identity of another owner, that
+    /// is said as a property rather than by changing the supplier.
     // rivet: verifies REQ-SBOMFIELDS-001
     #[test]
-    fn the_supplier_comes_from_the_signed_proof_signer_where_there_is_one() {
+    fn the_supplier_is_the_repo_owner_and_a_different_signer_is_recorded_not_obeyed() {
         let manifest = br#"{
   "annotations": {
     "eu.pulseengine.varve.layer": "2026.10.0", "eu.pulseengine.varve.channel": "rolling",
@@ -543,52 +551,79 @@ mod tests {
   },
   "manifests": [
     { "digest": "sha256:1111", "annotations": {
-        "eu.pulseengine.tool": "a", "eu.pulseengine.tool.version": "1.0.0",
-        "eu.pulseengine.source.repo": "forked-from/a",
-        "eu.pulseengine.source.proof": "cosign-sums",
-        "eu.pulseengine.source.proof-signer": "https://github.com/the-signer/a/.github/workflows/release.yml@refs/tags/v1.0.0" } },
+        "eu.pulseengine.tool": "wasmtime", "eu.pulseengine.tool.version": "49.0.1",
+        "eu.pulseengine.source.repo": "bytecodealliance/wasmtime",
+        "eu.pulseengine.source.proof": "build-provenance",
+        "eu.pulseengine.source.proof-signer": "https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@refs/tags/v2.0.0" } },
     { "digest": "sha256:2222", "annotations": {
         "eu.pulseengine.tool": "b", "eu.pulseengine.tool.version": "1.0.0",
         "eu.pulseengine.source.repo": "owner/b",
         "eu.pulseengine.source.proof": "cosign-sums",
-        "eu.pulseengine.source.proof-signer": "release-bot@example.org" } },
+        "eu.pulseengine.source.proof-signer": "https://github.com/owner/b/.github/workflows/release.yml@refs/tags/v1.0.0" } },
     { "digest": "sha256:3333", "annotations": {
         "eu.pulseengine.tool": "c", "eu.pulseengine.tool.version": "1.0.0",
+        "eu.pulseengine.source.repo": "owner/c",
         "eu.pulseengine.source.proof": "cosign-sums",
-        "eu.pulseengine.source.proof-signer": "https://github.com/only-signer/c/.github/workflows/r.yml@refs/heads/main" } }
+        "eu.pulseengine.source.proof-signer": "release-bot@example.org" } },
+    { "digest": "sha256:4444", "annotations": {
+        "eu.pulseengine.tool": "d", "eu.pulseengine.tool.version": "1.0.0",
+        "eu.pulseengine.source.repo": "owner/d" } },
+    { "digest": "sha256:5555", "annotations": {
+        "eu.pulseengine.tool": "e", "eu.pulseengine.tool.version": "1.0.0",
+        "eu.pulseengine.source.proof": "cosign-sums",
+        "eu.pulseengine.source.proof-signer": "https://github.com/only-signer/e/.github/workflows/r.yml@refs/heads/main" } }
   ]
 }"#;
         let m = LayerManifest::parse(manifest).unwrap();
         let doc: serde_json::Value =
             serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx, &[7u8; 32]))
                 .unwrap();
+        let prop = |d: &str, name: &str| -> Option<String> {
+            comp(&doc, d)["properties"]
+                .as_array()
+                .and_then(|ps| ps.iter().find(|p| p["name"] == name))
+                .map(|p| p["value"].as_str().unwrap().to_string())
+        };
+        const DIFFERS: &str = "eu.pulseengine.varve.supplier-signer-differs";
+        const SIGNER: &str = "eu.pulseengine.source.proof-signer";
+
+        // The reusable-workflow case: supplier stays the repository's owner.
         assert_eq!(
             comp(&doc, "sha256:1111")["supplier"],
-            serde_json::json!({"name": "the-signer", "url": ["https://github.com/the-signer"]}),
-            "the signer vouched for these bytes; the repo slug is only where they say they came from"
+            serde_json::json!({"name": "bytecodealliance", "url": ["https://github.com/bytecodealliance"]})
         );
-        // The signer is recorded verbatim, so a reader sees what the supplier
-        // was derived from.
+        assert_eq!(
+            prop("sha256:1111", DIFFERS).as_deref(),
+            Some("slsa-framework")
+        );
         assert!(
-            comp(&doc, "sha256:1111")["properties"]
-                .as_array()
+            prop("sha256:1111", SIGNER)
                 .unwrap()
-                .iter()
-                .any(|p| p["name"] == "eu.pulseengine.source.proof-signer"
-                    && p["value"]
-                        == "https://github.com/the-signer/a/.github/workflows/release.yml@refs/tags/v1.0.0"),
+                .contains("slsa-github-generator")
         );
-        // A signer that is not a GitHub URL names no organisation we can
-        // read: fall back to the repository owner, never guess from it.
+
+        // Same owner: recorded, nothing to flag.
         assert_eq!(
             comp(&doc, "sha256:2222")["supplier"],
             serde_json::json!({"name": "owner", "url": ["https://github.com/owner"]})
         );
-        // No repository at all, but a signer: the signer is enough.
-        assert_eq!(
-            comp(&doc, "sha256:3333")["supplier"],
-            serde_json::json!({"name": "only-signer", "url": ["https://github.com/only-signer"]})
-        );
+        assert!(prop("sha256:2222", SIGNER).is_some());
+        assert_eq!(prop("sha256:2222", DIFFERS), None);
+
+        // A signer that names no GitHub organisation: recorded, not compared.
+        assert_eq!(comp(&doc, "sha256:3333")["supplier"]["name"], "owner");
+        assert!(prop("sha256:3333", SIGNER).is_some());
+        assert_eq!(prop("sha256:3333", DIFFERS), None);
+
+        // No signer: no signer properties.
+        assert_eq!(comp(&doc, "sha256:4444")["supplier"]["name"], "owner");
+        assert_eq!(prop("sha256:4444", SIGNER), None);
+        assert_eq!(prop("sha256:4444", DIFFERS), None);
+
+        // No repository: no supplier is invented from the signer.
+        assert!(comp(&doc, "sha256:5555").get("supplier").is_none());
+        assert!(prop("sha256:5555", SIGNER).is_some());
+        assert_eq!(prop("sha256:5555", DIFFERS), None);
     }
 
     /// Clause 2 and 7: the author is the realm whose root signed the layer,
