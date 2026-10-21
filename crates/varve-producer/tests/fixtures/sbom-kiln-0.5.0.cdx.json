@@ -1,0 +1,1527 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "serialNumber": "urn:uuid:124214f1-6ac3-4f9a-83a2-0cd7a1bec48b",
+  "metadata": {
+    "timestamp": "2026-09-08T21:46:33.523272006Z",
+    "tools": [
+      {
+        "vendor": "CycloneDX",
+        "name": "cargo-cyclonedx",
+        "version": "0.5.9"
+      }
+    ],
+    "component": {
+      "type": "application",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kilnd#0.5.0",
+      "name": "kilnd",
+      "version": "0.5.0",
+      "description": "Kiln WebAssembly Runtime Daemon - minimal optimized binary for different environments",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kilnd@0.5.0?download_url=file://.",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ],
+      "components": [
+        {
+          "type": "library",
+          "bom-ref": "path+file:///home/runner/work/kiln/kiln/kilnd#0.5.0 bin-target-0",
+          "name": "kilnd",
+          "version": "0.5.0",
+          "purl": "pkg:cargo/kilnd@0.5.0?download_url=file://.#src/lib.rs"
+        },
+        {
+          "type": "application",
+          "bom-ref": "path+file:///home/runner/work/kiln/kiln/kilnd#0.5.0 bin-target-1",
+          "name": "kilnd",
+          "version": "0.5.0",
+          "purl": "pkg:cargo/kilnd@0.5.0?download_url=file://.#src/main.rs"
+        }
+      ]
+    },
+    "properties": [
+      {
+        "name": "cdx:rustc:sbom:target:triple",
+        "value": "x86_64-unknown-linux-gnu"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-component#0.5.0",
+      "name": "kiln-component",
+      "version": "0.5.0",
+      "description": "WebAssembly Component Model support for Kiln",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-component@0.5.0?download_url=file://../kiln-component",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/kiln-component"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-decoder#0.5.0",
+      "name": "kiln-decoder",
+      "version": "0.5.0",
+      "description": "WebAssembly module decoder for Kiln runtime",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-decoder@0.5.0?download_url=file://../kiln-decoder",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+      "name": "kiln-error",
+      "version": "0.5.0",
+      "description": "Error handling for the Kiln WebAssembly Runtime",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-error@0.5.0?download_url=file://../kiln-error",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-format#0.5.0",
+      "name": "kiln-format",
+      "version": "0.5.0",
+      "description": "WebAssembly format handling for Kiln",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-format@0.5.0?download_url=file://../kiln-format",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0",
+      "name": "kiln-foundation",
+      "version": "0.5.0",
+      "description": "Foundation library providing core types and memory safety primitives for the Kiln WebAssembly Runtime.",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-foundation@0.5.0?download_url=file://../kiln-foundation",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-host#0.5.0",
+      "name": "kiln-host",
+      "version": "0.5.0",
+      "description": "Host function infrastructure for the WebAssembly Runtime (Kiln)",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-host@0.5.0?download_url=file://../kiln-host",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/kiln-host"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-instructions#0.5.0",
+      "name": "kiln-instructions",
+      "version": "0.5.0",
+      "description": "WebAssembly instruction implementations for the Kiln runtime",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-instructions@0.5.0?download_url=file://../kiln-instructions",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-intercept#0.5.0",
+      "name": "kiln-intercept",
+      "version": "0.5.0",
+      "description": "Host interception for WebAssembly Runtime (Kiln)",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-intercept@0.5.0?download_url=file://../kiln-intercept",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/kiln-intercept"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-logging#0.5.0",
+      "name": "kiln-logging",
+      "version": "0.5.0",
+      "description": "Logging infrastructure for the WebAssembly Runtime (Kiln)",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-logging@0.5.0?download_url=file://../kiln-logging",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/kiln-logging"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-math#0.5.0",
+      "author": "The Kiln Project Developers",
+      "name": "kiln-math",
+      "version": "0.5.0",
+      "description": "Mathematical operations for the Kiln runtime, supporting WebAssembly standards.",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-math@0.5.0?download_url=file://../kiln-math",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/kiln-math"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-panic#0.5.0",
+      "name": "kiln-panic",
+      "version": "0.5.0",
+      "description": "Panic handler for Kiln - provides ASIL-B/D compliant panic handling",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-panic@0.5.0?download_url=file://../kiln-panic",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-platform#0.5.0",
+      "author": "The Kiln Project Developers",
+      "name": "kiln-platform",
+      "version": "0.5.0",
+      "description": "Platform Abstraction Layer (Memory, Synchronization) for Kiln.",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-platform@0.5.0?download_url=file://../kiln-platform",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-runtime#0.5.0",
+      "name": "kiln-runtime",
+      "version": "0.5.0",
+      "description": "WebAssembly Component Model Runtime for Kiln",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-runtime@0.5.0?download_url=file://../kiln-runtime",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/kiln-runtime"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-sync#0.5.0",
+      "author": "The Kiln Project Developers",
+      "name": "kiln-sync",
+      "version": "0.5.0",
+      "description": "Synchronization primitives for Kiln, supporting std and no_std environments.",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-sync@0.5.0?download_url=file://../kiln-sync",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "path+file:///home/runner/work/kiln/kiln/kiln-wasi#0.5.0",
+      "name": "kiln-wasi",
+      "version": "0.5.0",
+      "description": "WASI Preview2 implementation for Kiln WebAssembly Runtime with Preview3 preparation",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/kiln-wasi@0.5.0?download_url=file://../kiln-wasi",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pulseengine/kiln"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#cfg-if@1.0.1",
+      "author": "Alex Crichton <alex@alexcrichton.com>",
+      "name": "cfg-if",
+      "version": "1.0.1",
+      "description": "A macro to ergonomically define an item depending on a large number of #[cfg] parameters. Structured like an if-else chain, the first matching branch is the item that gets emitted. ",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "9555578bc9e57714c812a1f84e4fc5b4d21fcb063490c624de019f7464c91268"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/cfg-if@1.0.1",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/rust-lang/cfg-if"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#equivalent@1.0.2",
+      "name": "equivalent",
+      "version": "1.0.2",
+      "description": "Traits for key comparison in maps.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "purl": "pkg:cargo/equivalent@1.0.2",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/indexmap-rs/equivalent"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#hashbrown@0.17.1",
+      "name": "hashbrown",
+      "version": "0.17.1",
+      "description": "A Rust port of Google's SwissTable hash map",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/hashbrown@0.17.1",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/rust-lang/hashbrown"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#indexmap@2.14.0",
+      "name": "indexmap",
+      "version": "2.14.0",
+      "description": "A hash table with consistent order and fast iteration.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "purl": "pkg:cargo/indexmap@2.14.0",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/indexmap/"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/indexmap-rs/indexmap"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.186",
+      "author": "The Rust Project Developers",
+      "name": "libc",
+      "version": "0.2.186",
+      "description": "Raw FFI bindings to platform libraries like libc.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/libc@0.2.186",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/rust-lang/libc"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#libm@0.2.16",
+      "author": "Alex Crichton <alex@alexcrichton.com>, Amanieu d'Antras <amanieu@gmail.com>, Jorge Aparicio <japaricious@gmail.com>, Trevor Gross <tg@trevorgross.com>",
+      "name": "libm",
+      "version": "0.2.16",
+      "description": "libm in pure Rust",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/libm@0.2.16",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/rust-lang/compiler-builtins"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#lock_api@0.4.14",
+      "author": "Amanieu d'Antras <amanieu@gmail.com>",
+      "name": "lock_api",
+      "version": "0.4.14",
+      "description": "Wrappers to create fully-featured Mutex and RwLock types. Compatible with no_std.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/lock_api@0.4.14",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Amanieu/parking_lot"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#log@0.4.34",
+      "author": "The Rust Project Developers",
+      "name": "log",
+      "version": "0.4.34",
+      "description": "A lightweight logging facade for Rust ",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/log@0.4.34",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/log"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/rust-lang/log"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#once_cell@1.21.3",
+      "author": "Aleksey Kladov <aleksey.kladov@gmail.com>",
+      "name": "once_cell",
+      "version": "1.21.3",
+      "description": "Single assignment cells and lazy values.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/once_cell@1.21.3",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/once_cell"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/matklad/once_cell"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#parking_lot@0.12.5",
+      "author": "Amanieu d'Antras <amanieu@gmail.com>",
+      "name": "parking_lot",
+      "version": "0.12.5",
+      "description": "More compact and efficient implementations of the standard synchronization primitives.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/parking_lot@0.12.5",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Amanieu/parking_lot"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#parking_lot_core@0.9.12",
+      "author": "Amanieu d'Antras <amanieu@gmail.com>",
+      "name": "parking_lot_core",
+      "version": "0.9.12",
+      "description": "An advanced API for creating custom synchronization primitives.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/parking_lot_core@0.9.12",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Amanieu/parking_lot"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#pin-project-lite@0.2.16",
+      "name": "pin-project-lite",
+      "version": "0.2.16",
+      "description": "A lightweight version of pin-project written with declarative macros. ",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "3b3cff922bd51709b605d9ead9aa71031d81447142d828eb4a6eba76fe619f9b"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "purl": "pkg:cargo/pin-project-lite@0.2.16",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/taiki-e/pin-project-lite"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106",
+      "author": "David Tolnay <dtolnay@gmail.com>, Alex Crichton <alex@alexcrichton.com>",
+      "name": "proc-macro2",
+      "version": "1.0.106",
+      "description": "A substitute implementation of the compiler's `proc_macro` API to decouple token-based libraries from the procedural macro use case.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/proc-macro2@1.0.106",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/proc-macro2"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/dtolnay/proc-macro2"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#quote@1.0.45",
+      "author": "David Tolnay <dtolnay@gmail.com>",
+      "name": "quote",
+      "version": "1.0.45",
+      "description": "Quasi-quoting macro quote!(...)",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/quote@1.0.45",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/quote/"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/dtolnay/quote"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#scopeguard@1.2.0",
+      "author": "bluss",
+      "name": "scopeguard",
+      "version": "1.2.0",
+      "description": "A RAII scope guard that will run a given closure when it goes out of scope, even if the code between panics (assuming unwinding panic).  Defines the macros `defer!`, `defer_on_unwind!`, `defer_on_success!` as shorthands for guards with one of the implemented strategies. ",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/scopeguard@1.2.0",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/scopeguard/"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/bluss/scopeguard"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.229",
+      "author": "Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>",
+      "name": "serde",
+      "version": "1.0.229",
+      "description": "A generic serialization/deserialization framework",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/serde@1.0.229",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/serde"
+        },
+        {
+          "type": "website",
+          "url": "https://serde.rs"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/serde-rs/serde"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#serde_core@1.0.229",
+      "author": "Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>",
+      "name": "serde_core",
+      "version": "1.0.229",
+      "description": "Serde traits only, with no support for derive -- use the `serde` crate instead",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/serde_core@1.0.229",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/serde_core"
+        },
+        {
+          "type": "website",
+          "url": "https://serde.rs"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/serde-rs/serde"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#serde_derive@1.0.229",
+      "author": "Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>",
+      "name": "serde_derive",
+      "version": "1.0.229",
+      "description": "Macros 1.1 implementation of #[derive(Serialize, Deserialize)]",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/serde_derive@1.0.229",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://serde.rs/derive.html"
+        },
+        {
+          "type": "website",
+          "url": "https://serde.rs"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/serde-rs/serde"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#serde_spanned@1.1.1",
+      "name": "serde_spanned",
+      "version": "1.1.1",
+      "description": "Serde-compatible spanned Value",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/serde_spanned@1.1.1",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/toml-rs/toml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#smallvec@1.15.1",
+      "author": "The Servo Project Developers",
+      "name": "smallvec",
+      "version": "1.15.1",
+      "description": "'Small vector' optimization: store up to a small number of items on the stack",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/smallvec@1.15.1",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/smallvec/"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/servo/rust-smallvec"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#syn@3.0.2",
+      "author": "David Tolnay <dtolnay@gmail.com>",
+      "name": "syn",
+      "version": "3.0.2",
+      "description": "Parser for Rust source code",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "a207d6d6a2b7fc470b80443726053f18a2481b7e1eee970597051596567987a3"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/syn@3.0.2",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/syn"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/dtolnay/syn"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#toml@1.1.3+spec-1.1.0",
+      "name": "toml",
+      "version": "1.1.3+spec-1.1.0",
+      "description": "A native Rust encoder and decoder of TOML-formatted files and streams. Provides implementations of the standard Serialize/Deserialize traits for TOML data to facilitate deserializing and serializing Rust structures. ",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "53c96ecdfa941c8fc4fcaed14f99ada8ebed502eef533015095a07e3301d4c3c"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/toml@1.1.3+spec-1.1.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/toml-rs/toml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#toml_datetime@1.1.1+spec-1.1.0",
+      "name": "toml_datetime",
+      "version": "1.1.1+spec-1.1.0",
+      "description": "A TOML-compatible datetime type",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/toml_datetime@1.1.1+spec-1.1.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/toml-rs/toml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#toml_parser@1.1.2+spec-1.1.0",
+      "name": "toml_parser",
+      "version": "1.1.2+spec-1.1.0",
+      "description": "Yet another format-preserving TOML parser.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/toml_parser@1.1.2+spec-1.1.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/toml-rs/toml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#toml_writer@1.1.2+spec-1.1.0",
+      "name": "toml_writer",
+      "version": "1.1.2+spec-1.1.0",
+      "description": "A low-level interface for writing out TOML ",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/toml_writer@1.1.2+spec-1.1.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/toml-rs/toml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#tracing-core@0.1.36",
+      "author": "Tokio Contributors <team@tokio.rs>",
+      "name": "tracing-core",
+      "version": "0.1.36",
+      "description": "Core primitives for application-level tracing. ",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/tracing-core@0.1.36",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://tokio.rs"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/tokio-rs/tracing"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#tracing@0.1.44",
+      "author": "Eliza Weisman <eliza@buoyant.io>, Tokio Contributors <team@tokio.rs>",
+      "name": "tracing",
+      "version": "0.1.44",
+      "description": "Application-level tracing for Rust. ",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/tracing@0.1.44",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://tokio.rs"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/tokio-rs/tracing"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#unicode-ident@1.0.18",
+      "author": "David Tolnay <dtolnay@gmail.com>",
+      "name": "unicode-ident",
+      "version": "1.0.18",
+      "description": "Determine whether characters have the XID_Start or XID_Continue properties according to Unicode Standard Annex #31",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "5a5f39404a5da50712a4c1eecf25e90dd62b613502b7e925fd4e4d19b5c96512"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "(MIT OR Apache-2.0) AND Unicode-3.0"
+        }
+      ],
+      "purl": "pkg:cargo/unicode-ident@1.0.18",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/unicode-ident"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/dtolnay/unicode-ident"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#winnow@1.0.2",
+      "name": "winnow",
+      "version": "1.0.2",
+      "description": "A byte-oriented, zero-copy, parser combinators library",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "purl": "pkg:cargo/winnow@1.0.2",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/winnow-rs/winnow"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-component#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-decoder#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-format#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-host#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-intercept#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-platform#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-runtime#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-sync#0.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#log@0.4.34"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-decoder#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-format#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.229",
+        "registry+https://github.com/rust-lang/crates.io-index#toml@1.1.3+spec-1.1.0"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0"
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-format#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-platform#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-sync#0.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#tracing@0.1.44",
+        "registry+https://github.com/rust-lang/crates.io-index#tracing-core@0.1.36"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-host#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-intercept#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-sync#0.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#log@0.4.34"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-instructions#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-math#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-sync#0.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#log@0.4.34"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-intercept#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-sync#0.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#log@0.4.34"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-logging#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-host#0.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#log@0.4.34"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-math#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-platform#0.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#libm@0.2.16"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-panic#0.5.0"
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-platform#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-sync#0.5.0"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-runtime#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-decoder#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-format#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-host#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-instructions#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-intercept#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-platform#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-sync#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-wasi#0.5.0"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-sync#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#parking_lot@0.12.5"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kiln-wasi#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-format#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-host#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-platform#0.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#once_cell@1.21.3"
+      ]
+    },
+    {
+      "ref": "path+file:///home/runner/work/kiln/kiln/kilnd#0.5.0",
+      "dependsOn": [
+        "path+file:///home/runner/work/kiln/kiln/kiln-component#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-decoder#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-error#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-foundation#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-host#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-logging#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-panic#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-platform#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-runtime#0.5.0",
+        "path+file:///home/runner/work/kiln/kiln/kiln-wasi#0.5.0"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#cfg-if@1.0.1"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#equivalent@1.0.2"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#hashbrown@0.17.1"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#indexmap@2.14.0",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#equivalent@1.0.2",
+        "registry+https://github.com/rust-lang/crates.io-index#hashbrown@0.17.1"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.186"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#libm@0.2.16"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#lock_api@0.4.14",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#scopeguard@1.2.0"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#log@0.4.34"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#once_cell@1.21.3"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#parking_lot@0.12.5",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#lock_api@0.4.14",
+        "registry+https://github.com/rust-lang/crates.io-index#parking_lot_core@0.9.12"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#parking_lot_core@0.9.12",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#cfg-if@1.0.1",
+        "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.186",
+        "registry+https://github.com/rust-lang/crates.io-index#smallvec@1.15.1"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#pin-project-lite@0.2.16"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#unicode-ident@1.0.18"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#quote@1.0.45",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#scopeguard@1.2.0"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.229",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#serde_core@1.0.229",
+        "registry+https://github.com/rust-lang/crates.io-index#serde_derive@1.0.229"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#serde_core@1.0.229"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#serde_derive@1.0.229",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106",
+        "registry+https://github.com/rust-lang/crates.io-index#quote@1.0.45",
+        "registry+https://github.com/rust-lang/crates.io-index#syn@3.0.2"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#serde_spanned@1.1.1",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#serde_core@1.0.229"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#smallvec@1.15.1"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#syn@3.0.2",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106",
+        "registry+https://github.com/rust-lang/crates.io-index#quote@1.0.45",
+        "registry+https://github.com/rust-lang/crates.io-index#unicode-ident@1.0.18"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#toml@1.1.3+spec-1.1.0",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#indexmap@2.14.0",
+        "registry+https://github.com/rust-lang/crates.io-index#serde_core@1.0.229",
+        "registry+https://github.com/rust-lang/crates.io-index#serde_spanned@1.1.1",
+        "registry+https://github.com/rust-lang/crates.io-index#toml_datetime@1.1.1+spec-1.1.0",
+        "registry+https://github.com/rust-lang/crates.io-index#toml_parser@1.1.2+spec-1.1.0",
+        "registry+https://github.com/rust-lang/crates.io-index#toml_writer@1.1.2+spec-1.1.0",
+        "registry+https://github.com/rust-lang/crates.io-index#winnow@1.0.2"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#toml_datetime@1.1.1+spec-1.1.0",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#serde_core@1.0.229"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#toml_parser@1.1.2+spec-1.1.0",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#winnow@1.0.2"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#toml_writer@1.1.2+spec-1.1.0"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#tracing-core@0.1.36",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#once_cell@1.21.3"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#tracing@0.1.44",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#pin-project-lite@0.2.16",
+        "registry+https://github.com/rust-lang/crates.io-index#tracing-core@0.1.36"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#unicode-ident@1.0.18"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#winnow@1.0.2"
+    }
+  ]
+}

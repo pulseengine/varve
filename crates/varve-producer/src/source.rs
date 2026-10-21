@@ -122,6 +122,82 @@ impl<R: CommandRunner> GhSource<R> {
         Ok(out.stdout)
     }
 
+    /// `gh api --paginate repos/<repo>/security-advisories?state=published`
+    /// (REQ-ADVISORYWATCH-001 clause 1). Through the SAME forge as every
+    /// other call this source makes — the tool's repo lives wherever this
+    /// run's own releases do.
+    pub fn ghsa_advisories_json(&self, repo: &str) -> Result<String, RunError> {
+        self.gh(gh::security_advisories_argv(repo))
+    }
+
+    /// The RustSec advisory-db directory listing for one crate, or `None` on
+    /// a 404 — absence of advisories for that crate, never a failure to ask.
+    ///
+    /// Deliberately NOT through `self.gh`, and deliberately NOT through this
+    /// run's forge: `rustsec/advisory-db` has one home, github.com, whatever
+    /// forge this run's own releases live on.
+    pub fn rustsec_crate_directory(&self, krate: &str) -> Result<Option<String>, RunError> {
+        let args = gh::rustsec_crate_dir_argv(krate)
+            .map_err(|e| io_err("building the rustsec query", &e.to_string()))?;
+        let out = self.runner.run("gh", &args, &gh::rustsec_advisory_db_env());
+        if out.code == 127 {
+            return Err(io_err(
+                "running gh",
+                &GhError::NotInstalled {
+                    program: "gh".into(),
+                }
+                .to_string(),
+            ));
+        }
+        if out.ok() {
+            return Ok(Some(out.stdout));
+        }
+        if gh::is_http_404(&out.stderr) {
+            return Ok(None);
+        }
+        Err(io_err(&format!("gh {}", args.join(" ")), out.stderr.trim()))
+    }
+
+    /// One RustSec advisory file's raw markdown. Same github.com-only
+    /// reasoning as [`Self::rustsec_crate_directory`].
+    pub fn rustsec_advisory_markdown(
+        &self,
+        krate: &str,
+        filename: &str,
+    ) -> Result<String, RunError> {
+        let args = gh::rustsec_advisory_md_argv(krate, filename)
+            .map_err(|e| io_err("building the rustsec query", &e.to_string()))?;
+        let out = self.runner.run("gh", &args, &gh::rustsec_advisory_db_env());
+        if out.code == 127 {
+            return Err(io_err(
+                "running gh",
+                &GhError::NotInstalled {
+                    program: "gh".into(),
+                }
+                .to_string(),
+            ));
+        }
+        if !out.ok() {
+            return Err(io_err(&format!("gh {}", args.join(" ")), out.stderr.trim()));
+        }
+        Ok(out.stdout)
+    }
+
+    /// The release's own upstream SBOM, admitted through the SAME proof
+    /// `deposit` already verifies for every payload — the fallback for a
+    /// payload whose layer manifest recorded no `ANN_SBOM` of its own
+    /// (REQ-ADVISORYWATCH-001 clause 4b). Through THIS source's own forge:
+    /// unlike the RustSec advisory-db, a release's SBOM lives wherever that
+    /// release does.
+    pub fn release_sbom(
+        &self,
+        repo: &str,
+        release: &str,
+        version: &str,
+    ) -> crate::orchestrate::ReleaseSbomOutcome {
+        crate::orchestrate::release_sbom_outcome(self, &self.forge, repo, release, version)
+    }
+
     /// Download one asset into the release's directory and return its path.
     fn download(&self, repo: &str, version: &str, asset: &str) -> Result<PathBuf, RunError> {
         let dir = self.dir_for(repo, version);
@@ -747,6 +823,164 @@ mod tests {
         let o = Spawn.run("definitely-not-a-real-binary-xyzzy", &[], &[]);
         assert!(!o.ok(), "{o:?}");
         assert_eq!(o.code, 127);
+    }
+
+    /// GHSA queries go through the SAME forge as everything else this
+    /// source does — the tool's own repo lives wherever this run's releases
+    /// do, enterprise or not.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn ghsa_advisories_are_asked_through_the_runs_own_forge() {
+        const JSON: &str = r#"[{"ghsa_id":"GHSA-x"}]"#;
+        let src = GhSource::new(
+            Scripted(vec![("gh api".into(), out(0, JSON, ""))]),
+            Forge::enterprise("ghe.example.com"),
+            "/w",
+        );
+        assert_eq!(src.ghsa_advisories_json("o/r").unwrap(), JSON);
+    }
+
+    /// Records every env it is handed, so a test can assert the EXACT
+    /// `GH_HOST` each call carried, rather than merely that gh was invoked.
+    struct CapturingRunner {
+        envs: RefCell<Vec<Vec<(String, String)>>>,
+    }
+
+    impl CapturingRunner {
+        fn new() -> Self {
+            CapturingRunner {
+                envs: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandRunner for CapturingRunner {
+        fn run(&self, program: &str, _args: &[String], env: &[(String, String)]) -> RunOutput {
+            assert_eq!(program, "gh");
+            self.envs.borrow_mut().push(env.to_vec());
+            out(0, "[]", "")
+        }
+    }
+
+    /// THE host-inheritance hole: an empty env for a public-GitHub call
+    /// does not mean "target github.com" — it means "inherit whatever
+    /// `GH_HOST` the calling process already has", which can silently
+    /// redirect a probe, a sums fetch, an SBOM download or an advisory
+    /// query to a different host. Every call — GHSA through this run's
+    /// own forge, and RustSec pinned to github.com regardless of it —
+    /// must state its host explicitly, including when that host IS
+    /// github.com.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn every_gh_call_states_its_host_explicitly_never_inheriting_the_ambient_one() {
+        let public = GhSource::new(CapturingRunner::new(), Forge::github_com(), "/w");
+        let _ = public.ghsa_advisories_json("o/r");
+        assert_eq!(
+            public.runner.envs.borrow()[0],
+            vec![("GH_HOST".to_string(), "github.com".to_string())],
+            "a public-GitHub GHSA call must still state its host"
+        );
+
+        let enterprise = GhSource::new(
+            CapturingRunner::new(),
+            Forge::enterprise("ghe.example.com"),
+            "/w",
+        );
+        let _ = enterprise.ghsa_advisories_json("o/r");
+        assert_eq!(
+            enterprise.runner.envs.borrow()[0],
+            vec![("GH_HOST".to_string(), "ghe.example.com".to_string())]
+        );
+
+        // RustSec is pinned to github.com from the SAME enterprise source.
+        let _ = enterprise.rustsec_crate_directory("rustls");
+        assert_eq!(
+            enterprise.runner.envs.borrow()[1],
+            vec![("GH_HOST".to_string(), "github.com".to_string())]
+        );
+        let _ = enterprise.rustsec_advisory_markdown("rustls", "RUSTSEC-2026-0346.md");
+        assert_eq!(
+            enterprise.runner.envs.borrow()[2],
+            vec![("GH_HOST".to_string(), "github.com".to_string())]
+        );
+    }
+
+    /// The RustSec advisory database is fetched WITHOUT this run's forge
+    /// environment — it lives on github.com no matter which forge the
+    /// run's own releases come from.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn rustsec_queries_do_not_carry_an_enterprise_forges_environment() {
+        // Pinned to github.com EXPLICITLY, never empty: an empty env means
+        // "inherit whatever GH_HOST this process already has", which is
+        // exactly the host-inheritance hole this pins shut.
+        struct AssertGithubComHost;
+        impl CommandRunner for AssertGithubComHost {
+            fn run(&self, program: &str, args: &[String], env: &[(String, String)]) -> RunOutput {
+                assert_eq!(program, "gh");
+                assert_eq!(
+                    env,
+                    &[("GH_HOST".to_string(), "github.com".to_string())],
+                    "rustsec/advisory-db must be pinned to github.com, not {env:?}"
+                );
+                if args.contains(&"contents/crates/rustls".to_string())
+                    || args.last().unwrap().ends_with("crates/rustls")
+                {
+                    out(0, r#"[{"name":"RUSTSEC-2026-0346.md"}]"#, "")
+                } else {
+                    out(0, "raw markdown body", "")
+                }
+            }
+        }
+        let src = GhSource::new(
+            AssertGithubComHost,
+            Forge::enterprise("ghe.example.com"),
+            "/w",
+        );
+        let listing = src.rustsec_crate_directory("rustls").unwrap();
+        assert_eq!(
+            listing,
+            Some(r#"[{"name":"RUSTSEC-2026-0346.md"}]"#.to_string())
+        );
+        let md = src
+            .rustsec_advisory_markdown("rustls", "RUSTSEC-2026-0346.md")
+            .unwrap();
+        assert_eq!(md, "raw markdown body");
+    }
+
+    /// A 404 on the crate directory is absence, not a failure — most crates
+    /// have never had an advisory.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn a_404_rustsec_crate_directory_is_none_not_an_error() {
+        let src = GhSource::new(
+            Scripted(vec![(
+                "gh api".into(),
+                out(1, "", "gh: Not Found (HTTP 404)"),
+            )]),
+            Forge::github_com(),
+            "/w",
+        );
+        assert_eq!(src.rustsec_crate_directory("no-such-crate").unwrap(), None);
+    }
+
+    /// Anything else — rate limiting, a network error — is a real failure
+    /// and must not be read as "this crate has no advisories".
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn a_non_404_rustsec_failure_is_an_error_not_an_absent_crate() {
+        let src = GhSource::new(
+            Scripted(vec![(
+                "gh api".into(),
+                out(1, "", "HTTP 403: API rate limit exceeded"),
+            )]),
+            Forge::github_com(),
+            "/w",
+        );
+        let e = src
+            .rustsec_crate_directory("rustls")
+            .expect_err("must refuse");
+        assert!(e.to_string().contains("403"), "{e}");
     }
 
     /// Asking for an attestation the probe never captured is an ordering bug

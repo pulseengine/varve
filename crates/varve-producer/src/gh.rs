@@ -58,6 +58,13 @@ pub enum GhError {
     },
     /// The command succeeded and its output was not what we parse.
     Unparseable { program: String, detail: String },
+    /// A RustSec advisory-db query was asked about something that cannot be
+    /// a crate name — refused BEFORE the argv is built, so no caller can
+    /// smuggle a path-traversal segment into the request (REQ-ADVISORYWATCH-001
+    /// clause 4). `name` carries what was asked for.
+    InvalidCrateName { name: String },
+    /// Same refusal, for the FILENAME half of a RustSec query.
+    InvalidAdvisoryFilename { filename: String },
 }
 
 impl fmt::Display for GhError {
@@ -83,6 +90,16 @@ impl fmt::Display for GhError {
             GhError::Unparseable { program, detail } => {
                 write!(f, "cannot read {program}'s output: {detail}")
             }
+            GhError::InvalidCrateName { name } => write!(
+                f,
+                "{name:?} is not a crate name this RustSec query will accept — refusing \
+                 to build a request that would interpolate it into a URL path"
+            ),
+            GhError::InvalidAdvisoryFilename { filename } => write!(
+                f,
+                "{filename:?} is not a RustSec advisory filename this query will accept — \
+                 refusing to build a request that would interpolate it into a URL path"
+            ),
         }
     }
 }
@@ -277,16 +294,196 @@ pub fn parse_repo_license(stdout: &str) -> Result<Option<String>, GhError> {
     })
 }
 
+/// `gh api --paginate repos/<repo>/security-advisories?state=published&per_page=100`
+/// (REQ-ADVISORYWATCH-001 clause 1). `--paginate` so a repo publishing more
+/// than one page of advisories is not silently read as having fewer.
+pub fn security_advisories_argv(repo: &str) -> Vec<String> {
+    vec![
+        "api".into(),
+        "--paginate".into(),
+        format!("repos/{repo}/security-advisories?state=published&per_page=100"),
+    ]
+}
+
+/// Is `s` a crate name crates.io itself would accept — a letter, then up to
+/// 63 more letters, digits, `_` or `-`?
+///
+/// `krate` ends up interpolated directly into a URL path
+/// (`.../crates/<krate>` and `.../crates/<krate>/<filename>`), and its only
+/// source is an upstream SBOM's component names — untrusted text a crafted
+/// `../../..` could use to steer that request anywhere on the GitHub API.
+/// Checked in BYTES, not `char`s: every character this pattern allows is a
+/// single ASCII byte, so slicing at index 1 below can never land inside a
+/// multi-byte sequence, and anything actually multi-byte fails the
+/// `is_ascii_alphabetic` check on its own first byte regardless.
+pub fn is_valid_crate_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    if !bytes[0].is_ascii_alphabetic() {
+        return false;
+    }
+    bytes[1..]
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+}
+
+/// Is `s` a safe GitHub owner or repository NAME — letters, digits, `-`,
+/// `_` or `.`, non-empty, at most 100 bytes, and never `.` or `..` alone
+/// (which name no real owner or repo and must not be mistaken for a path
+/// traversal segment)?
+///
+/// Used to validate EACH path segment of an untrusted
+/// `https://github.com/<owner>/<repo>/...` URL — a RustSec advisory's own
+/// `url` field, which this round's live run showed can point at a PR, a
+/// commit or an issue, not only a `/security/advisories/` link — before
+/// either segment is interpolated into a second request path. Same
+/// reasoning as [`is_valid_crate_name`] above, one more untrusted input
+/// source later.
+pub fn is_valid_github_name(s: &str) -> bool {
+    if s.is_empty() || s.len() > 100 || s == "." || s == ".." {
+        return false;
+    }
+    s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
+/// Is `s` the exact shape of a RustSec advisory filename,
+/// `RUSTSEC-YYYY-NNNN.md`?
+///
+/// `filename` comes from a directory LISTING this program asked for, which
+/// is one layer removed from upstream input — but the listing is still
+/// untrusted content from a network response, and interpolating it
+/// unchecked into a second URL path is the same mistake as `krate` above,
+/// one hop later.
+pub fn is_valid_rustsec_filename(s: &str) -> bool {
+    let four_digits = |t: &str| t.len() == 4 && t.bytes().all(|b| b.is_ascii_digit());
+    let Some(rest) = s.strip_prefix("RUSTSEC-") else {
+        return false;
+    };
+    let Some((year, rest)) = rest.split_once('-') else {
+        return false;
+    };
+    let Some(number) = rest.strip_suffix(".md") else {
+        return false;
+    };
+    four_digits(year) && four_digits(number)
+}
+
+/// `gh api repos/rustsec/advisory-db/contents/crates/<crate>` — the directory
+/// listing for one crate. Always against github.com: the advisory database
+/// has one home, independent of which forge this run's OWN releases live on.
+///
+/// Refuses BEFORE building anything when `krate` is not a shape crates.io
+/// itself would issue (REQ-ADVISORYWATCH-001 clause 4) — defense in depth
+/// beneath whatever check a caller already ran.
+pub fn rustsec_crate_dir_argv(krate: &str) -> Result<Vec<String>, GhError> {
+    if !is_valid_crate_name(krate) {
+        return Err(GhError::InvalidCrateName {
+            name: krate.to_string(),
+        });
+    }
+    Ok(vec![
+        "api".into(),
+        format!("repos/rustsec/advisory-db/contents/crates/{krate}"),
+    ])
+}
+
+/// `gh api -H "Accept: application/vnd.github.raw" repos/rustsec/advisory-db/contents/crates/<crate>/<file>`
+///
+/// The raw media type, so stdout IS the markdown — not a JSON envelope
+/// carrying it base64-encoded, which `rustsec_finding` would then have to be
+/// taught to unwrap for no reason but this one call site.
+///
+/// Refuses BEFORE building anything when either half is not the shape it
+/// claims to be — same reasoning as [`rustsec_crate_dir_argv`].
+pub fn rustsec_advisory_md_argv(krate: &str, filename: &str) -> Result<Vec<String>, GhError> {
+    if !is_valid_crate_name(krate) {
+        return Err(GhError::InvalidCrateName {
+            name: krate.to_string(),
+        });
+    }
+    if !is_valid_rustsec_filename(filename) {
+        return Err(GhError::InvalidAdvisoryFilename {
+            filename: filename.to_string(),
+        });
+    }
+    Ok(vec![
+        "api".into(),
+        "-H".into(),
+        "Accept: application/vnd.github.raw".into(),
+        format!("repos/rustsec/advisory-db/contents/crates/{krate}/{filename}"),
+    ])
+}
+
+/// Did `gh api` fail because the resource genuinely does not exist?
+///
+/// Looks for gh's OWN structured error marker, `(HTTP 404)` — not a bare
+/// `404`, which [`crate::registry`]'s module docs already catalogue as
+/// something a port number, a repository path or a crate name can contain
+/// by coincidence. `gh api` prints that exact parenthesised form on a real
+/// 404 from the GitHub API, so requiring it is strictly narrower than the
+/// bare substring and does not reach for the incidental case.
+pub fn is_http_404(stderr: &str) -> bool {
+    stderr.contains("(HTTP 404)")
+}
+
+/// The `.md` filenames in a RustSec crate directory listing
+/// (`gh api repos/rustsec/advisory-db/contents/crates/<crate>`).
+///
+/// Anything that is not a markdown file (a stray `README` the directory
+/// convention does not actually carry, but nothing here assumes it never
+/// will) is simply not an advisory and is dropped rather than refused.
+pub fn parse_rustsec_dir_listing(stdout: &str) -> Result<Vec<String>, GhError> {
+    let v: serde_json::Value = serde_json::from_str(stdout).map_err(|e| GhError::Unparseable {
+        program: "gh".into(),
+        detail: e.to_string(),
+    })?;
+    let arr = v.as_array().ok_or_else(|| GhError::Unparseable {
+        program: "gh".into(),
+        detail: "expected a JSON array of directory entries".into(),
+    })?;
+    let mut names = Vec::new();
+    for entry in arr {
+        let name =
+            entry
+                .get("name")
+                .and_then(|n| n.as_str())
+                .ok_or_else(|| GhError::Unparseable {
+                    program: "gh".into(),
+                    detail: "a directory entry carries no name".into(),
+                })?;
+        if name.ends_with(".md") {
+            names.push(name.to_string());
+        }
+    }
+    Ok(names)
+}
+
 /// The environment a command needs to reach the right forge.
 ///
-/// `GH_HOST` is what `gh` itself uses; passing it rather than assuming
-/// github.com is what makes an enterprise instance reachable at all.
+/// `GH_HOST` is what `gh` itself uses, and it is ALWAYS stated here —
+/// including for public GitHub. An empty environment does not mean "target
+/// github.com"; it means "inherit whatever `GH_HOST` the calling process
+/// already has", and a `GH_HOST` set for an unrelated reason in that
+/// process's environment would then silently redirect every probe, sums
+/// fetch, SBOM download and advisory query to a different host. Stating the
+/// host explicitly is the only way "this call targets forge X" is actually
+/// true of the call, rather than true of the forge object and merely hoped
+/// of the environment.
 pub fn forge_env(forge: &crate::forge::Forge) -> Vec<(String, String)> {
-    if forge.is_public_github() {
-        Vec::new()
-    } else {
-        vec![("GH_HOST".to_string(), forge.host.clone())]
-    }
+    vec![("GH_HOST".to_string(), forge.host.clone())]
+}
+
+/// The environment a RustSec advisory-db query needs: `GH_HOST` pinned to
+/// `github.com` explicitly, REGARDLESS of which forge this run's own
+/// releases live on and regardless of the calling process's own
+/// environment. `rustsec/advisory-db` has one home; stating that is the
+/// only way a call that is SUPPOSED to always target github.com actually
+/// does, rather than inheriting whatever `GH_HOST` happens to be set.
+pub fn rustsec_advisory_db_env() -> Vec<(String, String)> {
+    vec![("GH_HOST".to_string(), "github.com".to_string())]
 }
 
 #[cfg(test)]
@@ -458,10 +655,22 @@ mod tests {
         assert!(!joined.contains("githubusercontent"), "{joined}");
     }
 
+    /// `GH_HOST` is ALWAYS passed explicitly, including for public GitHub.
+    ///
+    /// An empty env here does not mean "no host override" — it means
+    /// "inherit whatever `GH_HOST` the calling process already has", which
+    /// silently redirects every probe, sums fetch, SBOM download and
+    /// advisory query to a different host when the environment happens to
+    /// set one. Stating `github.com` explicitly is what makes "this call
+    /// targets the public forge" true regardless of the environment it
+    /// runs in.
     // rivet: verifies REQ-PRODUCER-002
     #[test]
-    fn an_enterprise_forge_reaches_gh_through_the_variable_gh_itself_uses() {
-        assert!(forge_env(&Forge::github_com()).is_empty());
+    fn the_host_is_always_stated_explicitly_never_inherited() {
+        assert_eq!(
+            forge_env(&Forge::github_com()),
+            vec![("GH_HOST".to_string(), "github.com".to_string())]
+        );
         assert_eq!(
             forge_env(&Forge::enterprise("ghe.example.com")),
             vec![("GH_HOST".to_string(), "ghe.example.com".to_string())]
@@ -498,6 +707,190 @@ mod tests {
             repo_info_argv("pulseengine/rivet"),
             vec!["api", "repos/pulseengine/rivet"]
         );
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn the_security_advisories_query_paginates_and_asks_for_published_only() {
+        let argv = security_advisories_argv("bytecodealliance/wasmtime");
+        assert_eq!(argv[0], "api");
+        assert!(argv.contains(&"--paginate".to_string()), "{argv:?}");
+        let path = argv.last().unwrap();
+        assert!(
+            path.starts_with("repos/bytecodealliance/wasmtime/security-advisories?"),
+            "{path}"
+        );
+        assert!(path.contains("state=published"), "{path}");
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn the_rustsec_queries_name_the_fixed_advisory_db_repository() {
+        let dir = rustsec_crate_dir_argv("rustls").expect("a real crate name");
+        assert_eq!(
+            dir,
+            vec!["api", "repos/rustsec/advisory-db/contents/crates/rustls"]
+        );
+        let md = rustsec_advisory_md_argv("rustls", "RUSTSEC-2026-0346.md")
+            .expect("a real crate name and a real filename");
+        assert_eq!(
+            md,
+            vec![
+                "api",
+                "-H",
+                "Accept: application/vnd.github.raw",
+                "repos/rustsec/advisory-db/contents/crates/rustls/RUSTSEC-2026-0346.md"
+            ]
+        );
+    }
+
+    /// `krate` and `filename` land directly in a URL path
+    /// (`.../crates/<krate>/<filename>`); a component name from an
+    /// upstream SBOM or a filename from a directory listing is untrusted
+    /// text, and `../../..` steers that request anywhere. The argv
+    /// builders refuse BEFORE building anything — defense in depth beneath
+    /// whatever check a caller already did.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn the_argv_builders_refuse_a_crate_name_that_could_steer_the_request() {
+        for bad in ["../x", "a/b", "", &"a".repeat(65), "1abc"] {
+            assert!(
+                matches!(
+                    rustsec_crate_dir_argv(bad),
+                    Err(GhError::InvalidCrateName { .. })
+                ),
+                "{bad:?} must be refused"
+            );
+            assert!(
+                matches!(
+                    rustsec_advisory_md_argv(bad, "RUSTSEC-2026-0346.md"),
+                    Err(GhError::InvalidCrateName { .. })
+                ),
+                "{bad:?} must be refused as the crate half too"
+            );
+        }
+        for bad in ["../evil.md", "README.md", "RUSTSEC-2026-03466.md", ""] {
+            assert!(
+                matches!(
+                    rustsec_advisory_md_argv("rustls", bad),
+                    Err(GhError::InvalidAdvisoryFilename { .. })
+                ),
+                "{bad:?} must be refused as a filename"
+            );
+        }
+        assert!(rustsec_advisory_md_argv("rustls", "RUSTSEC-2026-0346.md").is_ok());
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn crate_name_validation_matches_crates_ios_own_rule() {
+        for good in ["rustls", "a", "wasm-tools", "wasm_tools", "A1", "z12345"] {
+            assert!(is_valid_crate_name(good), "{good:?} should be valid");
+        }
+        for bad in [
+            "",
+            "1abc",
+            "-abc",
+            "_abc",
+            "a/b",
+            "../x",
+            "a b",
+            &"a".repeat(65),
+        ] {
+            assert!(!is_valid_crate_name(bad), "{bad:?} should be invalid");
+        }
+        // Exactly 64 characters is the boundary, and must still be valid.
+        let max = format!("a{}", "b".repeat(63));
+        assert_eq!(max.len(), 64);
+        assert!(is_valid_crate_name(&max));
+    }
+
+    /// `bytecodealliance`/`wasmtime` are the real owner/repo this round's
+    /// alias-severity rule widened to — real GitHub names, with digits,
+    /// hyphens and dots all allowed; `.`/`..` alone, and a path-traversal
+    /// attempt, are refused.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn github_name_validation_refuses_traversal_and_empty_segments() {
+        for good in [
+            "bytecodealliance",
+            "wasmtime",
+            "rust-lang",
+            "my_repo.rs",
+            "a",
+            "123",
+        ] {
+            assert!(is_valid_github_name(good), "{good:?} should be valid");
+        }
+        for bad in ["", ".", "..", "../x", "a/b", "a b"] {
+            assert!(!is_valid_github_name(bad), "{bad:?} should be invalid");
+        }
+        assert!(!is_valid_github_name(&"a".repeat(101)));
+        assert!(is_valid_github_name(&"a".repeat(100)));
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn rustsec_filename_validation_matches_the_real_shape() {
+        for good in ["RUSTSEC-2026-0346.md", "RUSTSEC-0000-0001.md"] {
+            assert!(is_valid_rustsec_filename(good), "{good:?} should be valid");
+        }
+        for bad in [
+            "../evil.md",
+            "README.md",
+            "RUSTSEC-2026-03466.md",
+            "RUSTSEC-26-0346.md",
+            "RUSTSEC-2026-346.md",
+            "rustsec-2026-0346.md",
+            "RUSTSEC-2026-0346.MD",
+            "RUSTSEC-2026-0346",
+            "",
+            "RUSTSEC-2026-0346.md/../x",
+        ] {
+            assert!(!is_valid_rustsec_filename(bad), "{bad:?} should be invalid");
+        }
+    }
+
+    /// THE guard against registry.rs's own lesson: a bare `404` anywhere in
+    /// an error must not be read as absence. `gh api`'s own marker is the
+    /// parenthesised `(HTTP 404)`, and only that is matched.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn only_ghs_own_structured_404_marker_is_read_as_absence() {
+        assert!(is_http_404("gh: Not Found (HTTP 404)"));
+        assert!(!is_http_404(
+            "gh: repository build-404 not found: HTTP 403: forbidden"
+        ));
+        assert!(!is_http_404("connection reset while fetching crate 404"));
+        assert!(!is_http_404(""));
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn the_rustsec_directory_listing_keeps_only_markdown_files() {
+        let names = parse_rustsec_dir_listing(
+            r#"[{"name":"RUSTSEC-2026-0346.md"},{"name":"RUSTSEC-2026-0347.md"},{"name":".gitkeep"}]"#,
+        )
+        .expect("parses");
+        assert_eq!(names, vec!["RUSTSEC-2026-0346.md", "RUSTSEC-2026-0347.md"]);
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn an_empty_rustsec_directory_is_not_an_error() {
+        assert_eq!(
+            parse_rustsec_dir_listing("[]").unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn unreadable_rustsec_directory_output_is_refused() {
+        for bad in ["not json", r#"{"not":"an array"}"#, r#"[{"size":1}]"#] {
+            let e = parse_rustsec_dir_listing(bad).expect_err(bad);
+            assert!(matches!(e, GhError::Unparseable { .. }), "{bad}: {e:?}");
+        }
     }
 
     // rivet: verifies REQ-PRODUCER-002

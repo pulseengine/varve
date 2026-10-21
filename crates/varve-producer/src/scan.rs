@@ -1051,11 +1051,15 @@ mod tests {
         }
     }
 
-    /// …and public GitHub must NOT get a GH_HOST, because setting it there is
-    /// how a working setup starts failing for a reason nobody can see.
+    /// …and public GitHub gets GH_HOST=github.com stated EXPLICITLY, not an
+    /// empty environment. An empty environment does not mean "target
+    /// github.com" — it means "inherit whatever GH_HOST the calling
+    /// process already has", which would silently redirect every lookup to
+    /// a different host whenever that variable happens to be set for an
+    /// unrelated reason.
     // rivet: verifies REQ-SCAN-001
     #[test]
-    fn public_github_is_asked_without_an_overridden_host() {
+    fn public_github_is_asked_with_its_host_stated_explicitly() {
         let r = recorder(r#"{"tagName":"v9.9.9"}"#, 0);
         latest_releases(
             &r,
@@ -1063,9 +1067,10 @@ mod tests {
             &manifest(TWO, "rolling"),
         );
         for (_, env) in r.calls.borrow().iter() {
-            assert!(
-                env.is_empty(),
-                "public github needs no host override: {env:?}"
+            assert_eq!(
+                env,
+                &vec![("GH_HOST".to_string(), "github.com".to_string())],
+                "public github must still state its host, not inherit the ambient one"
             );
         }
     }
