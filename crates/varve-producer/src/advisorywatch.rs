@@ -120,42 +120,154 @@ pub struct Payload {
     pub sbom_sha256: Option<String>,
 }
 
-/// One manifest entry, turned into a [`Payload`] — or `None` when it lacks
-/// either `eu.pulseengine.tool` or `eu.pulseengine.tool.version`, in which
-/// case it names nothing a security advisory could ever match and clause 3
-/// says to ignore it rather than guess.
-pub fn payload_from_entry(entry: &varve_core::manifest::ManifestEntry) -> Option<Payload> {
-    let tool = entry.annotations.get("eu.pulseengine.tool")?.clone();
-    let version = entry
-        .annotations
-        .get("eu.pulseengine.tool.version")?
-        .clone();
-    let repo = entry.annotations.get("eu.pulseengine.source.repo")?.clone();
-    let release = entry
-        .annotations
-        .get("eu.pulseengine.source.release")
-        .cloned()
-        .unwrap_or_else(|| version.clone());
-    let sbom_asset = entry.annotations.get(varve_core::ANN_SBOM).cloned();
-    let sbom_sha256 = entry.annotations.get(varve_core::ANN_SBOM_SHA256).cloned();
-    Some(Payload {
+/// What the watcher could not check about one manifest entry, and why.
+///
+/// An entry used to be dropped silently when it lacked a version or a source
+/// repository, and an included layer or a non-tool entry never reached the
+/// report at all — so a line carrying them read "nothing new" over bytes
+/// nobody had looked at (REQ-ADVISORYWATCH-001 clause 1: every payload is
+/// checked, and one that cannot be is said so, never skipped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotChecked {
+    /// A tool entry that names something but not enough to ask an upstream
+    /// about it, or an included layer. Reported one by one.
+    Entry(UncheckedReport),
+    /// An entry of a kind that is not a tool (crate, sdk, docs, ...). Reported
+    /// once per kind with a distinct count, keyed by `digest`.
+    OfKind { kind: String, digest: String },
+}
+
+/// One manifest entry, classified: a [`Payload`] the watcher can check, or
+/// the reason it cannot.
+pub fn classify_entry(entry: &varve_core::manifest::ManifestEntry) -> Result<Payload, NotChecked> {
+    use varve_core::PayloadKind;
+    let ann = |k: &str| entry.annotations.get(k).cloned();
+    let tool_name = ann("eu.pulseengine.tool");
+    match entry.kind() {
+        Ok(PayloadKind::Layer) => {
+            let layer =
+                ann(varve_core::compose::ANN_INCLUDE_LAYER).unwrap_or_else(|| entry.digest.clone());
+            return Err(NotChecked::Entry(UncheckedReport {
+                tool: "included layer".to_string(),
+                version: layer,
+                repo: ann(varve_core::compose::ANN_INCLUDE_REALM)
+                    .unwrap_or_else(|| "-".to_string()),
+                reason: "an included layer: this run reads the payloads of this line's own \
+                         layers, so advisories against what the included layer carries are \
+                         checked only where the realm that publishes it is watched, never here"
+                    .to_string(),
+            }));
+        }
+        Ok(PayloadKind::Tool) => {}
+        Ok(other) if tool_name.is_none() => {
+            return Err(NotChecked::OfKind {
+                kind: other.to_string(),
+                digest: entry.digest.clone(),
+            });
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return Err(NotChecked::Entry(UncheckedReport {
+                tool: tool_name.unwrap_or_else(|| entry.digest.clone()),
+                version: ann("eu.pulseengine.tool.version").unwrap_or_else(|| "-".to_string()),
+                repo: ann("eu.pulseengine.source.repo").unwrap_or_else(|| "-".to_string()),
+                reason: format!("an entry of a payload kind this build does not know ({e})"),
+            }));
+        }
+    }
+    let unchecked = |tool: String, reason: &str| {
+        NotChecked::Entry(UncheckedReport {
+            tool,
+            version: ann("eu.pulseengine.tool.version").unwrap_or_else(|| "-".to_string()),
+            repo: ann("eu.pulseengine.source.repo").unwrap_or_else(|| "-".to_string()),
+            reason: reason.to_string(),
+        })
+    };
+    let Some(tool) = tool_name else {
+        return Err(unchecked(
+            entry.digest.clone(),
+            "no eu.pulseengine.tool annotation, so the entry names no tool to check",
+        ));
+    };
+    let Some(version) = ann("eu.pulseengine.tool.version") else {
+        return Err(unchecked(
+            tool,
+            "no eu.pulseengine.tool.version annotation, so there is no exact version to match \
+             an advisory's range against",
+        ));
+    };
+    let Some(repo) = ann("eu.pulseengine.source.repo") else {
+        return Err(unchecked(
+            tool,
+            "no eu.pulseengine.source.repo annotation, so there is no upstream repository to ask \
+             for advisories",
+        ));
+    };
+    let release = ann("eu.pulseengine.source.release").unwrap_or_else(|| version.clone());
+    Ok(Payload {
         tool,
         repo,
         version,
         release,
-        sbom_asset,
-        sbom_sha256,
+        sbom_asset: ann(varve_core::ANN_SBOM),
+        sbom_sha256: ann(varve_core::ANN_SBOM_SHA256),
     })
 }
 
+/// One manifest entry as a [`Payload`], or `None` when it is not one. The
+/// reason it is not is [`classify_entry`]'s to give; a caller that discards it
+/// must say so elsewhere.
+pub fn payload_from_entry(entry: &varve_core::manifest::ManifestEntry) -> Option<Payload> {
+    classify_entry(entry).ok()
+}
+
 /// Every payload one layer's signed manifest carries, across every entry
-/// (platform) it has.
-pub fn payloads_from_manifest(manifest: &varve_core::LayerManifest) -> Vec<Payload> {
-    manifest
-        .entries
-        .iter()
-        .filter_map(payload_from_entry)
-        .collect()
+/// (platform) it has, and everything else it carries that cannot be checked.
+pub fn payloads_from_manifest(
+    manifest: &varve_core::LayerManifest,
+) -> (Vec<Payload>, Vec<NotChecked>) {
+    let mut payloads = Vec::new();
+    let mut not_checked = Vec::new();
+    for entry in &manifest.entries {
+        match classify_entry(entry) {
+            Ok(p) => payloads.push(p),
+            Err(n) => not_checked.push(n),
+        }
+    }
+    (payloads, not_checked)
+}
+
+/// Fold what every layer of a line could not check into report entries:
+/// individual ones de-duplicated (the same tool entry recurs per platform and
+/// per layer), non-tool kinds once each with a distinct count.
+pub fn unchecked_from_not_checked(items: &[NotChecked]) -> Vec<UncheckedReport> {
+    let mut out: Vec<UncheckedReport> = Vec::new();
+    let mut by_kind: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for item in items {
+        match item {
+            NotChecked::Entry(r) => {
+                if !out.contains(r) {
+                    out.push(r.clone());
+                }
+            }
+            NotChecked::OfKind { kind, digest } => {
+                by_kind.entry(kind).or_default().insert(digest);
+            }
+        }
+    }
+    for (kind, digests) in by_kind {
+        out.push(UncheckedReport {
+            tool: format!("{kind} entries"),
+            version: format!("{} distinct", digests.len()),
+            repo: "-".to_string(),
+            reason: format!(
+                "an entry of kind {kind} is not a tool payload: this watcher checks tool \
+                 payloads against their upstream repository's advisories and does not check \
+                 this kind"
+            ),
+        });
+    }
+    out
 }
 
 /// One (repo, version) payload, de-duplicated across every layer and
@@ -671,9 +783,11 @@ pub struct LineReport {
     pub skipped: Vec<SkippedReport>,
     /// Payloads whose advisory check was INCOMPLETE this run, and why —
     /// embedded components that could not be checked (REQ-ADVISORYWATCH-001
-    /// clause 4b's fallback), or the payload's own version could not be
-    /// read for the GHSA comparison. Never silently absorbed into "nothing
-    /// new" — see [`UncheckedReport`].
+    /// clause 4b's fallback), the payload's own version could not be read
+    /// for the GHSA comparison, or a manifest entry that never became a
+    /// payload at all (no version, no source repository, an included layer, a
+    /// non-tool kind — see [`NotChecked`]). Never silently absorbed into
+    /// "nothing new" — see [`UncheckedReport`].
     pub unchecked: Vec<UncheckedReport>,
     /// RustSec `informational` advisories (`"unmaintained"`, `"notice"`) —
     /// never a `KnownProblem`, never silently dropped either.
@@ -753,8 +867,7 @@ pub fn render_line(line: &LineReport) -> String {
         out.push_str(&format!("{}\tnothing new\n", line.line));
     } else {
         out.push_str(&format!(
-            "{}\tnothing new among checked payloads; {} payload(s) NOT checked for embedded \
-             components: {}\n",
+            "{}\tnothing new among checked payloads; {} item(s) NOT checked: {}\n",
             line.line,
             line.unchecked.len(),
             render_unchecked_list(&line.unchecked),
@@ -798,7 +911,7 @@ pub fn render_line(line: &LineReport) -> String {
     // carries that sentence when "nothing new" is the whole story.
     if line.wrote && !line.unchecked.is_empty() {
         out.push_str(&format!(
-            "  {} payload(s) NOT checked for embedded components: {}\n",
+            "  {} item(s) NOT checked: {}\n",
             line.unchecked.len(),
             render_unchecked_list(&line.unchecked),
         ));
@@ -880,6 +993,7 @@ fn watch_line<G: AdvisoryGh, S: LayerSource>(
     // Fetch every layer's signed manifest, verifying the index's own digest
     // against the registry's bytes (clause 1) before trusting anything in it.
     let mut per_layer: Vec<(String, Vec<Payload>)> = Vec::new();
+    let mut not_checked: Vec<NotChecked> = Vec::new();
     for entry in &index.layers {
         let envelope = registry
             .fetch_manifest(&LayerRef::Digest(entry.digest.clone()))
@@ -920,7 +1034,9 @@ fn watch_line<G: AdvisoryGh, S: LayerSource>(
         }
         let manifest = varve_core::LayerManifest::parse(&payload)
             .map_err(|e| failed(format!("layer {} manifest", entry.layer), e))?;
-        per_layer.push((entry.layer.clone(), payloads_from_manifest(&manifest)));
+        let (payloads, dropped) = payloads_from_manifest(&manifest);
+        per_layer.push((entry.layer.clone(), payloads));
+        not_checked.extend(dropped);
     }
 
     let deduped = dedup_payloads(&per_layer);
@@ -949,7 +1065,9 @@ fn watch_line<G: AdvisoryGh, S: LayerSource>(
     let mut undecidable_report: Vec<UndecidableReport> = Vec::new();
     let mut defaulted: Vec<DefaultedSeverityReport> = Vec::new();
     let mut skipped: Vec<SkippedReport> = Vec::new();
-    let mut unchecked: Vec<UncheckedReport> = Vec::new();
+    // What the layers carry that is not a checkable payload comes first, so
+    // it is in the report even when no payload remains to be queried.
+    let mut unchecked: Vec<UncheckedReport> = unchecked_from_not_checked(&not_checked);
     let mut notes: Vec<NoteReport> = Vec::new();
     let mut severity_from_ghsa: Vec<SeverityFromGhsaReport> = Vec::new();
 
@@ -1525,6 +1643,83 @@ mod tests {
         );
     }
 
+    /// `payload_from_entry` still says "not a payload" for these, but
+    /// `classify_entry` is where the reason lives, and it must give a
+    /// distinct, specific one for each shape (REQ-ADVISORYWATCH-001 clause 1).
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn classify_entry_gives_a_specific_reason_for_every_entry_it_cannot_check() {
+        let reason = |anns: &[(&str, &str)]| match classify_entry(&entry(anns)) {
+            Err(NotChecked::Entry(r)) => r,
+            other => panic!("expected an individual unchecked entry, got {other:?}"),
+        };
+        let r = reason(&[]);
+        assert!(
+            r.reason.contains("no eu.pulseengine.tool annotation"),
+            "{r:?}"
+        );
+        assert_eq!(
+            r.tool, "sha256:aaaa",
+            "an unnamed entry is named by its digest"
+        );
+        let r = reason(&[
+            ("eu.pulseengine.tool", "t"),
+            ("eu.pulseengine.source.repo", "o/t"),
+        ]);
+        assert!(r.reason.contains("tool.version"), "{r:?}");
+        assert_eq!(
+            (r.tool.as_str(), r.repo.as_str(), r.version.as_str()),
+            ("t", "o/t", "-")
+        );
+        let r = reason(&[
+            ("eu.pulseengine.tool", "t"),
+            ("eu.pulseengine.tool.version", "1.0.0"),
+        ]);
+        assert!(r.reason.contains("source.repo"), "{r:?}");
+        assert_eq!((r.repo.as_str(), r.version.as_str()), ("-", "1.0.0"));
+        let r = reason(&[
+            ("eu.pulseengine.varve.kind", "from-the-future"),
+            ("eu.pulseengine.tool", "t"),
+        ]);
+        assert!(r.reason.contains("kind this build does not know"), "{r:?}");
+        assert_eq!(r.tool, "t");
+        // A layer include with no layer name is named by its digest, and its
+        // realm is carried.
+        let r = reason(&[
+            ("eu.pulseengine.varve.kind", "layer"),
+            ("eu.pulseengine.varve.include.realm", "r"),
+        ]);
+        assert_eq!(
+            (r.tool.as_str(), r.version.as_str(), r.repo.as_str()),
+            ("included layer", "sha256:aaaa", "r")
+        );
+        let r = reason(&[("eu.pulseengine.varve.kind", "layer")]);
+        assert_eq!(r.repo, "-");
+    }
+
+    /// A non-tool kind is only set aside when it names no tool: an entry that
+    /// carries a tool name and everything a check needs is still a payload,
+    /// whatever kind it declares — that is what the watcher always did, and
+    /// reporting must not change what it fetches.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn a_non_tool_kind_that_names_a_checkable_tool_is_still_a_payload() {
+        let full = [
+            ("eu.pulseengine.varve.kind", "wasm-component"),
+            ("eu.pulseengine.tool", "t"),
+            ("eu.pulseengine.tool.version", "1.0.0"),
+            ("eu.pulseengine.source.repo", "o/t"),
+        ];
+        assert!(classify_entry(&entry(&full)).is_ok());
+        match classify_entry(&entry(&[("eu.pulseengine.varve.kind", "wasm-component")])) {
+            Err(NotChecked::OfKind { kind, digest }) => {
+                assert_eq!(kind, "wasm-component");
+                assert_eq!(digest, "sha256:aaaa");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     // rivet: verifies REQ-ADVISORYWATCH-001
     #[test]
     fn release_defaults_to_version_when_absent() {
@@ -1686,10 +1881,7 @@ mod tests {
             rendered.contains("nothing new among checked payloads"),
             "{rendered}"
         );
-        assert!(
-            rendered.contains("1 payload(s) NOT checked for embedded components"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("1 item(s) NOT checked"), "{rendered}");
         assert!(rendered.contains("pulseengine/wsc"), "{rendered}");
         assert!(rendered.contains("no SBOM recorded"), "{rendered}");
         assert!(
@@ -1717,10 +1909,7 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("new known problem: GHSA-x"), "{rendered}");
-        assert!(
-            rendered.contains("NOT checked for embedded components"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("item(s) NOT checked"), "{rendered}");
     }
 
     /// The flip side: a line that wrote something AND has NOTHING
@@ -3772,6 +3961,142 @@ patched = ["not a requirement at all"]
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A layer whose manifest entries are given as raw JSON, so a test can
+    /// carry exactly the shapes `layer_manifest_payload` cannot: an entry
+    /// with no version, one with no repository, an included layer, a crate.
+    fn with_raw_entries(
+        source: MemorySource,
+        layer: &str,
+        raw_entries: &[&str],
+    ) -> (MemorySource, String) {
+        let payload = format!(
+            r#"{{"annotations":{{"eu.pulseengine.varve.layer":"{layer}","eu.pulseengine.varve.channel":"rolling","eu.pulseengine.varve.counter":"1","org.opencontainers.image.created":"2026-10-01T00:00:00Z"}},"manifests":[{}]}}"#,
+            raw_entries.join(",")
+        )
+        .into_bytes();
+        let digest = varve_core::manifest_digest(&payload);
+        (source.with_manifest(&envelope_for(&payload)), digest)
+    }
+
+    /// Everything a layer carries that the watcher cannot check is REPORTED
+    /// (clause 1 / clause 4): an entry with no version, one with no source
+    /// repository, and an included layer used to be dropped by
+    /// `payload_from_entry` and never mentioned, so a line carrying them read
+    /// "nothing new" over payloads nobody had looked at.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn entries_a_layer_carries_but_the_watcher_cannot_check_are_reported_not_dropped() {
+        let root = scratch("droppedentries");
+        let (source, digest) = with_raw_entries(
+            MemorySource::new(),
+            "2026.10.0",
+            &[
+                r#"{"digest":"sha256:ok","annotations":{"eu.pulseengine.tool":"wsc","eu.pulseengine.tool.version":"0.11.0","eu.pulseengine.source.repo":"pulseengine/wsc"}}"#,
+                r#"{"digest":"sha256:nov","annotations":{"eu.pulseengine.tool":"noversion","eu.pulseengine.source.repo":"o/noversion"}}"#,
+                r#"{"digest":"sha256:norepo","annotations":{"eu.pulseengine.tool":"norepo","eu.pulseengine.tool.version":"1.2.3"}}"#,
+                r#"{"digest":"sha256:inc","annotations":{"eu.pulseengine.varve.kind":"layer","eu.pulseengine.varve.include.realm":"bytecodealliance","eu.pulseengine.varve.include.layer":"2026.09.0"}}"#,
+            ],
+        );
+        write_index(&root, "2026.10", &[("2026.10.0", &digest)]);
+        let gh = FakeGh::default()
+            .ghsa("pulseengine/wsc", "[]")
+            .release_sbom_outcome(
+                "pulseengine/wsc",
+                "0.11.0",
+                "0.11.0",
+                crate::orchestrate::ReleaseSbomOutcome::NoSbom,
+            );
+
+        let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
+        let unchecked = &report.lines[0].unchecked;
+        let find = |tool: &str| unchecked.iter().find(|u| u.tool == tool);
+        let nov =
+            find("noversion").unwrap_or_else(|| panic!("no-version entry dropped: {unchecked:?}"));
+        assert!(
+            nov.reason.contains("eu.pulseengine.tool.version"),
+            "the reason must name the missing annotation: {nov:?}"
+        );
+        assert_eq!(nov.repo, "o/noversion");
+        let norepo =
+            find("norepo").unwrap_or_else(|| panic!("no-repo entry dropped: {unchecked:?}"));
+        assert!(
+            norepo.reason.contains("eu.pulseengine.source.repo"),
+            "{norepo:?}"
+        );
+        assert_eq!(norepo.version, "1.2.3");
+        let inc = find("included layer")
+            .unwrap_or_else(|| panic!("included layer dropped: {unchecked:?}"));
+        assert_eq!(inc.version, "2026.09.0");
+        assert_eq!(inc.repo, "bytecodealliance");
+        assert!(inc.reason.contains("included layer"), "{inc:?}");
+        // The checkable payload is still checked, and still reports its own gap.
+        assert!(find("wsc").is_some(), "{unchecked:?}");
+
+        let summary = human_summary(&report);
+        assert!(
+            !summary.contains("2026.10\tnothing new\n"),
+            "bare \"nothing new\" must not stand over unchecked entries: {summary}"
+        );
+        assert!(summary.contains("o/noversion"), "{summary}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A line made ONLY of things the watcher cannot check must still say so:
+    /// no payload means no GHSA query at all, which is exactly when a silent
+    /// drop reads as a clean line.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn a_line_of_only_unchecked_entries_never_reads_as_nothing_new() {
+        let root = scratch("onlydropped");
+        let (source, digest) = with_raw_entries(
+            MemorySource::new(),
+            "2026.10.0",
+            &[
+                r#"{"digest":"sha256:nov","annotations":{"eu.pulseengine.tool":"noversion","eu.pulseengine.source.repo":"o/noversion"}}"#,
+            ],
+        );
+        write_index(&root, "2026.10", &[("2026.10.0", &digest)]);
+        let report = run(&root, &FakeGh::default(), &source, "2026-10-15").expect("runs");
+        assert_eq!(report.lines[0].unchecked.len(), 1, "{:?}", report.lines[0]);
+        let summary = human_summary(&report);
+        assert!(
+            summary.contains("nothing new among checked payloads"),
+            "{summary}"
+        );
+        assert!(!summary.contains("2026.10\tnothing new\n"), "{summary}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Entries of a kind that is not a tool (crates, SDKs, docs...) are not
+    /// payloads this watcher checks. They are reported once per kind with a
+    /// count — a layer of a hundred crates must not be a hundred lines — and
+    /// the same entry carried by two layers is counted once.
+    // rivet: verifies REQ-ADVISORYWATCH-001
+    #[test]
+    fn non_tool_entries_are_reported_once_per_kind_with_a_distinct_count() {
+        let root = scratch("kindsreported");
+        let crate_a =
+            r#"{"digest":"sha256:ca","annotations":{"eu.pulseengine.varve.kind":"crate"}}"#;
+        let crate_b =
+            r#"{"digest":"sha256:cb","annotations":{"eu.pulseengine.varve.kind":"crate"}}"#;
+        let (source, d1) = with_raw_entries(MemorySource::new(), "2026.10.0", &[crate_a, crate_b]);
+        let (source, d2) = with_raw_entries(source, "2026.10.1", &[crate_a]);
+        write_index(&root, "2026.10", &[("2026.10.0", &d1), ("2026.10.1", &d2)]);
+        let report = run(&root, &FakeGh::default(), &source, "2026-10-15").expect("runs");
+        let unchecked = &report.lines[0].unchecked;
+        assert_eq!(unchecked.len(), 1, "{unchecked:?}");
+        assert_eq!(unchecked[0].tool, "crate entries");
+        assert_eq!(unchecked[0].version, "2 distinct");
+        assert!(
+            unchecked[0].reason.contains("not a tool payload"),
+            "{unchecked:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A release that publishes NO SBOM at all: the payload is unchecked
     /// for embedded components, with the reason recorded, and the human
     /// summary says so rather than printing a bare "nothing new".
@@ -3808,10 +4133,7 @@ patched = ["not a requirement at all"]
         );
 
         let summary = human_summary(&report);
-        assert!(
-            summary.contains("NOT checked for embedded components"),
-            "{summary}"
-        );
+        assert!(summary.contains("item(s) NOT checked"), "{summary}");
         assert!(
             !summary.contains("\tnothing new\n"),
             "the bare phrase must never appear alone over an unchecked payload: {summary}"

@@ -46,10 +46,54 @@ fn fixture(pin: Option<&str>, layers: &[(&str, LayerTools)]) -> Fixture {
     }
 }
 
+/// One signing root for every realmless fixture in this file.
+///
+/// `fixture()` and the tests that call `Store::lay_down` directly write layers
+/// with no signature. A realmless pin dispatches only a layer the configured
+/// root actually signed (REQ-NOPINNOTOOL-001 clause 2: a key that vouches for
+/// nothing in the store is no root in scope), so before any command runs the
+/// fixture signs whatever it laid down with this key, and names its public
+/// half as VARVE_TRUST_ROOT — the setup a realmless user has after a real
+/// `varve install`.
+fn fixture_keys() -> &'static (Vec<u8>, Vec<u8>) {
+    static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    KEYS.get_or_init(varve_core::generate_root_keypair)
+}
+
+/// Sign every layer in the fixture's top-level store that has no retained
+/// envelope yet, exactly as `install` would have left it.
+fn sign_fixture_layers(root: &std::path::Path) {
+    let Ok(dir) = std::fs::read_dir(root.join("core")) else {
+        return;
+    };
+    for entry in dir.filter_map(Result::ok) {
+        let layer = entry.path();
+        let envelope = layer.join("layer.dsse.json");
+        let manifest = layer.join("layer.json");
+        if envelope.exists() || !manifest.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&manifest).unwrap();
+        let signed =
+            varve_core::sign_layer_manifest(&bytes, &fixture_keys().0, "fixture-root").unwrap();
+        std::fs::write(&envelope, signed).unwrap();
+    }
+}
+
+/// The fixture's root key file, for tests that launch a shim directly rather
+/// than through `varve()`. Signs the fixture's layers first.
+fn fixture_root_key(fx: &Fixture) -> std::path::PathBuf {
+    sign_fixture_layers(&fx.root);
+    let key = fx.root.with_file_name("fixture-root.pub");
+    std::fs::write(&key, hex::encode(&fixture_keys().1)).unwrap();
+    key
+}
+
 fn varve(fx: &Fixture) -> Command {
     let mut cmd = Command::cargo_bin("varve").unwrap();
     cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fx.root).current_dir(&fx.project);
+    cmd.env("VARVE_TRUST_ROOT", fixture_root_key(fx));
     // A hermetic PATH. Without it these tests inherit the developer's, and
     // REQ-SHADOW-001 correctly reported a real conflict — a `cargo install`ed
     // `synth` in ~/.cargo/bin shadowing the fixture's pinned one — turning
@@ -210,6 +254,71 @@ fn which_prints_the_resolved_binary_and_its_layer() {
         .stderr(predicate::str::contains("2026.07.0").and(predicate::str::contains("sha256:")));
 }
 
+// rivet: verifies REQ-NOPINNOTOOL-001
+#[test]
+fn a_realmless_pin_with_no_trust_root_resolves_nothing_just_as_status_refuses() {
+    // FOUND by the v0.43.0 clean-room review, and reproduced: with a pin that
+    // names no realm and VARVE_TRUST_ROOT unset, `varve status` refused ("no
+    // trust root configured") while `which` printed a path from the store and
+    // `run` executed it — #198's two code paths answering one question
+    // differently, still alive for realmless pins. Nothing in scope vouches
+    // for those bytes, so nothing may dispatch them.
+    let fx = fixture(Some(PIN_JULY), &[(MANIFEST_JULY, &[("synth", b"s")])]);
+    let bare = |args: &[&str]| {
+        let mut cmd = varve(&fx);
+        cmd.env_remove("VARVE_TRUST_ROOT").args(args);
+        cmd.assert().failure().code(1)
+    };
+    let reason = "no trust root configured";
+    bare(&["status"]).stderr(predicate::str::contains(reason));
+    bare(&["which", "synth"])
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(reason));
+    bare(&["run", "synth"]).stderr(predicate::str::contains(reason));
+    // ...and the shim, which is `run` reached through argv[0].
+    let shim = fx.root.with_file_name("synth");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(assert_cmd::cargo::cargo_bin("varve"), &shim).unwrap();
+    std::process::Command::new(&shim)
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &fx.root)
+        .env_remove("VARVE_TRUST_ROOT")
+        .current_dir(&fx.project)
+        .output()
+        .map(|o| {
+            assert_eq!(
+                o.status.code(),
+                Some(1),
+                "the shim dispatched with no root in scope"
+            );
+            assert!(String::from_utf8_lossy(&o.stderr).contains(reason));
+        })
+        .unwrap();
+    // Name a root and the same pin resolves again: the refusal is about the
+    // missing vouching root, not about realmless pins as such.
+    varve(&fx).args(["which", "synth"]).assert().success();
+
+    // ...but it must be the root that SIGNED the layer. FOUND by the second
+    // v0.43.0 clean-room review: with VARVE_TRUST_ROOT pointing at any
+    // well-formed key, `verify` refused ("signature does not verify against
+    // the trust root") while `which` printed the path and `run` executed it.
+    // A root that vouches for nothing in the store is no root in scope.
+    let (_, stranger) = varve_core::generate_root_keypair();
+    let stranger_key = fx.root.with_file_name("stranger.pub");
+    std::fs::write(&stranger_key, hex::encode(&stranger)).unwrap();
+    for args in [&["which", "synth"][..], &["run", "synth"][..]] {
+        let mut cmd = varve(&fx);
+        cmd.env("VARVE_TRUST_ROOT", &stranger_key).args(args);
+        cmd.assert()
+            .failure()
+            .code(1)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(
+                "does not verify against the trust root",
+            ));
+    }
+}
+
 // rivet: verifies REQ-PIN-001
 #[test]
 fn which_fails_closed_when_the_pinned_layer_is_not_installed() {
@@ -285,13 +394,24 @@ fn list_with_a_legacy_entry_prints_exactly_one_note_naming_the_count() {
         stdout.contains(fx.root.join("core").display().to_string().as_str()),
         "the note must name the legacy store's path:\n{stdout}"
     );
-    for needle in ["no realm", "has not deleted"] {
+    // "no realm's root vouches for them" was half true and read as "nothing
+    // does" — but a realmless layer was verified against VARVE_TRUST_ROOT at
+    // install, and that root is what `which`/`run` now require to dispatch it
+    // (v0.43.0 clean-room review). Name the root that does vouch.
+    for needle in ["no realm", "VARVE_TRUST_ROOT", "has not deleted"] {
         assert!(
             stdout.contains(needle),
-            "the note must say the entries belong to no realm and were not deleted \
-             (missing {needle:?}):\n{stdout}"
+            "the note must say the entries belong to no realm, what vouches for \
+             them, and that they were not deleted (missing {needle:?}):\n{stdout}"
         );
     }
+    // And "not deleted" as a FACT, not only a sentence.
+    let kept = std::fs::read_dir(fx.root.join("core"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("sha256-"))
+        .count();
+    assert_eq!(kept, 1, "list must leave the legacy layer on disk");
 }
 
 // rivet: verifies REQ-NOPINNOTOOL-001
@@ -1498,7 +1618,10 @@ fn install_verifies_lays_down_and_verify_repeats_the_verdict() {
         .assert()
         .success()
         .stdout(predicate::str::contains("2026.07.0"));
+    // The root that signed it — a realmless pin dispatches only what the root
+    // in scope vouches for (REQ-NOPINNOTOOL-001 clause 2).
     varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
         .args(["which", "synth"])
         .assert()
         .success()
@@ -2972,6 +3095,7 @@ fn a_shim_passes_non_utf8_arguments_through_byte_for_byte() {
         .arg(nasty)
         .current_dir(&fx.project)
         .env("VARVE_ROOT", &fx.root)
+        .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
         .env("VARVE_ARG_OUT", &out_file)
         .status()
         .unwrap();
@@ -3058,6 +3182,7 @@ fn shims_resolve_per_invocation_so_switching_projects_is_cd() {
         let out = std::process::Command::new(&shim)
             .current_dir(dir)
             .env("VARVE_ROOT", &fx.root)
+            .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
             .output()
             .unwrap();
         (
@@ -3121,6 +3246,63 @@ fn env_is_evaluable_and_idempotent() {
 }
 
 // rivet: verifies REQ-ENV-001
+// rivet: verifies REQ-ENVQUOTE-001
+#[cfg(unix)]
+#[test]
+fn the_line_shim_install_tells_you_to_paste_cannot_run_a_command_in_the_root() {
+    // FOUND by the second v0.43.0 clean-room review, and reproduced:
+    // `varve shim install` prints the line a user pastes into their LOGIN
+    // config as `. "<root>/env"` — double quotes, where `$(...)` stays live.
+    // With VARVE_ROOT containing `$(touch X)`, running the printed line
+    // created X: #46 again, in the one place it would run on every login.
+    let tmp = tempfile::tempdir().unwrap();
+    let canary = tmp.path().join("pwned-shim-line");
+    let root = tmp.path().join(format!("r$(touch {})", canary.display()));
+    let project = tmp.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("varve.toml"), PIN_JULY).unwrap();
+    varve_core::Store::at(&root)
+        .lay_down(MANIFEST_JULY.as_bytes(), &[("probe", b"#!/bin/sh\n")])
+        .unwrap();
+    sign_fixture_layers(&root);
+    let key = tmp.path().join("root.pub");
+    std::fs::write(&key, hex::encode(&fixture_keys().1)).unwrap();
+    let out = Command::cargo_bin("varve")
+        .unwrap()
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &root)
+        .env("VARVE_TRUST_ROOT", &key)
+        .current_dir(&project)
+        .args(["shim", "install"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with(". "))
+        .unwrap_or_else(|| panic!("no line to paste in:\n{stdout}"))
+        .split("        #")
+        .next()
+        .unwrap()
+        .trim()
+        .to_string();
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{line} 2>/dev/null; true"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        !canary.exists(),
+        "pasting the line shim install printed ran a command from VARVE_ROOT: {line}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn shim_install_writes_a_sourceable_env_file() {
@@ -3151,6 +3333,7 @@ fn shim_install_writes_a_sourceable_env_file() {
             fx.project.display()
         ))
         .env("VARVE_ROOT", &fx.root)
+        .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
         .output()
         .unwrap();
     assert!(
@@ -3270,6 +3453,7 @@ sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 fn export_bazel_refuses_without_a_trust_root() {
     let fx = fixture(Some(PIN_JULY), &[]);
     varve(&fx)
+        .env_remove("VARVE_TRUST_ROOT")
         .args(["export-bazel", "--layer", "2026.07.0", "--out"])
         .arg(fx.project.parent().unwrap().join("nowhere"))
         .assert()
@@ -3688,6 +3872,7 @@ arg-prefix = "--wasi-arg"
     // Dispatch: varve run -- scry --version x  →  the runner receives its
     // prefix args, then the module path, then per-arg-prefixed user args.
     varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
         .args(["run", "--", "scry", "--version", "x"])
         .assert()
         .success()
@@ -3771,6 +3956,7 @@ fn the_trust_root_error_points_to_the_realm_path() {
     let fx = fixture(Some(PIN_JULY), &[]);
     let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
     varve(&fx)
+        .env_remove("VARVE_TRUST_ROOT")
         .args(["install", "--from"])
         .arg(&signed.archive)
         .assert()
@@ -6101,6 +6287,64 @@ fn env_quotes_a_hostile_project_path_for_declared_sourced_exports() {
     );
 }
 
+// rivet: verifies REQ-ENVQUOTE-001
+#[test]
+fn env_refuses_an_export_destination_that_would_break_out_of_its_comment() {
+    // FOUND by the v0.43.0 clean-room review, and reproduced: a cloned
+    // repository's varve.toml with `out = "sdk\ntouch PWNED\n#"` made
+    // `varve env` print `touch PWNED` as a line of its own, and
+    // `eval "$(varve env)"` created the file. Quoting the store root and the
+    // script path (the two fixes above) left the comment line naming the
+    // export unquoted, and a newline needs no quote to escape a comment.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("varve-root");
+    let project = tmp.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let canary = tmp.path().join("pwned-export-out");
+    std::fs::write(
+        project.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\n\
+             layer = \"2026.07.0\"\n\
+             \n[[export]]\nkind = \"sdk\"\nout = \"sdk\\ntouch {}\\n#\"\n\
+             \n[export.env]\nscript = \"setup.sh\"\npath = \"before-shims\"\n",
+            canary.display()
+        ),
+    )
+    .unwrap();
+
+    let out = Command::cargo_bin("varve")
+        .unwrap()
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &root)
+        .current_dir(&project)
+        .arg("env")
+        .output()
+        .unwrap();
+    let script = String::from_utf8_lossy(&out.stdout).to_string();
+    // Whatever varve printed, evaluating it must not run the embedded command.
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg("eval \"$VARVE_ENV\" 2>/dev/null; true")
+        .env("VARVE_ENV", &script)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        !canary.exists(),
+        "eval of `varve env` ran a command embedded in an export destination:\n{script}"
+    );
+    assert!(
+        !out.status.success(),
+        "a destination containing a newline must be refused, not printed:\n{script}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("control character"),
+        "the refusal must say what is wrong with the destination: {stderr}"
+    );
+}
+
 // rivet: verifies REQ-PIN-001
 #[test]
 fn a_schema_mistake_in_the_pin_is_reported_once_not_twice() {
@@ -7525,4 +7769,347 @@ fn shim_dispatch_refuses_with_no_pin_in_scope_the_same_way_status_does() {
         stdout.is_empty(),
         "shim dispatch must not have executed the legacy store's 'legacytool':\n{stdout}"
     );
+}
+
+// ──────────────── REQ-COMPOSEWINDOW-001, end to end ────────────────
+//
+// The two tests above only reach `support_horizon` before any include is read
+// ("no includes" and "undefined realm"). With the include windows replaced by
+// an empty slice at the `cap_by_includes` call, every one of them stayed green
+// — the cap could be deleted and nothing noticed. These run the binary against
+// a registry that really serves a signed include and a signed line-status, so
+// the cap is measured where it is applied.
+
+/// An OCI registry on a loopback port serving exactly one included layer: its
+/// signed manifest, and (optionally) a signed baseline line-status stating
+/// `support_until`. Returns (registry reference, payload digest, root key hex).
+fn serve_include_realm(support_until: Option<Option<&str>>) -> (String, String, String) {
+    use std::io::{BufRead, BufReader, Write};
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let payload = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{"eu.pulseengine.varve.layer":"2026.10.0","eu.pulseengine.varve.line":"2026.10","eu.pulseengine.varve.channel":"rolling","eu.pulseengine.varve.counter":"1","org.opencontainers.image.created":"2026-09-24T00:00:00Z"},"manifests":[]}"#;
+    let digest = varve_core::manifest_digest(payload);
+    let envelope = varve_core::sign_layer_manifest(payload, &sk, "test-root").unwrap();
+    let mut blobs = std::collections::BTreeMap::new();
+    let env_digest = varve_core::manifest_digest(envelope.as_bytes());
+    blobs.insert(env_digest.clone(), envelope.into_bytes());
+    let mut layers = vec![serde_json::json!({
+        "mediaType": "application/json", "digest": env_digest, "size": 0,
+        "annotations": { "eu.pulseengine.varve.role": "envelope" }
+    })];
+    if let Some(until) = support_until {
+        let status = varve_core::LineStatus {
+            line: "2026.10".into(),
+            counter: 1,
+            issued_at: "2026-09-24T00:00:00Z".into(),
+            support_until: until.map(str::to_string),
+            min_counter: None,
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        }
+        .sign(&sk, "k")
+        .unwrap()
+        .into_bytes();
+        let d = varve_core::manifest_digest(&status);
+        blobs.insert(d.clone(), status);
+        layers.push(serde_json::json!({
+            "mediaType": "application/json", "digest": d, "size": 0,
+            "annotations": { "eu.pulseengine.varve.role": "line-status" }
+        }));
+    }
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "layers": layers,
+    }))
+    .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let target = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let path = target.split('?').next().unwrap_or("");
+            let mut header = String::new();
+            while reader.read_line(&mut header).is_ok() && header != "\r\n" && !header.is_empty() {
+                header.clear();
+            }
+            let (status, body): (&str, Vec<u8>) = if path == "/v2/inc/layers/tags/list" {
+                (
+                    "200 OK",
+                    br#"{"name":"inc/layers","tags":["2026.10.0"]}"#.to_vec(),
+                )
+            } else if path == "/v2/inc/layers/manifests/2026.10.0" {
+                ("200 OK", manifest.clone())
+            } else if let Some(d) = path.strip_prefix("/v2/inc/layers/blobs/") {
+                match blobs.get(d) {
+                    Some(b) => ("200 OK", b.clone()),
+                    None => ("404 Not Found", b"{}".to_vec()),
+                }
+            } else {
+                ("404 Not Found", b"{}".to_vec())
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(&body);
+        }
+    });
+    (
+        format!("oci+http://{addr}/inc/layers"),
+        digest,
+        hex::encode(&pk),
+    )
+}
+
+/// A project whose layer includes the layer `serve_include_realm` serves.
+fn composing_project(support_until: Option<Option<&str>>) -> Fixture {
+    let fx = fixture(None, &[]);
+    let (registry, digest, root) = serve_include_realm(support_until);
+    std::fs::write(
+        fx.project.join("varve-realms.toml"),
+        format!("[realm.wasm]\nregistry = \"{registry}\"\ntrust-root = \"{root}\"\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        fx.project.join("layer.toml"),
+        format!(
+            "{LAYER_TOML_NO_INCLUDES}\n[[include]]\ndigest = \"{digest}\"\nrealm = \"wasm\"\nlayer = \"2026.10.0\"\n"
+        ),
+    )
+    .unwrap();
+    fx
+}
+
+fn support_horizon_args(extra: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "support-horizon",
+        "--channel",
+        "rolling",
+        "--issued-at",
+        "2026-10-02T10:00:00Z",
+        "--manifest",
+        "layer.toml",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.extend(extra.iter().map(|s| s.to_string()));
+    args
+}
+
+/// Clause 1: the covalent case. The channel alone says 2026-11-02; the
+/// included layer's own signed line-status says 2026-10-24; the date signed is
+/// the earlier one, and stderr names what bound it.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_caps_a_composition_at_its_includes_signed_window() {
+    let fx = composing_project(Some(Some("2026-10-24")));
+    varve(&fx)
+        .args(support_horizon_args(&[]))
+        .assert()
+        .success()
+        .stdout("2026-10-24\n")
+        .stderr(predicate::str::contains("support capped at 2026-10-24"))
+        .stderr(predicate::str::contains("2026.10.0"))
+        .stderr(predicate::str::contains("realm 'wasm'"))
+        .stderr(predicate::str::contains("2026-11-02"));
+}
+
+/// An include that outlives the composition does not lengthen it: the cap only
+/// ever shortens, and nothing is said about a bound that did not bind.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_keeps_its_own_date_when_the_include_outlives_it() {
+    let fx = composing_project(Some(Some("2027-06-30")));
+    varve(&fx)
+        .args(support_horizon_args(&[]))
+        .assert()
+        .success()
+        .stdout("2026-11-02\n")
+        .stderr("");
+}
+
+/// Clause 2: an include whose realm serves its layer but no line-status states
+/// no window, so the horizon is refused — not computed as if it were absent.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_refuses_an_include_with_no_line_status() {
+    let fx = composing_project(None);
+    varve(&fx)
+        .args(support_horizon_args(&[]))
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("2026.10.0"))
+        .stderr(predicate::str::contains("states no support window"))
+        .stderr(predicate::str::contains("Refusing rather than skipping"));
+}
+
+/// Clause 2, the other way a window goes unstated: a line-status that exists
+/// and is signed but names no `support-until`.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_refuses_an_include_whose_line_status_states_no_window() {
+    let fx = composing_project(Some(None));
+    varve(&fx)
+        .args(support_horizon_args(&[]))
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("states no support window"));
+}
+
+/// Clause 2: a line-status that the include's realm did not sign is
+/// unverifiable, and refuses rather than being skipped.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_refuses_an_include_whose_realm_root_does_not_verify() {
+    let fx = composing_project(Some(Some("2026-10-24")));
+    let (_, other_pk) = varve_core::generate_root_keypair();
+    let realms = std::fs::read_to_string(fx.project.join("varve-realms.toml")).unwrap();
+    let root_line = realms
+        .lines()
+        .find(|l| l.starts_with("trust-root"))
+        .unwrap();
+    std::fs::write(
+        fx.project.join("varve-realms.toml"),
+        realms.replace(
+            root_line,
+            &format!("trust-root = \"{}\"", hex::encode(&other_pk)),
+        ),
+    )
+    .unwrap();
+    varve(&fx)
+        .args(support_horizon_args(&[]))
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "cannot read the support window of included layer",
+        ));
+}
+
+/// Clause 3: exceeding the cap takes `--past-includes <reason>`; the longer
+/// date is then signed, and the reason and the window it overrode are said.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_past_includes_exceeds_the_cap_and_records_the_reason() {
+    let fx = composing_project(Some(Some("2026-10-24")));
+    varve(&fx)
+        .args(support_horizon_args(&[
+            "--past-includes",
+            "wasm-layers is re-signed monthly by agreement",
+        ]))
+        .assert()
+        .success()
+        .stdout("2026-11-02\n")
+        .stderr(predicate::str::contains(
+            "wasm-layers is re-signed monthly by agreement",
+        ))
+        .stderr(predicate::str::contains("2026-10-24"));
+}
+
+/// Clause 3: an override with no reason is not an override.
+// rivet: verifies REQ-COMPOSEWINDOW-001
+#[test]
+fn support_horizon_past_includes_with_a_blank_reason_is_refused() {
+    let fx = composing_project(Some(Some("2026-10-24")));
+    varve(&fx)
+        .args(support_horizon_args(&["--past-includes", "  "]))
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("needs a reason"));
+}
+
+// ──────────────── REQ-SBOMFIELDS-001 clause 7, end to end ────────────────
+//
+// `varve sbom` named its author from the caller's LOCAL realm alias, so one
+// signed manifest produced different SBOM bytes in two projects that happened
+// to call the realm different things (and a third text outside a project).
+// Clause 7 says re-emission is byte-identical for the same signed manifest.
+
+/// Install `signed` into a fresh project that names the realm `alias`, and
+/// return the SBOM `varve sbom` writes there.
+fn sbom_under_realm_alias(signed: &SignedLayer, alias: &str) -> String {
+    let fx = fixture(None, &[]);
+    let root = std::fs::read_to_string(&signed.trust_root)
+        .unwrap()
+        .trim()
+        .to_string();
+    std::fs::write(
+        fx.project.join("varve-realms.toml"),
+        format!(
+            "[realm.{alias}]\nregistry = \"oci://example.invalid/{alias}\"\ntrust-root = \"{root}\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        fx.project.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nrealm = \"{alias}\"\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\n"
+        ),
+    )
+    .unwrap();
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    let out = fx.project.join("layer.cdx.json");
+    varve(&fx)
+        .args(["sbom", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    std::fs::read_to_string(out).unwrap()
+}
+
+/// The same signed manifest gives the same SBOM bytes whatever the caller
+/// calls the realm, and whether or not there is a project around it.
+// rivet: verifies REQ-SBOMFIELDS-001
+#[test]
+fn the_same_signed_manifest_gives_byte_identical_sbom_whatever_the_callers_realm_alias() {
+    let origin = fixture(None, &[]);
+    let signed = signed_layer_fixture(&origin, "2026.07.0", 1);
+    let alpha = sbom_under_realm_alias(&signed, "alpha");
+    let beta = sbom_under_realm_alias(&signed, "beta");
+    assert_eq!(
+        alpha, beta,
+        "the SBOM named the caller's local alias, so one signed manifest emitted two documents"
+    );
+
+    // And outside any realm: only the environment's trust root is known.
+    let bare = fixture(Some(PIN_JULY), &[]);
+    varve(&bare)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    let out = bare.project.join("layer.cdx.json");
+    varve(&bare)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["sbom", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    assert_eq!(
+        alpha,
+        std::fs::read_to_string(out).unwrap(),
+        "a project that names no realm emitted different bytes for the same signed manifest"
+    );
+    for alias in ["alpha", "beta"] {
+        assert!(
+            !alpha.contains(alias),
+            "a caller's local alias leaked into the document: {alpha}"
+        );
+    }
 }

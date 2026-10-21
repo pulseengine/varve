@@ -8,7 +8,8 @@
 # WHY THIS SHARDS THE `[not-yet]` FILES AND NO LONGER MUTATES THE WORKSPACE.
 # MEASURED (varve#181): the previous shape was one job running
 # `cargo mutants --no-shuffle || true` over the whole workspace, 2,675 mutants
-# at ~7 mutants/minute on one runner. It was cancelled at its 90-minute cap
+# at ~7 mutants/minute on one runner (an estimate the shards later measured
+# slower than; see below). It was cancelled at its 90-minute cap
 # every night after ~32% of them, so 11 of the 22 `not-yet` files were never
 # reached — and `|| true` plus an upload step made the cancellation read as a
 # run. REQ-MUTANTDEBT-001 clause 1 asks that EVERY `not-yet` file be tested by
@@ -23,9 +24,12 @@
 # mutation-scope.toml on every run (REQ-MUTATE-003: a hand-kept list drifted
 # once and nothing noticed), counts each file's mutants with the cheap
 # `cargo mutants --list`, and packs them into shards of <= 300 mutants. 300 is
-# ~43 minutes at the MEASURED ~7 mutants/minute (`-j 4`, ubuntu-latest) against
-# a 90-minute cap: room for the baseline build and a slow-test file. A file
-# larger than that gets a shard to itself.
+# ~63 minutes at the MEASURED ~4.75 mutants/minute (`-j 4`, ubuntu-latest)
+# against a 90-minute cap. Measured by the first workflow_dispatch run (run
+# 39541389293 on pulseengine/varve, 939 mutants): shards of 314, 300, 298 and
+# 27 mutants took 66, 61, 59 and 7 minutes. That leaves ~24 minutes of headroom
+# for the baseline build and a slow-test file, and no more: do not raise the
+# target without re-measuring. A file larger than that gets a shard to itself.
 #
 # THE RESULT IS "MEASURED" OR "INCOMPLETE", NEVER A ZERO. The `report` job runs
 # even when shards were cancelled, and a shard with no cargo-mutants summary —

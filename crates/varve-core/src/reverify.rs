@@ -106,6 +106,52 @@ pub fn verify_installed(
     verify_installed_timed(store, layer, verifier, platform).map(|(checked, _)| checked)
 }
 
+/// Steps 1 and 2 of [`verify_installed`] and nothing else: the layer's
+/// retained envelope verifies against `verifier`, and its payload is the
+/// manifest the store holds. No payload is hashed, so it costs one signature
+/// check and one small read — cheap enough to run on every dispatch, which is
+/// where a realmless pin uses it (REQ-NOPINNOTOOL-001 clause 2: a configured
+/// root that signed nothing in the store vouches for nothing).
+pub fn verify_retained_envelope(
+    layer: &InstalledLayer,
+    verifier: &dyn ManifestVerifier,
+) -> Result<(), ReverifyError> {
+    retained_payload(layer, verifier, &mut VerifyTiming::default()).map(|_| ())
+}
+
+fn retained_payload(
+    layer: &InstalledLayer,
+    verifier: &dyn ManifestVerifier,
+    timing: &mut VerifyTiming,
+) -> Result<Vec<u8>, ReverifyError> {
+    let io = |path: &std::path::Path, source: std::io::Error| ReverifyError::Io {
+        path: path.display().to_string(),
+        source,
+    };
+    // 1. The retained envelope must exist and verify against the trust root.
+    let envelope_path = layer.root.join(ENVELOPE_FILE);
+    let envelope = match std::fs::read(&envelope_path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ReverifyError::NoEnvelope {
+                digest: layer.digest.clone(),
+            });
+        }
+        Err(e) => return Err(io(&envelope_path, e)),
+    };
+    let t = std::time::Instant::now();
+    let payload = verifier.verify(&envelope)?;
+    timing.signature = t.elapsed();
+
+    // 2. The verified payload must be byte-identical to the stored manifest.
+    let manifest_path = layer.root.join("layer.json");
+    let stored = std::fs::read(&manifest_path).map_err(|e| io(&manifest_path, e))?;
+    if payload != stored {
+        return Err(ReverifyError::PayloadMismatch);
+    }
+    Ok(payload)
+}
+
 /// [`verify_installed`], reporting where the time went.
 ///
 /// The timing rides on the real verification path — the same function every
@@ -123,28 +169,9 @@ pub fn verify_installed_timed(
         source,
     };
 
-    // 1. The retained envelope must exist and verify against the trust root.
-    let envelope_path = layer.root.join(ENVELOPE_FILE);
-    let envelope = match std::fs::read(&envelope_path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ReverifyError::NoEnvelope {
-                digest: layer.digest.clone(),
-            });
-        }
-        Err(e) => return Err(io(&envelope_path, e)),
-    };
+    // 1 and 2: the retained envelope verifies, and says what the store holds.
+    let payload = retained_payload(layer, verifier, &mut timing)?;
     let t = std::time::Instant::now();
-    let payload = verifier.verify(&envelope)?;
-    timing.signature = t.elapsed();
-
-    // 2. The verified payload must be byte-identical to the stored manifest.
-    let t = std::time::Instant::now();
-    let manifest_path = layer.root.join("layer.json");
-    let stored = std::fs::read(&manifest_path).map_err(|e| io(&manifest_path, e))?;
-    if payload != stored {
-        return Err(ReverifyError::PayloadMismatch);
-    }
 
     // 3. Every tool the signed manifest names must be present and unaltered.
     let manifest = LayerManifest::parse(&payload)?;
@@ -398,6 +425,73 @@ mod tests {
         let checked = verify_installed(&store, &layer, &verifier, "x86_64-unknown-linux-gnu")
             .expect("a composition-only layer must verify, not be refused for checking nothing");
         assert_eq!(checked, 0, "it has no payloads of its own to check");
+    }
+
+    /// The dispatch-time check: the retained envelope must verify against the
+    /// root in scope — and against THAT root, not any key. FOUND by the second
+    /// v0.43.0 clean-room review: a realmless pin dispatched a layer under an
+    /// unrelated VARVE_TRUST_ROOT that `verify` refused.
+    // rivet: verifies REQ-NOPINNOTOOL-001
+    #[test]
+    fn the_retained_envelope_vouches_only_under_the_root_that_signed_it() {
+        let (sk, pk) = generate_root_keypair();
+        let (_, stranger) = generate_root_keypair();
+        let payload = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json",
+ "artifactType":"application/vnd.pulseengine.varve.layer.v1+json",
+ "annotations":{{"eu.pulseengine.varve.layer":"2026.07.0",
+ "eu.pulseengine.varve.line":"2026.07","eu.pulseengine.varve.channel":"qualified",
+ "eu.pulseengine.varve.counter":"1",
+ "org.opencontainers.image.created":"2026-07-31T09:14:00Z"}},
+ "manifests":[{{"digest":"sha256:{d}","size":0,
+ "annotations":{{"{k}":"layer","eu.pulseengine.varve.include.realm":"other"}}}}]}}"#,
+            d = "0".repeat(64),
+            k = crate::kind::ANN_KIND,
+        )
+        .into_bytes();
+        let envelope = sign_layer_manifest(&payload, &sk, "varve-root-1").unwrap();
+        let source = MemorySource::new().with_manifest(envelope.as_bytes());
+        let pin = Pin::parse(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\n",
+            "varve.toml",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let store = Store::at(&root);
+        let mut marks = HighWaterMarks::load(&root).unwrap();
+        let verifier = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+        let policy = InstallPolicy {
+            index: None,
+            now: "2026-08-07T00:00:00Z",
+            staleness_threshold_days: 90,
+            platform: "x86_64-unknown-linux-gnu",
+        };
+        let outcome = install(&pin, &source, &verifier, &store, &mut marks, &policy).unwrap();
+        let layer = store.get(&outcome.digest).unwrap().unwrap();
+
+        verify_retained_envelope(&layer, &verifier).expect("the signing root vouches");
+        let other = PinnedKeyVerifier::from_public_key_bytes(&stranger).unwrap();
+        assert!(
+            verify_retained_envelope(&layer, &other).is_err(),
+            "a root that signed nothing here must not vouch for it"
+        );
+        std::fs::write(layer.root.join("layer.json"), b"{}").unwrap();
+        assert!(
+            matches!(
+                verify_retained_envelope(&layer, &verifier),
+                Err(ReverifyError::PayloadMismatch)
+            ),
+            "a manifest that differs from what was signed must not vouch"
+        );
+        std::fs::remove_file(layer.root.join(ENVELOPE_FILE)).unwrap();
+        assert!(
+            matches!(
+                verify_retained_envelope(&layer, &verifier),
+                Err(ReverifyError::NoEnvelope { .. })
+            ),
+            "no retained envelope, nothing to vouch with"
+        );
     }
 
     /// The refusal has to name the platforms the layer ACTUALLY carries.
