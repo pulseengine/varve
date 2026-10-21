@@ -1649,7 +1649,10 @@ path   = "before-shims"
             // A newline inside the single-quoted `. '...'` path is literal to
             // the shell; inside a `#` comment it ends the comment.
             if line.starts_with('#') {
-                assert!(!line.contains('\n'), "a comment broken by a raw newline: {line:?}");
+                assert!(
+                    !line.contains('\n'),
+                    "a comment broken by a raw newline: {line:?}"
+                );
             }
         }
     }

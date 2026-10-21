@@ -46,10 +46,26 @@ fn fixture(pin: Option<&str>, layers: &[(&str, LayerTools)]) -> Fixture {
     }
 }
 
+/// A well-formed ed25519 public key (the curve's base point), for the
+/// realmless fixture. These layers are laid down unsigned, so no signature is
+/// ever checked against it; it is here because a realmless pin resolves only
+/// when SOME root is named (REQ-NOPINNOTOOL-001 clause 2), as `status` has
+/// always required.
+const FIXTURE_ROOT_HEX: &str = "5866666666666666666666666666666666666666666666666666666666666666";
+
+/// The fixture's root key file, for tests that launch a shim directly rather
+/// than through `varve()`.
+fn fixture_root_key(fx: &Fixture) -> std::path::PathBuf {
+    let key = fx.root.with_file_name("fixture-root.pub");
+    std::fs::write(&key, FIXTURE_ROOT_HEX).unwrap();
+    key
+}
+
 fn varve(fx: &Fixture) -> Command {
     let mut cmd = Command::cargo_bin("varve").unwrap();
     cmd.env("PATH", "/usr/bin:/bin"); // hermetic — see the note on `varve()`
     cmd.env("VARVE_ROOT", &fx.root).current_dir(&fx.project);
+    cmd.env("VARVE_TRUST_ROOT", fixture_root_key(fx));
     // A hermetic PATH. Without it these tests inherit the developer's, and
     // REQ-SHADOW-001 correctly reported a real conflict — a `cargo install`ed
     // `synth` in ~/.cargo/bin shadowing the fixture's pinned one — turning
@@ -210,6 +226,51 @@ fn which_prints_the_resolved_binary_and_its_layer() {
         .stderr(predicate::str::contains("2026.07.0").and(predicate::str::contains("sha256:")));
 }
 
+// rivet: verifies REQ-NOPINNOTOOL-001
+#[test]
+fn a_realmless_pin_with_no_trust_root_resolves_nothing_just_as_status_refuses() {
+    // FOUND by the v0.43.0 clean-room review, and reproduced: with a pin that
+    // names no realm and VARVE_TRUST_ROOT unset, `varve status` refused ("no
+    // trust root configured") while `which` printed a path from the store and
+    // `run` executed it — #198's two code paths answering one question
+    // differently, still alive for realmless pins. Nothing in scope vouches
+    // for those bytes, so nothing may dispatch them.
+    let fx = fixture(Some(PIN_JULY), &[(MANIFEST_JULY, &[("synth", b"s")])]);
+    let bare = |args: &[&str]| {
+        let mut cmd = varve(&fx);
+        cmd.env_remove("VARVE_TRUST_ROOT").args(args);
+        cmd.assert().failure().code(1)
+    };
+    let reason = "no trust root configured";
+    bare(&["status"]).stderr(predicate::str::contains(reason));
+    bare(&["which", "synth"])
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(reason));
+    bare(&["run", "synth"]).stderr(predicate::str::contains(reason));
+    // ...and the shim, which is `run` reached through argv[0].
+    let shim = fx.root.with_file_name("synth");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(assert_cmd::cargo::cargo_bin("varve"), &shim).unwrap();
+    std::process::Command::new(&shim)
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &fx.root)
+        .env_remove("VARVE_TRUST_ROOT")
+        .current_dir(&fx.project)
+        .output()
+        .map(|o| {
+            assert_eq!(
+                o.status.code(),
+                Some(1),
+                "the shim dispatched with no root in scope"
+            );
+            assert!(String::from_utf8_lossy(&o.stderr).contains(reason));
+        })
+        .unwrap();
+    // Name a root and the same pin resolves again: the refusal is about the
+    // missing vouching root, not about realmless pins as such.
+    varve(&fx).args(["which", "synth"]).assert().success();
+}
+
 // rivet: verifies REQ-PIN-001
 #[test]
 fn which_fails_closed_when_the_pinned_layer_is_not_installed() {
@@ -285,13 +346,24 @@ fn list_with_a_legacy_entry_prints_exactly_one_note_naming_the_count() {
         stdout.contains(fx.root.join("core").display().to_string().as_str()),
         "the note must name the legacy store's path:\n{stdout}"
     );
-    for needle in ["no realm", "has not deleted"] {
+    // "no realm's root vouches for them" was half true and read as "nothing
+    // does" — but a realmless layer was verified against VARVE_TRUST_ROOT at
+    // install, and that root is what `which`/`run` now require to dispatch it
+    // (v0.43.0 clean-room review). Name the root that does vouch.
+    for needle in ["no realm", "VARVE_TRUST_ROOT", "has not deleted"] {
         assert!(
             stdout.contains(needle),
-            "the note must say the entries belong to no realm and were not deleted \
-             (missing {needle:?}):\n{stdout}"
+            "the note must say the entries belong to no realm, what vouches for \
+             them, and that they were not deleted (missing {needle:?}):\n{stdout}"
         );
     }
+    // And "not deleted" as a FACT, not only a sentence.
+    let kept = std::fs::read_dir(fx.root.join("core"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("sha256-"))
+        .count();
+    assert_eq!(kept, 1, "list must leave the legacy layer on disk");
 }
 
 // rivet: verifies REQ-NOPINNOTOOL-001
@@ -2972,6 +3044,7 @@ fn a_shim_passes_non_utf8_arguments_through_byte_for_byte() {
         .arg(nasty)
         .current_dir(&fx.project)
         .env("VARVE_ROOT", &fx.root)
+        .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
         .env("VARVE_ARG_OUT", &out_file)
         .status()
         .unwrap();
@@ -3058,6 +3131,7 @@ fn shims_resolve_per_invocation_so_switching_projects_is_cd() {
         let out = std::process::Command::new(&shim)
             .current_dir(dir)
             .env("VARVE_ROOT", &fx.root)
+            .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
             .output()
             .unwrap();
         (
@@ -3151,6 +3225,7 @@ fn shim_install_writes_a_sourceable_env_file() {
             fx.project.display()
         ))
         .env("VARVE_ROOT", &fx.root)
+        .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
         .output()
         .unwrap();
     assert!(
@@ -3270,6 +3345,7 @@ sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 fn export_bazel_refuses_without_a_trust_root() {
     let fx = fixture(Some(PIN_JULY), &[]);
     varve(&fx)
+        .env_remove("VARVE_TRUST_ROOT")
         .args(["export-bazel", "--layer", "2026.07.0", "--out"])
         .arg(fx.project.parent().unwrap().join("nowhere"))
         .assert()
@@ -3771,6 +3847,7 @@ fn the_trust_root_error_points_to_the_realm_path() {
     let fx = fixture(Some(PIN_JULY), &[]);
     let signed = signed_layer_fixture(&fx, "2026.07.0", 1);
     varve(&fx)
+        .env_remove("VARVE_TRUST_ROOT")
         .args(["install", "--from"])
         .arg(&signed.archive)
         .assert()

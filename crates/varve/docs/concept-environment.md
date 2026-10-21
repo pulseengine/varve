@@ -5,7 +5,7 @@ Every variable varve reads, and which one wins.
 | Variable | Read by | Default |
 |---|---|---|
 | `VARVE_ROOT` | everything | `~/.varve` |
-| `VARVE_TRUST_ROOT` | verification, when the pin names no realm | none — fails closed |
+| `VARVE_TRUST_ROOT` | verification, and `which` / `run` / the shims, when the pin names no realm | none — fails closed |
 | `VARVE_REGISTRY_AUTH` | `oci://` pulls against a private registry | none |
 | `VARVE_UPDATE_API` | `varve self-update` only | the GitHub releases API |
 | `VARVE_INSTALL_DIR`, `VARVE_VERSION`, `VARVE_ALLOW_ROOT` | `install.sh` only, never the binary | `~/.varve/bin`, `latest`, refuse |
@@ -56,6 +56,13 @@ applies **only when the pin names no realm**: a realm's `trust-root` is
 authoritative and this variable is ignored, including when it points at a file
 that does not exist. If you set it and nothing changes, check whether your pin
 has a `realm`.
+
+For a pin with no realm it is needed **every time a tool is dispatched**, not
+only at install: `which`, `run` and the shims refuse without it, with the same
+reason `status` gives. The bytes in the store were vouched for by this root and
+nothing else, so with no root in scope there is nothing to dispatch them on
+(REQ-NOPINNOTOOL-001). A realm carries its root in `varve-realms.toml` and
+needs no variable at all.
 
 ## VARVE_REGISTRY_AUTH
 

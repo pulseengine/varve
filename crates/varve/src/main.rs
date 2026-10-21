@@ -1843,7 +1843,7 @@ fn run_tool(
     tool: &str,
     args: &[std::ffi::OsString],
 ) -> anyhow::Result<()> {
-    let ctx = project_ctx(store)?;
+    let ctx = dispatch_ctx(store)?;
     // Kept before the move: a refusal below names the pin that caused it, and
     // the realm is what makes that sentence answer the user's real question.
     let pin_file = ctx.root.join("varve.toml");
@@ -3298,6 +3298,22 @@ fn project_ctx(base: &Store) -> anyhow::Result<ProjectCtx> {
     }
 }
 
+/// The context for anything that DISPATCHES a tool — `which`, `run`, and the
+/// shims through `run` — refused unless some root in scope vouches for the
+/// store it resolves from (REQ-NOPINNOTOOL-001 clause 2).
+///
+/// A realm brings its own root. A pin that names no realm resolves from the
+/// top-level store, and the only thing that ever vouched for those bytes was
+/// `VARVE_TRUST_ROOT` at install time. FOUND by the v0.43.0 clean-room review:
+/// with it unset, `status` refused while `which` printed a path and `run`
+/// executed it — #198's two answers to one question, still alive for
+/// realmless pins. Now all of them give `status`'s reason.
+fn dispatch_ctx(base: &Store) -> anyhow::Result<ProjectCtx> {
+    let ctx = project_ctx(base)?;
+    ctx_verifier(&ctx)?;
+    Ok(ctx)
+}
+
 fn ctx_root_bytes(ctx: &ProjectCtx) -> anyhow::Result<Vec<u8>> {
     match &ctx.realm {
         Some(realm) => Ok(realm.trust_root.clone()),
@@ -4749,7 +4765,7 @@ fn load_pin() -> anyhow::Result<(Pin, PathBuf)> {
 }
 
 fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
-    let ctx = project_ctx(store)?;
+    let ctx = dispatch_ctx(store)?;
     let resolved = resolve(&ctx.pin, &ctx.store)?;
     let asked = tool.to_string();
     let Some((tool, path)) = dispatch_target(&resolved, tool) else {
@@ -4878,8 +4894,8 @@ fn list(store: &Store) -> anyhow::Result<()> {
     // REQ-NOPINNOTOOL-001 clause 3: an entry with no realm label is one `list`
     // found at the TOP of the core rather than under `realms/<fingerprint>` —
     // i.e. one laid down before realms existed, or installed realmless on
-    // purpose. Nothing resolves it without a realmless pin naming it
-    // explicitly (clauses 1 and 2), so a reader seeing it listed here needs
+    // purpose. Nothing resolves it without a realmless pin naming it AND a
+    // VARVE_TRUST_ROOT in scope (clauses 1 and 2), so a reader seeing it listed here needs
     // telling why it is not also reachable the way a realm's layers are, and
     // that varve has not quietly removed it.
     let legacy_count = rows.iter().filter(|(realm, _)| realm.is_empty()).count();
@@ -4896,8 +4912,9 @@ fn list(store: &Store) -> anyhow::Result<()> {
     if legacy_count > 0 {
         println!(
             "note: {legacy_count} layer(s) above are in the pre-realm store ({}): they \
-             belong to no realm, so no realm's root vouches for them; varve does not use \
-             them outside a realmless pin and has not deleted them.",
+             belong to no realm, so only the root VARVE_TRUST_ROOT names vouches for them; \
+             varve dispatches them only for a realmless pin with that root set, and has \
+             not deleted them.",
             store.root().join("core").display()
         );
     }
