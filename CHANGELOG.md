@@ -1,5 +1,121 @@
 # Changelog
 
+## v0.43.0 — 2026-10-22
+
+*An advisory arrives as a prepared line-status, a composition's support is capped
+by what it composes, and two independent reviews found what this release fixes.*
+
+`rivet release status v0.43.0`: REQ-ENVQUOTE-001, REQ-NOPINNOTOOL-001 and
+REQ-SBOMFIELDS-001 are **verified**. REQ-ADVISORYWATCH-001,
+REQ-COMPOSEWINDOW-001 and REQ-MUTANTDEBT-001 ship **implemented**, not verified,
+by the maintainer's decision: each has a clause that can only be shown after this
+release, or open work moved to v0.44.0 (see "Not verified in this release").
+
+### Upgrading: behaviour that changes
+
+* **A pin with no realm needs its trust root every time a tool runs.** `which`,
+  `run`, the shims and `shim install` now refuse when `VARVE_TRUST_ROOT` is unset,
+  with the reason `status` always gave. And it must be the root that SIGNED the
+  layer: dispatch checks the layer's retained signature, so another key refuses
+  as `varve verify` does. A realm pin is unaffected; it carries its root in
+  `varve-realms.toml`.
+* **The SBOM author is named by the signing root's key fingerprint**, not by the
+  realm name in your `varve-realms.toml`. A realm name is a local label, so the
+  same signed layer used to produce different SBOM bytes in different projects.
+* **`varve.toml` refuses an `[[export]] out` containing a control character.**
+
+### Security
+
+* **`varve env` could be made to run a command by a cloned repository.** An
+  `[[export]] out = "sdk\ntouch PWNED\n#"` ended the comment `varve env` prints
+  for the export and put the rest on a line of its own, which
+  `eval "$(varve env)"` ran. The store root and script path are quoted
+  literally too (#46): `$`, backticks and quotes in `$VARVE_ROOT` or the project
+  path stay text. The round trip is shown by running the output in sh, bash,
+  zsh, dash and, in CI, fish.
+* **`varve shim install` printed an injectable line for your login config**
+  (`. "<root>/env"`, where `$(...)` stays live). It is quoted literally now.
+* **A realmless pin dispatched tools no root in scope vouched for**, with the
+  trust root unset or pointing at an unrelated key, while `status` and `verify`
+  refused. See "Upgrading".
+* rustls-webpki 0.103.16 and webpki-roots 1.0.10, for RUSTSEC-2026-0381 and
+  RUSTSEC-2026-0382 (distrusted emSign intermediates).
+
+### An advisory arrives as a prepared line-status
+
+`varve-producer advisories` reads every layer on every supported line from the
+signed line index and each layer's signed manifest. It checks each tool against
+its repository's GitHub security advisories by version range, and each library
+inside a tool against RustSec through the upstream SBOM: the one the deposit
+recorded, else the release's own, used only when the release's verified sums
+cover it. It writes the next `line-status/<line>.json` and never publishes.
+
+What it cannot check is reported with a reason, never dropped, and "nothing new"
+never stands over an unchecked payload. A source it cannot read fails the run.
+
+### A composition never promises support past what it composes
+
+`varve support-horizon --manifest layer.toml` caps a composing layer's support
+window at the earliest window among its includes. Each window is read from the
+include's own signed line-status and verified against that include's realm
+root. An include with no line-status, or one that states no window, refuses the
+horizon. Exceeding the cap takes `--past-includes "<reason>"`.
+
+### The layer SBOM carries supplier, author, license and dependencies
+
+Each component names its supplier from the signed upstream repository, with the
+signed proof signer recorded beside it (and flagged when it names a different
+organisation, as a reusable signing workflow does). The deposit records the
+upstream's declared license and SBOM through its proof. Re-emitting the same
+signed manifest is byte-identical anywhere.
+
+### No pin, no tool; a shim failure says it was one
+
+With no `varve.toml` in scope, `which`, `run` and the shims refuse exactly as
+`status` does, instead of resolving something from the old top-level store.
+`varve list` names that store, says which root can vouch for it, and leaves it
+on disk. A failure while varve runs as a shim now says it was invoked as one and
+under which name.
+
+### Declared mutation debt is measured in full
+
+The nightly mutation run shards the `[not-yet]` files of `mutation-scope.toml`
+(read at run time, never copied into the workflow) into jobs that finish inside
+the cap. A shard with no summary, or one that tested a different number of
+mutants than planned, is INCOMPLETE and turns the run red; it is never a zero.
+The first full measurement: 939 mutants across 21 files, 111 surviving, the debt
+that was declared and is now counted.
+
+### Not verified in this release
+
+* **REQ-ADVISORYWATCH-001.** No layers repository runs the watcher on a schedule
+  yet; that needs this release. Crates are not checked against RustSec by name,
+  and some SBOM components are reported rather than checked. Moved to
+  REQ-ADVISORYWATCH-002.
+* **REQ-COMPOSEWINDOW-001.** The cap holds for direct includes only. An expired
+  include is not refused, the override reason is not signed, and no layers
+  repository passes `--manifest` yet. Moved to REQ-COMPOSEWINDOW-002.
+* **REQ-MUTANTDEBT-001.** It is verified once a scheduled nightly run of the
+  merged workflow completes on main; the evidence so far is one dispatch run.
+* **#277:** a binary changed in the store after install still runs, for every
+  pin, until `varve verify` is run. It is a design question, not a regression.
+
+### Falsification
+
+This release is wrong if any of these is observed in the field:
+
+* any `varve.toml` field, `VARVE_ROOT` or project path that makes
+  `eval "$(varve env)"`, or the line `shim install` prints, run a command;
+* a realmless pin dispatching a tool with no trust root, or with a root that did
+  not sign the layer;
+* two SBOMs of one signed manifest differing by a byte;
+* a composing layer's `support-horizon --manifest` later than any direct
+  include's signed window, without `--past-includes`;
+* the advisory watch writing a line-status that omits an advisory it could
+  read, or reporting "nothing new" while something went unchecked;
+* a nightly mutation report reading MEASURED for a shard that did not test its
+  planned mutants.
+
 ## v0.42.0 — 2026-10-15
 
 *A moved pin arrives prepared: the scanner derives the version, re-measures the

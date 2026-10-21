@@ -41,6 +41,33 @@ jobs:
         # enforces the same invariant; this exercises the user-facing CLI gate.
         run: cargo run -q -p varve -- docs check --coverage --strict
 
+  fish:
+    # REQ-ENVQUOTE-001 clause 2: the `varve env` round trip is SHOWN by running
+    # the emitted script in each supported shell. Both v0.43.0 clean-room
+    # reviews found fish never ran anywhere, so its quoting was checked by
+    # reading it. Hosted, because installing a shell needs root the pool's
+    # runners do not grant; VARVE_REQUIRE_FISH makes the test FAIL rather than
+    # skip if the install did not take.
+    name: varve env round trip in fish (REQ-ENVQUOTE-001)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: install fish
+        run: sudo apt-get update -q && sudo apt-get install -y -q fish && fish --version
+      - name: eval varve env in fish with a hostile root
+        env:
+          VARVE_REQUIRE_FISH: "1"
+        # A filter that matches nothing passes with "0 passed", so the step
+        # also insists that exactly this one test ran.
+        run: |
+          set -euo pipefail
+          cargo test -p varve --test cli -- --exact \
+            env_quotes_a_hostile_root_for_fish_so_eval_cannot_run_embedded_commands 2>&1 | tee fish.log
+          grep -q 'test result: ok. 1 passed' fish.log
+
   rivet:
     name: rivet validate · release plan
     runs-on: [self-hosted, linux, x64, light]
