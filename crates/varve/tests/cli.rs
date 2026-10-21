@@ -46,18 +46,46 @@ fn fixture(pin: Option<&str>, layers: &[(&str, LayerTools)]) -> Fixture {
     }
 }
 
-/// A well-formed ed25519 public key (the curve's base point), for the
-/// realmless fixture. These layers are laid down unsigned, so no signature is
-/// ever checked against it; it is here because a realmless pin resolves only
-/// when SOME root is named (REQ-NOPINNOTOOL-001 clause 2), as `status` has
-/// always required.
-const FIXTURE_ROOT_HEX: &str = "5866666666666666666666666666666666666666666666666666666666666666";
+/// One signing root for every realmless fixture in this file.
+///
+/// `fixture()` and the tests that call `Store::lay_down` directly write layers
+/// with no signature. A realmless pin dispatches only a layer the configured
+/// root actually signed (REQ-NOPINNOTOOL-001 clause 2: a key that vouches for
+/// nothing in the store is no root in scope), so before any command runs the
+/// fixture signs whatever it laid down with this key, and names its public
+/// half as VARVE_TRUST_ROOT — the setup a realmless user has after a real
+/// `varve install`.
+fn fixture_keys() -> &'static (Vec<u8>, Vec<u8>) {
+    static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    KEYS.get_or_init(varve_core::generate_root_keypair)
+}
+
+/// Sign every layer in the fixture's top-level store that has no retained
+/// envelope yet, exactly as `install` would have left it.
+fn sign_fixture_layers(root: &std::path::Path) {
+    let Ok(dir) = std::fs::read_dir(root.join("core")) else {
+        return;
+    };
+    for entry in dir.filter_map(Result::ok) {
+        let layer = entry.path();
+        let envelope = layer.join("layer.dsse.json");
+        let manifest = layer.join("layer.json");
+        if envelope.exists() || !manifest.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&manifest).unwrap();
+        let signed =
+            varve_core::sign_layer_manifest(&bytes, &fixture_keys().0, "fixture-root").unwrap();
+        std::fs::write(&envelope, signed).unwrap();
+    }
+}
 
 /// The fixture's root key file, for tests that launch a shim directly rather
-/// than through `varve()`.
+/// than through `varve()`. Signs the fixture's layers first.
 fn fixture_root_key(fx: &Fixture) -> std::path::PathBuf {
+    sign_fixture_layers(&fx.root);
     let key = fx.root.with_file_name("fixture-root.pub");
-    std::fs::write(&key, FIXTURE_ROOT_HEX).unwrap();
+    std::fs::write(&key, hex::encode(&fixture_keys().1)).unwrap();
     key
 }
 
@@ -269,6 +297,26 @@ fn a_realmless_pin_with_no_trust_root_resolves_nothing_just_as_status_refuses() 
     // Name a root and the same pin resolves again: the refusal is about the
     // missing vouching root, not about realmless pins as such.
     varve(&fx).args(["which", "synth"]).assert().success();
+
+    // ...but it must be the root that SIGNED the layer. FOUND by the second
+    // v0.43.0 clean-room review: with VARVE_TRUST_ROOT pointing at any
+    // well-formed key, `verify` refused ("signature does not verify against
+    // the trust root") while `which` printed the path and `run` executed it.
+    // A root that vouches for nothing in the store is no root in scope.
+    let (_, stranger) = varve_core::generate_root_keypair();
+    let stranger_key = fx.root.with_file_name("stranger.pub");
+    std::fs::write(&stranger_key, hex::encode(&stranger)).unwrap();
+    for args in [&["which", "synth"][..], &["run", "synth"][..]] {
+        let mut cmd = varve(&fx);
+        cmd.env("VARVE_TRUST_ROOT", &stranger_key).args(args);
+        cmd.assert()
+            .failure()
+            .code(1)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(
+                "does not verify against the trust root",
+            ));
+    }
 }
 
 // rivet: verifies REQ-PIN-001
@@ -1570,7 +1618,10 @@ fn install_verifies_lays_down_and_verify_repeats_the_verdict() {
         .assert()
         .success()
         .stdout(predicate::str::contains("2026.07.0"));
+    // The root that signed it — a realmless pin dispatches only what the root
+    // in scope vouches for (REQ-NOPINNOTOOL-001 clause 2).
     varve(&fx)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
         .args(["which", "synth"])
         .assert()
         .success()
@@ -3195,6 +3246,63 @@ fn env_is_evaluable_and_idempotent() {
 }
 
 // rivet: verifies REQ-ENV-001
+// rivet: verifies REQ-ENVQUOTE-001
+#[cfg(unix)]
+#[test]
+fn the_line_shim_install_tells_you_to_paste_cannot_run_a_command_in_the_root() {
+    // FOUND by the second v0.43.0 clean-room review, and reproduced:
+    // `varve shim install` prints the line a user pastes into their LOGIN
+    // config as `. "<root>/env"` — double quotes, where `$(...)` stays live.
+    // With VARVE_ROOT containing `$(touch X)`, running the printed line
+    // created X: #46 again, in the one place it would run on every login.
+    let tmp = tempfile::tempdir().unwrap();
+    let canary = tmp.path().join("pwned-shim-line");
+    let root = tmp.path().join(format!("r$(touch {})", canary.display()));
+    let project = tmp.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("varve.toml"), PIN_JULY).unwrap();
+    varve_core::Store::at(&root)
+        .lay_down(MANIFEST_JULY.as_bytes(), &[("probe", b"#!/bin/sh\n")])
+        .unwrap();
+    sign_fixture_layers(&root);
+    let key = tmp.path().join("root.pub");
+    std::fs::write(&key, hex::encode(&fixture_keys().1)).unwrap();
+    let out = Command::cargo_bin("varve")
+        .unwrap()
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &root)
+        .env("VARVE_TRUST_ROOT", &key)
+        .current_dir(&project)
+        .args(["shim", "install"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with(". "))
+        .unwrap_or_else(|| panic!("no line to paste in:\n{stdout}"))
+        .split("        #")
+        .next()
+        .unwrap()
+        .trim()
+        .to_string();
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{line} 2>/dev/null; true"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        !canary.exists(),
+        "pasting the line shim install printed ran a command from VARVE_ROOT: {line}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn shim_install_writes_a_sourceable_env_file() {
@@ -3764,6 +3872,7 @@ arg-prefix = "--wasi-arg"
     // Dispatch: varve run -- scry --version x  →  the runner receives its
     // prefix args, then the module path, then per-arg-prefixed user args.
     varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
         .args(["run", "--", "scry", "--version", "x"])
         .assert()
         .success()

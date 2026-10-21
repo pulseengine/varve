@@ -1121,8 +1121,11 @@ fn shim_install(store: &Store, extra_tools: &[String]) -> anyhow::Result<()> {
     // extras); the names are only entry points — every invocation
     // re-resolves the pin (and its realm) from its own working directory,
     // so ONE shim directory serves every realm.
-    let ctx = project_ctx(store)?;
+    // Resolving names reads the store, so it needs the same vouching root as
+    // dispatch does (REQ-NOPINNOTOOL-001 clause 2; second clean-room review).
+    let ctx = dispatch_ctx(store)?;
     let resolved = resolve(&ctx.pin, &ctx.store)?;
+    vouch_for_dispatch(&ctx, &resolved.layer)?;
     let mut names: Vec<String> = resolved.tools.iter().map(|(n, _)| n.clone()).collect();
     names.extend(extra_tools.iter().cloned());
     names.sort();
@@ -1190,11 +1193,15 @@ fn shim_install(store: &Store, extra_tools: &[String]) -> anyhow::Result<()> {
     let env_file = store.root().join("env");
     std::fs::write(&env_file, env_script_sh(&shim_dir))
         .with_context(|| format!("cannot write {}", env_file.display()))?;
+    // The line a user pastes into their LOGIN config is shell text, so the
+    // path is quoted literally — the double quotes this used to print left
+    // `$(...)` in VARVE_ROOT live on every login (second v0.43.0 clean-room
+    // review; REQ-ENVQUOTE-001's defect in its most persistent place).
     println!(
-        "installed {} shim(s) in {} — switching projects is cd\n\nadd ONE line to your shell config:\n  . \"{}\"        # or: eval \"$(varve env)\"",
+        "installed {} shim(s) in {} — switching projects is cd\n\nadd ONE line to your shell config:\n  . {}        # or: eval \"$(varve env)\"",
         names.len(),
         shim_dir.display(),
-        env_file.display()
+        varve_core::shellquote::quote_sh(&env_file.display().to_string())
     );
     Ok(())
 }
@@ -1848,7 +1855,7 @@ fn run_tool(
     // the realm is what makes that sentence answer the user's real question.
     let pin_file = ctx.root.join("varve.toml");
     let pinned_realm = ctx.pin.realm.clone();
-    let mut pin = ctx.pin;
+    let mut pin = ctx.pin.clone();
     if let Some(layer) = override_layer {
         // A one-off: resolve another layer for this invocation only. The
         // checked-in pin is not read past this point and never written.
@@ -1856,6 +1863,7 @@ fn run_tool(
         pin.digest = None;
     }
     let resolved = resolve(&pin, &ctx.store)?;
+    vouch_for_dispatch(&ctx, &resolved.layer)?;
     let Some((tool, path)) = dispatch_target(&resolved, tool) else {
         // The same correction `which` carries: the layer HOLDS a `wit`, `crate`
         // or `vsix` payload, it just does not dispatch one (REQ-INSPECT-001
@@ -3314,6 +3322,33 @@ fn dispatch_ctx(base: &Store) -> anyhow::Result<ProjectCtx> {
     Ok(ctx)
 }
 
+/// For a pin that names no realm, the layer about to be dispatched must carry
+/// a signature from the root in scope — not merely SOME root be configured.
+///
+/// FOUND by the second v0.43.0 clean-room review: `dispatch_ctx` checked only
+/// that VARVE_TRUST_ROOT parsed as a key, so pointing it at any well-formed key
+/// let `which` print and `run` execute a layer that `verify` refused. A realm
+/// pin needs no such check here: its store directory is keyed by its root's
+/// fingerprint, so a different root resolves a different (empty) store. The
+/// realmless store is keyed by nothing, which is why the signature is checked
+/// instead — the retained envelope only, one signature and one small read, so
+/// it stays cheap enough for a shim.
+fn vouch_for_dispatch(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> anyhow::Result<()> {
+    if ctx.realm.is_some() {
+        return Ok(());
+    }
+    let verifier = ctx_verifier(ctx)?;
+    varve_core::verify_retained_envelope(layer, &verifier).with_context(|| {
+        format!(
+            "layer {} in {} is not vouched for by the root VARVE_TRUST_ROOT names — \
+             `varve verify` says the same; point VARVE_TRUST_ROOT at the root that \
+             signed it, or reinstall",
+            layer.layer,
+            ctx.store.root().display()
+        )
+    })
+}
+
 fn ctx_root_bytes(ctx: &ProjectCtx) -> anyhow::Result<Vec<u8>> {
     match &ctx.realm {
         Some(realm) => Ok(realm.trust_root.clone()),
@@ -4767,6 +4802,7 @@ fn load_pin() -> anyhow::Result<(Pin, PathBuf)> {
 fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
     let ctx = dispatch_ctx(store)?;
     let resolved = resolve(&ctx.pin, &ctx.store)?;
+    vouch_for_dispatch(&ctx, &resolved.layer)?;
     let asked = tool.to_string();
     let Some((tool, path)) = dispatch_target(&resolved, tool) else {
         // "is not part of layer" was FALSE for a held payload: the layer holds

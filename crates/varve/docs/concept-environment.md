@@ -59,10 +59,11 @@ has a `realm`.
 
 For a pin with no realm it is needed **every time a tool is dispatched**, not
 only at install: `which`, `run` and the shims refuse without it, with the same
-reason `status` gives. The bytes in the store were vouched for by this root and
-nothing else, so with no root in scope there is nothing to dispatch them on
-(REQ-NOPINNOTOOL-001). A realm carries its root in `varve-realms.toml` and
-needs no variable at all.
+reason `status` gives. And it must be the root that SIGNED the layer: dispatch
+checks the layer's retained signature against it, so pointing the variable at
+some other key refuses exactly as `varve verify` does. The bytes in the store
+were vouched for by that root and nothing else (REQ-NOPINNOTOOL-001). A realm
+carries its root in `varve-realms.toml` and needs no variable at all.
 
 ## VARVE_REGISTRY_AUTH
 
