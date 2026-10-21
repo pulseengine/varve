@@ -119,19 +119,36 @@ fn component(entry: &crate::manifest::ManifestEntry) -> serde_json::Value {
         c["purl"] = serde_json::json!(format!("pkg:github/{owner}/{name}@{version}"));
     }
 
-    // Clause 1: the supplier is the upstream organisation the signed repo
-    // annotation names. Without one there is no supplier to name, and
-    // inventing one would be the scan-shaped guess this document exists to
-    // avoid.
-    if let Some((owner, _)) = entry
-        .annotations
-        .get("eu.pulseengine.source.repo")
-        .and_then(|r| r.split_once('/'))
-    {
+    // Clause 1: the supplier is whoever the signed annotations say supplied the
+    // bytes. Where a proof signer is recorded it is the identity that vouched
+    // for them (the certificate identity cosign matched, or the attestation's
+    // build signer), so it is read first; the repository owner is the fallback,
+    // and with neither there is no supplier to name — inventing one would be
+    // the scan-shaped guess this document exists to avoid.
+    //
+    // The signer is a free-form identity. Only a GitHub URL names an
+    // organisation varve can read off it without guessing; anything else (an
+    // email-shaped certificate identity, say) is recorded as a property for a
+    // human to read and does not decide the supplier.
+    let signer = entry.annotations.get(crate::ingest::ANN_PROOF_SIGNER);
+    let supplier_org = signer.and_then(|s| github_owner_of(s)).or_else(|| {
+        entry
+            .annotations
+            .get("eu.pulseengine.source.repo")
+            .and_then(|r| r.split_once('/'))
+            .map(|(owner, _)| owner)
+    });
+    if let Some(owner) = supplier_org {
         c["supplier"] = serde_json::json!({
             "name": owner,
             "url": [format!("https://github.com/{owner}")]
         });
+    }
+    if let Some(signer) = signer {
+        props.push(serde_json::json!({
+            "name": crate::ingest::ANN_PROOF_SIGNER,
+            "value": signer
+        }));
     }
 
     // A composed layer points at its own document rather than restating it.
@@ -193,16 +210,31 @@ fn component(entry: &crate::manifest::ManifestEntry) -> serde_json::Value {
     c
 }
 
+/// The organisation in a `https://github.com/<owner>/...` identity, or `None`
+/// for anything else — including a bare `https://github.com/` with no owner.
+fn github_owner_of(identity: &str) -> Option<&str> {
+    let rest = identity.strip_prefix("https://github.com/")?;
+    let owner = rest.split('/').next()?;
+    (!owner.is_empty()).then_some(owner)
+}
+
 /// Emit an SBOM for a verified layer manifest. Deterministic: same manifest in,
 /// byte-identical document out.
-/// `author` names the realm whose root signed the layer (REQ-SBOMFIELDS-001
-/// clause 2) — the caller knows it from the pin; the manifest does not say.
+///
+/// `root_public_key` is the root that verified the layer's envelope
+/// (REQ-SBOMFIELDS-001 clause 2). The author is NAMED by that root's
+/// fingerprint, not by a realm name: the name is a label each project chooses
+/// for itself in varve-realms.toml, so using it made one signed manifest emit
+/// different bytes in different projects — and clause 7 says it must not. The
+/// key that verified the envelope is the one fact about "the realm that signed
+/// this" the signed data itself states.
 pub fn emit(
     manifest: &LayerManifest,
     manifest_digest: &str,
     format: SbomFormat,
-    author: &str,
+    root_public_key: &[u8],
 ) -> String {
+    let author = crate::store::manifest_digest(root_public_key);
     let SbomFormat::CycloneDx = format;
     let mut components: Vec<serde_json::Value> = manifest.entries.iter().map(component).collect();
     // Stable order by bom-ref (the digest), so the document is diffable.
@@ -218,7 +250,7 @@ pub fn emit(
             // The layer's own issued-at, not "now" — the document describes a
             // released artifact, not the moment someone asked about it.
             "timestamp": manifest.issued_at,
-            "authors": [{"name": format!("varve realm {author} (whose root signed this layer)")}],
+            "authors": [{"name": format!("varve realm with root key {author} (whose root signed this layer)")}],
             "component": {
                 "type": "firmware",
                 "name": format!("varve-layer-{}", manifest.layer),
@@ -297,7 +329,7 @@ mod tests {
     fn every_component_is_transcribed_from_the_signed_manifest() {
         let (m, digest) = manifest();
         let doc: serde_json::Value =
-            serde_json::from_str(&emit(&m, &digest, SbomFormat::CycloneDx, "pulseengine")).unwrap();
+            serde_json::from_str(&emit(&m, &digest, SbomFormat::CycloneDx, &[7u8; 32])).unwrap();
         let comps = doc["components"].as_array().unwrap();
         assert_eq!(
             comps.len(),
@@ -336,7 +368,7 @@ mod tests {
         );
         let m = LayerManifest::parse(&bytes).unwrap();
         let doc: serde_json::Value =
-            serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx, "pulseengine"))
+            serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx, &[7u8; 32]))
                 .unwrap();
         let comps = doc["components"].as_array().unwrap();
         assert_eq!(comps.len(), 2);
@@ -377,7 +409,7 @@ mod tests {
         let m = LayerManifest::parse(bytes).unwrap();
         assert_eq!(m.entries.len(), 3, "fixture sanity");
         let doc: serde_json::Value =
-            serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx, "pulseengine"))
+            serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx, &[7u8; 32]))
                 .unwrap();
         let comps = doc["components"].as_array().unwrap();
         assert_eq!(
@@ -399,8 +431,8 @@ mod tests {
     #[test]
     fn emission_is_deterministic() {
         let (m, digest) = manifest();
-        let a = emit(&m, &digest, SbomFormat::CycloneDx, "pulseengine");
-        let b = emit(&m, &digest, SbomFormat::CycloneDx, "pulseengine");
+        let a = emit(&m, &digest, SbomFormat::CycloneDx, &[7u8; 32]);
+        let b = emit(&m, &digest, SbomFormat::CycloneDx, &[7u8; 32]);
         assert_eq!(a, b, "the same layer must emit a byte-identical document");
         // …and it carries the layer's own issued-at, not the wall clock.
         let doc: serde_json::Value = serde_json::from_str(&a).unwrap();
@@ -412,7 +444,7 @@ mod tests {
     fn the_document_binds_itself_to_the_layer_it_describes() {
         let (m, digest) = manifest();
         let doc: serde_json::Value =
-            serde_json::from_str(&emit(&m, &digest, SbomFormat::CycloneDx, "pulseengine")).unwrap();
+            serde_json::from_str(&emit(&m, &digest, SbomFormat::CycloneDx, &[7u8; 32])).unwrap();
         // An SBOM that does not say which signed artifact it describes cannot
         // be checked against one.
         assert_eq!(doc["metadata"]["component"]["bom-ref"], digest);
@@ -472,7 +504,7 @@ mod tests {
 
     fn fields_doc() -> serde_json::Value {
         let m = LayerManifest::parse(FIELDS).unwrap();
-        serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx, "pulseengine")).unwrap()
+        serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx, &[7u8; 32])).unwrap()
     }
 
     fn comp<'a>(doc: &'a serde_json::Value, digest: &str) -> &'a serde_json::Value {
@@ -497,6 +529,96 @@ mod tests {
         assert!(comp(&doc, "sha256:cccc").get("supplier").is_none());
     }
 
+    /// Clause 1: where a signed proof signer is present the supplier comes
+    /// from it — whoever vouched for the bytes — and not from the repository
+    /// slug; where it names no organisation varve can read, or is absent, the
+    /// repository owner stays the supplier.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn the_supplier_comes_from_the_signed_proof_signer_where_there_is_one() {
+        let manifest = br#"{
+  "annotations": {
+    "eu.pulseengine.varve.layer": "2026.10.0", "eu.pulseengine.varve.channel": "rolling",
+    "eu.pulseengine.varve.counter": "0", "org.opencontainers.image.created": "2026-10-01T00:00:00Z"
+  },
+  "manifests": [
+    { "digest": "sha256:1111", "annotations": {
+        "eu.pulseengine.tool": "a", "eu.pulseengine.tool.version": "1.0.0",
+        "eu.pulseengine.source.repo": "forked-from/a",
+        "eu.pulseengine.source.proof": "cosign-sums",
+        "eu.pulseengine.source.proof-signer": "https://github.com/the-signer/a/.github/workflows/release.yml@refs/tags/v1.0.0" } },
+    { "digest": "sha256:2222", "annotations": {
+        "eu.pulseengine.tool": "b", "eu.pulseengine.tool.version": "1.0.0",
+        "eu.pulseengine.source.repo": "owner/b",
+        "eu.pulseengine.source.proof": "cosign-sums",
+        "eu.pulseengine.source.proof-signer": "release-bot@example.org" } },
+    { "digest": "sha256:3333", "annotations": {
+        "eu.pulseengine.tool": "c", "eu.pulseengine.tool.version": "1.0.0",
+        "eu.pulseengine.source.proof": "cosign-sums",
+        "eu.pulseengine.source.proof-signer": "https://github.com/only-signer/c/.github/workflows/r.yml@refs/heads/main" } }
+  ]
+}"#;
+        let m = LayerManifest::parse(manifest).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&emit(&m, "sha256:dd", SbomFormat::CycloneDx, &[7u8; 32]))
+                .unwrap();
+        assert_eq!(
+            comp(&doc, "sha256:1111")["supplier"],
+            serde_json::json!({"name": "the-signer", "url": ["https://github.com/the-signer"]}),
+            "the signer vouched for these bytes; the repo slug is only where they say they came from"
+        );
+        // The signer is recorded verbatim, so a reader sees what the supplier
+        // was derived from.
+        assert!(
+            comp(&doc, "sha256:1111")["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["name"] == "eu.pulseengine.source.proof-signer"
+                    && p["value"]
+                        == "https://github.com/the-signer/a/.github/workflows/release.yml@refs/tags/v1.0.0"),
+        );
+        // A signer that is not a GitHub URL names no organisation we can
+        // read: fall back to the repository owner, never guess from it.
+        assert_eq!(
+            comp(&doc, "sha256:2222")["supplier"],
+            serde_json::json!({"name": "owner", "url": ["https://github.com/owner"]})
+        );
+        // No repository at all, but a signer: the signer is enough.
+        assert_eq!(
+            comp(&doc, "sha256:3333")["supplier"],
+            serde_json::json!({"name": "only-signer", "url": ["https://github.com/only-signer"]})
+        );
+    }
+
+    /// Clause 2 and 7: the author is the realm whose root signed the layer,
+    /// named by that root's own fingerprint — the one thing about "the realm"
+    /// the signed data can state. A realm's NAME is a label each project picks
+    /// for itself in varve-realms.toml, so naming it made one signed manifest
+    /// emit different bytes in different projects.
+    // rivet: verifies REQ-SBOMFIELDS-001
+    #[test]
+    fn the_author_is_named_by_the_roots_fingerprint_not_a_local_label() {
+        let m = LayerManifest::parse(FIELDS).unwrap();
+        let a = emit(&m, "sha256:dd", SbomFormat::CycloneDx, &[1u8; 32]);
+        let b = emit(&m, "sha256:dd", SbomFormat::CycloneDx, &[2u8; 32]);
+        let name = |s: &str| {
+            let v: serde_json::Value = serde_json::from_str(s).unwrap();
+            v["metadata"]["authors"][0]["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let fp = crate::store::manifest_digest(&[1u8; 32]);
+        assert!(name(&a).contains(&fp), "{}", name(&a));
+        assert_ne!(name(&a), name(&b), "a different root is a different author");
+        assert_eq!(
+            a,
+            emit(&m, "sha256:dd", SbomFormat::CycloneDx, &[1u8; 32]),
+            "the same root and manifest must re-emit byte-identically"
+        );
+    }
+
     /// Clause 2: the author is the realm whose root signed the layer.
     // rivet: verifies REQ-SBOMFIELDS-001
     #[test]
@@ -504,10 +626,10 @@ mod tests {
         let doc = fields_doc();
         let authors = doc["metadata"]["authors"].as_array().unwrap();
         assert_eq!(authors.len(), 1);
-        assert!(
-            authors[0]["name"].as_str().unwrap().contains("pulseengine"),
-            "{authors:?}"
-        );
+        let fp = crate::store::manifest_digest(&[7u8; 32]);
+        let name = authors[0]["name"].as_str().unwrap();
+        assert!(name.contains(&fp), "{authors:?}");
+        assert!(name.contains("signed this layer"), "{authors:?}");
     }
 
     /// Clause 3: the layer depends on every component, and nothing says a

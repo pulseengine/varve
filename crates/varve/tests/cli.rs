@@ -7784,3 +7784,88 @@ fn support_horizon_past_includes_with_a_blank_reason_is_refused() {
         .stdout("")
         .stderr(predicate::str::contains("needs a reason"));
 }
+
+// ──────────────── REQ-SBOMFIELDS-001 clause 7, end to end ────────────────
+//
+// `varve sbom` named its author from the caller's LOCAL realm alias, so one
+// signed manifest produced different SBOM bytes in two projects that happened
+// to call the realm different things (and a third text outside a project).
+// Clause 7 says re-emission is byte-identical for the same signed manifest.
+
+/// Install `signed` into a fresh project that names the realm `alias`, and
+/// return the SBOM `varve sbom` writes there.
+fn sbom_under_realm_alias(signed: &SignedLayer, alias: &str) -> String {
+    let fx = fixture(None, &[]);
+    let root = std::fs::read_to_string(&signed.trust_root)
+        .unwrap()
+        .trim()
+        .to_string();
+    std::fs::write(
+        fx.project.join("varve-realms.toml"),
+        format!(
+            "[realm.{alias}]\nregistry = \"oci://example.invalid/{alias}\"\ntrust-root = \"{root}\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        fx.project.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nrealm = \"{alias}\"\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\n"
+        ),
+    )
+    .unwrap();
+    varve(&fx)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    let out = fx.project.join("layer.cdx.json");
+    varve(&fx)
+        .args(["sbom", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    std::fs::read_to_string(out).unwrap()
+}
+
+/// The same signed manifest gives the same SBOM bytes whatever the caller
+/// calls the realm, and whether or not there is a project around it.
+// rivet: verifies REQ-SBOMFIELDS-001
+#[test]
+fn the_same_signed_manifest_gives_byte_identical_sbom_whatever_the_callers_realm_alias() {
+    let origin = fixture(None, &[]);
+    let signed = signed_layer_fixture(&origin, "2026.07.0", 1);
+    let alpha = sbom_under_realm_alias(&signed, "alpha");
+    let beta = sbom_under_realm_alias(&signed, "beta");
+    assert_eq!(
+        alpha, beta,
+        "the SBOM named the caller's local alias, so one signed manifest emitted two documents"
+    );
+
+    // And outside any realm: only the environment's trust root is known.
+    let bare = fixture(Some(PIN_JULY), &[]);
+    varve(&bare)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["install", "--from"])
+        .arg(&signed.archive)
+        .assert()
+        .success();
+    let out = bare.project.join("layer.cdx.json");
+    varve(&bare)
+        .env("VARVE_TRUST_ROOT", &signed.trust_root)
+        .args(["sbom", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    assert_eq!(
+        alpha,
+        std::fs::read_to_string(out).unwrap(),
+        "a project that names no realm emitted different bytes for the same signed manifest"
+    );
+    for alias in ["alpha", "beta"] {
+        assert!(
+            !alpha.contains(alias),
+            "a caller's local alias leaked into the document: {alpha}"
+        );
+    }
+}

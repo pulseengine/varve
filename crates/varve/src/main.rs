@@ -2563,7 +2563,15 @@ fn sbom_cmd(
     let entry = target.entry;
     let payload = std::fs::read(entry.root.join("layer.json"))?;
     let manifest = varve_core::LayerManifest::parse(&payload)?;
-    let doc = varve_core::sbom::emit(&manifest, &entry.digest, format, &target.realm);
+    // The root that verified the layer names its author — never the caller's
+    // local realm alias, which would make the same signed manifest emit
+    // different bytes in different projects (REQ-SBOMFIELDS-001 clause 7).
+    let doc = varve_core::sbom::emit(
+        &manifest,
+        &entry.digest,
+        format,
+        target.verifier.public_key(),
+    );
     match out {
         Some(path) => {
             std::fs::write(path, &doc)

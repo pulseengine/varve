@@ -23,13 +23,23 @@ pub const LAYER_PAYLOAD_TYPE: &str = "application/vnd.pulseengine.varve.layer.v1
 /// key (32 raw bytes).
 pub struct PinnedKeyVerifier {
     verifier: Ed25519DsseVerifier,
+    public_key: Vec<u8>,
 }
 
 impl PinnedKeyVerifier {
     pub fn from_public_key_bytes(public_key: &[u8]) -> Result<Self, VerifyError> {
         let verifier = Ed25519DsseVerifier::from_bytes(public_key)
             .map_err(|e| VerifyError(format!("invalid trust-root public key: {e}")))?;
-        Ok(PinnedKeyVerifier { verifier })
+        Ok(PinnedKeyVerifier {
+            verifier,
+            public_key: public_key.to_vec(),
+        })
+    }
+
+    /// The root this verifier accepts — what a document that must name the
+    /// signer (the SBOM's author) names it by.
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
     }
 }
 
