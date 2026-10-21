@@ -12,8 +12,10 @@ Three modes, stdlib only:
   files   print the `[not-yet]` files of mutation-scope.toml, one per line.
   plan    pack them into shards and print a GitHub Actions matrix as JSON.
   report  read each shard's mutants.log and print a markdown table in which a
-          shard is MEASURED (cargo-mutants printed its summary) or INCOMPLETE
-          (it did not). Exits 1 if ANY shard is INCOMPLETE.
+          shard is MEASURED (cargo-mutants printed its summary AND the number
+          it tested equals the number the plan gave the shard) or INCOMPLETE
+          (no summary, or a summary for a different number of mutants). Exits
+          1 if ANY shard is INCOMPLETE.
 
 THE LIST IS DERIVED, NEVER COPIED. REQ-MUTATE-003 exists because a hand-kept
 file list drifted (`linestatus.rs` fell outside the gate and nothing noticed).
@@ -21,10 +23,15 @@ The workflow therefore never names a debt file: `plan` reads the TOML on every
 run, so a file added to `[not-yet]` is sharded tomorrow night without anyone
 editing a workflow, and a file promoted into the gate leaves the debt run.
 
-SHARD SIZE. MEASURED on hosted ubuntu-latest: about 7 mutants per minute at
-`-j 4`, and the job cap is 90 minutes, so a shard that must finish inside the
-cap holds at most ~630 mutants with zero headroom. The default target is 300
-(~43 minutes), which leaves room for a slow-test file and the baseline build. A
+SHARD SIZE. MEASURED on hosted ubuntu-latest by the first workflow_dispatch
+run (run 39541389293, 939 mutants): about 4.75 mutants per minute at `-j 4`.
+Shards of 314, 300, 298 and 27 mutants took 66, 61, 59 and 7 minutes, so the
+cap of 90 minutes holds at most ~430 mutants with zero headroom. An earlier
+version of this comment said ~7/minute; the shards measured slower. The default target stays 300
+(~63 minutes at 4.75/min, measured 59-66 for 298-314), which leaves about 24
+minutes of headroom for a slow-test file and the baseline build; the largest
+shard a target of 300 can produce is a file-boundary overshoot like that 314.
+A
 single file larger than the target gets its own shard rather than being split:
 cargo-mutants selects by file, and a file that alone exceeds the cap is a fact
 to be shown as INCOMPLETE, not hidden by packing.
@@ -37,6 +44,13 @@ INCOMPLETE IS NOT ZERO. A cancelled or OOM-killed job prints no summary, and
 `report` takes the EXPECTED shards from the plan's matrix, not from whatever
 logs happen to exist: a shard whose job was cancelled before it uploaded
 anything has no log at all, and is INCOMPLETE too.
+
+A SUMMARY IS NOT A COMPLETE SHARD. cargo-mutants' `N mutants tested` counts
+every mutant it ran (caught, missed, unviable and timed out), and the planned
+count is `cargo mutants --list` on the same commit, so a finished shard has N
+equal to its planned count. `report` compares them: a log reading "12 mutants
+tested" for a shard planned at 314 is INCOMPLETE, not MEASURED, and so is one
+that tested more than was planned (the plan no longer describes the run).
 """
 import argparse
 import json
@@ -153,7 +167,7 @@ def parse_summary(text):
 def cmd_report(a):
     with open(a.matrix) as fh:
         shards = json.load(fh)["include"]
-    rows, incomplete = [], 0
+    rows, incomplete, mismatch = [], 0, 0
     tot = {"tested": 0, "caught": 0, "missed": 0, "unviable": 0, "timeouts": 0}
     for s in shards:
         path = os.path.join(a.logs, f"mutants-{s['shard']}", "mutants.log")
@@ -166,6 +180,26 @@ def cmd_report(a):
         if res is None:
             incomplete += 1
             rows.append(f"| {s['shard']} | {nfiles} | {s['count']} | INCOMPLETE | - | - | - | - |")
+            continue
+        # A summary says cargo-mutants finished SOMETHING, not that it finished
+        # THIS shard. `N mutants tested` counts every mutant it ran, unviable
+        # and timed-out included, and the plan's count is `cargo mutants
+        # --list` on the same commit, so the two must be equal. Fewer is a
+        # run cut short or pointed at the wrong files; more is a plan that no
+        # longer describes the run. Either way the shard was not measured as
+        # planned, and its missed count is not a result.
+        if res["tested"] != s["count"]:
+            incomplete += 1
+            mismatch += 1
+            if res["tested"] < s["count"]:
+                why = f"tested {res['tested']} of {s['count']} planned"
+            else:
+                why = (f"plan and run disagree: tested {res['tested']}, "
+                       f"planned {s['count']}")
+            rows.append(
+                f"| {s['shard']} | {nfiles} | {s['count']} | INCOMPLETE ({why}) "
+                f"| {res['tested']} | - | - | - |"
+            )
             continue
         for k in tot:
             tot[k] += res[k]
@@ -186,7 +220,9 @@ def cmd_report(a):
     else:
         print(f"No shard produced a summary: nothing was measured.")
     if incomplete:
-        print(f"\n**{incomplete} shard(s) INCOMPLETE — no cargo-mutants summary. "
+        absent = incomplete - mismatch
+        print(f"\n**{incomplete} shard(s) INCOMPLETE — {absent} with no cargo-mutants "
+              f"summary, {mismatch} whose summary does not match the plan. "
               "Those files were NOT measured; this is not a zero-missed result.**")
         return 1
     if tot["timeouts"]:

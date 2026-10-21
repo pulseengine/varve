@@ -40,10 +40,16 @@ COUNTS = {
     "crates/a/src/big.rs": 800,
 }
 
-FULL_LOG = (
-    "Found 300 mutants to test\n"
-    "300 mutants tested in 41m: 12 missed, 270 caught, 18 unviable\n"
-)
+def full_log(n, missed=12, unviable=18):
+    """A finished shard log that tested exactly `n` mutants."""
+    caught = n - missed - unviable
+    return (
+        f"Found {n} mutants to test\n"
+        f"{n} mutants tested in 41m: {missed} missed, {caught} caught, {unviable} unviable\n"
+    )
+
+
+FULL_LOG = full_log(300)
 
 
 def run(argv):
@@ -156,6 +162,8 @@ class ReportTests(Fixture):
         self.matrix_text = out
         self.matrix = self.write("matrix.json", out)
         self.shards = [s["shard"] for s in json.loads(out)["include"]]
+        # What the plan said each shard holds: a finished log must agree.
+        self.planned = {s["shard"]: s["count"] for s in json.loads(out)["include"]}
 
     def log(self, shard, text):
         self.write(f"logs/mutants-{shard}/mutants.log", text)
@@ -166,7 +174,7 @@ class ReportTests(Fixture):
 
     def all_full(self):
         for s in self.shards:
-            self.log(s, FULL_LOG)
+            self.log(s, full_log(self.planned[s]))
 
     def test_all_summaries_measured_exit_zero(self):
         self.all_full()
@@ -196,7 +204,7 @@ class ReportTests(Fixture):
 
     def test_missing_artifact_is_incomplete(self):
         for s in self.shards[1:]:
-            self.log(s, FULL_LOG)
+            self.log(s, full_log(self.planned[s]))
         code, out, _ = self.report()
         self.assertNotEqual(code, 0)
         row = [l for l in out.splitlines() if self.shards[0] in l][0]
@@ -212,9 +220,10 @@ class ReportTests(Fixture):
 
     def test_timeouts_are_reported_but_still_measured(self):
         self.all_full()
+        n = self.planned[self.shards[0]]
         self.log(
             self.shards[0],
-            "300 mutants tested in 50m: 0 missed, 280 caught, 10 unviable, 10 timeouts\n",
+            f"{n} mutants tested in 50m: 0 missed, {n - 20} caught, 10 unviable, 10 timeouts\n",
         )
         code, out, _ = self.report()
         self.assertEqual(code, 0)
@@ -225,13 +234,66 @@ class ReportTests(Fixture):
 
     def test_singular_timeout_and_ansi_are_parsed(self):
         self.all_full()
+        n = self.planned[self.shards[0]]
         self.log(
             self.shards[0],
-            "\x1b[1m300 mutants tested in 5m\x1b[0m: 1 missed, 298 caught, 1 timeout\n",
+            f"\x1b[1m{n} mutants tested in 5m\x1b[0m: 1 missed, {n - 2} caught, 1 timeout\n",
         )
         code, out, _ = self.report()
         self.assertEqual(code, 0)
         self.assertIn("MEASURED", [l for l in out.splitlines() if self.shards[0] in l][0])
+
+    # THE GAP THIS CLOSES: a summary line proves cargo-mutants FINISHED
+    # something, not that it finished THE SHARD. A log reading "12 mutants
+    # tested" for a shard planned at 314 was MEASURED and exited 0.
+    def test_a_summary_for_fewer_mutants_than_planned_is_incomplete(self):
+        self.all_full()
+        shard = self.shards[0]
+        planned = self.planned[shard]
+        self.log(shard, full_log(12, missed=1, unviable=1))
+        code, out, _ = self.report()
+        self.assertNotEqual(code, 0)
+        row = [l for l in out.splitlines() if l.startswith(f"| {shard} ")][0]
+        self.assertIn("INCOMPLETE", row)
+        self.assertNotIn("MEASURED", row)
+        # The numbers are shown, so a reader sees how far it got.
+        self.assertIn(f"tested 12 of {planned} planned", row)
+        self.assertNotIn("| 0 |", row)
+
+    def test_a_summary_for_more_mutants_than_planned_is_incomplete_too(self):
+        self.all_full()
+        shard = self.shards[0]
+        planned = self.planned[shard]
+        self.log(shard, full_log(planned + 30))
+        code, out, _ = self.report()
+        self.assertNotEqual(code, 0)
+        row = [l for l in out.splitlines() if l.startswith(f"| {shard} ")][0]
+        self.assertIn("INCOMPLETE", row)
+        self.assertIn("plan and run disagree", row)
+        self.assertIn(f"tested {planned + 30}, planned {planned}", row)
+
+    def test_a_shard_that_tested_exactly_what_was_planned_is_measured(self):
+        self.all_full()
+        code, out, _ = self.report()
+        self.assertEqual(code, 0)
+        rows = [l for l in out.splitlines() if l.startswith("| debt-")]
+        self.assertTrue(all("MEASURED" in r for r in rows), rows)
+
+    def test_an_incomplete_shard_adds_nothing_to_the_measured_totals(self):
+        self.all_full()
+        shard = self.shards[0]
+        self.log(shard, full_log(12, missed=11, unviable=0))
+        _, out, _ = self.report()
+        others = sum(self.planned[s] for s in self.shards[1:])
+        self.assertIn(f"{others} mutants were tested", out)
+        self.assertIn(f"{len(self.shards) - 1} of {len(self.shards)} shards have a summary", out)
+
+    def test_the_closing_line_names_both_kinds_of_incomplete(self):
+        self.all_full()
+        self.log(self.shards[0], full_log(12, missed=1, unviable=1))
+        _, out, _ = self.report()
+        self.assertIn("does not match the plan", out)
+        self.assertIn("NOT measured", out)
 
     def test_parse_summary(self):
         self.assertEqual(
