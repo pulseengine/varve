@@ -143,7 +143,13 @@ jobs:
     # Runs after a cancelled or failed matrix too: that is exactly when the
     # answer matters.
     if: always()
-    runs-on: ubuntu-latest
+    # On the pool, as ci.yml's aggregator is: the shards need a VM each (they
+    # serialise on a shared host), but reading their logs is a few seconds of
+    # python, and the self-hosted classes start it at once instead of queueing
+    # it behind hosted builds. runner_trust_boundary.rs holds this workflow to
+    # at least one pool job so a revert to all-hosted cannot pass unnoticed.
+    # MEASURED: the `light` class ran the tool's tomllib tests on varve#276.
+    runs-on: [self-hosted, linux, x64, light]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
