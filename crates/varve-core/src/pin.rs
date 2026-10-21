@@ -547,6 +547,13 @@ fn contained_relative_fault(value: &str) -> Option<String> {
     if value.contains('\0') {
         return Some("contains a NUL".into());
     }
+    // A directory name never needs one, and `varve env` names the export in
+    // shell text: a newline here ended the comment it was printed in and put
+    // the rest of the value on a line of its own, which `eval` ran (found by
+    // the v0.43.0 clean-room review, REQ-ENVQUOTE-001).
+    if let Some(c) = value.chars().find(|c| c.is_control()) {
+        return Some(format!("contains a control character ({:?})", c));
+    }
     for component in value.split(['/', '\\']) {
         if component == ".." {
             return Some("climbs out with '..'".into());
@@ -748,10 +755,13 @@ pub fn env_lines(pin: &Pin, project_root: &Path, shim_env: Option<&Path>) -> Vec
             .filter(|d| d.env.as_ref().is_some_and(|e| e.path == order))
         {
             if let Some(script) = decl.env_script(project_root) {
+                // Escaped even though parsing refuses control characters in
+                // `out`: this line is shell text, and a comment is only a
+                // comment until the first newline (REQ-ENVQUOTE-001).
                 lines.push(format!(
                     "# {} export {} — declared {} (REQ-EXPORTDECL-001 clause 5)",
                     decl.kind,
-                    decl.out,
+                    decl.out.escape_debug(),
                     order.as_str()
                 ));
                 // `project_root` is the directory holding varve.toml — not
@@ -1590,6 +1600,72 @@ path   = "before-shims"
             .collect();
         assert_eq!(no_shims.len(), 2);
         assert!(!no_shims.iter().any(|l| l.contains(".varve/env")));
+    }
+
+    // rivet: verifies REQ-ENVQUOTE-001
+    #[test]
+    fn an_export_destination_with_a_control_character_is_refused_at_parse() {
+        // FOUND by the v0.43.0 clean-room review: `out = "sdk\ntouch PWNED\n#"`
+        // parsed, and `varve env` then printed `touch PWNED` as a line of its
+        // own, which `eval "$(varve env)"` ran. A destination is a directory
+        // name; no control character belongs in one, so the file is refused
+        // before anything is printed.
+        for hostile in ["sdk\ntouch PWNED\n#", "sdk\rx", "sdk\u{1b}[2J", "a\tb"] {
+            let toml = format!(
+                "[[export]]\nkind = \"sdk\"\nout = {}\n\
+                 [export.env]\nscript = \"setup.sh\"\npath = \"before-shims\"\n",
+                toml_quote(hostile)
+            );
+            assert!(
+                parse(&toml).is_err(),
+                "an export destination containing {hostile:?} must be refused"
+            );
+        }
+    }
+
+    // rivet: verifies REQ-ENVQUOTE-001
+    #[test]
+    fn the_env_comment_cannot_be_broken_out_of_even_by_a_decl_parse_never_made() {
+        // Defence in depth for the same finding: the comment line naming an
+        // export is shell text too. Whatever reaches `env_lines` — including a
+        // declaration built in code rather than parsed — every emitted line is
+        // either a comment or one of the lines varve itself writes.
+        let root = Path::new("/repo");
+        let mut pin = parse("").unwrap();
+        pin.exports.push(ExportDecl {
+            kind: ExportKind::Sdk,
+            out: "sdk\ntouch PWNED\n#".to_string(),
+            select: None,
+            env: Some(ExportEnv {
+                script: "setup.sh".to_string(),
+                path: ShimOrder::BeforeShims,
+            }),
+        });
+        for line in env_lines(&pin, root, None) {
+            assert!(
+                line.starts_with('#') || line.starts_with(". "),
+                "a line that is neither a comment nor a source: {line:?}"
+            );
+            // A newline inside the single-quoted `. '...'` path is literal to
+            // the shell; inside a `#` comment it ends the comment.
+            if line.starts_with('#') {
+                assert!(!line.contains('\n'), "a comment broken by a raw newline: {line:?}");
+            }
+        }
+    }
+
+    fn toml_quote(s: &str) -> String {
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
     }
 }
 

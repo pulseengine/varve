@@ -6101,6 +6101,64 @@ fn env_quotes_a_hostile_project_path_for_declared_sourced_exports() {
     );
 }
 
+// rivet: verifies REQ-ENVQUOTE-001
+#[test]
+fn env_refuses_an_export_destination_that_would_break_out_of_its_comment() {
+    // FOUND by the v0.43.0 clean-room review, and reproduced: a cloned
+    // repository's varve.toml with `out = "sdk\ntouch PWNED\n#"` made
+    // `varve env` print `touch PWNED` as a line of its own, and
+    // `eval "$(varve env)"` created the file. Quoting the store root and the
+    // script path (the two fixes above) left the comment line naming the
+    // export unquoted, and a newline needs no quote to escape a comment.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("varve-root");
+    let project = tmp.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let canary = tmp.path().join("pwned-export-out");
+    std::fs::write(
+        project.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\n\
+             layer = \"2026.07.0\"\n\
+             \n[[export]]\nkind = \"sdk\"\nout = \"sdk\\ntouch {}\\n#\"\n\
+             \n[export.env]\nscript = \"setup.sh\"\npath = \"before-shims\"\n",
+            canary.display()
+        ),
+    )
+    .unwrap();
+
+    let out = Command::cargo_bin("varve")
+        .unwrap()
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &root)
+        .current_dir(&project)
+        .arg("env")
+        .output()
+        .unwrap();
+    let script = String::from_utf8_lossy(&out.stdout).to_string();
+    // Whatever varve printed, evaluating it must not run the embedded command.
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg("eval \"$VARVE_ENV\" 2>/dev/null; true")
+        .env("VARVE_ENV", &script)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        !canary.exists(),
+        "eval of `varve env` ran a command embedded in an export destination:\n{script}"
+    );
+    assert!(
+        !out.status.success(),
+        "a destination containing a newline must be refused, not printed:\n{script}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("control character"),
+        "the refusal must say what is wrong with the destination: {stderr}"
+    );
+}
+
 // rivet: verifies REQ-PIN-001
 #[test]
 fn a_schema_mistake_in_the_pin_is_reported_once_not_twice() {
