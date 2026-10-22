@@ -27,7 +27,14 @@ sha2 = "0.11.0"
 tar = "0.4.46"
 thiserror = "2.0.19"
 toml = "1.1.4"
-ureq = "3"
+# Below 3.5, for wsc's sake, not ours. ureq 3.5.0 (2026-10-21) changed
+# `unversioned::transport::TransportAdapter::new` (a module ureq exempts from
+# semver), and wsc 0.11.0 calls it with the old arity, so wsc stops compiling.
+# One 3.x is chosen for the whole graph, so this cap is what keeps wsc on a
+# version it builds against wherever no lockfile decides: the fuzz workspace
+# (all five fuzz jobs went red on #279) and `cargo install varve` without
+# --locked. Lift it when sigil ships a wsc that builds against 3.5.
+ureq = ">=3, <3.5"
 # Reading a binary WIT package (DD-036). The `wit` payload form is the one
 # `wkg`'s local backend reads, so the closure must be derived by DECODING that
 # form — and hand-rolling a component-model reader to avoid a dependency would

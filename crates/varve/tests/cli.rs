@@ -6125,6 +6125,84 @@ fn env_enters_every_declared_environment_in_the_order_that_inverts_the_file() {
 // rivet: verifies REQ-ENVQUOTE-001
 #[cfg(unix)]
 #[test]
+fn env_quotes_a_hostile_root_for_fish_so_eval_cannot_run_embedded_commands() {
+    // REQ-ENVQUOTE-001 clause 2 asks for the round trip to be SHOWN by running
+    // the emitted script in each supported shell, and fish is supported — but
+    // both v0.43.0 clean-room reviews found nothing ever ran fish, so the fish
+    // quoting was checked by reading it. In fish `(...)` and `$(...)` are
+    // command substitutions; inside single quotes neither is live.
+    //
+    // fish is not on every host, so this skips where it is absent — EXCEPT
+    // where VARVE_REQUIRE_FISH is set, which the CI job that installs fish
+    // sets. A test that skips silently in the one place it was meant to run
+    // would be a gate that cannot fail.
+    let Some(fish) = [
+        "/usr/bin/fish",
+        "/usr/local/bin/fish",
+        "/opt/homebrew/bin/fish",
+    ]
+    .into_iter()
+    .find(|p| std::path::Path::new(p).exists()) else {
+        assert!(
+            std::env::var_os("VARVE_REQUIRE_FISH").is_none(),
+            "VARVE_REQUIRE_FISH is set but fish is not installed"
+        );
+        eprintln!("skipping: fish is not installed on this host");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let canary_paren = tmp.path().join("pwned-paren");
+    let canary_dollar = tmp.path().join("pwned-dollar");
+    let hostile_root = format!(
+        "{}/vr(touch {})x$(touch {})'sq'\\bs sp;semi",
+        tmp.path().display(),
+        canary_paren.display(),
+        canary_dollar.display()
+    );
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let out = Command::cargo_bin("varve")
+        .unwrap()
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &hostile_root)
+        .current_dir(&project)
+        .args(["env", "--shell", "fish"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "varve env --shell fish failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let script = String::from_utf8(out.stdout).unwrap();
+    let probe = std::process::Command::new(fish)
+        .arg("--no-config")
+        .arg("-c")
+        .arg("eval $VARVE_ENV; string join : $PATH")
+        .env("VARVE_ENV", &script)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        probe.status.success(),
+        "fish failed to eval the emitted script: {}\n{script}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let path = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+    let shims = format!("{hostile_root}/shims");
+    assert!(
+        path.split(':').any(|e| e == shims),
+        "fish: the literal shim dir must be on PATH verbatim: {path}"
+    );
+    assert!(
+        !canary_paren.exists() && !canary_dollar.exists(),
+        "fish: evaluating the emitted script ran a command embedded in the root"
+    );
+}
+
+// rivet: verifies REQ-ENVQUOTE-001
+#[cfg(unix)]
+#[test]
 fn env_quotes_a_hostile_root_so_eval_cannot_run_embedded_commands() {
     // `varve env` tells you to `eval "$(varve env)"`. The store root — read
     // from $VARVE_ROOT, so attacker-controlled in exactly the environments

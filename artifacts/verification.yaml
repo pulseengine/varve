@@ -3442,3 +3442,25 @@ artifacts:
       created-by: ai
       model: claude-sonnet-5-5
       timestamp: 2026-10-20T22:50:51Z
+
+  - id: VER-REVIEW-V0-43-0
+    type: verification
+    title: "v0.43.0 independently reviewed twice: DISSENT, then PARTIAL; every reproduced defect fixed test-first"
+    status: verified
+    release: v0.43.0
+    description: "The recorded independent review for v0.43.0 (REQ-INDEP-001, DD-019). Advisory at v0.x: a missing or dissenting review is visible, not blocking. Both reviews dissented, and the fixes landed before any requirement was promoted."
+    fields:
+      baseline: "Two independent clean-room reviews (fresh context, refute-framed) of the v0.43.0 scope, 2026-10-21. REVIEW 1 at 8a3c26e: DISSENT on all six requirements. It reproduced a shell injection through varve.toml's [[export]] out (a newline ended the comment varve env prints, and eval ran the rest), and realmless dispatch with no trust root while status refused. It also found REQ-COMPOSEWINDOW-001's clauses 1-3 lost at merge, no end-to-end test of the cap, payloads the advisory watch dropped silently, the SBOM supplier ignoring the proof signer, the SBOM author depending on a local realm alias, and the mutation report not comparing tested against planned. All were fixed test-first in #278. REVIEW 2 at the #278 branch: no requirement REFUTED; four PARTIAL. It reproduced that ANY well-formed VARVE_TRUST_ROOT let a realmless pin dispatch a layer verify refused, and that shim install printed a dot-source line with command substitution live. Both were fixed test-first and negative-controlled in #278 (the layer's retained envelope must verify against the root in scope; the printed line is quoted literally). It also found fish never executed, so a CI job now installs fish and runs the round trip, failing rather than skipping when fish is absent. Outcome: REQ-ENVQUOTE-001, REQ-NOPINNOTOOL-001 and REQ-SBOMFIELDS-001 are verified, with clause amendments recorded on each artifact. REQ-ADVISORYWATCH-001 and REQ-COMPOSEWINDOW-001 stay implemented, their open clauses moved to REQ-ADVISORYWATCH-002 and REQ-COMPOSEWINDOW-002 (v0.44.0), by the maintainer's decision. REQ-MUTANTDEBT-001 waits for a scheduled nightly run on main. Tampering after install, which affects every pin, is #277."
+      method: review
+      steps: cargo test --workspace; VARVE_REQUIRE_FISH=1 cargo test -p varve --test cli -- --exact env_quotes_a_hostile_root_for_fish_so_eval_cannot_run_embedded_commands (CI job 'varve env round trip in fish')
+    links:
+      - type: verifies
+        target: REQ-ENVQUOTE-001
+      - type: verifies
+        target: REQ-NOPINNOTOOL-001
+      - type: verifies
+        target: REQ-SBOMFIELDS-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-21T16:53:38Z
