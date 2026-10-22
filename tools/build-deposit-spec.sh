@@ -97,6 +97,19 @@ WORK="${1:?usage: build-deposit-spec.sh <workdir>}"
 
 PLATFORMS="${PLATFORMS:-aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu}"
 
+# Every TARBALL_TOOLS entry's shape, checked before anything is fetched and by
+# the same function the systest's live-pin check uses (varve#267): a fused
+# entry otherwise parses as a plausible first tool and silently drops the
+# second. Sourced before the `cd` below, while $0 still resolves.
+. "$(dirname "$0")/tarball-entry.sh"
+for entry in $TARBALL_TOOLS; do
+  fault="$(tarball_entry_fault "$entry")"
+  if [ -n "$fault" ]; then
+    echo "::error::TARBALL_TOOLS entry '$entry' $fault"
+    exit 1
+  fi
+done
+
 mkdir -p "$WORK"
 WORK="$(cd "$WORK" && pwd)"
 cd "$WORK"

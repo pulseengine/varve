@@ -474,6 +474,15 @@ LIVE_WSC="$(wf_env WSC_VERSION)"
 { [ -n "$LIVE_TARBALL" ] && [ -n "$LIVE_VSIX" ] && [ -n "$LIVE_WSC" ]; } \
   || fail "could not read TARBALL_TOOLS/VSIX_PACKAGES/WSC_VERSION out of $WORKFLOW — this check \
 silently stops checking if the env block is reshaped"
+# Each live entry's SHAPE, by the deposit's own validator (varve#267). The pin
+# extraction below reads only the first two fields, so on its own it passed a
+# fused `kiln:v0.6.0:kilndpulseengine/varve:...` as a valid `kiln v0.6.0`.
+. "$REPO/tools/tarball-entry.sh"
+for entry in $LIVE_TARBALL; do
+  fault="$(tarball_entry_fault "$entry")"
+  [ -z "$fault" ] || fail "the shipping TARBALL_TOOLS entry '$entry' $fault"
+done
+echo "   $(set -- $LIVE_TARBALL; echo $#) live TARBALL_TOOLS entries, each well formed"
 PINS="$WORK/live-pins.txt"
 : > "$PINS"
 for entry in $LIVE_TARBALL; do
@@ -495,6 +504,27 @@ verify_release, and were the guard ever removed it would verify one release's as
 another release's sums"
 fi
 echo "   $(sort -u "$PINS" | wc -l | tr -d ' ') distinct repo pins, no repo at two versions"
+
+# The shape check must be able to go red on the defect it exists for: fuse two
+# real live entries exactly as #266 did, and require a refusal from BOTH the
+# validator and the assembler that would have shipped it.
+echo "== negative control: a fused TARBALL_TOOLS entry is refused"
+set -- $LIVE_TARBALL
+[ $# -ge 2 ] || fail "fewer than two live entries to fuse — this control proves nothing"
+FUSED="$1$2"
+[ -n "$(tarball_entry_fault "$FUSED")" ] \
+  || fail "the shape check accepted the fused entry '$FUSED' — it cannot catch varve#267"
+reset_layer_env
+export TARBALL_TOOLS="$FUSED"
+if run_assembler fused; then
+  fail "the assembler accepted the fused entry '$FUSED'"
+fi
+grep -qF "TARBALL_TOOLS entry '$FUSED'" "$WORK/logs/fused.log" \
+  || { cat "$WORK/logs/fused.log"; fail "the assembler refused the fused entry, but not for its shape \
+— the control is not controlling what it claims"; }
+[ ! -s "$WORK/logs/fused.gh" ] \
+  || fail "the assembler called gh before refusing the fused entry — the shape check must come first"
+echo "   refused by the validator and by the assembler"
 
 # ── 6. negative control: the gate must be able to go red ─────────────────────
 # selfhost.sh ends by proving its isolation can fail. The equivalent here is to
@@ -530,6 +560,8 @@ if removed != len(MARKERS):
 open(sys.argv[2], 'w').write('\n'.join(out))
 PY
 chmod +x "$MUTANT"
+# The assembler sources its entry validator from beside itself.
+cp "$REPO/tools/tarball-entry.sh" "$WORK/"
 reset_layer_env
 if run_assembler mutated "$MUTANT"; then
   fail "the assembler built the layer with the idempotence guard REMOVED — this gate would not \

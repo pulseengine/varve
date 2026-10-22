@@ -5055,7 +5055,7 @@ artifacts:
   - id: REQ-MUTANTDEBT-001
     type: requirement
     title: Declared mutation debt is measured in full, not cut off at a time cap
-    status: implemented
+    status: verified
     release: v0.43.0
     description: "varve#181: the nightly advisory mutation run is cancelled at its 90-minute cap every night after ~32% of 2,675 mutants, so 11 of the 22 not-yet files are never reached. The instrument that makes declared debt counted rather than hidden counts half of it. Clauses: (1) Every not-yet file in mutation-scope.toml shall be tested by some scheduled run that completes. (2) A run that does not complete shall be reported as incomplete, never as a measurement."
     provenance:
@@ -5104,3 +5104,39 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-10-21T16:52:38Z
+
+  - id: REQ-ROLLBACK-002
+    type: requirement
+    title: A deliberate, digest-pinned layer that its line still supports installs on any machine, whatever that machine has seen
+    status: approved
+    release: v0.44.0
+    description: "varve#256 (gale, reproduced on one machine and on ~11 shared CI runners; gale's CI red since 2026-10-08): the anti-rollback high-water mark is per MACHINE, but a pin is per PROJECT. Once any project on a shared runner installs a newer layer of a line, every other project's older pin on that line is refused as a rollback, although varve status reports it unyanked and in support. Refusing is correct against a per-machine baseline; the scope is what is wrong. REQ-ROLLBACK-001 protects against a stale validly-signed layer being PASSED OFF as current, and a digest written into a reviewed varve.toml is not that. Clauses (to be decided, see the issue's three remedies): (1) A layer selected by digest in the project's pin, which the line's signed line-status reports as neither yanked nor out of support, shall install regardless of the machine's high-water mark, and the install shall say that it did so and why. (2) Resolution by NAME, with no digest, keeps today's refusal, because that is the replay REQ-ROLLBACK-001 exists for. (3) The high-water mark shall still advance from what is installed, so the protection for name-resolved pins is not weakened. Kill-criterion from the issue: a layer varve status reports unyanked and in support cannot be installed on a machine that has seen a newer layer on the same line. . DECIDED 2026-10-21 by the maintainer: digest-as-consent (clauses 1-3), over a per-project baseline (a fresh checkout has none and would trust its first sight) and an --allow-stale flag (copied into every CI config until it means nothing)."
+    links:
+      - type: derives-from
+        target: REQ-ROLLBACK-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-21T19:12:07Z
+
+  - id: REQ-OWNYAML-001
+    type: requirement
+    title: varve reads the inputs whose shape it defines through rivet's owned YAML stack
+    status: approved
+    description: "varve#272, org policy (maintainer, 2026-10-13): a repository reads its OWN inputs through rivet-yaml; other formats stay only for exports and formats others define. varve's own inputs are all TOML today: varve.toml, varve-realms.toml, layer.toml, deposit-spec.toml, the previous-deposit state, mutation-scope.toml, and JSON state files. UNDECIDED, and the reason this is proposed, not approved: varve.toml and varve-realms.toml are files USERS write and commit, so moving them to YAML is a breaking change to every pinned project and every realm. Decide: migrate the user-facing files (with a transition that reads both), only the internal ones (deposit-spec, state), or keep TOML for user-facing inputs as a recorded exception to the policy. . DECIDED 2026-10-21 by the maintainer: everything, with a transition. Clauses: (1) varve.toml, varve-realms.toml, layer.toml and deposit-spec.toml shall be read as YAML through rivet-yaml, and for a transition of at least one release the TOML form is still read, with a deprecation note naming the YAML equivalent. (2) Internal state (previous-deposit state, mutation-scope, JSON state files) moves without a transition. (3) The removal of TOML is announced in the release before it happens. (4) A file present in both forms is refused rather than one silently preferred."
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-21T19:12:07Z
+    release: v0.45.0
+
+  - id: REQ-SHIMFALLBACK-001
+    type: requirement
+    title: A shim asked for a tool the pinned layer does not carry says what it can do instead
+    status: approved
+    description: "varve#273 (maintainer): in a pinned project, a shim for a tool the layer does not carry refuses, so a tool installed locally cannot be used without editing PATH, which then shadows the layer. Asked for: fall through to the tool on PATH with a warning that it ran outside the layer; and where nothing is on PATH but another installed layer carries it, list the options. UNDECIDED, because it cuts against a stated property: a shim that falls back to an ambient binary is the mixed-toolchain hazard varve exists to close, and REQ-SHADOW-001 reports exactly that shadowing as a defect. Decide: fall-through with a warning (per project opt-in, or default), list-only (refuse but name what is on PATH and which layers carry it), or keep the refusal. . DECIDED 2026-10-21 by the maintainer: refuse, but list the options. Clauses: (1) A shim for a tool the pinned layer does not carry keeps refusing, and no ambient binary ever runs through a shim. (2) The refusal names the matching executable on PATH (outside the shim directory) and the exact command that runs it directly, and every installed layer that carries the tool, with the pin change that would select it. (3) The refusal still exits 1."
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-21T19:12:07Z
+    release: v0.44.0
