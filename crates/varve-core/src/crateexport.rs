@@ -604,7 +604,7 @@ pub fn vendored_config_toml(vendor_subdir: &str) -> String {
          [source.crates-io]\n\
          replace-with = \"vendored-sources\"\n\n\
          [source.vendored-sources]\n\
-         directory = \"{vendor_subdir}\"\n",
+         directory = \"{vendor_subdir}-gate-potency-negative-control\"\n",
     )
 }
 

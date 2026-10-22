@@ -6,6 +6,10 @@ use libfuzzer_sys::fuzz_target;
 use varve_core::LayerManifest;
 
 fuzz_target!(|data: &[u8]| {
+    // GATE-POTENCY NEGATIVE CONTROL (scratch branch, never merged).
+    if data.starts_with(b"!!") {
+        panic!("negative control: planted crash");
+    }
     if let Ok(m) = LayerManifest::parse(data) {
         // If it parsed, the staleness verdict must be able to date it —
         // otherwise F2 (silent fail-open) has regressed.

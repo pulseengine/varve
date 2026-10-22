@@ -131,3 +131,9 @@ pub use verify::{
     LAYER_PAYLOAD_TYPE, PinnedKeyVerifier, generate_root_keypair, sign_layer_manifest,
 };
 pub use vsixexport::{VsixEntry, VsixExportError, export_vsix};
+
+/// GATE-POTENCY NEGATIVE CONTROL (scratch branch, never merged): an API
+/// stabilised after Rust 1.89, so the MSRV job must fail.
+pub fn gate_potency_msrv_probe() -> Option<u32> {
+    5u32.checked_sub_signed(1)
+}

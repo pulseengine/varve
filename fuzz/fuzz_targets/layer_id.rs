@@ -5,6 +5,10 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
+    // GATE-POTENCY NEGATIVE CONTROL (scratch branch, never merged).
+    if data.starts_with(b"!!") {
+        panic!("negative control: planted crash");
+    }
     if let Ok(s) = std::str::from_utf8(data) {
         if let Ok(id) = s.parse::<varve_core::LayerId>() {
             assert_eq!(id.to_string(), s, "round-trip must be exact");

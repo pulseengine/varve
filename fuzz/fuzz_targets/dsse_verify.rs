@@ -6,6 +6,10 @@ use libfuzzer_sys::fuzz_target;
 use varve_core::install::ManifestVerifier;
 
 fuzz_target!(|data: &[u8]| {
+    // GATE-POTENCY NEGATIVE CONTROL (scratch branch, never merged).
+    if data.starts_with(b"!!") {
+        panic!("negative control: planted crash");
+    }
     // A fixed, valid-shaped public key (all-zero is a legal ed25519 point
     // encoding for the verifier constructor; no envelope will verify to it).
     let pk = [0u8; 32];
