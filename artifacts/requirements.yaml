@@ -5055,7 +5055,7 @@ artifacts:
   - id: REQ-MUTANTDEBT-001
     type: requirement
     title: Declared mutation debt is measured in full, not cut off at a time cap
-    status: implemented
+    status: verified
     release: v0.43.0
     description: "varve#181: the nightly advisory mutation run is cancelled at its 90-minute cap every night after ~32% of 2,675 mutants, so 11 of the 22 not-yet files are never reached. The instrument that makes declared debt counted rather than hidden counts half of it. Clauses: (1) Every not-yet file in mutation-scope.toml shall be tested by some scheduled run that completes. (2) A run that does not complete shall be reported as incomplete, never as a measurement."
     provenance:

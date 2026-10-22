@@ -5,11 +5,12 @@
 *An advisory arrives as a prepared line-status, a composition's support is capped
 by what it composes, and two independent reviews found what this release fixes.*
 
-`rivet release status v0.43.0`: REQ-ENVQUOTE-001, REQ-NOPINNOTOOL-001 and
-REQ-SBOMFIELDS-001 are **verified**. REQ-ADVISORYWATCH-001,
-REQ-COMPOSEWINDOW-001 and REQ-MUTANTDEBT-001 ship **implemented**, not verified,
-by the maintainer's decision: each has a clause that can only be shown after this
-release, or open work moved to v0.44.0 (see "Not verified in this release").
+`rivet release status v0.43.0`: REQ-ENVQUOTE-001, REQ-NOPINNOTOOL-001,
+REQ-SBOMFIELDS-001 and REQ-MUTANTDEBT-001 are **verified**.
+REQ-ADVISORYWATCH-001 and REQ-COMPOSEWINDOW-001 ship **implemented**, not
+verified, by the maintainer's decision: each has a clause that can only be shown
+after this release, with the open work moved to v0.44.0 (see "Not verified in
+this release").
 
 ### Upgrading: behaviour that changes
 
@@ -40,6 +41,16 @@ release, or open work moved to v0.44.0 (see "Not verified in this release").
   refused. See "Upgrading".
 * rustls-webpki 0.103.16 and webpki-roots 1.0.10, for RUSTSEC-2026-0381 and
   RUSTSEC-2026-0382 (distrusted emSign intermediates).
+* `ureq` is capped below 3.5: ureq 3.5.0 broke `wsc` 0.11.0, so a build
+  without varve's lockfile (`cargo install varve` without `--locked`) failed to
+  compile (pulseengine/sigil#319).
+
+### The deposit refuses a malformed tool entry
+
+Two `TARBALL_TOOLS` entries fused by a missing space used to parse as one
+plausible tool and silently drop the other (#267). One validator now decides an
+entry's shape, used by the deposit before it fetches anything and by its system
+test; a negative control fuses two real entries and requires both to refuse.
 
 ### An advisory arrives as a prepared line-status
 
@@ -83,8 +94,9 @@ The nightly mutation run shards the `[not-yet]` files of `mutation-scope.toml`
 (read at run time, never copied into the workflow) into jobs that finish inside
 the cap. A shard with no summary, or one that tested a different number of
 mutants than planned, is INCOMPLETE and turns the run red; it is never a zero.
-The first full measurement: 939 mutants across 21 files, 111 surviving, the debt
-that was declared and is now counted.
+The first scheduled run on main (run 39736152885) completed all four shards
+inside the cap, each testing exactly its planned count: 945 mutants across 21
+files, 111 surviving. That is the debt that was declared, now counted.
 
 ### Not verified in this release
 
@@ -95,8 +107,6 @@ that was declared and is now counted.
 * **REQ-COMPOSEWINDOW-001.** The cap holds for direct includes only. An expired
   include is not refused, the override reason is not signed, and no layers
   repository passes `--manifest` yet. Moved to REQ-COMPOSEWINDOW-002.
-* **REQ-MUTANTDEBT-001.** It is verified once a scheduled nightly run of the
-  merged workflow completes on main; the evidence so far is one dispatch run.
 * **#277:** a binary changed in the store after install still runs, for every
   pin, until `varve verify` is run. It is a design question, not a regression.
 
