@@ -136,7 +136,8 @@ than a best-effort translation:
   called `sigil`, and a consumer asking for `wsc` would find nothing in a layer
   that deposited and verified cleanly. A foreign *owner* is fine:
   `bytecodealliance/wasm-tools` is exactly what the second realm needs. Set
-  `binary` when only the executable's name differs, as `kiln` does for `kilnd`.
+  `binary` when only the executable's name differs, as `jess` does for
+  `with-device`.
 * **An unknown `layout`** is rejected, and the message names the two that work.
 * **Two entries of one name**, and **a manifest with no payloads at all**, are
   both rejected.
