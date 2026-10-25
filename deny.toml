@@ -28,6 +28,30 @@ yanked = "deny"
 # and force either an in-org compiler build or unvouched bytes (DD-034).
 ignore = [
   "RUSTSEC-2023-0071",
+  # RUSTSEC-2026-0387 — constant-time (timing side-channel) branches in
+  # `crypto-bigint` 0.5.x (subtraction, zero counting, division, Montgomery
+  # multiplication, UintRef equality, BoxedMontyForm::invert), reached through
+  # `elliptic-curve` 0.13.x, which `pgp` 0.21.0 (rPGP, varve-producer) and
+  # `wsc` 0.11.0 (varve-core) both depend on. No reachable patched release:
+  # pgp 0.21.0 and wsc 0.11.0 are the latest published versions and are tied
+  # to the elliptic-curve 0.13.x line; elliptic-curve 0.14.x (which uses
+  # crypto-bigint 0.7.x) is not yet a dependency of either, so
+  # `cargo update -p crypto-bigint` cannot move it.
+  #
+  # WHY THIS IS ACCEPTABLE HERE: the advisory is a timing side-channel in
+  # elliptic-curve arithmetic. varve performs no ECDSA/ECDH private-key
+  # operations through these crates — it verifies detached OpenPGP signatures
+  # made elsewhere, using public keys, over bytes that are already public
+  # (same posture as the RUSTSEC-2023-0071 entry above). varve's own signing
+  # is ed25519 (`varve keygen`, `sign-layer-manifest`), which does not go
+  # through crypto-bigint. There is no secret in this process for a timing
+  # channel to leak.
+  #
+  # That reasoning fails the day varve SIGNS with ECDSA/ECDH through these
+  # crates. It does not today. Drop this entry as soon as pgp/wsc ship against
+  # elliptic-curve 0.14.x, and re-argue rather than inherit if the posture
+  # changes.
+  "RUSTSEC-2026-0387",
 ]
 
 [bans]

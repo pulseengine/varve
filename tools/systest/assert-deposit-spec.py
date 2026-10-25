@@ -121,11 +121,15 @@ def main() -> int:
                 lambda p: f"loom-v1.2.0-{p}.tar.gz", loom_platforms)
     check(not any(t.get("platform") == "aarch64-apple-darwin" for t in by_name.get("loom", [])),
           "loom: an aarch64-apple-darwin entry exists for a release that ships no such asset")
-    # kiln's CLI is `kilnd`: the entry is named for the BINARY, since that is
-    # what `varve run` dispatches.
-    expect_tool("kilnd", "0.4.4", "pulseengine/kiln", "v0.4.4",
-                lambda p: f"kiln-v0.4.4-{p}.tar.gz", PLATFORMS)
-    check("kiln" not in by_name, "a payload is named 'kiln'; the dispatched binary is 'kilnd'")
+    # kiln v0.6.0 renamed its CLI `kilnd` -> `kiln` (kiln#524) and the archive
+    # carries both. Entries are named for the BINARY, since that is what
+    # `varve run` dispatches, so one repo and one archive yield two payloads.
+    # `kilnd` is the deprecated alias, carried for one layer cycle (varve#258);
+    # delete its expectation when the layer moves to kiln v0.7.0.
+    expect_tool("kiln", "0.6.0", "pulseengine/kiln", "v0.6.0",
+                lambda p: f"kiln-v0.6.0-{p}.tar.gz", PLATFORMS)
+    expect_tool("kilnd", "0.6.0", "pulseengine/kiln", "v0.6.0",
+                lambda p: f"kiln-v0.6.0-{p}.tar.gz", PLATFORMS)
     expect_tool("wsc", "0.10.0", "pulseengine/sigil", "v0.10.0",
                 lambda p: WSC_ASSET[p], PLATFORMS)
     # The second realm (REQ-INGEST-001): a foreign owner, upstream asset naming,
@@ -207,7 +211,8 @@ def main() -> int:
     check(mechanisms == {"cosign-sums", "build-provenance"},
           f"this layer should mix both accepted mechanisms, got {sorted(m or '<none>' for m in mechanisms)}")
 
-    total = 4 + 4 + 3 + 4 + 4 + 1 + 4 + 4
+    # kiln counts twice: `kiln` and the `kilnd` alias, four platforms each.
+    total = 4 + 4 + 3 + 4 + 4 + 4 + 1 + 4 + 4
     check(len(tools) == total, f"{len(tools)} payloads in the spec, expected {total}")
 
     if failures:
