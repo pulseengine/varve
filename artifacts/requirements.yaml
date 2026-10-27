@@ -5259,3 +5259,87 @@ artifacts:
       model: claude-opus-5-5
       timestamp: 2026-10-21T19:12:07Z
     release: v0.44.0
+
+  - id: REQ-SERVELAYER-001
+    type: requirement
+    title: varve-serve reads the layer it is told to read
+    status: approved
+    release: v0.44.0
+    description: "varve#286: --layer is declared and documented but main.rs never reads it, so varve-serve --layer X exits 0 and serves the pin's documentation instead. Clauses: (1) With --layer X different from the pin, the documents served shall be X's; shown by a fixture with two installed layers carrying distinct docs where --check --layer X prints X's label and version. (2) An unknown or uninstalled --layer shall exit non-zero and name the layer. (3) Every flag of the CLI shall be read; removing the use of --layer makes (1) fail."
+    links:
+      - type: derives-from
+        target: REQ-LAYERDOCS-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-AGENTDOCS-001
+    type: requirement
+    title: An agent can ask which documentation the pinned layer carries, for exactly those versions
+    status: approved
+    release: v0.44.0
+    description: "Decided by the maintainer on 2026-10-27 after the MCP research: agents get version-exact documentation from the verified layer, offline. Clauses: (1) varve-serve map --format json shall emit one record per payload of the composition, {realm, layer, name, version, kind, docs:[{name, format, entry, digest}]}, shown against a golden JSON for a two-layer fixture. (2) A payload with no documentation shall appear with docs: []. (3) If any layer fails verification it shall exit non-zero with empty stdout (flip one byte in the store). (4) Two runs shall produce byte-identical output."
+    links:
+      - type: derives-from
+        target: REQ-LAYERDOCS-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-AGENTDOCS-002
+    type: requirement
+    title: An agent can search and read verified documentation text, offline
+    status: approved
+    release: v0.44.0
+    description: "Clauses: (1) varve-serve search <q> --format json shall return hits {doc, path, title, score, snippet, layer, digest}, ordered by score then (doc, path), byte-identical across runs; the index is built at query time from verified bytes and never signed or shipped (the MCP research found a producer-built signed index adds a claim no consumer can check without recomputing it). (2) Hits and pages shall come only from members of verified docs payloads: a stray file planted in the store never appears and a tampered archive is refused. (3) page <doc> <path> for a member that does not exist, including ../ paths, shall exit non-zero and name the doc. (4) Each hit's digest shall equal the payload digest in the signed manifest. (5) It shall succeed with no network, shown on Linux CI under unshare -rn. (6) Markdown, HTML and rustdoc HTML docs payloads shall all be searchable as text."
+    links:
+      - type: derives-from
+        target: REQ-AGENTDOCS-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-AGENTDOCS-003
+    type: requirement
+    title: varve-serve speaks MCP over stdio, so an agent reads the pinned layer's docs as tools
+    status: approved
+    release: v0.44.0
+    description: "Decided by the maintainer on 2026-10-27: build the MCP server in v0.44.0 as a thin adapter over the REQ-AGENTDOCS-001/002 functions, in varve-serve (REQ-LAYERDOCS-001 clause 4 keeps varve itself from serving), ON THE ORG'S OWN FRAMEWORK, pulseengine/mcp (pulseengine-mcp-* crates, v0.17.0 on crates.io), not a third-party SDK or a hand-written loop. Clauses: (1) varve-serve --mcp shall use pulseengine-mcp's stdio transport and create no sockets, shown by strace -f -e trace=socket,bind recording zero calls. (2) It shall expose exactly list_docs, search_docs and read_doc, whose structured results equal the CLI JSON, shown by driving it over pipes. (3) It shall interoperate with the protocol revisions pulseengine-mcp supports, shown by golden transcripts per revision; a revision the framework lacks (2026-07-28 at v0.17.0) is filed in pulseengine/mcp, never patched around in varve. (4) Every line written to stdout shall be valid JSON-RPC. (5) The security topic shall state that documentation text enters an agent's context and can carry prompt injection. (6) The framework's dependencies shall pass varve's cargo deny policy, and anything pulled in only for HTTP/WebSocket transports shall be left out by feature selection."
+    links:
+      - type: derives-from
+        target: REQ-AGENTDOCS-002
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-DOCSINLAYER-001
+    type: requirement
+    title: The pulseengine layer carries varve's own documentation, and Markdown counts as documentation
+    status: approved
+    release: v0.44.0
+    description: "The MCP research measured the pinned pulseengine layer at ONE docs payload (varve-core's rustdoc) and the wasm layer at none, so an agent docs server would have almost nothing to serve. Decided by the maintainer on 2026-10-27. Clauses: (1) The pulseengine realm's layer shall carry the documentation varve's release already signs: varve's rustdoc and its traceability HTML report, each as a [[docs]] payload ingested through the release's verified sums. (2) A tool's Markdown documentation (a docs/ tree or a book) shall be acceptable as a docs payload in format markdown, and varve-serve shall render it as text for map, search and page. (3) Each new docs payload is shown by varve-serve map listing it for the pinned layer."
+    links:
+      - type: derives-from
+        target: REQ-LAYERDOCS-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-BUILTINDOCS-001
+    type: requirement
+    title: A tool's built-in docs topics are served from the verified binary that carries them
+    status: approved
+    release: v0.44.0
+    description: "rivet, varve-producer and varve-serve answer version-exact questions with their own docs command (rivet docs has 57 topics), and harvesting that output at deposit would mean running third-party binaries in the signing pipeline. Decided by the maintainer on 2026-10-27: serve them on demand from the verified binary. Clauses: (1) layer.toml shall be able to declare a tool's docs-command (the argv that lists topics and the one that prints one, with --format json where the tool offers it), signed into the layer as an annotation. (2) varve-serve map shall list those topics, and page shall print one, by running ONLY the binary the layer verified, re-verified against its signed digest at that moment, with no shell, a clean environment, no network where the platform allows, and a time limit. (3) A tool with no declared docs-command is never executed by varve-serve. (4) The output is treated as untrusted text (the same prompt-injection warning as REQ-AGENTDOCS-003 clause 5)."
+    links:
+      - type: derives-from
+        target: REQ-AGENTDOCS-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
