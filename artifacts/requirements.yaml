@@ -5328,3 +5328,59 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-RENODE-001
+    type: requirement
+    title: A layer carries Renode platform definitions, and any Renode finds them without touching its install
+    status: approved
+    release: v0.45.0
+    description: "From the Zephyr/Renode research (2026-10-27) and the maintainer's decisions: DEFINITIONS ONLY, users bring their own Renode (Renode publishes no checksums, signatures or attestations, so carrying the runtime would be an unverified, Linux-only opt-in). Definitions are code, not data (.resc runs commands, .robot runs Python), so they need the same proof rung as a tool. Clauses: (1) A new held payload kind `renode` (role definitions) shall be declarable in layer.toml with a namespace, a tested Renode version list and a supported range, signed into the layer and shown by varve inspect. (2) The deposit shall refuse a carried .resc or .repl that references a path outside its own tree or relative to the working directory (`@hardware/...`), naming the file; $ORIGIN-relative paths are accepted. (3) varve export-renode --out D shall lay the definitions down verbatim under D/defs/<namespace>/, write D/defs/varve-renode.resc containing the path add, and stamp per-tree digests (needs varve#288), so `include @D/defs/varve-renode.resc` then `@<namespace>/<file>` resolves in an unmodified Renode. (4) An export can never override a file Renode ships, because Renode searches its own install first and the namespace is unique; shown by a test that a namespaced name never resolves to a built-in."
+    links:
+      - type: derives-from
+        target: REQ-EXPORTDECL-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T21:32:28Z
+
+  - id: REQ-JESSRENODE-001
+    type: requirement
+    title: The jess Pixhawk 6X-RT Renode model is distributed through the layer and boots, offline, from the export alone
+    status: approved
+    release: v0.45.0
+    description: "The maintainer's first concrete case (2026-10-27): ship jess's stable core now, the PX4 bring-up parts later as their own version. Prerequisites in jess: an Apache-2.0 OR MIT licence, $ORIGIN-relative paths in its .resc scripts, and a release asset (described in a jess issue). Clauses: (1) jess publishes the stable core (pixhawk6xrt.repl, vehicle/rt1176-dualcore.repl, rt1176-smoke.resc/.robot and the smoke ELF with its boot.S/link.ld, plus READMEs and a generated renode-model.toml) as ONE deterministic archive listed by a committed MODEL.files, built before SHA256SUMS so its existing cosign signature and build provenance cover it, and released only after the self-test passes on the UNPACKED archive. (2) The pulseengine layer carries it as kind renode, role definitions, on the cosign rung, namespace pulseengine/jess, with a signed fidelity statement that it is a bring-up model not yet cross-validated against the board (jess REQ-PIX-011). (3) With the network removed (proved by a failing curl) and from /, the exported smoke robot passes and the exported dual-core platform loads through the generated path-add script, on every Renode version the layer lists as tested (1.16.1 first); without the include the load fails, and one flipped byte in the exported .repl fails varve verify."
+    links:
+      - type: derives-from
+        target: REQ-RENODE-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T21:32:28Z
+
+  - id: REQ-ZMODEXPORT-001
+    type: requirement
+    title: A project adds a verified Zephyr module to its own Zephyr build without changing its west.yml
+    status: approved
+    release: v0.45.0
+    description: "From the narrowed Zephyr research (2026-10-27): varve carries the Zephyr modules a project ADDS, not Zephyr itself. The maintainer chose that gale, the org's only Zephyr module, reaches the strongest proof through a deterministic module source archive under its existing cosign-signed SHA256SUMS, so no new proof rung is needed for it; the signed-git-tag rung for mirrored third-party modules is later work. Clauses: (1) A zephyr-module payload shall carry the module tree with its zephyr/module.yml, and the deposit shall refuse a tree without one. (2) varve export-zephyr-modules --out D shall write each module tree and D/zephyr-extra-modules.cmake appending them to ZEPHYR_EXTRA_MODULES, usable as `west build ... -- -C D/zephyr-extra-modules.cmake` or a plain cmake build, never editing the team's west.yml. (3) The export shall refuse a module whose name collides with one the workspace already provides, unless --override is given (Zephyr itself lets the later one silently win), and shall refuse an incomplete `build: depends` closure. (4) With the network removed, a Zephyr test that needs gale builds for a board using gale only from the export, and the same build without the cmake script fails; one flipped byte in the exported tree fails varve verify (varve#288). Stated scope: this proves the added module is offline and verified, not Zephyr or Python."
+    links:
+      - type: derives-from
+        target: REQ-EXPORTDECL-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T21:32:28Z
+
+  - id: REQ-BLOBLICENCE-001
+    type: requirement
+    title: A vendor blob travels in a layer only when its licence permits redistribution, and says so
+    status: approved
+    release: v0.45.0
+    description: "The maintainer's decision (2026-10-27): carry vendor HAL blobs where the licence allows. Clauses: (1) A blob a carried module declares is ingested only with its sha256 matching the module's own zephyr/module.yml, and only if its declared licence is on the realm's redistribution allow-list. (2) A blob whose licence requires click-through acceptance is refused unless the realm records that acceptance in the signed layer. (3) Each carried blob's licence appears in the layer SBOM (REQ-SBOMFIELDS-001)."
+    links:
+      - type: derives-from
+        target: REQ-ZMODEXPORT-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T21:32:28Z
