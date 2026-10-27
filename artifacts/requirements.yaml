@@ -1080,14 +1080,10 @@ artifacts:
     type: requirement
     title: The ASPICE V is populated so its trace rules bite non-vacuously
     status: approved
-    release: v0.19.0
-    description: >
-      The enabled aspice schema's V-types shall carry real artifacts —
-      system requirements deriving from the STPA-Sec losses, software
-      requirements deriving from them, architecture components over the
-      actual module structure, and unit/software verification separated by
-      level — so the SWE.1↔SWE.6 / SWE.2↔SWE.5 / SWE.3↔SWE.4 rules measure a
-      non-empty set instead of passing 0/0 (the vacuous-gate finding).
+    release: backlog
+    description: |-
+      The enabled aspice schema's V-types shall carry real artifacts — system requirements deriving from the STPA-Sec losses, software requirements deriving from them, architecture components over the actual module structure, and unit/software verification separated by level — so the SWE.1↔SWE.6 / SWE.2↔SWE.5 / SWE.3↔SWE.4 rules measure a non-empty set instead of passing 0/0 (the vacuous-gate finding).
+       . MOVED TO THE BACKLOG on 2026-10-27, by the maintainer's decision: it was still approved and assigned to v0.19.0, a release that shipped long ago, with no verifying evidence, so the plan counted it as shipped when it was not. It returns to a release when someone schedules it.
     tags: [process]
     fields:
       priority: should
@@ -1097,15 +1093,10 @@ artifacts:
     type: requirement
     title: The threat analysis is a full TARA, not a seed
     status: approved
-    release: v0.19.0
-    description: >
-      The cybersecurity schema shall be enabled and populated: assets,
-      threat-scenarios with attack-vector and attack-feasibility, risk
-      assessments with explicit risk-treatment (incl. the accept decisions
-      currently implicit in prose), and cybersecurity goals with CALs. The
-      STPA-Sec back-half (control structure, sec-UCAs, loss scenarios) shall
-      be completed — the overdue v0.1.0 work item — surfacing SH-005/006 as
-      first-class analysis, not retrofitted hazards.
+    release: backlog
+    description: |-
+      The cybersecurity schema shall be enabled and populated: assets, threat-scenarios with attack-vector and attack-feasibility, risk assessments with explicit risk-treatment (incl. the accept decisions currently implicit in prose), and cybersecurity goals with CALs. The STPA-Sec back-half (control structure, sec-UCAs, loss scenarios) shall be completed — the overdue v0.1.0 work item — surfacing SH-005/006 as first-class analysis, not retrofitted hazards.
+       . MOVED TO THE BACKLOG on 2026-10-27, by the maintainer's decision: it was still approved and assigned to v0.19.0, a release that shipped long ago, with no verifying evidence, so the plan counted it as shipped when it was not. It returns to a release when someone schedules it.
     tags: [security]
     fields:
       priority: should
@@ -1116,13 +1107,10 @@ artifacts:
     type: requirement
     title: The archive of record is durable, not a 90-day CI artifact
     status: approved
-    release: v0.20.0
-    description: >
-      A deposited layer's oci-layout archive shall be published to durable,
-      verifiable storage kept independently of any registry or CI retention
-      policy (SL-002: a qualified line must stay reconstructible for the
-      safety-case lifetime). The current retention-90-days workflow artifact
-      contradicts varve's own loss and must be replaced.
+    release: backlog
+    description: |-
+      A deposited layer's oci-layout archive shall be published to durable, verifiable storage kept independently of any registry or CI retention policy (SL-002: a qualified line must stay reconstructible for the safety-case lifetime). The current retention-90-days workflow artifact contradicts varve's own loss and must be replaced.
+       . MOVED TO THE BACKLOG on 2026-10-27, by the maintainer's decision: it was still approved and assigned to v0.20.0, a release that shipped long ago, with no verifying evidence, so the plan counted it as shipped when it was not. It returns to a release when someone schedules it.
     tags: [core, safety]
     fields:
       priority: must
@@ -1132,13 +1120,10 @@ artifacts:
     type: requirement
     title: Client-side append-only log of installs, verifications, refusals
     status: approved
-    release: v0.20.0
-    description: >
-      varve shall write an append-only local record of update events —
-      installs, re-verifications, refusals, staleness warnings, self-updates
-      — so the update history is auditable (R156 record-keeping, IEC 62443
-      CR 2.8), not merely the resulting state. Tamper-evidence via a hash
-      chain is preferred.
+    release: backlog
+    description: |-
+      varve shall write an append-only local record of update events — installs, re-verifications, refusals, staleness warnings, self-updates — so the update history is auditable (R156 record-keeping, IEC 62443 CR 2.8), not merely the resulting state. Tamper-evidence via a hash chain is preferred.
+       . MOVED TO THE BACKLOG on 2026-10-27, by the maintainer's decision: it was still approved and assigned to v0.20.0, a release that shipped long ago, with no verifying evidence, so the plan counted it as shipped when it was not. It returns to a release when someone schedules it.
     tags: [security]
     fields:
       priority: should
