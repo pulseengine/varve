@@ -73,6 +73,7 @@ pub enum ExportKind {
     BazelDistdir,
     Vsix,
     Sdk,
+    Wit,
 }
 
 impl ExportKind {
@@ -84,6 +85,7 @@ impl ExportKind {
             ExportKind::BazelDistdir => "bazel-distdir",
             ExportKind::Vsix => "vsix",
             ExportKind::Sdk => "sdk",
+            ExportKind::Wit => "wit",
         }
     }
 
@@ -107,6 +109,7 @@ impl ExportKind {
         ExportKind::BazelDistdir,
         ExportKind::Vsix,
         ExportKind::Sdk,
+        ExportKind::Wit,
     ];
 }
 
@@ -696,6 +699,13 @@ pub enum DeclaredExportStatus {
     /// `Missing`, because "re-run the export" is not the fix for a permissions
     /// fault or a truncated file.
     Unreadable(String),
+    /// The stamp is current but the directory no longer holds what it recorded
+    /// (varve#288): a file was modified, deleted or added. Carries the first
+    /// differing path.
+    ContentDrift(crate::exportstamp::ContentDrift),
+    /// The stamp predates content digests, so nothing says what the directory
+    /// held. Not current: re-export.
+    Unverifiable,
 }
 
 impl DeclaredExportStatus {
@@ -714,7 +724,9 @@ pub fn check_declared_export(
     project_root: &Path,
     current_manifest_digest: &str,
 ) -> DeclaredExportStatus {
-    use crate::exportstamp::{ExportStampError, ExportStatus, read_stamp, status};
+    use crate::exportstamp::{
+        ContentStatus, ExportStampError, ExportStatus, read_stamp, status, verify_content,
+    };
     let dir = decl.dir(project_root);
     match read_stamp(&dir) {
         Err(ExportStampError::Missing(_)) => DeclaredExportStatus::Missing,
@@ -727,7 +739,12 @@ pub fn check_declared_export(
                 };
             }
             match status(&stamp, current_manifest_digest) {
-                ExportStatus::Current => DeclaredExportStatus::Current,
+                ExportStatus::Current => match verify_content(&dir, &stamp) {
+                    Ok(ContentStatus::Intact) => DeclaredExportStatus::Current,
+                    Ok(ContentStatus::Unverifiable) => DeclaredExportStatus::Unverifiable,
+                    Ok(ContentStatus::Drifted(d)) => DeclaredExportStatus::ContentDrift(d),
+                    Err(e) => DeclaredExportStatus::Unreadable(e.to_string()),
+                },
                 ExportStatus::Stale { stamped, current } => {
                     DeclaredExportStatus::Stale { stamped, current }
                 }
@@ -1083,7 +1100,7 @@ tools   = ["rivet", "synth"]
 #[cfg(test)]
 mod export_tests {
     use super::*;
-    use crate::exportstamp::{ExportStamp, write_stamp};
+    use crate::exportstamp::write_stamp;
 
     const HEAD: &str =
         "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.08.0\"\n";
@@ -1189,11 +1206,12 @@ path   = "before-shims"
             (ExportKind::BazelDistdir, "bazel-distdir"),
             (ExportKind::Vsix, "vsix"),
             (ExportKind::Sdk, "sdk"),
+            (ExportKind::Wit, "wit"),
         ] {
             assert_eq!(kind.as_str(), wire);
             assert_eq!(ExportKind::from_str(wire).unwrap(), kind);
         }
-        assert_eq!(ExportKind::ALL.len(), 6, "ALL must list every variant");
+        assert_eq!(ExportKind::ALL.len(), 7, "ALL must list every variant");
     }
 
     // rivet: verifies REQ-EXPORTDECL-001
@@ -1364,15 +1382,9 @@ path   = "before-shims"
     }
 
     fn stamped(dir: &std::path::Path, kind: &str, digest: &str) {
-        write_stamp(
-            dir,
-            &ExportStamp {
-                layer: "2026.08.0".into(),
-                manifest_digest: digest.into(),
-                kind: kind.into(),
-            },
-        )
-        .unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let stamp = crate::exportstamp::stamp_for(dir, "2026.08.0", digest, kind).unwrap();
+        write_stamp(dir, &stamp).unwrap();
     }
 
     // rivet: verifies REQ-EXPORTDECL-001
@@ -1443,6 +1455,45 @@ path   = "before-shims"
             check_declared_export(cargo, root, current),
             DeclaredExportStatus::Unreadable(_)
         ));
+    }
+
+    // rivet: verifies REQ-EXPORTDECL-001
+    #[test]
+    fn a_declared_export_whose_files_changed_or_whose_stamp_is_old_is_not_current() {
+        use crate::exportstamp::{ContentDrift, STAMP_FILE, read_stamp};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let pin = parse(DECLARED).unwrap();
+        let decl = &pin.exports[0];
+        let dir = decl.dir(root);
+        let current = "sha256:aaaa";
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.json"), b"{}").unwrap();
+        stamped(&dir, decl.kind.as_str(), current);
+        assert!(check_declared_export(decl, root, current).is_current());
+
+        std::fs::write(dir.join("index.json"), b"{ }").unwrap();
+        assert_eq!(
+            check_declared_export(decl, root, current),
+            DeclaredExportStatus::ContentDrift(ContentDrift::Modified("index.json".into()))
+        );
+        // A stale pin is still reported as stale, not as content drift.
+        assert!(matches!(
+            check_declared_export(decl, root, "sha256:bbbb"),
+            DeclaredExportStatus::Stale { .. }
+        ));
+
+        std::fs::write(dir.join("index.json"), b"{}").unwrap();
+        let mut old = read_stamp(&dir).unwrap();
+        old.content_digest = None;
+        old.files.clear();
+        std::fs::write(dir.join(STAMP_FILE), serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(
+            check_declared_export(decl, root, current),
+            DeclaredExportStatus::Unverifiable
+        );
+        assert!(!DeclaredExportStatus::Unverifiable.is_current());
+        assert!(!DeclaredExportStatus::ContentDrift(ContentDrift::Extra("x".into())).is_current());
     }
 
     // rivet: verifies REQ-EXPORTDECL-001

@@ -55,6 +55,8 @@ varve verify
 
 `--export DIR` (repeatable) also checks a committed export directory against the current pin: the `.varve-export.json` stamp written by `varve export-*` must name the layer the pin resolves to. If the pin has moved on, the export is stale and verify **fails** (non-zero exit); an absent or malformed stamp is likewise a failure. Run it in CI so a stale vendored tree cannot silently keep serving the old crates (REQ-EXPORT-SYNC-001).
 
+The stamp also records the exported **tree**: a sorted `path -> sha256` list over every file except the stamp, and one digest over that list. Both `--export` and a declared export re-hash the directory, so a file edited, deleted or added after the export **fails** (exit 1) and names the first differing path as `modified`, `missing` or `unexpected extra file`. A symlink is recorded by its target and never followed; a fifo, socket or device node makes the export unstampable. A stamp written before content digests existed is **unverifiable** and also fails: re-run the export to get one. Empty directories are not tracked (REQ-EXPORTDECL-001, varve#288).
+
 `--lockfile FILE` also checks a project's Cargo lockfile against the pinned layer's `crate` entries. A package the layer pins must resolve to the same version, and to the same bytes when both record a checksum; a disagreement fails verify. Packages the layer does not pin are ignored — the layer never claimed to cover every dependency.
 
 The boundary is deliberate: varve cannot intercept a Cargo build and cannot guarantee the compiler used the bytes it pins. Provenance for a dependency compiled *into* your artifact is by **asserted agreement** — the lockfile and the layer must say the same thing, mechanically — not by dispatch (REQ-LOCKPIN-001).

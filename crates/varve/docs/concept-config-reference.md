@@ -39,7 +39,7 @@ layer   = "2026.08.0"
 
 [[export]]
 kind = "crates-vendor"        # required; cargo | crates-vendor | bazel-registry |
-                              # bazel-distdir | vsix | sdk — spelled exactly as the
+                              # bazel-distdir | vsix | sdk | wit — spelled exactly as the
                               # adapters stamp it in .varve-export.json
 out  = "third_party/rust"     # required; RELATIVE to the directory holding varve.toml
 
