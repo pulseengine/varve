@@ -16,7 +16,13 @@
 //! nothing to type. A reader has already said which layer they want by pinning
 //! it, and asking them to name the document again is asking twice.
 
-use varve_serve::{cli::Cli, docs, http};
+use varve_serve::{
+    ask,
+    cli::{Cli, Cmd, Format},
+    context, docpages, docs,
+    harvest::Sandbox,
+    http, layers,
+};
 
 use anyhow::{Context, bail};
 use clap::Parser;
@@ -26,6 +32,17 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if let Some(topic) = &cli.docs {
         return docs::show(topic);
+    }
+
+    match &cli.command {
+        Some(Cmd::Context { format }) => return run_context(*format),
+        Some(Cmd::Ask {
+            words,
+            format,
+            limit,
+        }) => return run_ask(&words.join(" "), *format, *limit),
+        Some(Cmd::Page { doc, path }) => return run_page(doc, path),
+        None => {}
     }
 
     let payloads = collect()?;
@@ -97,14 +114,14 @@ fn main() -> anyhow::Result<()> {
     http::accept_loop(&site, &listener)
 }
 
-/// Every `docs` payload of the pinned layer, verified, with what the producer
-/// signed about it.
+/// The pinned layer and every layer it composes, each verified.
 ///
-/// This shells out to `varve export-docs`? No — it asks varve-core directly,
-/// for the same reason the producer reads `layer.toml` itself: a second
-/// implementation of "which payloads does this layer have" is a second thing
-/// to keep in step.
-fn collect() -> anyhow::Result<Vec<DocsPayload>> {
+/// Both the viewer and the orientation start here, so there is one answer to
+/// "what does this pin contain" (see `tests/follows_composition.rs`).
+fn resolve_layers() -> anyhow::Result<(
+    varve_core::InstalledLayer,
+    Vec<varve_core::compose::ComposedLayer>,
+)> {
     // The BASE root. Named `base` because `effective_root` below maps a base
     // root to a realm partition, and handing it a partition instead nests them.
     let base = varve_core::Store::at(store_root()?);
@@ -175,19 +192,22 @@ fn collect() -> anyhow::Result<Vec<DocsPayload>> {
                 .join(", ")
         );
     }
-    let mut out = Vec::new();
-    for p in varve_core::compose::payloads_of(
-        &layers,
-        varve_core::PayloadKind::Docs,
-        &varve_core::host_platform(),
-    )
-    .map_err(|e| anyhow::anyhow!(e.to_string()))?
-    {
-        out.push(
-            DocsPayload::from_signed(&p.annotations, p.bytes)
-                .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-        );
-    }
+    Ok((entry, layers))
+}
+
+/// Every `docs` payload of the pinned layer, verified, with what the producer
+/// signed about it.
+///
+/// This shells out to `varve export-docs`? No — it asks varve-core directly,
+/// for the same reason the producer reads `layer.toml` itself: a second
+/// implementation of "which payloads does this layer have" is a second thing
+/// to keep in step.
+fn collect() -> anyhow::Result<Vec<DocsPayload>> {
+    let (entry, layers) = resolve_layers()?;
+    let out: Vec<DocsPayload> = layers::docs_sources(&layers, &varve_core::host_platform())?
+        .into_iter()
+        .map(|d| d.payload)
+        .collect();
     if out.is_empty() {
         bail!(
             "layer {} carries no documentation{}. `varve inspect` lists every payload it \
@@ -201,6 +221,64 @@ fn collect() -> anyhow::Result<Vec<DocsPayload>> {
         );
     }
     Ok(out)
+}
+
+/// The orientation for the pin. Everything is verified before anything is read
+/// or run; a failure anywhere returns an error and the caller prints nothing.
+fn orient() -> anyhow::Result<context::Context> {
+    let (_, layers) = resolve_layers()?;
+    let pinned = layers::pinned(&layers, &varve_core::host_platform())?;
+    Ok(context::orient(pinned, &Sandbox::default()))
+}
+
+fn run_context(format: Format) -> anyhow::Result<()> {
+    let ctx = orient()?;
+    // One write, after everything succeeded: a half-printed orientation is
+    // worse than none.
+    print!(
+        "{}",
+        match format {
+            Format::Md => context::render_md(&ctx),
+            Format::Json => context::render_json(&ctx),
+        }
+    );
+    Ok(())
+}
+
+fn run_ask(query: &str, format: Format, limit: usize) -> anyhow::Result<()> {
+    let ctx = orient()?;
+    let units = ask::index(&ctx)?;
+    let hits = ask::search(&units, query, limit);
+    print!(
+        "{}",
+        match format {
+            Format::Md => ask::render_md(query, &ctx, &hits),
+            Format::Json => ask::render_json(query, &ctx, &hits),
+        }
+    );
+    Ok(())
+}
+
+fn run_page(doc: &str, path: &str) -> anyhow::Result<()> {
+    let (_, layers) = resolve_layers()?;
+    let sources = layers::docs_sources(&layers, &varve_core::host_platform())?;
+    let Some(source) = sources.iter().find(|d| d.payload.name == doc) else {
+        let names: Vec<&str> = sources.iter().map(|d| d.payload.name.as_str()).collect();
+        bail!(
+            "this pin carries no documentation payload named {doc:?}. It carries: {}.",
+            names.join(", ")
+        );
+    };
+    match docpages::read_page(&source.payload, path)? {
+        Some(text) => {
+            println!("{text}");
+            Ok(())
+        }
+        None => bail!(
+            "documentation payload {doc:?} has no page {path:?}. `varve-serve ask` prints the \
+             exact `page` command for each hit."
+        ),
+    }
 }
 
 fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {

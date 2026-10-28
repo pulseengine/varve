@@ -418,6 +418,21 @@ jobs:
           - shard: varve-core (elf)
             files: >-
               -f crates/varve-core/src/elf.rs
+          # NEW at v0.44.0 (REQ-AGENTDOCS-001/-002), as its own shard: the
+          # orientation an agent is handed unasked, and the ranking that points
+          # it at documentation. A wrong caveat dropped here is a tool an agent
+          # runs believing it works; a wrong rank is a page it never reads. Its
+          # kill criteria are the lib tests only (mutants.toml), which is why
+          # all of its logic lives in the lib and `main.rs` stays a bin-target.
+          - shard: varve-serve (agent context)
+            files: >-
+              -f crates/varve-serve/src/help.rs
+              -f crates/varve-serve/src/harvest.rs
+              -f crates/varve-serve/src/layers.rs
+              -f crates/varve-serve/src/context.rs
+              -f crates/varve-serve/src/ask.rs
+              -f crates/varve-serve/src/docpages.rs
+              -f crates/varve-serve/src/varvecmds.rs
           # GATED on arrival rather than declared as debt (varve#126's lesson).
           # A wrong closure ships a wrong signed tree, and the module is small,
           # pure and has no I/O — its tests run in 20ms, so there is no cost

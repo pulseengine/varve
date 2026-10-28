@@ -10,6 +10,19 @@
 //! mutant that makes it answer a `POST`, or resolve a path it should not, is
 //! exactly the kind nobody notices by reading.
 
+pub mod ask;
 pub mod cli;
+pub mod context;
+pub mod docpages;
 pub mod docs;
+pub mod harvest;
+pub mod help;
 pub mod http;
+pub mod layers;
+pub mod varvecmds;
+
+/// Test support shared with `tests/`: a real signed layer in a real store.
+/// Compiled for unit tests only; see the file for why it lives under `tests/`.
+#[cfg(test)]
+#[path = "../tests/support/fixture.rs"]
+pub mod fixture;

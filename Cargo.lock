@@ -3047,6 +3047,10 @@ version = "0.43.0"
 dependencies = [
  "anyhow",
  "clap",
+ "flate2",
+ "serde_json",
+ "tar",
+ "tempfile",
  "varve-core",
 ]
 
