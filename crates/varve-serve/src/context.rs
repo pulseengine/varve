@@ -223,13 +223,35 @@ pub fn orient(pinned: crate::layers::Pinned, sb: &crate::harvest::Sandbox) -> Co
     build(pinned.facts, tools, pinned.held, pinned.docs)
 }
 
+/// One shell word for a name that came from a layer: plain as written when it
+/// is plainly safe, single-quoted otherwise. These strings are commands an
+/// agent may run verbatim, and a payload name or an archive member path is
+/// data a producer chose, not text varve vouches is harmless.
+pub fn shell_word(s: &str) -> String {
+    let plain = !s.is_empty()
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/:@%+=,-".contains(c));
+    if plain {
+        s.to_string()
+    } else {
+        varve_core::shellquote::quote_sh(s)
+    }
+}
+
 /// The command that gets a held payload out of the store, exactly as typed.
 pub fn get_command(h: &Held) -> String {
     match h.kind.as_str() {
         "crate" => "varve export-cargo --out ./cargo-registry".into(),
         "vsix" => "varve export-vsix --out ./vsix".into(),
-        "docs" => format!("varve export-docs --out ./doc --select {}", h.name),
-        "sdk" => format!("varve export-sdk --out ./sdk --select {}", h.name),
+        "docs" => format!(
+            "varve export-docs --out ./doc --select {}",
+            shell_word(&h.name)
+        ),
+        "sdk" => format!(
+            "varve export-sdk --out ./sdk --select {}",
+            shell_word(&h.name)
+        ),
         "wit" if h.name.contains(':') => format!(
             "varve export-wit --out ./wit --package {}@{}",
             h.name, h.version

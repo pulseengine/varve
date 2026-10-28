@@ -81,19 +81,18 @@ const SPAWN_RETRIES: u32 = 20;
 /// is a race, not a refusal, and the next try succeeds. Any other error, or
 /// twenty busy answers in a row, is returned as it is.
 fn retrying<T>(pause: Duration, mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
-    let mut attempts = 0;
-    loop {
+    // A bounded `for`, not a counter in a `loop`: a counter that fails to
+    // count (or a guard that is always true) would make an endless loop,
+    // and that was reported as a timeout rather than caught.
+    for _ in 0..SPAWN_RETRIES {
         match f() {
-            Err(e)
-                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
-                    && attempts < SPAWN_RETRIES =>
-            {
-                attempts += 1;
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                 std::thread::sleep(pause);
             }
             other => return other,
         }
     }
+    f()
 }
 
 /// What one invocation printed.

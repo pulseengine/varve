@@ -226,8 +226,21 @@ fn collect() -> anyhow::Result<Vec<DocsPayload>> {
 /// The orientation for the pin. Everything is verified before anything is read
 /// or run; a failure anywhere returns an error and the caller prints nothing.
 fn orient() -> anyhow::Result<context::Context> {
-    let (_, layers) = resolve_layers()?;
-    let pinned = layers::pinned(&layers, &varve_core::host_platform())?;
+    let (entry, layers) = resolve_layers()?;
+    // Harvesting RUNS the host's binaries, so the layer must have been
+    // verified for the host. One installed for another platform (varve#189)
+    // was verified for that platform's payloads, not for the ones run here.
+    let host = varve_core::host_platform();
+    if let Some(plat) = entry.platform.as_deref()
+        && plat != host
+    {
+        anyhow::bail!(
+            "layer {} was installed for {plat}, not this machine ({host}); `varve-serve \
+             context` runs this machine's tools, so it orients only a layer installed for {host}",
+            entry.layer
+        );
+    }
+    let pinned = layers::pinned(&layers, &host)?;
     Ok(context::orient(pinned, &Sandbox::default()))
 }
 
@@ -271,7 +284,10 @@ fn run_page(doc: &str, path: &str) -> anyhow::Result<()> {
     };
     match docpages::read_page(&source.payload, path)? {
         Some(text) => {
-            println!("{text}");
+            // Page text goes to a terminal or into an agent's context; control
+            // characters (an escape sequence in a page) are blanked as they
+            // are for harvested help.
+            println!("{}", varve_serve::help::clean_block(&text));
             Ok(())
         }
         None => bail!(

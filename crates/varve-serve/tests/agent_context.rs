@@ -361,7 +361,7 @@ fn ask_ranks_the_page_that_is_the_item_above_its_module() {
     assert_eq!(hits[0]["layer"], "2026.10.1");
     // the hit's digest IS the digest the signed manifest carries
     let docs_bytes = tar_gz_of_fixture_digest(&w);
-    assert_eq!(hits[0]["digest"], docs_bytes.as_str());
+    assert_eq!(hits[0]["payload_digest"], docs_bytes.as_str());
 }
 
 fn tar_gz_of_fixture_digest(w: &World) -> String {

@@ -30,7 +30,7 @@
 
 use serde_json::{Value, json};
 
-use crate::context::{Context, get_command};
+use crate::context::{Context, get_command, shell_word};
 use crate::docpages;
 
 /// Words that carry no question. Matching them turns every sentence into noise.
@@ -49,6 +49,8 @@ const BODY: u32 = 1;
 const PARTIAL: u32 = 1;
 const EXACT_ITEM: u32 = 10;
 const NAMED_TOOL: u32 = 6;
+const SNIPPET_MAX: usize = 160;
+const SUBCOMMAND_NAMED: u32 = 3;
 
 /// The default number of hits.
 pub const DEFAULT_LIMIT: usize = 5;
@@ -107,6 +109,10 @@ pub struct Hit {
     pub score: u32,
     pub layer: String,
     pub digest: Option<String>,
+    /// The best-matching line of a topic: used for ranking, and deliberately
+    /// NOT printed — a hit is a pointer, and docs text is a prompt-injection
+    /// surface (tests/agent_context.rs plants one).
+    pub snippet: Option<String>,
     pub read: String,
 }
 
@@ -130,6 +136,9 @@ pub fn query_words(query: &str) -> Vec<String> {
     }
     out
 }
+
+/// The rustdoc kinds whose page IS the answer to the item's name.
+const TYPE_KINDS: &[&str] = &["struct", "enum", "trait", "type", "union"];
 
 const RUSTDOC_KINDS: &[&str] = &[
     "struct",
@@ -157,17 +166,62 @@ pub fn item_of(path: &str, title: &str) -> Option<String> {
     if let [kind, item, "html"] = parts.as_slice()
         && RUSTDOC_KINDS.contains(kind)
     {
-        return Some(item.to_lowercase());
+        // Only a TYPE page is "the" answer to a word: `fn.sign.html` took the
+        // top slot for "sign wasm module" ahead of `wsc sign`, the tool the
+        // question was about. A function page still matches by its words.
+        return TYPE_KINDS.contains(kind).then(|| item.to_lowercase());
     }
     let (head, _) = title.split_once(" in ")?;
     let last = head.split_whitespace().last()?;
     (!last.contains("::")).then(|| last.to_lowercase())
 }
 
+/// A topic's text is scored by its BEST LINE, not as one bag of words: the
+/// answer is usually one row of a table (rivet's `verifies | verified-by |
+/// Test verifies a requirement`), and a whole-text bag lets every long topic
+/// that mentions the words somewhere tie with it.
+fn best_line(body: &str, words: &[String]) -> Option<(u32, String)> {
+    let mut best: Option<(u32, String)> = None;
+    for line in body.lines() {
+        let toks = tokens(line);
+        let hit = words.iter().filter(|w| toks.contains(w)).count() as u32;
+        if hit > 0 && best.as_ref().is_none_or(|(b, _)| hit > *b) {
+            best = Some((hit, snippet_of(line)));
+        }
+    }
+    best.map(|(n, line)| (n * DESC, line))
+}
+
+/// One line, trimmed, cut at a word boundary if it is long — never mid-word.
+fn snippet_of(line: &str) -> String {
+    let cleaned = crate::help::clean_block(line);
+    let line = cleaned.trim();
+    if line.chars().count() <= SNIPPET_MAX {
+        return line.to_string();
+    }
+    let mut out = String::new();
+    for w in line.split_whitespace() {
+        if out.chars().count() + w.chars().count() + 1 > SNIPPET_MAX {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+    out.push_str(" …");
+    out
+}
+
 fn base_score(u: &Unit, words: &[String]) -> u32 {
     let name = tokens(&u.name);
     let desc = tokens(&format!("{} {}", u.title, u.desc));
-    let body = tokens(&u.body);
+    // A topic's body is scored by `best_line` instead.
+    let body = if u.kind == Kind::Topic {
+        Vec::new()
+    } else {
+        tokens(&u.body)
+    };
     let name_lower = u.name.to_lowercase();
     words
         .iter()
@@ -187,7 +241,7 @@ fn base_score(u: &Unit, words: &[String]) -> u32 {
         .sum()
 }
 
-fn score(u: &Unit, words: &[String]) -> u32 {
+fn score(u: &Unit, words: &[String]) -> (u32, Option<String>) {
     // A query that names the tool a unit is about: the name itself says
     // nothing about WHICH of that tool's subcommands is meant, so it is taken
     // out of the matching and paid as one flat boost instead. Left in, it
@@ -205,16 +259,29 @@ fn score(u: &Unit, words: &[String]) -> u32 {
     if named && rest.is_empty() {
         // The question is only the tool's name: its overview is the answer.
         return if u.kind == Kind::ToolOverview {
-            NAME + NAMED_TOOL
+            (NAME + NAMED_TOOL, None)
         } else {
-            0
+            (0, None)
         };
     }
-    let base = base_score(u, &rest);
+    let line = if u.kind == Kind::Topic {
+        best_line(&u.body, &rest)
+    } else {
+        None
+    };
+    let base = base_score(u, &rest) + line.as_ref().map_or(0, |(n, _)| *n);
     if base == 0 {
-        return 0;
+        return (0, None);
     }
+    let snippet = line.map(|(_, l)| l);
     let mut s = base;
+    // A subcommand whose own name is a word of the question is very likely
+    // the verb asked for: "rivet add requirement test verifies" wants
+    // `rivet add`, which otherwise lost to subcommands whose descriptions
+    // happened to repeat more of the other words.
+    if u.kind == Kind::ToolSubcommand && rest.contains(&u.name.to_lowercase()) {
+        s += SUBCOMMAND_NAMED;
+    }
     if let Some(item) = &u.item
         && words.contains(item)
     {
@@ -223,7 +290,7 @@ fn score(u: &Unit, words: &[String]) -> u32 {
     if named {
         s += NAMED_TOOL;
     }
-    s
+    (s, snippet)
 }
 
 /// Rank `units` for `query`, best first, ties broken by `(kind, id)`.
@@ -232,8 +299,9 @@ pub fn search(units: &[Unit], query: &str, limit: usize) -> Vec<Hit> {
     let mut hits: Vec<Hit> = units
         .iter()
         .filter_map(|u| {
-            let s = score(u, &words);
+            let (s, snippet) = score(u, &words);
             (s > 0).then(|| Hit {
+                snippet,
                 id: u.id.clone(),
                 kind: u.kind,
                 title: u.title.clone(),
@@ -384,11 +452,19 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 item: None,
                 layer: d.layer.clone(),
                 digest: Some(d.digest.clone()),
-                read: format!("varve export-docs --out ./doc --select {}", p.name),
+                read: format!(
+                    "varve export-docs --out ./doc --select {}",
+                    shell_word(&p.name)
+                ),
             });
             continue;
         }
         for page in docpages::pages(p)? {
+            // A member path starting with `-` would be read as a flag by
+            // `page`; it is left out rather than handed over as a command.
+            if page.path.starts_with('-') {
+                continue;
+            }
             units.push(Unit {
                 kind: Kind::DocsPage,
                 id: format!("docs:{}:{}", p.name, page.path),
@@ -400,7 +476,11 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 tool: None,
                 layer: d.layer.clone(),
                 digest: Some(d.digest.clone()),
-                read: format!("varve-serve page {} {}", p.name, page.path),
+                read: format!(
+                    "varve-serve page {} {}",
+                    shell_word(&p.name),
+                    shell_word(&page.path)
+                ),
             });
         }
     }
@@ -428,8 +508,10 @@ pub fn render_md(query: &str, ctx: &Context, hits: &[Hit]) -> String {
             h.id,
             h.layer
         ));
+        // The PAYLOAD's digest — the file this hit lives in — not the
+        // layer manifest digest, which is in the orientation's header.
         if let Some(d) = &h.digest {
-            o.push_str(&format!("  digest: {d}"));
+            o.push_str(&format!("  payload digest: {d}"));
         }
         o.push_str(&format!("\n   read: `{}`\n", h.read));
     }
@@ -447,7 +529,7 @@ pub fn render_json(query: &str, ctx: &Context, hits: &[Hit]) -> String {
             "title": h.title,
             "score": h.score,
             "layer": h.layer,
-            "digest": h.digest,
+            "payload_digest": h.digest,
             "read": h.read,
         })).collect::<Vec<Value>>(),
     });
@@ -478,6 +560,127 @@ mod tests {
 
     fn ids(h: &[Hit]) -> Vec<&str> {
         h.iter().map(|h| h.id.as_str()).collect()
+    }
+
+    /// A topic is scored by its best line, and that line is shown: the row
+    /// that answers is one line of a long table.
+    // rivet: verifies REQ-AGENTDOCS-002
+    #[test]
+    fn a_topic_ranks_by_its_best_line_and_records_it() {
+        let mut table = unit(
+            Kind::Topic,
+            "topic:rivet:artifact-format",
+            "artifact-format",
+            "`rivet docs artifact-format`",
+            "",
+        );
+        table.tool = Some("rivet".into());
+        table.body = "intro text about artifacts\n| satisfies | satisfied-by | Implements a requirement |\n| verifies | verified-by | Test verifies a requirement |\n".into();
+        // A long topic that mentions every word, but never on one line.
+        let mut wordy = unit(
+            Kind::Topic,
+            "topic:rivet:audit",
+            "audit",
+            "`rivet docs audit`",
+            "",
+        );
+        wordy.tool = Some("rivet".into());
+        wordy.body = "a test\nsomething verifies\nevery requirement\nlink here\n".into();
+        let hits = search(&[wordy, table], "rivet link test verifies requirement", 5);
+        assert_eq!(ids(&hits)[0], "topic:rivet:artifact-format", "{hits:?}");
+        assert_eq!(
+            hits[0].snippet.as_deref(),
+            Some("| verifies | verified-by | Test verifies a requirement |")
+        );
+    }
+
+    /// A long line is cut at a word boundary, never inside a word.
+    // rivet: verifies REQ-AGENTDOCS-002
+    #[test]
+    fn a_long_snippet_is_cut_between_words() {
+        let line = "word ".repeat(60);
+        let cut = snippet_of(&line);
+        assert!(cut.ends_with(" …"), "{cut}");
+        assert!(cut.chars().count() <= SNIPPET_MAX + 2, "{}", cut.len());
+        assert!(
+            cut.trim_end_matches(" …").split(' ').all(|w| w == "word"),
+            "{cut}"
+        );
+        assert_eq!(snippet_of("  short line  "), "short line");
+    }
+
+    /// A function page is not "the" answer to a word; the tool's verb is.
+    // rivet: verifies REQ-AGENTDOCS-002
+    #[test]
+    fn a_function_page_does_not_take_the_item_boost() {
+        let mut page = unit(
+            Kind::DocsPage,
+            "docs:fn.sign",
+            "v/verify/fn.sign.html",
+            "sign in v::verify - Rust",
+            "",
+        );
+        page.item = item_of("v/verify/fn.sign.html", "sign in v::verify - Rust");
+        assert_eq!(page.item, None, "fn pages carry no exact item");
+        let mut sub = unit(
+            Kind::ToolSubcommand,
+            "tool:wsc:sub:sign",
+            "sign",
+            "`wsc sign` — Sign a module",
+            "Sign a module",
+        );
+        sub.tool = Some("wsc".into());
+        let hits = search(&[page, sub], "sign wasm module", 5);
+        assert_eq!(ids(&hits)[0], "tool:wsc:sub:sign", "{hits:?}");
+    }
+
+    /// The subcommand whose name IS a word of the question wins over ones
+    /// whose descriptions merely repeat more of the other words.
+    // rivet: verifies REQ-AGENTDOCS-002
+    #[test]
+    fn a_subcommand_named_in_the_question_outranks_wordier_neighbours() {
+        let mk = |name: &str, desc: &str| {
+            let mut u = unit(
+                Kind::ToolSubcommand,
+                &format!("tool:rivet:sub:{name}"),
+                name,
+                &format!("`rivet {name}` — {desc}"),
+                desc,
+            );
+            u.tool = Some("rivet".into());
+            u
+        };
+        let add = mk("add", "Add a new artifact to the project");
+        let verify = mk(
+            "verify",
+            "Advance a requirement to verified when it has verifying test evidence",
+        );
+        let trace = mk(
+            "trace-results",
+            "Trace a requirement FORWARD to the test results that cover it",
+        );
+        let hits = search(
+            &[verify, trace, add],
+            "rivet add requirement test verifies",
+            5,
+        );
+        assert_eq!(ids(&hits)[0], "tool:rivet:sub:add", "{hits:?}");
+    }
+
+    /// Names and paths from a layer become shell words, quoted when not
+    /// plainly safe, so a `read` command cannot smuggle shell syntax.
+    // rivet: verifies REQ-AGENTDOCS-002
+    #[test]
+    fn layer_names_become_safe_shell_words() {
+        assert_eq!(
+            shell_word("varve_core/store/struct.Store.html"),
+            "varve_core/store/struct.Store.html"
+        );
+        assert_eq!(shell_word("a b"), "'a b'");
+        assert_eq!(shell_word("x$(touch PWNED)"), "'x$(touch PWNED)'");
+        assert_eq!(shell_word("it's"), "'it'\\''s'");
+        assert_eq!(shell_word("-rf"), "'-rf'");
+        assert_eq!(shell_word(""), "''");
     }
 
     /// Filler words are removed, once-each, in order; one-letter tokens go.
@@ -661,19 +864,22 @@ mod tests {
     fn weights_order_name_over_description_over_body() {
         let name = unit(Kind::Topic, "n", "zebra", "t", "");
         let desc = unit(Kind::Topic, "d", "other", "t", "a zebra here");
-        let mut body = unit(Kind::Topic, "b", "other2", "t", "");
+        // Body weight is for whole-text units; a TOPIC's body is scored by
+        // its best line (see `a_topic_answers_by_its_best_line_and_shows_it`).
+        let mut body = unit(Kind::DocsPage, "b", "other2", "t", "");
         body.body = "text about a zebra".into();
         let part = unit(Kind::Topic, "p", "zebras", "t", "");
         let w = vec!["zebra".to_string()];
-        assert_eq!(score(&name, &w), NAME);
-        assert_eq!(score(&desc, &w), DESC);
-        assert_eq!(score(&body, &w), BODY);
-        assert_eq!(score(&part, &w), PARTIAL);
+        assert_eq!(score(&name, &w).0, NAME);
+        assert_eq!(score(&desc, &w).0, DESC);
+        assert_eq!(score(&body, &w).0, BODY);
+        assert_eq!(score(&part, &w).0, PARTIAL);
         assert_eq!(
             score(
                 &unit(Kind::Topic, "x", "zeb", "t", ""),
                 &["zeb".to_string()]
-            ),
+            )
+            .0,
             NAME
         );
         // a two-letter word does not match by substring
@@ -681,7 +887,8 @@ mod tests {
             score(
                 &unit(Kind::Topic, "y", "rivet", "t", ""),
                 &["iv".to_string()]
-            ),
+            )
+            .0,
             0
         );
         let hits = search(&[part, body, desc, name], "zebra", 5);
@@ -802,7 +1009,14 @@ mod tests {
         let meld = "Fusion\n\nCommands:\n  fuse  Fuse components\n  docs  Docs\n";
         let ctx = ctx_with(vec![
             tool_input("kilnd", kilnd, &[]),
-            tool_input("meld", meld, &[("fusion", "the secret zebra paragraph")]),
+            tool_input(
+                "meld",
+                meld,
+                &[(
+                    "fusion",
+                    "the zebra line\nthe secret paragraph\nesc \u{1b}[31m zebra",
+                )],
+            ),
         ]);
         let units = index(&ctx).unwrap();
         let by_id = |id: &str| {
@@ -831,13 +1045,15 @@ mod tests {
         assert_eq!(hits[0].id, "absent:kiln", "{hits:?}");
         let hits = search(&units, "zebra", 3);
         assert_eq!(hits[0].id, "topic:meld:fusion");
+        // A hit is a POINTER: no line of the topic's text is printed, not
+        // even the one that matched (docs text is a prompt-injection surface).
         let json = render_json("zebra", &ctx, &hits);
-        assert!(
-            !json.contains("secret zebra paragraph"),
-            "the matched text leaked: {json}"
-        );
         let md = render_md("zebra", &ctx, &hits);
-        assert!(!md.contains("secret zebra paragraph"), "{md}");
+        for out in [&json, &md] {
+            assert!(!out.contains("zebra line"), "matched text leaked: {out}");
+            assert!(!out.contains("secret paragraph"), "text leaked: {out}");
+        }
+        assert_eq!(hits[0].snippet.as_deref(), Some("the zebra line"));
         let hits = search(&units, "export vsix", 3);
         assert_eq!(hits[0].id, "varve:export-vsix", "{hits:?}");
     }
@@ -918,13 +1134,13 @@ mod tests {
         );
         assert!(md.contains("id: tool:meld:sub:fuse\n"), "{md}");
         assert!(
-            md.contains("layer: 2026.10.1  digest: sha256:meld\n"),
+            md.contains("layer: 2026.10.1  payload digest: sha256:meld\n"),
             "{md}"
         );
         assert!(md.contains("read: `meld fuse --help`\n"), "{md}");
         let v: Value = serde_json::from_str(&render_json("meld fuse", &ctx, &hits)).unwrap();
         assert_eq!(v["hits"][0]["id"], "tool:meld:sub:fuse");
-        assert_eq!(v["hits"][0]["digest"], "sha256:meld");
+        assert_eq!(v["hits"][0]["payload_digest"], "sha256:meld");
         assert_eq!(v["hits"][0]["read"], "meld fuse --help");
         assert_eq!(v["hits"][0]["kind"], "tool-subcommand");
         assert_eq!(v["query"], "meld fuse");
