@@ -29,6 +29,18 @@ updates:
       - dependencies
     open-pull-requests-limit: 5
     groups:
+      # The wasm-tools crates release in LOCKSTEP and must land as one set:
+      # wit-component 0.262 requires wit-parser 0.262, so the two PRs
+      # dependabot raised separately (#282, #283) could each only fail alone.
+      # Their 0.x minor is a breaking line for cargo, which is why the
+      # minor-and-patch group below never caught them. No `update-types`
+      # here, deliberately: every bump of these is a set bump.
+      wasm-tools:
+        patterns:
+          - "wit-*"
+          - "wasm-encoder"
+          - "wasm-metadata"
+          - "wasmparser"
       cargo-minor-and-patch:
         update-types:
           - minor
