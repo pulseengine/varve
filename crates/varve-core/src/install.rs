@@ -623,11 +623,15 @@ fn consent_why_not(
         Ok(cached) => cached,
         Err(e) => return Some(format!("the cached one does not verify: {e}")),
     };
-    match (served, cached) {
-        (Some(s), Some(c)) if c.counter > s.counter => consent_from_status(manifest, &c, now),
-        (Some(s), _) => consent_from_status(manifest, &s, now),
-        (None, Some(c)) => consent_from_status(manifest, &c, now),
-        (None, None) => Some(format!(
+    // One counter names one signed document, so which side wins a tie does
+    // not matter; the greatest counter is the line's latest word.
+    match [served, cached]
+        .into_iter()
+        .flatten()
+        .max_by_key(|d| d.counter)
+    {
+        Some(newest) => consent_from_status(manifest, &newest, now),
+        None => Some(format!(
             "none is available for line {line}: the source carries none and none was cached by \
              an earlier install"
         )),
@@ -2233,6 +2237,64 @@ mod tests {
         )
         .expect_err("a counter below the signed floor stays refused");
         assert!(err.to_string().contains("floor"), "{err}");
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_layer_exactly_at_the_signed_floor_still_consents() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let mut doc = crate::linestatus::LineStatus::verify_and_parse(
+            &status_for("2026.07", None, &[], &f.sk),
+            &f.pk,
+        )
+        .unwrap();
+        doc.min_counter = Some(1); // the older layer presents counter 1
+        let envelope = doc.sign(&f.sk, "root-1").unwrap().as_bytes().to_vec();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&envelope);
+        let outcome = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect("a floor AT the layer's counter does not exclude it");
+        assert!(outcome.digest_consent.is_some());
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn verifys_offline_judgment_reads_the_cache_and_names_why() {
+        // `varve verify` calls this with no source; it must agree with install.
+        let f = consent_fixture();
+        let older = LayerManifest::parse(&f.older).unwrap();
+        let now = "2026-08-07T00:00:00Z";
+        let none = cached_consent_why_not(&older, f.store.root(), &f.pk, now)
+            .expect("nothing cached is not consent");
+        assert!(
+            none.contains("none is available for line 2026.07"),
+            "{none}"
+        );
+
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let cache = crate::linestatus::StatusCache::at_root(f.store.root());
+        let ok = status_numbered(1, "2026.07", None, &[], &f.sk);
+        let doc = crate::linestatus::LineStatus::verify_and_parse(&ok, &f.pk).unwrap();
+        cache.update(&line, &ok, &doc).unwrap();
+        assert_eq!(
+            cached_consent_why_not(&older, f.store.root(), &f.pk, now),
+            None
+        );
+
+        let yank = status_numbered(2, "2026.07", None, &[("2026.07.0", "bad")], &f.sk);
+        let doc = crate::linestatus::LineStatus::verify_and_parse(&yank, &f.pk).unwrap();
+        cache.update(&line, &yank, &doc).unwrap();
+        let why = cached_consent_why_not(&older, f.store.root(), &f.pk, now)
+            .expect("a cached yank refuses");
+        assert!(why.contains("YANKED") && why.contains("bad"), "{why}");
     }
 
     // rivet: verifies REQ-ROLLBACK-002
