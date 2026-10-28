@@ -14,8 +14,8 @@ exits 2).
 
 ## Protocol
 
-Two arms of FRESH agents, the same 9 questions, one agent per question per arm,
-no memory shared between them:
+Two arms of FRESH agents (Sonnet, two runs per arm). Each agent answers all
+9 questions in one session, and no memory is shared between runs:
 
 - **baseline**: the agent has the pin (a project directory with `varve.toml`,
   the shims on PATH) and no orientation. It finds out for itself.
@@ -24,7 +24,7 @@ no memory shared between them:
 
 For each run record:
 
-1. **calls**: how many tool calls the agent made before answering;
+1. **calls**: how many tool calls the agent made across the 9 questions;
 2. **tokens**: how many it spent;
 3. **correctness**: whether the final answer matches every `must` pattern of the
    task. Mechanical; an answer that is right in other words and misses a pattern
@@ -35,18 +35,30 @@ the repository for the answer is discarded.
 
 ## Measured so far
 
-These come from the Python prototype the Rust code was written from
-(`orient3.py` and `ask.py`), not from the Rust binaries; re-running the
-orientation arm with the Rust output is the next measurement.
+2026-10-28, pin above, Sonnet, two runs per row. Tokens are the agent's whole
+session including the orientation it read. Correct is out of 9.
 
-| arm | calls per question | correct |
-|---|---|---|
-| baseline | 5 to 6 | 8 of 9 |
-| orientation v3 + `ask` | 3 to 6 | 7 to 8 of 9 |
+| arm | calls | tokens | correct | T4 exact page | T7 `verifies` |
+|---|---|---|---|---|---|
+| baseline: `varve inspect` and `--help` only | 5–6 | ~54.5k | 8, 8 | 0/2 | 2/2 |
+| Python prototype v1 (no `ask`) | 2 | ~46k | 7, 7 | 0/2 | 0/2 |
+| Python prototype v3 + `ask` | 3–6 | ~46k | 8, 7 | 0/2 | 1/2 |
+| Rust round 1 | 2–4 | ~48k | 8, 8 | 2/2 | 0/2 |
+| Rust round 2 | 3–4 | ~48k | 7, 8 | 0/2 | 1/2 |
+| Rust round 3 | 2–4 | ~48k | 8, 8 | 2/2 | 0/2 |
+| Rust round 4 (this code) | 2 | ~48k | 8, 8 | 2/2 | 0/2 |
 
-Read that table honestly: the orientation did not raise correctness. It lowered
-the number of calls, and the cases it got wrong are what the rules in the code
-come from.
+Read it honestly:
+
+- **Correctness held, it did not rise.** The orientation cut calls by 2–4 and
+  tokens by about 6k per session.
+- **It is the only arm that finds the exact page for a named type** (T4), once
+  the docs section says, where agents read it, that pages are not listed and
+  `ask "<Name>"` finds them (round 2 lacked that line and lost T4).
+- **T7 resists every change on this side.** Agents check flags with
+  `rivet link --help`, which lists only example link types; the baselines found
+  `verifies` through `rivet schema list`. Filed as pulseengine/rivet#1146
+  rather than worked around here.
 
 ## What the earlier drafts taught
 
