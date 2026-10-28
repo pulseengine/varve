@@ -69,7 +69,7 @@ pub fn resolve_in(path_var: Option<&OsStr>, name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn is_executable_file(p: &Path) -> bool {
+pub(crate) fn is_executable_file(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::metadata(p) {
         // `metadata` follows symlinks, which is what we want: a shim is a
@@ -80,7 +80,7 @@ fn is_executable_file(p: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable_file(p: &Path) -> bool {
+pub(crate) fn is_executable_file(p: &Path) -> bool {
     // On Windows the executable bit does not exist; presence of the file under
     // one of the PATHEXT-ish names is the practical test, and varve installs
     // copies rather than symlinks there.
