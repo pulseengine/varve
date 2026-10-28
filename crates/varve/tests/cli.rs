@@ -1724,6 +1724,233 @@ fn a_rolled_back_layer_is_refused_by_the_cli() {
         .stderr(predicate::str::contains("rollback").or(predicate::str::contains("high-water")));
 }
 
+// ──────────────── REQ-ROLLBACK-002 through the shipped binary ────────────
+//
+// varve#256 in one box: a machine installs a NEWER layer of a line (the mark
+// rises), then a different project pins an OLDER layer of the same line.
+
+struct Consent {
+    fx: Fixture,
+    pubf: std::path::PathBuf,
+    older_layout: std::path::PathBuf,
+    older_digest: String,
+    newer_layout: std::path::PathBuf,
+}
+
+impl Consent {
+    fn pin_by_name(&self, layer: &str) {
+        std::fs::write(
+            self.fx.project.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"{layer}\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn pin_by_digest(&self, layer: &str, digest: &str) {
+        std::fs::write(
+            self.fx.project.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"{layer}\"\ndigest = \"{digest}\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn install(&self, layout: &std::path::Path) -> assert_cmd::assert::Assert {
+        varve(&self.fx)
+            .env("VARVE_TRUST_ROOT", &self.pubf)
+            .args(["install", "--from"])
+            .arg(layout)
+            .assert()
+    }
+
+    fn mark(&self) -> Option<u64> {
+        varve_core::HighWaterMarks::load(&self.fx.root)
+            .unwrap()
+            .mark(
+                &"2026.08.0"
+                    .parse::<varve_core::LayerId>()
+                    .unwrap()
+                    .line()
+                    .clone(),
+            )
+    }
+}
+
+/// `status` is the line-status JSON attached to the OLDER layer's layout, or
+/// none. The newer layer's layout carries none, so nothing is cached by the
+/// first install.
+fn consent_scenario(status: Option<&str>) -> Consent {
+    let fx = fixture(None, &[]);
+    let dir = fx.project.parent().unwrap().to_path_buf();
+    let key = dir.join("root.key");
+    let pubf = dir.join("root.pub");
+    varve(&fx)
+        .args(["keygen", "--out"])
+        .arg(&key)
+        .arg("--pub")
+        .arg(&pubf)
+        .assert()
+        .success();
+    let deposit = |layer: &str, counter: u64| -> (std::path::PathBuf, String) {
+        let tool = dir.join(format!("synth-{layer}"));
+        std::fs::write(&tool, format!("#!/bin/sh\necho {layer}\n")).unwrap();
+        let layout = dir.join(format!("layout-{layer}"));
+        let out = varve(&fx)
+            .args([
+                "deposit",
+                "--layer",
+                layer,
+                "--channel",
+                "qualified",
+                "--counter",
+            ])
+            .arg(counter.to_string())
+            .args(["--issued-at", "2026-08-01T00:00:00Z", "--json", "--key"])
+            .arg(&key)
+            .arg("--out")
+            .arg(&layout)
+            .arg("--tool")
+            .arg(format!("synth@1.0.0={}", tool.display()))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        (layout, v["manifest_digest"].as_str().unwrap().to_string())
+    };
+    let (older_layout, older_digest) = deposit("2026.08.0", 1);
+    let (newer_layout, _) = deposit("2026.08.5", 5);
+    if let Some(json) = status {
+        let doc: varve_core::LineStatus = serde_json::from_str(json).unwrap();
+        let envelope = doc
+            .sign(
+                &hex::decode(std::fs::read_to_string(&key).unwrap().trim()).unwrap(),
+                "k",
+            )
+            .unwrap();
+        let line = "2026.08.0"
+            .parse::<varve_core::LayerId>()
+            .unwrap()
+            .line()
+            .clone();
+        varve_core::attach_status_to_layout(&older_layout, &line, envelope.as_bytes()).unwrap();
+    }
+    let c = Consent {
+        fx,
+        pubf,
+        older_layout,
+        older_digest,
+        newer_layout,
+    };
+    // The machine has seen the newer layer: the mark is 5.
+    c.pin_by_name("2026.08.5");
+    c.install(&c.newer_layout).success();
+    assert_eq!(c.mark(), Some(5));
+    c
+}
+
+const SUPPORTED_STATUS: &str = r#"{"line":"2026.08","counter":1,"issued-at":"2026-08-07T00:00:00Z","support-until":"2099-07-31","yanked":{},"known-problems":[]}"#;
+
+// rivet: verifies REQ-ROLLBACK-002
+#[test]
+fn a_digest_pinned_older_layer_installs_says_why_and_leaves_the_mark_alone() {
+    let c = consent_scenario(Some(SUPPORTED_STATUS));
+    // A different project: it pins the OLDER layer, by digest.
+    c.pin_by_digest("2026.08.0", &c.older_digest);
+    c.install(&c.older_layout).success().stdout(
+        predicate::str::contains("installed layer 2026.08.0 (counter 1)")
+            .and(predicate::str::contains(
+                "past this machine's anti-rollback mark",
+            ))
+            .and(predicate::str::contains(c.older_digest.as_str()))
+            .and(predicate::str::contains("counter 5"))
+            .and(predicate::str::contains("supported and not yanked")),
+    );
+    // Clause 3: installing the older layer does not lower the mark.
+    assert_eq!(c.mark(), Some(5));
+    // …and the project can pass its own gate: verify repeats the same verdict
+    // from the cached line-status, instead of refusing what install accepted.
+    varve(&c.fx)
+        .env("VARVE_TRUST_ROOT", &c.pubf)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("verified").and(predicate::str::contains("by digest")));
+}
+
+// rivet: verifies REQ-ROLLBACK-002, REQ-ROLLBACK-001
+#[test]
+fn resolution_by_name_is_refused_as_before_even_when_the_line_supports_it() {
+    let c = consent_scenario(Some(SUPPORTED_STATUS));
+    c.pin_by_name("2026.08.0");
+    c.install(&c.older_layout).failure().stderr(
+        predicate::str::contains("rollback refused")
+            .and(predicate::str::contains("high-water mark is 5")),
+    );
+    assert_eq!(c.mark(), Some(5));
+}
+
+// rivet: verifies REQ-ROLLBACK-002
+#[test]
+fn a_yanked_layer_stays_refused_even_when_pinned_by_digest() {
+    let c = consent_scenario(Some(
+        r#"{"line":"2026.08","counter":1,"issued-at":"2026-08-07T00:00:00Z","support-until":"2099-07-31","yanked":{"2026.08.0":"synth regression"},"known-problems":[]}"#,
+    ));
+    c.pin_by_digest("2026.08.0", &c.older_digest);
+    c.install(&c.older_layout).failure().stderr(
+        predicate::str::contains("rollback refused")
+            .and(predicate::str::contains("YANKED"))
+            .and(predicate::str::contains("synth regression")),
+    );
+    assert_eq!(c.mark(), Some(5));
+}
+
+// rivet: verifies REQ-ROLLBACK-002
+#[test]
+fn a_layer_out_of_support_stays_refused_even_when_pinned_by_digest() {
+    let c = consent_scenario(Some(
+        r#"{"line":"2026.08","counter":1,"issued-at":"2026-08-07T00:00:00Z","support-until":"2026-08-08","yanked":{},"known-problems":[]}"#,
+    ));
+    c.pin_by_digest("2026.08.0", &c.older_digest);
+    c.install(&c.older_layout).failure().stderr(
+        predicate::str::contains("rollback refused")
+            .and(predicate::str::contains("out of support")),
+    );
+    assert_eq!(c.mark(), Some(5));
+}
+
+// rivet: verifies REQ-ROLLBACK-002
+#[test]
+fn a_digest_pin_with_no_line_status_anywhere_is_refused() {
+    let c = consent_scenario(None);
+    c.pin_by_digest("2026.08.0", &c.older_digest);
+    c.install(&c.older_layout)
+        .failure()
+        .stderr(
+            predicate::str::contains("rollback refused").and(predicate::str::contains(
+                "digest consent needs a verifiable line-status",
+            )),
+        );
+    assert_eq!(c.mark(), Some(5));
+}
+
+// rivet: verifies REQ-ROLLBACK-002
+#[test]
+fn a_digest_that_is_not_the_named_layers_is_refused() {
+    let c = consent_scenario(Some(SUPPORTED_STATUS));
+    // Names the OLDER layer but carries the digest of a different manifest.
+    let wrong = format!("sha256:{}", "ab".repeat(32));
+    c.pin_by_digest("2026.08.0", &wrong);
+    c.install(&c.older_layout).failure();
+    assert_eq!(c.mark(), Some(5));
+}
+
 /// Deposit one layer of a line under a caller-supplied key, so several layers
 /// share ONE trust root — `signed_layer_fixture` mints a fresh keypair per
 /// call, and anti-rollback is a property of a line, which needs two layers a

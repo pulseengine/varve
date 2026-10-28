@@ -4052,6 +4052,11 @@ fn install(
         "installed layer {} (counter {}) {}",
         outcome.layer, outcome.counter, outcome.digest
     );
+    // REQ-ROLLBACK-002: going past the machine's mark is a decision, and a
+    // decision that is not said out loud is indistinguishable from a bug.
+    if let Some(consent) = &outcome.digest_consent {
+        println!("{}", consent.note());
+    }
     if composed_count > 0 {
         println!(
             "  composes {composed_count} installed layer(s), transitively — `varve verify` \
@@ -4317,12 +4322,48 @@ fn verify_no_rollback(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
         high_water,
     } = marks.check(&manifest)
     {
-        bail!(
-            "the layer verifies, but the pin resolves to a STALE layer: {} presents counter \
-             {presented} while the {line} line's high-water mark is {high_water}. A \
-             validly-signed older layer is exactly what anti-rollback exists to refuse — \
-             `install` would have refused this. Move the pin forward, or if you are \
-             deliberately going back, see `varve docs recovery`.",
+        // REQ-ROLLBACK-002: `install` accepted this layer on the strength of a
+        // digest in the pin and a line-status that supports it; `verify` is
+        // that verdict repeated offline and must reach the same answer from
+        // the cached line-status, or the project could install and never pass
+        // its own CI gate.
+        let consent = match &ctx.pin.digest {
+            Some(pinned) if *pinned == varve_core::manifest_digest(&payload) => {
+                let root_pk = ctx_root_bytes(ctx)?;
+                match varve_core::cached_consent_why_not(
+                    &manifest,
+                    store.root(),
+                    &root_pk,
+                    &today_rfc3339(),
+                ) {
+                    None => Ok(()),
+                    Some(why) => Err(format!(
+                        "The pin names the layer by digest, which would be consent, but digest \
+                         consent needs a verifiable line-status that reports the layer supported \
+                         and not yanked, and {why}."
+                    )),
+                }
+            }
+            _ => Err(
+                "The pin does not name the layer by digest, so there is no consent to \
+                      go below the mark."
+                    .to_string(),
+            ),
+        };
+        if let Err(why) = consent {
+            bail!(
+                "the layer verifies, but the pin resolves to a STALE layer: {} presents counter \
+                 {presented} while the {line} line's high-water mark is {high_water}. A \
+                 validly-signed older layer is exactly what anti-rollback exists to refuse — \
+                 `install` would have refused this. {why} Move the pin forward, or if you are \
+                 deliberately going back, see `varve docs recovery`.",
+                manifest.layer
+            );
+        }
+        println!(
+            "  note: {} is below this machine's anti-rollback mark ({presented} < {high_water} \
+             on line {line}); accepted because the pin selects it by digest and the line's \
+             cached, signed line-status reports it supported and not yanked.",
             manifest.layer
         );
     }

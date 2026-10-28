@@ -82,6 +82,7 @@ pub use ingest::{
     ANN_PROOF, ANN_PROOF_ASSERTS, ANN_PROOF_SIGNER, ANN_SBOM, ANN_SBOM_SHA256, IngestProof,
     UnknownProof,
 };
+pub use install::{DigestConsent, cached_consent_why_not};
 pub use install::{
     InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
     install_by_digest,

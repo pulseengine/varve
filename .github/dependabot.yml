@@ -64,7 +64,16 @@ updates:
     # Its latest release — 0.21.0 — still requires `rand ^0.8.6`. When it
     # moves, delete this ignore and bump pgp, rand and rand_chacha in ONE PR;
     # separately each is broken by construction. Tracked in #240.
+    #
+    # ureq is capped `<3.5` in varve-core/Cargo.toml because wsc 0.11.0 does
+    # not compile against ureq 3.5.0 (TransportAdapter::new arity). #294
+    # widened the cap and went red on exactly that. The exit is a wsc release
+    # that builds against 3.5 (pulseengine/sigil#319). Delete this entry and
+    # the cap together.
     ignore:
+      - dependency-name: ureq
+        versions:
+          - ">=3.5"
       - dependency-name: rand
         versions:
           - ">=0.9"

@@ -86,6 +86,35 @@ high-water mark is 5 — a stale, validly-signed layer cannot be passed off as
 current
 ```
 
+That refusal is for a pin that resolves the layer **by name**. If the pin names
+the layer by digest, it is a different case:
+
+```toml
+manifest-version = 1
+[toolchain]
+channel = "qualified"
+layer  = "2026.08.0"
+digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"   # the layer's manifest digest
+```
+
+A digest written into a reviewed `varve.toml` is a deliberate choice, not a stale
+layer being passed off as current, so varve treats it as consent — **provided the
+line's signed line-status reports that layer neither yanked nor out of support**.
+The install then says so on one line (the pinned digest, the higher counter this
+machine has seen, and that the line-status supports the layer) and the high-water
+mark is **not** lowered. This is what lets a project sit behind the head of its
+line on purpose, or bisect, on a machine (a shared CI runner, a laptop that once
+tried the head) that has seen something newer.
+
+Consent never overrides the line-status. A yanked layer, or one past its stated
+support window, is still refused; so is a digest pin when no line-status can be
+verified (offline and never cached, or signed by another root) — the pin alone is
+not trusted, and the error says digest consent needs a verifiable line-status. A
+digest that is not the named layer's is refused as a mismatch. `verify` repeats the
+same verdict from the cached line-status, so a project that installed this way
+passes its own gate. A digest an `[[include]]` names is the composing layer's
+choice, not the project's, and is not consent.
+
 There is no `--force`. If the newer layer is genuinely bad, the correct fix is
 **forward**: the producer yanks it (`varve docs status`) and issues a higher
 counter. Going backwards means editing local state by hand —
