@@ -1080,14 +1080,10 @@ artifacts:
     type: requirement
     title: The ASPICE V is populated so its trace rules bite non-vacuously
     status: approved
-    release: v0.19.0
-    description: >
-      The enabled aspice schema's V-types shall carry real artifacts —
-      system requirements deriving from the STPA-Sec losses, software
-      requirements deriving from them, architecture components over the
-      actual module structure, and unit/software verification separated by
-      level — so the SWE.1↔SWE.6 / SWE.2↔SWE.5 / SWE.3↔SWE.4 rules measure a
-      non-empty set instead of passing 0/0 (the vacuous-gate finding).
+    release: backlog
+    description: |-
+      The enabled aspice schema's V-types shall carry real artifacts — system requirements deriving from the STPA-Sec losses, software requirements deriving from them, architecture components over the actual module structure, and unit/software verification separated by level — so the SWE.1↔SWE.6 / SWE.2↔SWE.5 / SWE.3↔SWE.4 rules measure a non-empty set instead of passing 0/0 (the vacuous-gate finding).
+       . MOVED TO THE BACKLOG on 2026-10-27, by the maintainer's decision: it was still approved and assigned to v0.19.0, a release that shipped long ago, with no verifying evidence, so the plan counted it as shipped when it was not. It returns to a release when someone schedules it.
     tags: [process]
     fields:
       priority: should
@@ -1097,15 +1093,10 @@ artifacts:
     type: requirement
     title: The threat analysis is a full TARA, not a seed
     status: approved
-    release: v0.19.0
-    description: >
-      The cybersecurity schema shall be enabled and populated: assets,
-      threat-scenarios with attack-vector and attack-feasibility, risk
-      assessments with explicit risk-treatment (incl. the accept decisions
-      currently implicit in prose), and cybersecurity goals with CALs. The
-      STPA-Sec back-half (control structure, sec-UCAs, loss scenarios) shall
-      be completed — the overdue v0.1.0 work item — surfacing SH-005/006 as
-      first-class analysis, not retrofitted hazards.
+    release: backlog
+    description: |-
+      The cybersecurity schema shall be enabled and populated: assets, threat-scenarios with attack-vector and attack-feasibility, risk assessments with explicit risk-treatment (incl. the accept decisions currently implicit in prose), and cybersecurity goals with CALs. The STPA-Sec back-half (control structure, sec-UCAs, loss scenarios) shall be completed — the overdue v0.1.0 work item — surfacing SH-005/006 as first-class analysis, not retrofitted hazards.
+       . MOVED TO THE BACKLOG on 2026-10-27, by the maintainer's decision: it was still approved and assigned to v0.19.0, a release that shipped long ago, with no verifying evidence, so the plan counted it as shipped when it was not. It returns to a release when someone schedules it.
     tags: [security]
     fields:
       priority: should
@@ -1116,13 +1107,10 @@ artifacts:
     type: requirement
     title: The archive of record is durable, not a 90-day CI artifact
     status: approved
-    release: v0.20.0
-    description: >
-      A deposited layer's oci-layout archive shall be published to durable,
-      verifiable storage kept independently of any registry or CI retention
-      policy (SL-002: a qualified line must stay reconstructible for the
-      safety-case lifetime). The current retention-90-days workflow artifact
-      contradicts varve's own loss and must be replaced.
+    release: backlog
+    description: |-
+      A deposited layer's oci-layout archive shall be published to durable, verifiable storage kept independently of any registry or CI retention policy (SL-002: a qualified line must stay reconstructible for the safety-case lifetime). The current retention-90-days workflow artifact contradicts varve's own loss and must be replaced.
+       . MOVED TO THE BACKLOG on 2026-10-27, by the maintainer's decision: it was still approved and assigned to v0.20.0, a release that shipped long ago, with no verifying evidence, so the plan counted it as shipped when it was not. It returns to a release when someone schedules it.
     tags: [core, safety]
     fields:
       priority: must
@@ -1132,13 +1120,10 @@ artifacts:
     type: requirement
     title: Client-side append-only log of installs, verifications, refusals
     status: approved
-    release: v0.20.0
-    description: >
-      varve shall write an append-only local record of update events —
-      installs, re-verifications, refusals, staleness warnings, self-updates
-      — so the update history is auditable (R156 record-keeping, IEC 62443
-      CR 2.8), not merely the resulting state. Tamper-evidence via a hash
-      chain is preferred.
+    release: backlog
+    description: |-
+      varve shall write an append-only local record of update events — installs, re-verifications, refusals, staleness warnings, self-updates — so the update history is auditable (R156 record-keeping, IEC 62443 CR 2.8), not merely the resulting state. Tamper-evidence via a hash chain is preferred.
+       . MOVED TO THE BACKLOG on 2026-10-27, by the maintainer's decision: it was still approved and assigned to v0.20.0, a release that shipped long ago, with no verifying evidence, so the plan counted it as shipped when it was not. It returns to a release when someone schedules it.
     tags: [security]
     fields:
       priority: should
@@ -4524,10 +4509,10 @@ artifacts:
   - id: REQ-KEYROLES-001
     type: requirement
     title: A realm's keys are scoped by role, so a signature that is valid can still be out of scope
-    status: proposed
+    status: approved
     description: |-
       REPORTED as varve#148 and sharpened by comparison with criticaltrust, Ferrocene's trust format, which scopes keys BY ROLE — a key that may sign a release manifest is not thereby a key that may sign the index of what exists. varve has one flat root per realm: the same key signs layer manifests, line-status documents, line-index documents and attestations, and nothing in the format says which of those a given key was ever meant to do. . WHY IT MATTERS MORE NOW THAN WHEN IT WAS FILED. The pulseengine realm's key is used by an unattended depositor every 15 minutes (DD-030). One key, one secret, one blast radius: a compromise of the deposit credential is a compromise of everything a consumer trusts about that realm, including the documents that say which layers are yanked and which line-index is current — the very statements a consumer would use to react to the compromise. Role separation is what keeps the reaction channel out of the blast radius. . WHAT THIS REQUIREMENT MUST NOT DO. It must not invent a key hierarchy on its own authority. Custody, succession and what a root may delegate are the maintainer's policy, drafted in varve#113, and that PR's artifacts are deliberately proposed rather than merged. So this requirement's first clause is a DECISION to be taken, not a design to be implemented. . Clauses: (1) The maintainer decides which roles exist — at minimum whether the document-signing role (line-status, line-index) is separable from the layer-signing role — and that decision is recorded before any format change. (2) Where roles exist, the signed artifact shall name the role its signature claims, so a verifier can refuse a signature that is valid but out of scope. A signature that verifies and should not have been made is exactly the failure a flat key cannot express. (3) A realm's published trust material shall be able to carry more than one key, with each key's role stated, or roles are unenforceable at the consumer. (4) The existing single-key realms shall keep working unchanged: a realm that declares no roles behaves as today, because a format change that invalidates every published layer is not a security improvement. (5) It shall be settled BEFORE the v1.0 ceremony (REQ-CEREMONY-001): the provisional rolling root is replaced there, and replacing one flat key with another flat key would spend the one ceremony this project gets on the arrangement it has already outgrown.
-       . MOVED TO v0.38.0 on 2026-09-18, by the maintainer's decision, and the reason is not deprioritisation. v0.37.0 is being cut EARLY because two of its items are finished and both have a waiting consumer: layer.toml can declare a composition, and a realm's stated `unverified-reason` is now an opt-in at deposit rather than only in `plan`. The pulseengine-wasm realm cannot deposit its first layer until a varve RELEASE carries the second of those, so holding the release until this requirement is done would block a realm on work it does not need. Nothing here is descoped; it is the first scope of v0.38.0. . MOVED TO v0.39.0 on 2026-09-24. v0.38.0 was HELD — the maintainer's decision, not mine — until REQ-SDKTARGET-001 landed rather than deferring it a fourth time, and it is now verified. This requirement is a different case: it has never been deferred before and no work has started on it. Key roles change what a signature MEANS, so it wants its own release and its own review rather than riding beside a payload-model change. Recorded here so the count is visible if it is ever moved again. . MOVED TO v0.40.0 on 2026-09-25 — the SECOND deferral, recorded as such. v0.39.0 is cut early on the v0.37.0 precedent: a consumer is blocked. The covalent realm cannot deposit its first layer until a RELEASE carries the composition-only install fix (#191), because its deposit workflow runs a released varve. Key roles are a change to what a signature MEANS and want their own release and their own review; riding them beside a consumer unblock would make one release carry two unrelated reasons to fail. . MOVED TO v0.44.0 on 2026-10-21 — the THIRD deferral, by the maintainer's decision. Clause 1 is the maintainer's decision on which roles exist (varve#113), nothing has started on it, and v0.43.0's other scope (the advisory watcher, the composition support-window cap, SBOM fields, measured mutation debt) has waiting consumers. Key roles change what a signature MEANS and keep their own release and review; clause 5 still binds them to land before the v1.0 ceremony.
+       . MOVED TO v0.38.0 on 2026-09-18, by the maintainer's decision, and the reason is not deprioritisation. v0.37.0 is being cut EARLY because two of its items are finished and both have a waiting consumer: layer.toml can declare a composition, and a realm's stated `unverified-reason` is now an opt-in at deposit rather than only in `plan`. The pulseengine-wasm realm cannot deposit its first layer until a varve RELEASE carries the second of those, so holding the release until this requirement is done would block a realm on work it does not need. Nothing here is descoped; it is the first scope of v0.38.0. . MOVED TO v0.39.0 on 2026-09-24. v0.38.0 was HELD — the maintainer's decision, not mine — until REQ-SDKTARGET-001 landed rather than deferring it a fourth time, and it is now verified. This requirement is a different case: it has never been deferred before and no work has started on it. Key roles change what a signature MEANS, so it wants its own release and its own review rather than riding beside a payload-model change. Recorded here so the count is visible if it is ever moved again. . MOVED TO v0.40.0 on 2026-09-25 — the SECOND deferral, recorded as such. v0.39.0 is cut early on the v0.37.0 precedent: a consumer is blocked. The covalent realm cannot deposit its first layer until a RELEASE carries the composition-only install fix (#191), because its deposit workflow runs a released varve. Key roles are a change to what a signature MEANS and want their own release and their own review; riding them beside a consumer unblock would make one release carry two unrelated reasons to fail. . MOVED TO v0.44.0 on 2026-10-21 — the THIRD deferral, by the maintainer's decision. Clause 1 is the maintainer's decision on which roles exist (varve#113), nothing has started on it, and v0.43.0's other scope (the advisory watcher, the composition support-window cap, SBOM fields, measured mutation debt) has waiting consumers. Key roles change what a signature MEANS and keep their own release and review; clause 5 still binds them to land before the v1.0 ceremony. . DECIDED 2026-10-27 by the maintainer, after the trust-root custody concept (#113) merged. ROLES: an offline ROOT key signs only a delegation naming role keys; a LAYER role signs layer manifests and attestations (held by the depositor); a STATUS role signs line-status, line-index and advisory documents, used on a human merge and never by the unattended deposit job, so the reaction channel sits outside the depositor's blast radius. This matches the concept's succession design, a root that only delegates. v0.44.0 SCOPE: the DsseSigner seam (the concept's sequencing step 1); signed artifacts name the role their signature claims and verifiers refuse a valid signature out of role (clause 2); realm trust material can carry the root and its role keys (clause 3); a realm declaring no roles behaves exactly as today (clause 4). No realm changes its keys in v0.44.0: minting role keys waits for root succession and the v1.0 ceremony (clause 5).
     links:
       - type: derives-from
         target: REQ-CEREMONY-001
@@ -5201,7 +5186,7 @@ artifacts:
     title: A composition's support cap holds transitively, refuses an expired include, and signs the reason it is exceeded
     status: approved
     release: v0.44.0
-    description: "Moved out of REQ-COMPOSEWINDOW-001 by the v0.43.0 clean-room reviews, which found the cap correct for DIRECT includes and incomplete beyond them. Clauses: (1) The cap shall hold transitively: an include that itself includes is capped at the earliest window anywhere below it, read from each layer's own signed line-status, not trusted from the intermediate realm having applied it. (2) An include whose support-until is earlier than the composition's issued-at shall refuse the horizon, never yield a date already in the past. (3) A reason given to exceed the cap shall be carried in the signed line-status beside the date, so 'on the record' means signed, not a CI log. (4) Every layers repository whose layers include others shall pass the layer's manifest to support-horizon in its deposit, and a deposit of a composing layer without it shall be refused rather than silently use the channel's window. Clause 4 needs a released varve carrying REQ-COMPOSEWINDOW-001 first, which is why it was not part of v0.43.0."
+    description: "Moved out of REQ-COMPOSEWINDOW-001 by the v0.43.0 clean-room reviews, which found the cap correct for DIRECT includes and incomplete beyond them. Clauses: (1) The cap shall hold transitively: an include that itself includes is capped at the earliest window anywhere below it, read from each layer's own signed line-status, not trusted from the intermediate realm having applied it. (2) An include whose support-until is earlier than the composition's issued-at shall refuse the horizon, never yield a date already in the past. (3) A reason given to exceed the cap shall be carried in the signed line-status beside the date, so 'on the record' means signed, not a CI log. (4) Every layers repository whose layers include others shall pass the layer's manifest to support-horizon in its deposit, and a deposit of a composing layer without it shall be refused rather than silently use the channel's window. Clause 4 needs a released varve carrying REQ-COMPOSEWINDOW-001 first, which is why it was not part of v0.43.0. . CLAUSE 5 ADDED 2026-10-27 from varve#285, measured in production: covalent included pulseengine-wasm 2026.09.0, whose support ended 2026-10-24, and its layers kept promising support to late November for three days with nothing saying so, because the scanner looks for newer layers on the SAME line and line 2026.09 had none (fixed by hand in covalent-layers#43; layer 2026.10.10 is the first covalent layer capped by its includes, at 2026-11-21). (5) The scanner shall report an include whose line is out of support, or will be within the channel's notice period, and propose the newest supported layer of the next line as a line change in a reviewed pull request, never an unattended move."
     links:
       - type: derives-from
         target: REQ-COMPOSEWINDOW-001
@@ -5259,3 +5244,143 @@ artifacts:
       model: claude-opus-5-5
       timestamp: 2026-10-21T19:12:07Z
     release: v0.44.0
+
+  - id: REQ-SERVELAYER-001
+    type: requirement
+    title: varve-serve reads the layer it is told to read
+    status: approved
+    release: v0.44.0
+    description: "varve#286: --layer is declared and documented but main.rs never reads it, so varve-serve --layer X exits 0 and serves the pin's documentation instead. Clauses: (1) With --layer X different from the pin, the documents served shall be X's; shown by a fixture with two installed layers carrying distinct docs where --check --layer X prints X's label and version. (2) An unknown or uninstalled --layer shall exit non-zero and name the layer. (3) Every flag of the CLI shall be read; removing the use of --layer makes (1) fail."
+    links:
+      - type: derives-from
+        target: REQ-LAYERDOCS-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-AGENTDOCS-001
+    type: requirement
+    title: An agent can ask which documentation the pinned layer carries, for exactly those versions
+    status: approved
+    release: v0.44.0
+    description: "Decided by the maintainer on 2026-10-27 after the MCP research: agents get version-exact documentation from the verified layer, offline. Clauses: (1) varve-serve map --format json shall emit one record per payload of the composition, {realm, layer, name, version, kind, docs:[{name, format, entry, digest}]}, shown against a golden JSON for a two-layer fixture. (2) A payload with no documentation shall appear with docs: []. (3) If any layer fails verification it shall exit non-zero with empty stdout (flip one byte in the store). (4) Two runs shall produce byte-identical output."
+    links:
+      - type: derives-from
+        target: REQ-LAYERDOCS-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-AGENTDOCS-002
+    type: requirement
+    title: An agent can search and read verified documentation text, offline
+    status: approved
+    release: v0.44.0
+    description: "Clauses: (1) varve-serve search <q> --format json shall return hits {doc, path, title, score, snippet, layer, digest}, ordered by score then (doc, path), byte-identical across runs; the index is built at query time from verified bytes and never signed or shipped (the MCP research found a producer-built signed index adds a claim no consumer can check without recomputing it). (2) Hits and pages shall come only from members of verified docs payloads: a stray file planted in the store never appears and a tampered archive is refused. (3) page <doc> <path> for a member that does not exist, including ../ paths, shall exit non-zero and name the doc. (4) Each hit's digest shall equal the payload digest in the signed manifest. (5) It shall succeed with no network, shown on Linux CI under unshare -rn. (6) Markdown, HTML and rustdoc HTML docs payloads shall all be searchable as text."
+    links:
+      - type: derives-from
+        target: REQ-AGENTDOCS-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-AGENTDOCS-003
+    type: requirement
+    title: varve-serve speaks MCP over stdio, so an agent reads the pinned layer's docs as tools
+    status: approved
+    release: v0.44.0
+    description: "Decided by the maintainer on 2026-10-27: build the MCP server in v0.44.0 as a thin adapter over the REQ-AGENTDOCS-001/002 functions, in varve-serve (REQ-LAYERDOCS-001 clause 4 keeps varve itself from serving), ON THE ORG'S OWN FRAMEWORK, pulseengine/mcp (pulseengine-mcp-* crates, v0.17.0 on crates.io), not a third-party SDK or a hand-written loop. Clauses: (1) varve-serve --mcp shall use pulseengine-mcp's stdio transport and create no sockets, shown by strace -f -e trace=socket,bind recording zero calls. (2) It shall expose exactly list_docs, search_docs and read_doc, whose structured results equal the CLI JSON, shown by driving it over pipes. (3) It shall interoperate with the protocol revisions pulseengine-mcp supports, shown by golden transcripts per revision; a revision the framework lacks (2026-07-28 at v0.17.0) is filed in pulseengine/mcp, never patched around in varve. (4) Every line written to stdout shall be valid JSON-RPC. (5) The security topic shall state that documentation text enters an agent's context and can carry prompt injection. (6) The framework's dependencies shall pass varve's cargo deny policy, and anything pulled in only for HTTP/WebSocket transports shall be left out by feature selection."
+    links:
+      - type: derives-from
+        target: REQ-AGENTDOCS-002
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-DOCSINLAYER-001
+    type: requirement
+    title: The pulseengine layer carries varve's own documentation, and Markdown counts as documentation
+    status: approved
+    release: v0.44.0
+    description: "The MCP research measured the pinned pulseengine layer at ONE docs payload (varve-core's rustdoc) and the wasm layer at none, so an agent docs server would have almost nothing to serve. Decided by the maintainer on 2026-10-27. Clauses: (1) The pulseengine realm's layer shall carry the documentation varve's release already signs: varve's rustdoc and its traceability HTML report, each as a [[docs]] payload ingested through the release's verified sums. (2) A tool's Markdown documentation (a docs/ tree or a book) shall be acceptable as a docs payload in format markdown, and varve-serve shall render it as text for map, search and page. (3) Each new docs payload is shown by varve-serve map listing it for the pinned layer."
+    links:
+      - type: derives-from
+        target: REQ-LAYERDOCS-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-BUILTINDOCS-001
+    type: requirement
+    title: A tool's built-in docs topics are served from the verified binary that carries them
+    status: approved
+    release: v0.44.0
+    description: "rivet, varve-producer and varve-serve answer version-exact questions with their own docs command (rivet docs has 57 topics), and harvesting that output at deposit would mean running third-party binaries in the signing pipeline. Decided by the maintainer on 2026-10-27: serve them on demand from the verified binary. Clauses: (1) layer.toml shall be able to declare a tool's docs-command (the argv that lists topics and the one that prints one, with --format json where the tool offers it), signed into the layer as an annotation. (2) varve-serve map shall list those topics, and page shall print one, by running ONLY the binary the layer verified, re-verified against its signed digest at that moment, with no shell, a clean environment, no network where the platform allows, and a time limit. (3) A tool with no declared docs-command is never executed by varve-serve. (4) The output is treated as untrusted text (the same prompt-injection warning as REQ-AGENTDOCS-003 clause 5)."
+    links:
+      - type: derives-from
+        target: REQ-AGENTDOCS-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T20:00:16Z
+
+  - id: REQ-RENODE-001
+    type: requirement
+    title: A layer carries Renode platform definitions, and any Renode finds them without touching its install
+    status: approved
+    release: v0.45.0
+    description: "From the Zephyr/Renode research (2026-10-27) and the maintainer's decisions: DEFINITIONS ONLY, users bring their own Renode (Renode publishes no checksums, signatures or attestations, so carrying the runtime would be an unverified, Linux-only opt-in). Definitions are code, not data (.resc runs commands, .robot runs Python), so they need the same proof rung as a tool. Clauses: (1) A new held payload kind `renode` (role definitions) shall be declarable in layer.toml with a namespace, a tested Renode version list and a supported range, signed into the layer and shown by varve inspect. (2) The deposit shall refuse a carried .resc or .repl that references a path outside its own tree or relative to the working directory (`@hardware/...`), naming the file; $ORIGIN-relative paths are accepted. (3) varve export-renode --out D shall lay the definitions down verbatim under D/defs/<namespace>/, write D/defs/varve-renode.resc containing the path add, and stamp per-tree digests (needs varve#288), so `include @D/defs/varve-renode.resc` then `@<namespace>/<file>` resolves in an unmodified Renode. (4) An export can never override a file Renode ships, because Renode searches its own install first and the namespace is unique; shown by a test that a namespaced name never resolves to a built-in. . NO PYTHON, decided by the maintainer on 2026-10-27: varve distributes the BLOCKS a project adds (a Renode platform model, a Zephyr module), never the full Renode or Zephyr, and deploying a block shall need no Python on the consumer's machine. The user's own Renode or Zephyr installation, and whatever it needs, stays theirs. (5) A renode definitions payload shall be usable by plain Renode with no host Python: its self-test is a .resc that `renode --console --disable-xwt` runs and that exits non-zero on failure. Robot suites may travel as optional extras, but nothing in the layer's own check depends on renode-test or Robot Framework. Renode's built-in IronPython peripherals (pydev, e.g. flipflop.py) are part of Renode, not host Python, and are allowed."
+    links:
+      - type: derives-from
+        target: REQ-EXPORTDECL-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T21:32:28Z
+
+  - id: REQ-JESSRENODE-001
+    type: requirement
+    title: The jess Pixhawk 6X-RT Renode model is distributed through the layer and boots, offline, from the export alone
+    status: approved
+    release: v0.45.0
+    description: "The maintainer's first concrete case (2026-10-27): ship jess's stable core now, the PX4 bring-up parts later as their own version. Prerequisites in jess: an Apache-2.0 OR MIT licence, $ORIGIN-relative paths in its .resc scripts, and a release asset (described in a jess issue). Clauses: (1) jess publishes the stable core (pixhawk6xrt.repl, vehicle/rt1176-dualcore.repl, rt1176-smoke.resc/.robot and the smoke ELF with its boot.S/link.ld, plus READMEs and a generated renode-model.toml) as ONE deterministic archive listed by a committed MODEL.files, built before SHA256SUMS so its existing cosign signature and build provenance cover it, and released only after the self-test passes on the UNPACKED archive. (2) The pulseengine layer carries it as kind renode, role definitions, on the cosign rung, namespace pulseengine/jess, with a signed fidelity statement that it is a bring-up model not yet cross-validated against the board (jess REQ-PIX-011). (3) With the network removed (proved by a failing curl), from /, and with NO Python on PATH, the exported smoke self-test .resc passes under plain `renode --console --disable-xwt` and the exported dual-core platform loads through the generated path-add script, on every Renode version the layer lists as tested (1.16.1 first); without the include the load fails, and one flipped byte in the exported .repl fails varve verify. . NO PYTHON, decided by the maintainer on 2026-10-27: varve distributes the BLOCKS a project adds (a Renode platform model, a Zephyr module), never the full Renode or Zephyr, and deploying a block shall need no Python on the consumer's machine. The user's own Renode or Zephyr installation, and whatever it needs, stays theirs. The jess smoke check therefore ships as a .resc that asserts the UART line itself; rt1176-smoke.robot may travel as an optional extra."
+    links:
+      - type: derives-from
+        target: REQ-RENODE-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T21:32:28Z
+
+  - id: REQ-ZMODEXPORT-001
+    type: requirement
+    title: A project adds a verified Zephyr module to its own Zephyr build without changing its west.yml
+    status: approved
+    release: v0.45.0
+    description: "From the narrowed Zephyr research (2026-10-27): varve carries the Zephyr modules a project ADDS, not Zephyr itself. The maintainer chose that gale, the org's only Zephyr module, reaches the strongest proof through a deterministic module source archive under its existing cosign-signed SHA256SUMS, so no new proof rung is needed for it; the signed-git-tag rung for mirrored third-party modules is later work. Clauses: (1) A zephyr-module payload shall carry the module tree with its zephyr/module.yml, and the deposit shall refuse a tree without one. (2) varve export-zephyr-modules --out D shall write each module tree and D/zephyr-extra-modules.cmake appending them to ZEPHYR_EXTRA_MODULES, usable as `west build ... -- -C D/zephyr-extra-modules.cmake` or a plain cmake build, never editing the team's west.yml. (3) The export shall refuse a module whose name collides with one the workspace already provides, unless --override is given (Zephyr itself lets the later one silently win), and shall refuse an incomplete `build: depends` closure. (4) With the network removed, a Zephyr test that needs gale builds for a board using gale only from the export, and the same build without the cmake script fails; one flipped byte in the exported tree fails varve verify (varve#288). Stated scope: this proves the added module is offline and verified, not Zephyr or Python. . NO PYTHON, decided by the maintainer on 2026-10-27: varve distributes the BLOCKS a project adds (a Renode platform model, a Zephyr module), never the full Renode or Zephyr, and deploying a block shall need no Python on the consumer's machine. The user's own Renode or Zephyr installation, and whatever it needs, stays theirs. (5) varve's deposit and export of a zephyr-module shall need no Python. A module whose zephyr/module.yml declares `package-managers: pip` requirements adds a Python dependency to every build that uses it, so the deposit shall refuse it unless the layer records an explicit opt-in naming those requirements, and varve inspect shall show it. Zephyr's own build already needs the user's Python; that is outside this requirement."
+    links:
+      - type: derives-from
+        target: REQ-EXPORTDECL-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T21:32:28Z
+
+  - id: REQ-BLOBLICENCE-001
+    type: requirement
+    title: A vendor blob travels in a layer only when its licence permits redistribution, and says so
+    status: approved
+    release: v0.45.0
+    description: "The maintainer's decision (2026-10-27): carry vendor HAL blobs where the licence allows. Clauses: (1) A blob a carried module declares is ingested only with its sha256 matching the module's own zephyr/module.yml, and only if its declared licence is on the realm's redistribution allow-list. (2) A blob whose licence requires click-through acceptance is refused unless the realm records that acceptance in the signed layer. (3) Each carried blob's licence appears in the layer SBOM (REQ-SBOMFIELDS-001)."
+    links:
+      - type: derives-from
+        target: REQ-ZMODEXPORT-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-10-27T21:32:28Z
