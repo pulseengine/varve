@@ -118,6 +118,10 @@ pub struct Payload {
     pub release: String,
     pub sbom_asset: Option<String>,
     pub sbom_sha256: Option<String>,
+    /// The entry is `kind = crate`: its tool annotation is its own crate
+    /// name, checked against RustSec by that name and `version`
+    /// (REQ-ADVISORYWATCH-002 clause 2).
+    pub is_crate: bool,
 }
 
 /// What the watcher could not check about one manifest entry, and why.
@@ -211,6 +215,7 @@ pub fn classify_entry(entry: &varve_core::manifest::ManifestEntry) -> Result<Pay
         release,
         sbom_asset: ann(varve_core::ANN_SBOM),
         sbom_sha256: ann(varve_core::ANN_SBOM_SHA256),
+        is_crate: matches!(entry.kind(), Ok(PayloadKind::Crate)),
     })
 }
 
@@ -274,6 +279,7 @@ pub fn unchecked_from_not_checked(items: &[NotChecked]) -> Vec<UncheckedReport> 
 /// platform of a line, and the full list of layers that carry it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DedupedPayload {
+    pub is_crate: bool,
     pub repo: String,
     pub version: String,
     pub release: String,
@@ -284,7 +290,7 @@ pub struct DedupedPayload {
     pub layers: Vec<String>,
 }
 
-/// De-duplicate by (repo, version) across every layer and platform of a
+/// De-duplicate by (repo, version, release, tool) across every layer and platform of a
 /// line (REQ-ADVISORYWATCH-001 clause 3). `per_layer` is `(layer id,
 /// payloads that layer's manifest carries)`.
 ///
@@ -292,12 +298,25 @@ pub struct DedupedPayload {
 /// sibling's is carried forward — every entry for one (repo, version) is
 /// the same release, so this is filling in what one entry happened to omit,
 /// never choosing between two different claims.
+///
+/// The release and the tool name are part of the key (REQ-ADVISORYWATCH-002
+/// clauses 4 and 5): two releases of one repository and version each have
+/// their own SBOM, and an advisory is matched against the package that names
+/// the payload, so a payload cannot lose its name to a sibling's.
 pub fn dedup_payloads(per_layer: &[(String, Vec<Payload>)]) -> Vec<DedupedPayload> {
-    let mut by_key: BTreeMap<(String, String), DedupedPayload> = BTreeMap::new();
+    type Key = (String, String, String, String, bool);
+    let mut by_key: BTreeMap<Key, DedupedPayload> = BTreeMap::new();
     for (layer, payloads) in per_layer {
         for p in payloads {
-            let key = (p.repo.clone(), p.version.clone());
+            let key = (
+                p.repo.clone(),
+                p.version.clone(),
+                p.release.clone(),
+                p.tool.clone(),
+                p.is_crate,
+            );
             let entry = by_key.entry(key).or_insert_with(|| DedupedPayload {
+                is_crate: p.is_crate,
                 repo: p.repo.clone(),
                 version: p.version.clone(),
                 release: p.release.clone(),
@@ -327,9 +346,7 @@ pub fn dedup_payloads(per_layer: &[(String, Vec<Payload>)]) -> Vec<DedupedPayloa
         d.layers
             .sort_by_key(|l| l.parse::<varve_core::LayerId>().ok());
     }
-    out.sort_by(|a, b| {
-        (a.repo.as_str(), a.version.as_str()).cmp(&(b.repo.as_str(), b.version.as_str()))
-    });
+    // `by_key` iterates in key order: repo, version, release, tool, kind.
     out
 }
 
@@ -430,12 +447,62 @@ pub fn ghsa_package_names(json: &str) -> Result<Vec<String>, WatchError> {
     Ok(names.into_iter().collect())
 }
 
-/// Every finding and every undecidable advisory affecting `version`,
-/// unioned across every package name the repository's GHSA JSON mentions —
-/// a single advisory id is kept at most once even when it matched under
-/// more than one package name.
-pub fn ghsa_for_payload(json: &str, version: &Version) -> Result<GhsaResult, WatchError> {
-    let names = ghsa_package_names(json)?;
+/// Every advisory of the repository none of whose vulnerable packages is in
+/// `own_names`, as `GHSA-id (package, package)`. These are the advisories
+/// [`ghsa_for_payload`] does not match against the payload; they are reported
+/// so that not matching them is never silent.
+pub fn ghsa_not_naming(json: &str, own_names: &[String]) -> Result<Vec<String>, WatchError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| failed("GHSA advisories JSON", e))?;
+    let arr = v.as_array().ok_or_else(|| {
+        failed(
+            "GHSA advisories JSON",
+            "expected a JSON array of advisories",
+        )
+    })?;
+    let mut out = Vec::new();
+    for advisory in arr {
+        let Some(id) = advisory.get("ghsa_id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        let mut packages = BTreeSet::new();
+        if let Some(vulns) = advisory.get("vulnerabilities").and_then(|v| v.as_array()) {
+            for vuln in vulns {
+                if let Some(name) = vuln
+                    .get("package")
+                    .and_then(|p| p.get("name"))
+                    .and_then(|n| n.as_str())
+                {
+                    packages.insert(name);
+                }
+            }
+        }
+        if packages.is_empty() || packages.iter().any(|n| own_names.iter().any(|o| o == n)) {
+            continue;
+        }
+        out.push(format!(
+            "{id} ({})",
+            packages.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    Ok(out)
+}
+
+/// Every finding and every undecidable advisory affecting `version`, matched
+/// against the package ranges that NAME the payload (`own_names`) and no
+/// other range of the repository (REQ-ADVISORYWATCH-002 clause 5). An
+/// advisory that lists another package of the same repository, with a range
+/// the payload's version happens to fall inside, is not a finding about this
+/// payload. A single advisory id is kept at most once.
+pub fn ghsa_for_payload(
+    json: &str,
+    version: &Version,
+    own_names: &[String],
+) -> Result<GhsaResult, WatchError> {
+    let names: Vec<String> = ghsa_package_names(json)?
+        .into_iter()
+        .filter(|n| own_names.contains(n))
+        .collect();
     let mut findings: Vec<Finding> = Vec::new();
     let mut undecidable: Vec<advisory::Undecidable> = Vec::new();
     for name in names {
@@ -502,37 +569,128 @@ pub fn first_heading(md: &str) -> Option<String> {
 // Upstream SBOM components (clause 4b).
 // ---------------------------------------------------------------------
 
-fn components_of(value: &serde_json::Value, into: &mut Vec<(String, String)>) {
-    if let Some(mc) = value.get("metadata").and_then(|m| m.get("component"))
-        && let (Some(name), Some(version)) = (
-            mc.get("name").and_then(|x| x.as_str()),
-            mc.get("version").and_then(|x| x.as_str()),
-        )
-    {
-        into.push((name.to_string(), version.to_string()));
-    }
-    if let Some(comps) = value.get("components").and_then(|c| c.as_array()) {
-        for c in comps {
-            if let (Some(name), Some(version)) = (
-                c.get("name").and_then(|x| x.as_str()),
-                c.get("version").and_then(|x| x.as_str()),
-            ) {
-                into.push((name.to_string(), version.to_string()));
-            }
+/// One component of a CycloneDX upstream SBOM, as the SBOM states it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SbomComponent {
+    pub name: String,
+    pub version: Option<String>,
+    pub purl: Option<String>,
+}
+
+fn component_of(value: &serde_json::Value) -> Option<SbomComponent> {
+    let text = |k: &str| value.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    Some(SbomComponent {
+        name: text("name")?,
+        version: text("version"),
+        purl: text("purl"),
+    })
+}
+
+/// Walk `components[]` and every `components[]` nested inside a component,
+/// however deep (CycloneDX nests; a walk that stops at the first level skips
+/// what the nested components carry). Recursion is bounded by serde_json's
+/// own parse depth limit.
+fn walk_components(value: &serde_json::Value, into: &mut Vec<SbomComponent>) {
+    let Some(comps) = value.get("components").and_then(|c| c.as_array()) else {
+        return;
+    };
+    for c in comps {
+        if let Some(sc) = component_of(c) {
+            into.push(sc);
         }
+        walk_components(c, into);
     }
 }
 
-/// Every `(name, version)` component a CycloneDX upstream SBOM names —
-/// `metadata.component` (the subject itself) plus every entry of
-/// `components[]` (clause 4b: "take every component's (name, version) plus
-/// `metadata.component`").
-pub fn sbom_components(bytes: &[u8]) -> Result<Vec<(String, String)>, WatchError> {
+/// Every component a CycloneDX upstream SBOM names — `metadata.component`
+/// (the subject itself, and what is nested in it) plus every entry of
+/// `components[]`, nested ones included (REQ-ADVISORYWATCH-002 clause 3).
+pub fn sbom_components(bytes: &[u8]) -> Result<Vec<SbomComponent>, WatchError> {
     let v: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|e| failed("upstream SBOM", e))?;
     let mut out = Vec::new();
-    components_of(&v, &mut out);
+    if let Some(mc) = v.get("metadata").and_then(|m| m.get("component")) {
+        if let Some(sc) = component_of(mc) {
+            out.push(sc);
+        }
+        walk_components(mc, &mut out);
+    }
+    walk_components(&v, &mut out);
     Ok(out)
+}
+
+/// The ecosystem a purl names, lowercased: `pkg:cargo/serde@1` is `cargo`.
+/// `None` for text that is not a purl. Ecosystem is decided by THIS, never
+/// by a bare component name, so an npm package called `serde` cannot match a
+/// crate advisory (REQ-ADVISORYWATCH-002 clause 3).
+pub fn purl_type(purl: &str) -> Option<String> {
+    let rest = purl.strip_prefix("pkg:")?;
+    let ty = rest.split('/').next()?;
+    if ty.is_empty() || ty.len() == rest.len() {
+        return None;
+    }
+    Some(ty.to_ascii_lowercase())
+}
+
+/// The package name a `pkg:cargo/<name>@<version>?...#...` purl names. A
+/// nested bin-target component shares its parent crate's purl, so the purl —
+/// not the component's display name — says which crate it is.
+fn cargo_purl_name(purl: &str) -> String {
+    // Only called for a purl whose type was read, which needs a `/`.
+    let after = purl.split_once('/').map_or("", |(_, after)| after);
+    // An empty or malformed name is returned as is: the caller refuses it
+    // as "not a valid crate name" before it is ever looked up.
+    after
+        .split(['@', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// What one SBOM component is to the RustSec check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComponentClass {
+    /// A crate with a version: look it up by this name and version.
+    Crate { name: String, version: String },
+    /// Not checkable, and why.
+    Unchecked(String),
+}
+
+/// Decide what to do with one component: check it, or say why not.
+pub fn classify_component(c: &SbomComponent) -> ComponentClass {
+    let Some(purl) = c.purl.as_deref() else {
+        return ComponentClass::Unchecked(format!(
+            "SBOM component {} has no purl, so its ecosystem is unknown and a bare name is \
+             never matched against crate advisories",
+            c.name
+        ));
+    };
+    match purl_type(purl).as_deref() {
+        Some("cargo") => {}
+        Some(other) => {
+            return ComponentClass::Unchecked(format!(
+                "SBOM component {} is of ecosystem {other} (purl type), which RustSec does \
+                 not cover",
+                c.name
+            ));
+        }
+        None => {
+            return ComponentClass::Unchecked(format!(
+                "SBOM component {} has a purl this watcher cannot read ({purl}), so its \
+                 ecosystem is unknown",
+                c.name
+            ));
+        }
+    }
+    let Some(version) = c.version.clone() else {
+        return ComponentClass::Unchecked(format!(
+            "SBOM component {} has no version, so there is no exact version to match an \
+             advisory's range against",
+            c.name
+        ));
+    };
+    let name = cargo_purl_name(purl);
+    ComponentClass::Crate { name, version }
 }
 
 /// The sha256 of `bytes`, as lowercase hex — the same form `layer.toml`
@@ -1099,7 +1257,27 @@ fn watch_line<G: AdvisoryGh, S: LayerSource>(
                 j
             }
         };
-        let result = ghsa_for_payload(&json, &version)?;
+        // Only the package range that names THIS payload decides
+        // (REQ-ADVISORYWATCH-002 clause 5). When the repository's advisories
+        // name packages and none is this payload, nothing was matched, and
+        // that is said rather than read as a clean check.
+        let unmatched = ghsa_not_naming(&json, std::slice::from_ref(&p.tool))?;
+        if !unmatched.is_empty() {
+            unchecked.push(UncheckedReport {
+                tool: p.tool.clone(),
+                version: p.version.clone(),
+                repo: p.repo.clone(),
+                reason: format!(
+                    "{} advisor{} of the repository name only other packages and {} not matched \
+                     against this payload: {}",
+                    unmatched.len(),
+                    if unmatched.len() == 1 { "y" } else { "ies" },
+                    if unmatched.len() == 1 { "was" } else { "were" },
+                    unmatched.join(", ")
+                ),
+            });
+        }
+        let result = ghsa_for_payload(&json, &version, std::slice::from_ref(&p.tool))?;
         for f in &result.findings {
             let (severity, defaulted_reason) = ghsa_severity(f);
             if let Some(reason) = defaulted_reason {
@@ -1139,6 +1317,12 @@ fn watch_line<G: AdvisoryGh, S: LayerSource>(
 
     // Upstream SBOM -> RustSec (clause 2 + 4b + 4c).
     for p in &deduped {
+        // What this payload is checked against RustSec as: a crate payload
+        // is its own first component (REQ-ADVISORYWATCH-002 clause 2).
+        let mut to_check: Vec<(String, String)> = Vec::new();
+        if p.is_crate {
+            to_check.push((p.tool.clone(), p.version.clone()));
+        }
         let bytes = match (&p.sbom_asset, &p.sbom_sha256) {
             (Some(asset), Some(sha)) => {
                 let key = (p.repo.clone(), p.release.clone(), asset.clone());
@@ -1222,26 +1406,47 @@ fn watch_line<G: AdvisoryGh, S: LayerSource>(
                 }
             }
         };
-        let Some(bytes) = bytes else {
-            continue;
-        };
         // The SBOM is scoped to THIS payload alone — not shared with any
         // other payload the way the GHSA repo listing is — so malformed
         // bytes are a coverage gap for this one payload, never a reason to
         // abort every other payload and line the run is looking at.
-        let components = match sbom_components(&bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                unchecked.push(UncheckedReport {
-                    tool: p.tool.clone(),
-                    version: p.version.clone(),
-                    repo: p.repo.clone(),
-                    reason: format!("SBOM could not be parsed: {e}"),
-                });
-                continue;
+        if let Some(bytes) = bytes {
+            match sbom_components(&bytes) {
+                Ok(components) => {
+                    // Every component is checked or reported with its reason
+                    // (REQ-ADVISORYWATCH-002 clause 3).
+                    for c in &components {
+                        match classify_component(c) {
+                            ComponentClass::Crate { name, version } => {
+                                if !to_check.contains(&(name.clone(), version.clone())) {
+                                    to_check.push((name, version));
+                                }
+                            }
+                            ComponentClass::Unchecked(reason) => {
+                                let report = UncheckedReport {
+                                    tool: p.tool.clone(),
+                                    version: p.version.clone(),
+                                    repo: p.repo.clone(),
+                                    reason,
+                                };
+                                if !unchecked.contains(&report) {
+                                    unchecked.push(report);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    unchecked.push(UncheckedReport {
+                        tool: p.tool.clone(),
+                        version: p.version.clone(),
+                        repo: p.repo.clone(),
+                        reason: format!("SBOM could not be parsed: {e}"),
+                    });
+                }
             }
-        };
-        for (name, ver) in components {
+        }
+        for (name, ver) in to_check {
             // Refuse BEFORE ever asking: `name` is untrusted text from an
             // upstream SBOM, and it is about to be interpolated into a URL
             // path. A name that cannot be a real crate cannot have RustSec
@@ -1764,6 +1969,7 @@ mod tests {
             release: version.into(),
             sbom_asset: None,
             sbom_sha256: None,
+            is_crate: false,
         }
     }
 
@@ -2028,23 +2234,31 @@ mod tests {
         );
     }
 
-    /// The whole point of per-package-name union: a varve payload named
-    /// "wasmtime" is still affected by an advisory that only lists
-    /// "wasmtime-wasi" as its vulnerable package, because the release is
-    /// versioned in lockstep.
-    // rivet: verifies REQ-ADVISORYWATCH-001
+    /// A payload named "wasmtime" is matched by the advisory that names
+    /// "wasmtime" and NOT by the one that only lists "wasmtime-wasi"
+    /// (REQ-ADVISORYWATCH-002 clause 5; REQ-ADVISORYWATCH-001 clause 4a
+    /// used to union every package name of the repository). Naming both
+    /// names both.
+    // rivet: verifies REQ-ADVISORYWATCH-002
     #[test]
-    fn ghsa_for_payload_finds_an_advisory_under_a_different_internal_package_name() {
+    fn ghsa_for_payload_matches_only_the_packages_that_name_the_payload() {
         let v = Version::parse("49.0.1").unwrap();
-        let result = ghsa_for_payload(MULTI_PACKAGE_GHSA, &v).unwrap();
-        let ids: BTreeSet<_> = result.findings.iter().map(|f| f.id.clone()).collect();
-        assert_eq!(
-            ids,
-            ["GHSA-aaaa", "GHSA-bbbb"]
-                .into_iter()
-                .map(str::to_string)
+        let ids = |names: &[&str]| -> BTreeSet<String> {
+            let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+            ghsa_for_payload(MULTI_PACKAGE_GHSA, &v, &names)
+                .unwrap()
+                .findings
+                .iter()
+                .map(|f| f.id.clone())
                 .collect()
+        };
+        assert_eq!(ids(&["wasmtime"]), ["GHSA-aaaa".to_string()].into());
+        assert_eq!(ids(&["wasmtime-wasi"]), ["GHSA-bbbb".to_string()].into());
+        assert_eq!(
+            ids(&["wasmtime", "wasmtime-wasi"]),
+            ["GHSA-aaaa".to_string(), "GHSA-bbbb".to_string()].into()
         );
+        assert!(ids(&["unrelated"]).is_empty());
     }
 
     /// A single advisory matched under TWO different package names must not
@@ -2063,7 +2277,7 @@ mod tests {
             ]
         }]"#;
         let v = Version::parse("1.0.0").unwrap();
-        let result = ghsa_for_payload(json, &v).unwrap();
+        let result = ghsa_for_payload(json, &v, &["a".to_string(), "b".to_string()]).unwrap();
         assert_eq!(result.findings.len(), 1);
     }
 
@@ -2083,7 +2297,7 @@ mod tests {
             ]
         }]"#;
         let v = Version::parse("1.0.0").unwrap();
-        let result = ghsa_for_payload(json, &v).unwrap();
+        let result = ghsa_for_payload(json, &v, &["a".to_string(), "b".to_string()]).unwrap();
         assert!(result.findings.is_empty());
         assert_eq!(result.undecidable.len(), 1, "{:?}", result.undecidable);
         assert_eq!(result.undecidable[0].id, "GHSA-dup-undecidable");
@@ -2093,7 +2307,7 @@ mod tests {
     #[test]
     fn unparseable_ghsa_json_is_an_error() {
         let v = Version::parse("1.0.0").unwrap();
-        assert!(ghsa_for_payload("not json", &v).is_err());
+        assert!(ghsa_for_payload("not json", &v, &[]).is_err());
         assert!(ghsa_package_names("not json").is_err());
     }
 
@@ -2179,11 +2393,17 @@ unaffected = ["< 0.21.0"]
         let out = sbom_components(CYCLONEDX_SBOM.as_bytes()).unwrap();
         assert_eq!(
             out,
-            vec![
-                ("wsc".to_string(), "0.11.0".to_string()),
-                ("rustls".to_string(), "0.23.34".to_string()),
-                ("ring".to_string(), "0.17.8".to_string()),
-            ]
+            ["wsc:0.11.0", "rustls:0.23.34", "ring:0.17.8"]
+                .iter()
+                .map(|s| {
+                    let (n, v) = s.split_once(':').unwrap();
+                    SbomComponent {
+                        name: n.to_string(),
+                        version: Some(v.to_string()),
+                        purl: None,
+                    }
+                })
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2216,12 +2436,17 @@ unaffected = ["< 0.21.0"]
                 sbom_components(sbom.as_bytes()).unwrap_or_else(|e| panic!("{label}: {e}"));
             assert!(!components.is_empty(), "{label}: no components at all");
             let mut saw_build_metadata = false;
-            for (name, version) in &components {
+            for c in &components {
+                let (name, version) = (&c.name, c.version.as_deref().expect("versioned"));
                 if version.contains('+') {
                     saw_build_metadata = true;
                 }
                 Version::parse(version)
                     .unwrap_or_else(|e| panic!("{label}: {name} {version}: {e}"));
+                assert!(
+                    matches!(classify_component(c), ComponentClass::Crate { .. }),
+                    "{label}: {name} is a cargo component and must be checkable"
+                );
             }
             assert!(
                 saw_build_metadata,
@@ -2765,8 +2990,9 @@ unaffected = ["< 0.21.0"]
         (source.with_manifest(&envelope), digest)
     }
 
-    /// The real fixture the requirement names: 23 findings for 49.0.1, zero
-    /// for 49.0.3.
+    /// The real fixture the requirement names: 75 advisories, 59 of which name
+    /// the `wasmtime` package; 15 of those are findings for 49.0.1 and none for
+    /// 49.0.3.
     const WASMTIME_LIVE: &str = include_str!("../tests/fixtures/wasmtime-ghsa-2026-10-15.json");
 
     /// `affected` is sorted by layer NUMBER, not lexicographically — three
@@ -2810,7 +3036,7 @@ unaffected = ["< 0.21.0"]
                 crate::orchestrate::ReleaseSbomOutcome::NoSbom,
             );
         let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
-        assert_eq!(report.lines[0].new_known_problems.len(), 23);
+        assert_eq!(report.lines[0].new_known_problems.len(), 15);
 
         let written: LineStatus = serde_json::from_str(
             &std::fs::read_to_string(root.join("line-status/2026.10.json")).unwrap(),
@@ -2869,14 +3095,14 @@ unaffected = ["< 0.21.0"]
         let line = &report.lines[0];
         assert_eq!(line.line, "2026.10");
         assert!(line.wrote);
-        assert_eq!(line.new_known_problems.len(), 23, "{line:?}");
+        assert_eq!(line.new_known_problems.len(), 15, "{line:?}");
 
         let written: LineStatus = serde_json::from_str(
             &std::fs::read_to_string(root.join("line-status/2026.10.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(written.counter, 1);
-        assert_eq!(written.known_problems.len(), 23);
+        assert_eq!(written.known_problems.len(), 15);
         // 49.0.1's layer is affected; 49.0.3's is not.
         for kp in &written.known_problems {
             assert_eq!(kp.affected, vec!["2026.10.0".to_string()], "{kp:?}");
@@ -2932,7 +3158,7 @@ unaffected = []
         dep_version: &str,
     ) -> Vec<u8> {
         format!(
-            r#"{{"metadata":{{"component":{{"name":"{tool}","version":"{tool_version}"}}}},"components":[{{"name":"{dep_name}","version":"{dep_version}"}}]}}"#
+            r#"{{"metadata":{{"component":{{"name":"{tool}","version":"{tool_version}","purl":"pkg:cargo/{tool}@{tool_version}"}}}},"components":[{{"name":"{dep_name}","version":"{dep_version}","purl":"pkg:cargo/{dep_name}@{dep_version}"}}]}}"#
         )
         .into_bytes()
     }
@@ -3166,7 +3392,7 @@ patched = ["not a requirement at all"]
 "#;
 
     fn sbom_bytes() -> Vec<u8> {
-        br#"{"metadata":{"component":{"name":"wsc","version":"0.11.0"}},"components":[{"name":"rustls","version":"0.23.34"}]}"#.to_vec()
+        br#"{"metadata":{"component":{"name":"wsc","version":"0.11.0","purl":"pkg:cargo/wsc@0.11.0"}},"components":[{"name":"rustls","version":"0.23.34","purl":"pkg:cargo/rustls@0.23.34"}]}"#.to_vec()
     }
 
     /// A layer manifest payload for one tool, carrying a recorded
@@ -3471,7 +3697,7 @@ patched = ["not a requirement at all"]
 
     fn sbom_bytes_with_component(name: &str, version: &str) -> Vec<u8> {
         format!(
-            r#"{{"metadata":{{"component":{{"name":"wsc","version":"0.11.0"}}}},"components":[{{"name":"{name}","version":"{version}"}}]}}"#
+            r#"{{"metadata":{{"component":{{"name":"wsc","version":"0.11.0","purl":"pkg:cargo/wsc@0.11.0"}}}},"components":[{{"name":"{name}","version":"{version}","purl":"pkg:cargo/{name}@{version}"}}]}}"#
         )
         .into_bytes()
     }
@@ -3576,9 +3802,9 @@ patched = ["not a requirement at all"]
     // rivet: verifies REQ-ADVISORYWATCH-001
     #[test]
     fn an_sbom_component_with_a_prerelease_version_is_undecidable_not_aborting() {
-        let sbom = br#"{"metadata":{"component":{"name":"wsc","version":"0.11.0"}},"components":[
-            {"name":"rustls","version":"0.23.34"},
-            {"name":"somecrate","version":"1.0.0-rc.1"}
+        let sbom = br#"{"metadata":{"component":{"name":"wsc","version":"0.11.0","purl":"pkg:cargo/wsc@0.11.0"}},"components":[
+            {"name":"rustls","version":"0.23.34","purl":"pkg:cargo/rustls@0.23.34"},
+            {"name":"somecrate","version":"1.0.0-rc.1","purl":"pkg:cargo/somecrate@1.0.0-rc.1"}
         ]}"#
         .to_vec();
         let sha = sha256_hex(&sbom);
@@ -3624,9 +3850,9 @@ patched = ["not a requirement at all"]
     // rivet: verifies REQ-ADVISORYWATCH-001
     #[test]
     fn an_sbom_component_with_a_garbage_version_is_undecidable_not_aborting() {
-        let sbom = br#"{"metadata":{"component":{"name":"wsc","version":"0.11.0"}},"components":[
-            {"name":"rustls","version":"0.23.34"},
-            {"name":"somecrate","version":"banana"}
+        let sbom = br#"{"metadata":{"component":{"name":"wsc","version":"0.11.0","purl":"pkg:cargo/wsc@0.11.0"}},"components":[
+            {"name":"rustls","version":"0.23.34","purl":"pkg:cargo/rustls@0.23.34"},
+            {"name":"somecrate","version":"banana","purl":"pkg:cargo/somecrate@banana"}
         ]}"#
         .to_vec();
         let sha = sha256_hex(&sbom);
@@ -3750,7 +3976,7 @@ patched = ["not a requirement at all"]
         // The OTHER payload (wasmtime) is still checked normally.
         assert_eq!(
             report.lines[0].new_known_problems.len(),
-            23,
+            15,
             "{:?}",
             report.lines[0]
         );
@@ -4935,5 +5161,472 @@ patched = ["not a requirement at all"]
             }
             other => panic!("expected VerifyFailed carrying gh's own words, got {other:?}"),
         }
+    }
+
+    // -------------------------------------------------------------
+    // REQ-ADVISORYWATCH-002 clauses 2-5.
+    // -------------------------------------------------------------
+
+    /// Clause 2. A crate payload is `kind = crate`; its own crate name is
+    /// its tool annotation. Its repository has NO advisories, so only a
+    /// RustSec lookup by its own name and version can flag it.
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn a_crate_payload_is_checked_against_rustsec_by_its_own_name_and_version() {
+        let root = scratch("crate-payload");
+        let (source, digest) = with_raw_entries(
+            MemorySource::new(),
+            "2026.10.0",
+            &[
+                r#"{"digest":"sha256:c1","annotations":{"eu.pulseengine.varve.kind":"crate","eu.pulseengine.tool":"rustls","eu.pulseengine.tool.version":"0.23.34","eu.pulseengine.source.repo":"rustls/rustls"}}"#,
+            ],
+        );
+        write_index(&root, "2026.10", &[("2026.10.0", &digest)]);
+        let gh = FakeGh::default()
+            .ghsa("rustls/rustls", "[]")
+            .release_sbom_outcome(
+                "rustls/rustls",
+                "0.23.34",
+                "0.23.34",
+                crate::orchestrate::ReleaseSbomOutcome::NoSbom,
+            )
+            .rustsec_dir("rustls", &["RUSTSEC-2026-0346.md"])
+            .rustsec_md("rustls", "RUSTSEC-2026-0346.md", RUSTSEC_0346);
+
+        let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
+        assert_eq!(
+            report.lines[0].new_known_problems,
+            vec!["RUSTSEC-2026-0346".to_string()],
+            "{:?}",
+            report.lines[0]
+        );
+        let written: LineStatus = serde_json::from_str(
+            &std::fs::read_to_string(root.join("line-status/2026.10.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written.known_problems[0].affected, vec!["2026.10.0"]);
+        assert!(
+            written.known_problems[0].title.contains("0.23.34"),
+            "{:?}",
+            written.known_problems[0]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Clause 2 negative control: the same crate at a patched version is
+    /// looked up and is NOT flagged, and a crate payload that is also the
+    /// SBOM's own subject is not reported twice.
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn a_patched_crate_payload_is_looked_up_and_not_flagged() {
+        let root = scratch("crate-payload-patched");
+        let (source, digest) = with_raw_entries(
+            MemorySource::new(),
+            "2026.10.0",
+            &[
+                r#"{"digest":"sha256:c1","annotations":{"eu.pulseengine.varve.kind":"crate","eu.pulseengine.tool":"rustls","eu.pulseengine.tool.version":"0.23.50","eu.pulseengine.source.repo":"rustls/rustls"}}"#,
+            ],
+        );
+        write_index(&root, "2026.10", &[("2026.10.0", &digest)]);
+        let gh = FakeGh::default()
+            .ghsa("rustls/rustls", "[]")
+            .release_sbom_outcome(
+                "rustls/rustls",
+                "0.23.50",
+                "0.23.50",
+                crate::orchestrate::ReleaseSbomOutcome::NoSbom,
+            )
+            .rustsec_dir("rustls", &["RUSTSEC-2026-0346.md"])
+            .rustsec_md("rustls", "RUSTSEC-2026-0346.md", RUSTSEC_0346);
+        let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
+        assert!(
+            report.lines[0].new_known_problems.is_empty(),
+            "{:?}",
+            report.lines[0]
+        );
+        assert!(
+            gh.calls().iter().any(|c| c == "rustsec-dir:rustls"),
+            "the crate must have been looked up: {:?}",
+            gh.calls()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    const RUSTSEC_SERDE_NPM_BAIT: &str = r#"# serde: a crate advisory
+
+```toml
+[advisory]
+id = "RUSTSEC-2026-1111"
+package = "serde"
+date = "2026-10-14"
+
+[versions]
+patched = [">= 1.0.5"]
+```
+"#;
+
+    /// Clause 3. Ecosystem is the purl type, never the bare name; nested
+    /// components are walked; a component with no version, and one of an
+    /// ecosystem RustSec does not cover, are reported with their reason.
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn every_sbom_component_is_checked_or_reported_unchecked_with_its_reason() {
+        let sbom = br#"{
+            "metadata":{"component":{"name":"wsc","version":"0.11.0","purl":"pkg:cargo/wsc@0.11.0"}},
+            "components":[
+                {"name":"serde","version":"1.0.0","purl":"pkg:npm/serde@1.0.0"},
+                {"name":"nover","purl":"pkg:cargo/nover"},
+                {"name":"noprl","version":"2.0.0"},
+                {"name":"outer","version":"1.0.0","purl":"pkg:cargo/outer@1.0.0","components":[
+                    {"name":"rustls","version":"0.23.34","purl":"pkg:cargo/rustls@0.23.34"},
+                    {"name":"nestedver","purl":"pkg:cargo/nestedver"},
+                    {"name":"left-pad","version":"1.3.0","purl":"pkg:npm/left-pad@1.3.0"}
+                ]}
+            ]
+        }"#
+        .to_vec();
+        let sha = sha256_hex(&sbom);
+        let (root, source, digest) = wsc_layer_root(&sha);
+        write_index(&root, "2026.10", &[("2026.10.0", &digest)]);
+        // `serde` is scripted with an advisory that WOULD match 1.0.0, and
+        // `rustsec-dir:serde` must still never be asked.
+        let gh = FakeGh::default()
+            .ghsa("pulseengine/wsc", "[]")
+            .asset("pulseengine/wsc", "v0.11.0", "sbom.cdx.json", &sbom)
+            .rustsec_dir_404("wsc")
+            .rustsec_dir_404("outer")
+            .rustsec_dir("serde", &["RUSTSEC-2026-1111.md"])
+            .rustsec_md("serde", "RUSTSEC-2026-1111.md", RUSTSEC_SERDE_NPM_BAIT)
+            .rustsec_dir("rustls", &["RUSTSEC-2026-0346.md"])
+            .rustsec_md("rustls", "RUSTSEC-2026-0346.md", RUSTSEC_0346);
+
+        let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
+        let line = &report.lines[0];
+        assert_eq!(
+            line.new_known_problems,
+            vec!["RUSTSEC-2026-0346".to_string()],
+            "the NESTED cargo component must be checked: {line:?}"
+        );
+        assert!(
+            !gh.calls().iter().any(|c| c.contains("serde")),
+            "an npm package must never reach a crate advisory: {:?}",
+            gh.calls()
+        );
+        let reasons: Vec<String> = line.unchecked.iter().map(|u| u.reason.clone()).collect();
+        let about = |needle: &str| -> Vec<&String> {
+            reasons.iter().filter(|r| r.contains(needle)).collect()
+        };
+        assert_eq!(about("serde").len(), 1, "{reasons:?}");
+        assert!(about("serde")[0].contains("npm"), "{reasons:?}");
+        assert_eq!(about("nover").len(), 1, "{reasons:?}");
+        assert!(about("nover")[0].contains("no version"), "{reasons:?}");
+        assert_eq!(about("nestedver").len(), 1, "{reasons:?}");
+        assert!(about("nestedver")[0].contains("no version"), "{reasons:?}");
+        assert_eq!(about("left-pad").len(), 1, "{reasons:?}");
+        assert!(about("left-pad")[0].contains("npm"), "{reasons:?}");
+        assert_eq!(about("noprl").len(), 1, "{reasons:?}");
+        assert!(about("noprl")[0].contains("no purl"), "{reasons:?}");
+        // Every unchecked entry names the payload it belongs to.
+        assert!(
+            line.unchecked
+                .iter()
+                .all(|u| u.tool == "wsc" && u.repo == "pulseengine/wsc"),
+            "{:?}",
+            line.unchecked
+        );
+        let summary = human_summary(&report);
+        assert!(summary.contains("left-pad"), "{summary}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Clause 4. Same repository and version, different releases: each
+    /// release's own SBOM is read, and a finding names only the layer whose
+    /// release carries it.
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn payloads_sharing_repo_and_version_from_different_releases_each_get_their_own_sbom() {
+        let root = scratch("two-releases");
+        let (source, d1) = with_layer(
+            MemorySource::new(),
+            "2026.10.0",
+            &[("wsc", "0.11.0", "pulseengine/wsc", "v0.11.0")],
+        );
+        let payload2 = layer_manifest_payload(
+            "2026.10.1",
+            &[("wsc", "0.11.0", "pulseengine/wsc", "v0.11.0-rebuild")],
+        );
+        let d2 = varve_core::manifest_digest(&payload2);
+        let source = source.with_manifest(&envelope_for(&payload2));
+        write_index(&root, "2026.10", &[("2026.10.0", &d1), ("2026.10.1", &d2)]);
+
+        let gh = FakeGh::default()
+            .ghsa("pulseengine/wsc", "[]")
+            .release_sbom_outcome(
+                "pulseengine/wsc",
+                "v0.11.0",
+                "0.11.0",
+                crate::orchestrate::ReleaseSbomOutcome::Found(sbom_bytes_with_component(
+                    "rustls", "0.23.34",
+                )),
+            )
+            .release_sbom_outcome(
+                "pulseengine/wsc",
+                "v0.11.0-rebuild",
+                "0.11.0",
+                crate::orchestrate::ReleaseSbomOutcome::Found(sbom_bytes_with_component(
+                    "rustls", "0.23.50",
+                )),
+            )
+            .rustsec_dir_404("wsc")
+            .rustsec_dir("rustls", &["RUSTSEC-2026-0346.md"])
+            .rustsec_md("rustls", "RUSTSEC-2026-0346.md", RUSTSEC_0346);
+
+        let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
+        let calls = gh.calls();
+        for release in ["v0.11.0", "v0.11.0-rebuild"] {
+            assert!(
+                calls
+                    .iter()
+                    .any(|c| c == &format!("release-sbom:pulseengine/wsc/{release}/0.11.0")),
+                "release {release} never had its own SBOM read: {calls:?}"
+            );
+        }
+        let written: LineStatus = serde_json::from_str(
+            &std::fs::read_to_string(root.join("line-status/2026.10.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written.known_problems.len(), 1, "{report:?}");
+        assert_eq!(
+            written.known_problems[0].affected,
+            vec!["2026.10.0".to_string()],
+            "only the release whose SBOM carries rustls 0.23.34 is affected"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Clause 5. An advisory whose ranges name only a DIFFERENT package of
+    /// the same repository must not match the payload, even though the
+    /// payload's version sits inside that other package's range; and the
+    /// gap is reported rather than read as "nothing new".
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn an_advisory_naming_a_different_package_in_the_repo_does_not_match_the_payload() {
+        let root = scratch("other-package");
+        let (source, digest) = with_layer(
+            MemorySource::new(),
+            "2026.10.0",
+            &[("wasmtime", "49.0.1", "bytecodealliance/wasmtime", "")],
+        );
+        write_index(&root, "2026.10", &[("2026.10.0", &digest)]);
+        let ghsa = r#"[{
+            "ghsa_id": "GHSA-other",
+            "severity": "high",
+            "summary": "only the other package",
+            "html_url": null,
+            "vulnerabilities": [
+                {"package": {"name": "wasmtime-wasi"}, "vulnerable_version_range": ">= 49.0.0, <= 49.0.2", "patched_versions": "49.0.3"}
+            ]
+        }]"#;
+        let gh = FakeGh::default()
+            .ghsa("bytecodealliance/wasmtime", ghsa)
+            .release_sbom_outcome(
+                "bytecodealliance/wasmtime",
+                "49.0.1",
+                "49.0.1",
+                crate::orchestrate::ReleaseSbomOutcome::NoSbom,
+            );
+        let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
+        let line = &report.lines[0];
+        assert!(line.new_known_problems.is_empty(), "{line:?}");
+        let unchecked = line
+            .unchecked
+            .iter()
+            .find(|u| u.reason.contains("wasmtime-wasi"))
+            .unwrap_or_else(|| panic!("the unmatched advisory must be reported: {line:?}"));
+        assert_eq!(unchecked.tool, "wasmtime");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    /// Clause 5, positive side: the range that names the payload still
+    /// matches when the same advisory also lists other packages.
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn the_range_that_names_the_payload_is_the_one_that_decides() {
+        let json = r#"[{
+            "ghsa_id": "GHSA-both",
+            "severity": "high",
+            "summary": "two packages, different ranges",
+            "html_url": null,
+            "vulnerabilities": [
+                {"package": {"name": "wasmtime"}, "vulnerable_version_range": "< 40.0.0", "patched_versions": "40.0.0"},
+                {"package": {"name": "wasmtime-wasi"}, "vulnerable_version_range": ">= 49.0.0, <= 49.0.2", "patched_versions": "49.0.3"}
+            ]
+        }]"#;
+        let v = Version::parse("49.0.1").unwrap();
+        let own = ["wasmtime".to_string()];
+        let r = ghsa_for_payload(json, &v, &own).unwrap();
+        assert!(r.findings.is_empty(), "{r:?}");
+        let v = Version::parse("39.0.0").unwrap();
+        let r = ghsa_for_payload(json, &v, &own).unwrap();
+        assert_eq!(r.findings.len(), 1, "{r:?}");
+        assert_eq!(r.findings[0].package, "wasmtime");
+    }
+
+    fn comp(name: &str, version: Option<&str>, purl: Option<&str>) -> SbomComponent {
+        SbomComponent {
+            name: name.to_string(),
+            version: version.map(str::to_string),
+            purl: purl.map(str::to_string),
+        }
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn purl_type_is_the_ecosystem_segment_lowercased_and_none_for_non_purls() {
+        assert_eq!(purl_type("pkg:cargo/serde@1.0.0").as_deref(), Some("cargo"));
+        assert_eq!(purl_type("pkg:NPM/serde@1.0.0").as_deref(), Some("npm"));
+        assert_eq!(purl_type("pkg:cargo").as_deref(), None);
+        assert_eq!(purl_type("pkg:/x").as_deref(), None);
+        assert_eq!(purl_type("cargo/serde").as_deref(), None);
+        assert_eq!(purl_type("serde").as_deref(), None);
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn a_component_is_a_crate_only_by_its_purl_type_and_is_named_by_its_purl() {
+        assert_eq!(
+            classify_component(&comp(
+                "x",
+                Some("1.2.3"),
+                Some("pkg:cargo/real-name@1.2.3?a=b#c")
+            )),
+            ComponentClass::Crate {
+                name: "real-name".into(),
+                version: "1.2.3".into()
+            },
+            "the purl, not the display name, says which crate it is"
+        );
+        let unchecked = |c: SbomComponent| match classify_component(&c) {
+            ComponentClass::Unchecked(r) => r,
+            other => panic!("expected unchecked, got {other:?}"),
+        };
+        let r = unchecked(comp("serde", Some("1.0.0"), Some("pkg:npm/serde@1.0.0")));
+        assert!(
+            r.contains("serde") && r.contains("npm") && r.contains("RustSec"),
+            "{r}"
+        );
+        let r = unchecked(comp("serde", Some("1.0.0"), None));
+        assert!(r.contains("no purl") && r.contains("serde"), "{r}");
+        let r = unchecked(comp("serde", Some("1.0.0"), Some("not-a-purl")));
+        assert!(r.contains("cannot read") && r.contains("not-a-purl"), "{r}");
+        let r = unchecked(comp("serde", None, Some("pkg:cargo/serde")));
+        assert!(r.contains("no version"), "{r}");
+        // An empty crate name is handed on, to be refused as an invalid name.
+        assert_eq!(
+            classify_component(&comp("", Some("1.0.0"), Some("pkg:cargo/@1.0.0"))),
+            ComponentClass::Crate {
+                name: String::new(),
+                version: "1.0.0".into()
+            }
+        );
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn sbom_components_walk_every_nesting_level_including_inside_the_subject() {
+        let sbom = br#"{
+            "metadata":{"component":{"name":"s","version":"1","components":[{"name":"in-subject","version":"2"}]}},
+            "components":[
+                {"name":"a","version":"1","components":[
+                    {"name":"b","version":"1","components":[{"name":"c","version":"1"}]}]},
+                {"version":"9"}
+            ]}"#;
+        let names: Vec<String> = sbom_components(sbom)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["s", "in-subject", "a", "b", "c"]);
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn ghsa_not_naming_lists_the_advisories_that_name_only_other_packages() {
+        let json = r#"[
+            {"ghsa_id":"GHSA-1","vulnerabilities":[{"package":{"name":"x"}},{"package":{"name":"y"}}]},
+            {"ghsa_id":"GHSA-2","vulnerabilities":[{"package":{"name":"me"}},{"package":{"name":"y"}}]},
+            {"ghsa_id":"GHSA-3","vulnerabilities":[]},
+            {"vulnerabilities":[{"package":{"name":"z"}}]},
+            {"ghsa_id":"GHSA-4","vulnerabilities":[{"package":{"name":"z"}}]}
+        ]"#;
+        assert_eq!(
+            ghsa_not_naming(json, &["me".to_string()]).unwrap(),
+            ["GHSA-1 (x, y)", "GHSA-4 (z)"]
+        );
+        assert!(ghsa_not_naming("not json", &[]).is_err());
+        assert!(ghsa_not_naming("{}", &[]).is_err());
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn dedup_keeps_releases_tools_and_kinds_apart() {
+        let base = payload("o/r", "1.0.0");
+        let mut other_release = base.clone();
+        other_release.release = "rebuild".into();
+        let mut other_tool = base.clone();
+        other_tool.tool = "u".into();
+        let mut as_crate = base.clone();
+        as_crate.is_crate = true;
+        let out = dedup_payloads(&[
+            ("2026.10.0".into(), vec![base.clone()]),
+            (
+                "2026.10.1".into(),
+                vec![base, other_release, other_tool, as_crate],
+            ),
+        ]);
+        assert_eq!(out.len(), 4, "{out:?}");
+        let first = out
+            .iter()
+            .find(|d| d.release == "1.0.0" && d.tool == "t" && !d.is_crate)
+            .unwrap();
+        assert_eq!(first.layers, ["2026.10.0", "2026.10.1"]);
+        assert!(out.iter().any(|d| d.is_crate));
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn a_single_unmatched_advisory_is_reported_in_the_singular() {
+        let root = scratch("one-other");
+        let (source, digest) = with_layer(
+            MemorySource::new(),
+            "2026.10.0",
+            &[("wasmtime", "49.0.1", "bytecodealliance/wasmtime", "")],
+        );
+        write_index(&root, "2026.10", &[("2026.10.0", &digest)]);
+        let ghsa = r#"[{"ghsa_id":"GHSA-other","severity":"high","summary":"s","html_url":null,
+            "vulnerabilities":[{"package":{"name":"wasmtime-wasi"},"vulnerable_version_range":">= 1.0.0","patched_versions":null}]}]"#;
+        let gh = FakeGh::default()
+            .ghsa("bytecodealliance/wasmtime", ghsa)
+            .release_sbom_outcome(
+                "bytecodealliance/wasmtime",
+                "49.0.1",
+                "49.0.1",
+                crate::orchestrate::ReleaseSbomOutcome::NoSbom,
+            );
+        let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
+        let r = report.lines[0]
+            .unchecked
+            .iter()
+            .find(|u| u.reason.contains("GHSA-other"))
+            .unwrap();
+        assert!(
+            r.reason
+                .starts_with("1 advisory of the repository name only other packages and was not"),
+            "{r:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
