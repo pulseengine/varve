@@ -47,6 +47,10 @@ impl ManifestVerifier for PinnedKeyVerifier {
     fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {
         verify_with(&self.verifier, fetched, LAYER_PAYLOAD_TYPE)
     }
+
+    fn root_public_key(&self) -> Option<&[u8]> {
+        Some(&self.public_key)
+    }
 }
 
 /// Verify a DSSE envelope of a specific payload type against a pinned root
@@ -148,6 +152,39 @@ mod tests {
         assert_eq!(a.public_key(), pk.as_slice());
         assert_eq!(b.public_key(), other.as_slice());
         assert_ne!(a.public_key(), b.public_key());
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn the_verifier_names_its_root_through_the_trait_so_a_status_is_checked_against_it() {
+        use crate::install::ManifestVerifier as _;
+        let (sk, pk) = keys();
+        let (_, other) = keys();
+        let v = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
+        assert_eq!(v.root_public_key(), Some(pk.as_slice()));
+        // The document digest consent rests on verifies under that root and
+        // only that root.
+        let status = crate::linestatus::LineStatus {
+            line: "2026.07".into(),
+            counter: 1,
+            issued_at: "2026-08-01T00:00:00Z".into(),
+            support_until: None,
+            min_counter: None,
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        }
+        .sign(&sk, "root-1")
+        .unwrap();
+        assert!(
+            crate::linestatus::LineStatus::verify_and_parse(
+                status.as_bytes(),
+                v.root_public_key().unwrap()
+            )
+            .is_ok()
+        );
+        assert!(
+            crate::linestatus::LineStatus::verify_and_parse(status.as_bytes(), &other).is_err()
+        );
     }
 
     // rivet: verifies REQ-VERIFY-001

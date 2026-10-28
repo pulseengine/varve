@@ -31,6 +31,14 @@ use crate::store::{Store, StoreError, manifest_digest};
 /// the pipeline takes exactly one verifier for all sources.
 pub trait ManifestVerifier {
     fn verify(&self, fetched_bytes: &[u8]) -> Result<Vec<u8>, VerifyError>;
+
+    /// The root this verifier accepts, when it has one to name. A signed
+    /// document OTHER than the layer (the line-status digest consent rests on,
+    /// REQ-ROLLBACK-002) is verified against this same root and no other.
+    /// `None` means "cannot say", which consumers must read as "cannot verify".
+    fn root_public_key(&self) -> Option<&[u8]> {
+        None
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +71,34 @@ pub struct InstallOutcome {
     /// either — silence is the exact bandersnatch/Verdaccio failure this
     /// requirement exists to surface.
     pub attestation_note: Option<String>,
+    /// Set when this install went ahead of the machine's anti-rollback
+    /// high-water mark on the strength of a digest in the project's pin
+    /// (REQ-ROLLBACK-002). Carries what the caller must say out loud.
+    pub digest_consent: Option<DigestConsent>,
+}
+
+/// An install that was below the machine's mark and accepted anyway because the
+/// pin names the layer by digest and the line's signed line-status supports it
+/// (REQ-ROLLBACK-002).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigestConsent {
+    pub line: String,
+    pub digest: String,
+    pub presented: u64,
+    pub high_water: u64,
+}
+
+impl DigestConsent {
+    /// The one line the install prints: pinned digest, the machine's higher
+    /// counter, and why that was not a refusal.
+    pub fn note(&self) -> String {
+        format!(
+            "  note: installed past this machine's anti-rollback mark: the pin selects {} by \
+             digest (counter {}), this machine has seen counter {} on line {}, and the line's \
+             signed line-status reports it supported and not yanked. The mark is unchanged.",
+            self.digest, self.presented, self.high_water, self.line
+        )
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -90,6 +126,18 @@ pub enum InstallError {
         line: String,
         presented: u64,
         high_water: u64,
+    },
+    #[error(
+        "rollback refused: layer presents counter {presented} but the {line} line's high-water \
+         mark is {high_water}. The pin selects it by digest, which would be consent — but digest \
+         consent needs a verifiable line-status that reports the layer supported and not \
+         yanked, and {why}"
+    )]
+    RollbackConsentRefused {
+        line: String,
+        presented: u64,
+        high_water: u64,
+        why: String,
     },
     #[error(
         "layer on line {line} presents counter {presented}, below the floor of {floor} this \
@@ -187,9 +235,16 @@ pub fn install_by_digest(
         tools: None,
         exports: Vec::new(),
     };
-    install(&pin, source, verifier, store, marks, policy)
+    // The digest here comes from a composing layer, not from a project's pin,
+    // so it is NOT consent to go below the mark (REQ-ROLLBACK-002 speaks of
+    // the project's pin): a layer's include list is the signer's choice, and
+    // what this machine accepts is still the machine's.
+    install_inner(&pin, source, verifier, store, marks, policy, false)
 }
 
+/// Install the layer a project's pin selects. A pin that names the layer by
+/// digest is consent to go below the machine's high-water mark when the line's
+/// signed line-status supports the layer (REQ-ROLLBACK-002).
 pub fn install(
     pin: &Pin,
     source: &dyn LayerSource,
@@ -197,6 +252,18 @@ pub fn install(
     store: &Store,
     marks: &mut HighWaterMarks,
     policy: &InstallPolicy<'_>,
+) -> Result<InstallOutcome, InstallError> {
+    install_inner(pin, source, verifier, store, marks, policy, true)
+}
+
+fn install_inner(
+    pin: &Pin,
+    source: &dyn LayerSource,
+    verifier: &dyn ManifestVerifier,
+    store: &Store,
+    marks: &mut HighWaterMarks,
+    policy: &InstallPolicy<'_>,
+    digest_is_consent: bool,
 ) -> Result<InstallOutcome, InstallError> {
     // 1. Fetch.
     let layer_ref = match &pin.digest {
@@ -299,18 +366,52 @@ pub fn install(
     }
 
     // 4. Anti-rollback, before any blob moves.
+    let mut digest_consent: Option<DigestConsent> = None;
     match marks.check_with_floor(&manifest, first_contact_floor) {
         RollbackVerdict::Rollback {
             line,
             presented,
             high_water,
-        } => {
-            return Err(InstallError::Rollback {
-                line,
-                presented,
-                high_water,
-            });
-        }
+        } => match (&pin.digest, digest_is_consent) {
+            // REQ-ROLLBACK-002: a digest in the project's pin is a decision a
+            // reviewer saw; resolution by name is the replay REQ-ROLLBACK-001
+            // exists for. The digest was already matched against the
+            // verified manifest in step 3.
+            (Some(pinned), true) => {
+                match consent_why_not(
+                    &manifest,
+                    &layer_ref,
+                    source,
+                    store.root(),
+                    verifier,
+                    policy.now,
+                ) {
+                    None => {
+                        digest_consent = Some(DigestConsent {
+                            line,
+                            digest: pinned.clone(),
+                            presented,
+                            high_water,
+                        });
+                    }
+                    Some(why) => {
+                        return Err(InstallError::RollbackConsentRefused {
+                            line,
+                            presented,
+                            high_water,
+                            why,
+                        });
+                    }
+                }
+            }
+            _ => {
+                return Err(InstallError::Rollback {
+                    line,
+                    presented,
+                    high_water,
+                });
+            }
+        },
         RollbackVerdict::BelowFloor {
             line,
             presented,
@@ -478,7 +579,99 @@ pub fn install(
         index_high_water,
         attestations_carried,
         attestation_note,
+        digest_consent,
     })
+}
+
+/// Why a digest-pinned layer below the mark may NOT be installed on the pin's
+/// word alone; `None` when the line's signed line-status consents
+/// (REQ-ROLLBACK-002).
+///
+/// The pin is not trusted by itself: the digest being in the file proves the
+/// reviewer chose THIS layer, not that the line still stands behind it. That
+/// is the line-status's word, and it has to verify against the realm's root —
+/// fetched from the source when it carries one, else the copy cached by an
+/// earlier install. A yank is never overridden, and neither is an expired
+/// support window; no verifiable document means no consent.
+fn consent_why_not(
+    manifest: &LayerManifest,
+    layer_ref: &LayerRef,
+    source: &dyn LayerSource,
+    store_root: &std::path::Path,
+    verifier: &dyn ManifestVerifier,
+    now: &str,
+) -> Option<String> {
+    let Some(root_pk) = verifier.root_public_key() else {
+        return Some("there is no trust root to verify a line-status against".to_string());
+    };
+    let line = manifest.layer.line();
+    match crate::linestatus::current_line_status(
+        source,
+        layer_ref,
+        line,
+        root_pk,
+        crate::linestatus::Published::BestEffort,
+    ) {
+        Ok(Some((_, doc))) => consent_from_status(manifest, &doc, now),
+        Ok(None) => cached_consent_why_not(manifest, store_root, root_pk, now),
+        Err(e) => Some(format!("the one served does not verify: {e}")),
+    }
+}
+
+/// The same judgment from the line-status an earlier install cached, with no
+/// source — what `varve verify` has, because it runs offline and must not
+/// disagree with the install that put the layer there (REQ-ROLLBACK-002).
+pub fn cached_consent_why_not(
+    manifest: &LayerManifest,
+    store_root: &std::path::Path,
+    root_public_key: &[u8],
+    now: &str,
+) -> Option<String> {
+    let line = manifest.layer.line();
+    match crate::linestatus::StatusCache::at_root(store_root).load(line, root_public_key) {
+        Ok(Some(doc)) => consent_from_status(manifest, &doc, now),
+        Ok(None) => Some(format!(
+            "none is available for line {line}: the source carries none and none was cached by \
+             an earlier install"
+        )),
+        Err(e) => Some(format!("the cached one does not verify: {e}")),
+    }
+}
+
+/// What a VERIFIED line-status says about one layer, as consent: a yank or a
+/// lapsed support window refuses; silence on both consents.
+fn consent_from_status(
+    manifest: &LayerManifest,
+    doc: &crate::linestatus::LineStatus,
+    now: &str,
+) -> Option<String> {
+    let line = manifest.layer.line();
+    if doc.line != line.to_string() {
+        return Some(format!(
+            "the line-status served covers line {}, not {line}",
+            doc.line
+        ));
+    }
+    let report = doc.report_for(&manifest.layer);
+    if let Some(reason) = report.yanked_reason {
+        return Some(format!(
+            "the line-status reports layer {} YANKED ({reason}); consent does not override a yank",
+            manifest.layer
+        ));
+    }
+    if let Some(until) = &report.support_until {
+        match crate::support::standing(until, now) {
+            Ok(standing) if standing.is_expired() => {
+                return Some(format!(
+                    "the line-status reports line {line} out of support since {until}; consent \
+                     does not override that"
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => return Some(format!("the line-status support window is unreadable: {e}")),
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1559,5 +1752,492 @@ mod tests {
         assert!(msg.contains("2026.07.5"), "names the hidden layer: {msg}");
         // Nothing was laid down on the strength of a dishonest listing.
         assert!(store.list().unwrap().is_empty(), "no install on a refusal");
+    }
+
+    // ---- REQ-ROLLBACK-002: a digest in the pin is consent --------------------
+
+    /// Two layers of ONE line: 2026.07.0 (counter 1) and 2026.07.1 (counter 2),
+    /// and a source that serves both.
+    struct Consent {
+        _tmp: tempfile::TempDir,
+        store: Store,
+        marks: HighWaterMarks,
+        older: Vec<u8>,
+        newer: Vec<u8>,
+        source: MemorySource,
+        sk: Vec<u8>,
+        pk: Vec<u8>,
+    }
+
+    fn layer_of(name: &str, counter: u64, tag: &str) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
+        let blob = format!("{tag}-tool").into_bytes();
+        let blobs = vec![(manifest_digest(&blob), blob)];
+        let bytes = manifest_with_tools(
+            name,
+            "qualified",
+            counter,
+            "2026-07-31T09:14:00Z",
+            &[("synth", &blobs[0].0)],
+        );
+        (bytes, blobs)
+    }
+
+    fn consent_fixture() -> Consent {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let (_tmp, store, marks) = setup();
+        let (older, ob) = layer_of("2026.07.0", 1, "old");
+        let (newer, nb) = layer_of("2026.07.1", 2, "new");
+        let mut source = MemorySource::new()
+            .with_manifest(&older)
+            .with_manifest(&newer);
+        for (d, b) in ob.iter().chain(nb.iter()) {
+            source = source.with_blob(d, b);
+        }
+        Consent {
+            _tmp,
+            store,
+            marks,
+            older,
+            newer,
+            source,
+            sk,
+            pk,
+        }
+    }
+
+    fn status_for(
+        line: &str,
+        support_until: Option<&str>,
+        yanked: &[(&str, &str)],
+        sk: &[u8],
+    ) -> Vec<u8> {
+        crate::linestatus::LineStatus {
+            line: line.into(),
+            counter: 1,
+            issued_at: "2026-08-01T00:00:00Z".into(),
+            support_until: support_until.map(str::to_string),
+            min_counter: None,
+            yanked: yanked
+                .iter()
+                .map(|(l, r)| (l.to_string(), r.to_string()))
+                .collect(),
+            known_problems: Vec::new(),
+        }
+        .sign(sk, "root-1")
+        .unwrap()
+        .as_bytes()
+        .to_vec()
+    }
+
+    fn digest_pin(layer: &str, digest: &str) -> Pin {
+        Pin::parse(
+            &format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"{layer}\"\ndigest = \"{digest}\"\n"
+            ),
+            "varve.toml",
+        )
+        .unwrap()
+    }
+
+    /// Accepts every manifest and names a root, as `PinnedKeyVerifier` does.
+    struct AcceptWithRoot<'a>(&'a [u8]);
+    impl ManifestVerifier for AcceptWithRoot<'_> {
+        fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {
+            Ok(fetched.to_vec())
+        }
+        fn root_public_key(&self) -> Option<&[u8]> {
+            Some(self.0)
+        }
+    }
+
+    /// Install the NEWER layer by name, advancing the machine's mark to 2.
+    fn see_the_newer(f: &mut Consent) {
+        install(
+            &pin("2026.07.1"),
+            &f.source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .unwrap();
+        assert_eq!(f.marks.mark(&"2026.07".parse().unwrap()), Some(2));
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_digest_pinned_older_layer_the_line_supports_installs_past_the_mark() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source =
+            source.with_line_status(&status_for("2026.07", Some("2027-01-01"), &[], &f.sk));
+        let digest = manifest_digest(&f.older);
+        let outcome = install(
+            &digest_pin("2026.07.0", &digest),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect("a digest-pinned, supported, unyanked layer installs past the mark");
+        assert_eq!(outcome.counter, 1);
+        let consent = outcome.digest_consent.expect("the install must say so");
+        assert_eq!(consent.high_water, 2);
+        assert_eq!(consent.presented, 1);
+        assert_eq!(consent.digest, digest);
+        let note = consent.note();
+        for needle in [
+            digest.as_str(),
+            "counter 1",
+            "counter 2",
+            "2026.07",
+            "supported",
+            "not yanked",
+        ] {
+            assert!(note.contains(needle), "{needle} missing from: {note}");
+        }
+        // Clause 3: installing the older layer must NOT lower the mark.
+        assert_eq!(f.marks.mark(&"2026.07".parse().unwrap()), Some(2));
+        assert!(f.store.get(&digest).unwrap().is_some());
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn an_install_at_or_above_the_mark_carries_no_consent_note() {
+        let mut f = consent_fixture();
+        let digest = manifest_digest(&f.newer);
+        let outcome = install(
+            &digest_pin("2026.07.1", &digest),
+            &f.source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .unwrap();
+        assert_eq!(outcome.digest_consent, None);
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn resolution_by_name_keeps_the_refusal_even_with_a_supporting_line_status() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for("2026.07", None, &[], &f.sk));
+        let err = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("a name is not consent");
+        assert!(
+            matches!(
+                err,
+                InstallError::Rollback {
+                    presented: 1,
+                    high_water: 2,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(f.store.get(&manifest_digest(&f.older)).unwrap().is_none());
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_yank_is_not_overridden_by_a_digest() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for(
+            "2026.07",
+            None,
+            &[("2026.07.0", "regression in synth")],
+            &f.sk,
+        ));
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("a yanked layer stays refused");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, InstallError::RollbackConsentRefused { .. }),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("YANKED") && msg.contains("regression in synth"),
+            "{msg}"
+        );
+        assert!(f.store.get(&manifest_digest(&f.older)).unwrap().is_none());
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn an_expired_support_window_is_not_overridden_by_a_digest() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        // policy().now is 2026-08-07.
+        let source =
+            source.with_line_status(&status_for("2026.07", Some("2026-08-06"), &[], &f.sk));
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("an out-of-support layer stays refused");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, InstallError::RollbackConsentRefused { .. }),
+            "{msg}"
+        );
+        assert!(msg.contains("out of support"), "{msg}");
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn the_last_supported_day_still_consents() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source =
+            source.with_line_status(&status_for("2026.07", Some("2026-08-07"), &[], &f.sk));
+        install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect("the horizon day is still supported");
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn no_line_status_at_all_refuses_and_says_consent_needs_one() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &f.source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("the pin alone is not trusted");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, InstallError::RollbackConsentRefused { .. }),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("digest consent needs a verifiable line-status"),
+            "{msg}"
+        );
+        assert!(f.store.get(&manifest_digest(&f.older)).unwrap().is_none());
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_verifier_that_names_no_root_cannot_verify_a_status_so_it_is_refused() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for("2026.07", None, &[], &f.sk));
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptAll,
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("no root, no consent");
+        assert!(err.to_string().contains("no trust root"), "{err}");
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_status_signed_by_another_root_gives_no_consent() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let (other_sk, _) = crate::verify::generate_root_keypair();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for("2026.07", None, &[], &other_sk));
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("a forged status must not consent");
+        assert!(
+            matches!(err, InstallError::RollbackConsentRefused { .. }),
+            "{err}"
+        );
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_status_for_another_line_gives_no_consent() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for("2026.06", None, &[], &f.sk));
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("a status of another line says nothing about this one");
+        assert!(
+            matches!(err, InstallError::RollbackConsentRefused { .. }),
+            "{err}"
+        );
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_cached_line_status_consents_when_the_source_carries_none() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let envelope = status_for("2026.07", None, &[], &f.sk);
+        let doc = crate::linestatus::LineStatus::verify_and_parse(&envelope, &f.pk).unwrap();
+        crate::linestatus::StatusCache::at_root(f.store.root())
+            .update(&line, &envelope, &doc)
+            .unwrap();
+        let outcome = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &f.source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect("an offline machine that cached a verified status may consent");
+        assert!(outcome.digest_consent.is_some());
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_cached_status_that_yanks_the_layer_refuses_offline() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let envelope = status_for("2026.07", None, &[("2026.07.0", "bad")], &f.sk);
+        let doc = crate::linestatus::LineStatus::verify_and_parse(&envelope, &f.pk).unwrap();
+        crate::linestatus::StatusCache::at_root(f.store.root())
+            .update(&line, &envelope, &doc)
+            .unwrap();
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &f.source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("the cached yank binds");
+        assert!(err.to_string().contains("YANKED"), "{err}");
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_pin_naming_one_layer_with_anothers_digest_is_refused_not_consented() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for("2026.07", None, &[], &f.sk));
+        // Names 2026.07.0 but carries the digest of 2026.07.1.
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.newer)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("a digest that is not the named layer's is refused");
+        assert!(matches!(err, InstallError::LayerMismatch { .. }), "{err}");
+        // And a digest the source cannot match against its own bytes.
+        let wrong = format!("sha256:{}", "ab".repeat(32));
+        assert!(
+            install(
+                &digest_pin("2026.07.0", &wrong),
+                &source,
+                &AcceptWithRoot(&f.pk),
+                &f.store,
+                &mut f.marks,
+                &policy(),
+            )
+            .is_err()
+        );
+        assert_eq!(f.marks.mark(&"2026.07".parse().unwrap()), Some(2));
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_digest_named_by_a_composition_is_not_consent() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for("2026.07", None, &[], &f.sk));
+        let err = install_by_digest(
+            &manifest_digest(&f.older),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("an include is a signer's choice, not this project's consent");
+        assert!(matches!(err, InstallError::Rollback { .. }), "{err:?}");
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_cached_status_filed_under_the_wrong_line_gives_no_consent() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        // Validly signed, but about line 2026.06 — cached under 2026.07.
+        let envelope = status_for("2026.06", None, &[], &f.sk);
+        let doc = crate::linestatus::LineStatus::verify_and_parse(&envelope, &f.pk).unwrap();
+        crate::linestatus::StatusCache::at_root(f.store.root())
+            .update(&line, &envelope, &doc)
+            .unwrap();
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &f.source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("a status about another line says nothing about this one");
+        assert!(err.to_string().contains("covers line 2026.06"), "{err}");
     }
 }
