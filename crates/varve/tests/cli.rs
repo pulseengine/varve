@@ -1547,7 +1547,10 @@ fn verify_export_passes_when_the_stamp_matches_the_pin() {
     std::fs::create_dir_all(&export).unwrap();
     std::fs::write(
         export.join(".varve-export.json"),
-        format!(r#"{{"layer":"2026.07.0","manifest_digest":"{digest}","kind":"cargo"}}"#),
+        // An empty tree: the digest of no entries is sha256 of nothing.
+        format!(
+            r#"{{"layer":"2026.07.0","manifest_digest":"{digest}","kind":"cargo","content_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}"#
+        ),
     )
     .unwrap();
     varve(&fx)
@@ -8190,4 +8193,334 @@ fn the_same_signed_manifest_gives_byte_identical_sbom_whatever_the_callers_realm
             "a caller's local alias leaked into the document: {alpha}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// varve#288: `verify --export` re-hashes the tree, it does not trust the stamp.
+//
+// The stamp used to record only the layer's manifest digest, so an export
+// directory edited, truncated, or added to after `varve export-*` still passed.
+// Each adapter gets the same negative control: export, prove the untouched
+// directory verifies (so the control is not vacuous), then break it three ways
+// and require a non-zero exit that NAMES the path and says how it differs.
+// ---------------------------------------------------------------------------
+
+/// A binary WIT package, encoded the way `wkg` writes one.
+fn encoded_wit_package(source: &str, top: &str) -> Vec<u8> {
+    let mut resolve = wit_parser::Resolve::new();
+    let id = resolve.push_str("p.wit", source).expect("wit parses");
+    assert_eq!(resolve.packages[id].name.to_string(), top);
+    wit_component::encode(&resolve, id, false).expect("wit encodes")
+}
+
+/// Every regular file under `dir`, as `/`-separated relative paths, sorted.
+fn exported_files(dir: &std::path::Path) -> Vec<String> {
+    let mut out: Vec<String> = tree(dir)
+        .keys()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .filter(|p| p != ".varve-export.json")
+        .collect();
+    out.sort();
+    out
+}
+
+/// One installed layer holding a payload of every kind the non-sdk adapters
+/// consume. Returns (fixture, trust root).
+fn layer_for_every_adapter() -> (Fixture, Root) {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let host = varve_core::host_platform();
+    let tool_path = parent.join("rivet-bin");
+    std::fs::write(&tool_path, b"rivet-binary-bytes").unwrap();
+    let mut spec = format!(
+        "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+         [[tool]]\nname = \"rivet\"\nversion = \"0.32.0\"\nplatform = \"{host}\"\n\
+         path = \"{tool}\"\n\n[tool.source]\nrepo = \"pulseengine/rivet\"\n\
+         release = \"v0.32.0\"\nasset = \"rivet-v0.32.0-{host}.tar.gz\"\n\
+         sha256 = \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"\n",
+        tool = tool_path.display()
+    );
+    for (name, version) in [("serde", "1.0.200"), ("cfg-if", "1.0.0")] {
+        let p = parent.join(format!("{name}-{version}.crate"));
+        std::fs::write(&p, dot_crate(name, version, "")).unwrap();
+        spec.push_str(&format!(
+            "\n[[tool]]\nname = \"{name}\"\nversion = \"{version}\"\nkind = \"crate\"\npath = \"{}\"\n",
+            p.display()
+        ));
+    }
+    let vsix = parent.join("ext.vsix");
+    std::fs::write(&vsix, b"zip-bytes").unwrap();
+    spec.push_str(&format!(
+        "\n[[tool]]\nname = \"rust-lang.rust-analyzer\"\nversion = \"0.3.2300\"\n\
+         kind = \"vsix\"\npath = \"{}\"\n",
+        vsix.display()
+    ));
+    let doc = parent.join("handbook.md");
+    std::fs::write(&doc, b"# handbook\n").unwrap();
+    spec.push_str(&format!(
+        "\n[[tool]]\nname = \"handbook\"\nversion = \"1.0\"\nkind = \"docs\"\n\
+         docs-format = \"markdown\"\npath = \"{}\"\n",
+        doc.display()
+    ));
+    let wit = parent.join("acme-app.wasm");
+    std::fs::write(
+        &wit,
+        encoded_wit_package(
+            "package acme:app@0.3.0;\ninterface i { f: func(); }\n",
+            "acme:app@0.3.0",
+        ),
+    )
+    .unwrap();
+    spec.push_str(&format!(
+        "\n[[tool]]\nname = \"acme-app\"\nversion = \"0.3.0\"\nkind = \"wit\"\npath = \"{}\"\n",
+        wit.display()
+    ));
+    deposit_and_install(&fx, &root, &spec, "negctl");
+    (fx, root)
+}
+
+/// `varve verify --export DIR`, as a finished process.
+fn verify_export(fx: &Fixture, root: &Root, dir: &std::path::Path) -> std::process::Output {
+    varve(fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["verify", "--export"])
+        .arg(dir)
+        .output()
+        .unwrap()
+}
+
+/// Export with `adapter_args`, then break the result three ways. `extra` runs
+/// the same export through an adapter that needs more arguments.
+fn export_then_tamper(adapter: &str, extra: &[&str]) {
+    let (fx, root) = layer_for_every_adapter();
+    export_then_tamper_in(&fx, &root, adapter, extra);
+}
+
+fn export_then_tamper_in(fx: &Fixture, root: &Root, adapter: &str, extra: &[&str]) {
+    let parent = fx.project.parent().unwrap();
+    let out = parent.join(format!("out-{adapter}"));
+    varve(fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args([adapter, "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .args(extra)
+        .assert()
+        .success();
+    let files = exported_files(&out);
+    assert!(!files.is_empty(), "{adapter} wrote nothing");
+
+    // Control: the untouched export verifies, so a failure below is the
+    // tampering and nothing else.
+    let ok = verify_export(fx, root, &out);
+    assert!(
+        ok.status.success(),
+        "{adapter}: an untouched export must verify:\n{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+
+    // 1. Flip one byte in one file.
+    let victim = &files[0];
+    let victim_path = out.join(victim);
+    let original = std::fs::read(&victim_path).unwrap();
+    assert!(!original.is_empty(), "{adapter}: {victim} is empty");
+    let mut flipped = original.clone();
+    flipped[0] ^= 0x01;
+    std::fs::write(&victim_path, &flipped).unwrap();
+    let bad = verify_export(fx, root, &out);
+    let stderr = String::from_utf8_lossy(&bad.stderr).to_string();
+    assert_eq!(
+        bad.status.code(),
+        Some(1),
+        "{adapter}: one flipped byte passed:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(victim.as_str()),
+        "{adapter}: names no path:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("modified"),
+        "{adapter}: does not say modified:\n{stderr}"
+    );
+    std::fs::write(&victim_path, &original).unwrap();
+    assert!(
+        verify_export(fx, root, &out).status.success(),
+        "{adapter}: restore must verify"
+    );
+
+    // 2. Delete a file.
+    std::fs::remove_file(&victim_path).unwrap();
+    let bad = verify_export(fx, root, &out);
+    let stderr = String::from_utf8_lossy(&bad.stderr).to_string();
+    assert_eq!(
+        bad.status.code(),
+        Some(1),
+        "{adapter}: a deleted file passed:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(victim.as_str()),
+        "{adapter}: names no path:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("missing"),
+        "{adapter}: does not say missing:\n{stderr}"
+    );
+    std::fs::write(&victim_path, &original).unwrap();
+
+    // 3. Add a file.
+    let extra_path = out.join("zz-planted.txt");
+    std::fs::write(&extra_path, b"not from the layer").unwrap();
+    let bad = verify_export(fx, root, &out);
+    let stderr = String::from_utf8_lossy(&bad.stderr).to_string();
+    assert_eq!(
+        bad.status.code(),
+        Some(1),
+        "{adapter}: an added file passed:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("zz-planted.txt"),
+        "{adapter}: names no path:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unexpected"),
+        "{adapter}: does not say unexpected:\n{stderr}"
+    );
+    std::fs::remove_file(&extra_path).unwrap();
+    assert!(
+        verify_export(fx, root, &out).status.success(),
+        "{adapter}: clean again must verify"
+    );
+}
+
+// rivet: verifies REQ-EXPORTCONTENT-001
+#[test]
+fn verify_export_catches_tampering_in_a_cargo_registry() {
+    export_then_tamper("export-cargo", &[]);
+}
+
+// rivet: verifies REQ-EXPORTCONTENT-001
+#[test]
+fn verify_export_catches_tampering_in_a_crates_vendor_tree() {
+    export_then_tamper("export-crates-vendor", &[]);
+}
+
+// rivet: verifies REQ-EXPORTCONTENT-001
+#[test]
+fn verify_export_catches_tampering_in_a_bazel_registry() {
+    export_then_tamper("export-bazel", &[]);
+}
+
+// rivet: verifies REQ-EXPORTCONTENT-001
+#[test]
+fn verify_export_catches_tampering_in_a_bazel_distdir() {
+    export_then_tamper("export-bazel-distdir", &[]);
+}
+
+// rivet: verifies REQ-EXPORTCONTENT-001
+#[test]
+fn verify_export_catches_tampering_in_a_vsix_export() {
+    export_then_tamper("export-vsix", &[]);
+}
+
+// rivet: verifies REQ-EXPORTCONTENT-001
+#[test]
+fn verify_export_catches_tampering_in_a_docs_export() {
+    export_then_tamper("export-docs", &[]);
+}
+
+// rivet: verifies REQ-EXPORTCONTENT-001
+#[test]
+fn verify_export_catches_tampering_in_a_wit_export() {
+    export_then_tamper("export-wit", &["--package", "acme:app@0.3.0"]);
+}
+
+// rivet: verifies REQ-EXPORTCONTENT-001
+#[cfg(unix)]
+#[test]
+fn verify_export_catches_tampering_in_an_sdk_export() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let out = parent.join("out-export-sdk");
+    std::fs::create_dir_all(&out).unwrap();
+    let dest = out.canonicalize().unwrap();
+    let built = built_prefix_for(&dest);
+    let archive = parent.join("poky-sdk.tar.gz");
+    std::fs::write(&archive, sdk_tarball(&built)).unwrap();
+    deposit_and_install(
+        &fx,
+        &root,
+        &format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"poky-cortexa53\"\nversion = \"4.0.15\"\nkind = \"sdk\"\n\
+             sdk-prefix = \"{built}\"\npath = \"{}\"\n",
+            archive.display()
+        ),
+        "sdk-negctl",
+    );
+    export_then_tamper_in(&fx, &root, "export-sdk", &[]);
+}
+
+// rivet: verifies REQ-EXPORTCONTENT-001
+#[test]
+fn verify_export_refuses_a_stamp_that_predates_content_digests() {
+    // A stamp written before varve#288 binds the directory to a layer and says
+    // nothing about the bytes. Passing it would be vouching for contents nobody
+    // hashed, so it fails closed and says what to do.
+    let (fx, root) = layer_for_every_adapter();
+    let parent = fx.project.parent().unwrap();
+    let out = parent.join("old-stamp");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-vsix", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    let stamp_path = out.join(".varve-export.json");
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&stamp_path).unwrap()).unwrap();
+    let o = v.as_object_mut().unwrap();
+    o.remove("content_digest");
+    o.remove("files");
+    std::fs::write(&stamp_path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let res = verify_export(&fx, &root, &out);
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+    assert_eq!(res.status.code(), Some(1), "an old stamp passed:\n{stderr}");
+    assert!(stderr.contains("unverifiable"), "{stderr}");
+    assert!(
+        stderr.contains("re-export") || stderr.contains("Re-run"),
+        "{stderr}"
+    );
+}
+
+// rivet: verifies REQ-EXPORTCONTENT-001
+#[test]
+fn a_declared_export_that_was_edited_is_not_current() {
+    // The same hole through the declared path: `verify` with no flags checks
+    // every `[[export]]`, and used to call an edited tree "fresh".
+    let (fx, root) = layer_for_every_adapter();
+    write_pin(&fx, "\n[[export]]\nkind = \"wit\"\nout = \"wit\"\n");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-wit", "--package", "acme:app@0.3.0", "--out", "wit"])
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .success();
+    let victim = fx.project.join("wit/acme/app/0.3.0.wasm");
+    let mut bytes = std::fs::read(&victim).unwrap();
+    bytes[0] ^= 1;
+    std::fs::write(&victim, bytes).unwrap();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("acme/app/0.3.0.wasm")
+                .and(predicate::str::contains("modified")),
+        );
 }

@@ -2082,11 +2082,10 @@ fn write_export_stamp(
     entry: &varve_core::store::InstalledLayer,
     kind: &str,
 ) -> anyhow::Result<()> {
-    let stamp = varve_core::exportstamp::ExportStamp {
-        layer: entry.layer.to_string(),
-        manifest_digest: entry.digest.clone(),
-        kind: kind.to_string(),
-    };
+    // Scanned AFTER the adapter finished writing: the stamp records the tree
+    // as it now is, which is what `verify --export` re-hashes (varve#288).
+    let stamp =
+        varve_core::exportstamp::stamp_for(out, &entry.layer.to_string(), &entry.digest, kind)?;
     varve_core::exportstamp::write_stamp(out, &stamp)?;
     println!(
         "stamped {} — export bound to layer {} ({}); `varve verify --export {}` checks it",
@@ -2778,6 +2777,7 @@ fn export_wit(
     for w in &report.written {
         println!("  {w}");
     }
+    write_export_stamp(out, &target.entry, varve_core::ExportKind::Wit.as_str())?;
     // The stanza is PRINTED, never written: varve does not edit a consumer's
     // tool configuration, and the registry name is theirs because it is what
     // their wkg.toml or build rule already refers to.
@@ -4660,6 +4660,7 @@ fn producing_command(kind: varve_core::ExportKind) -> &'static str {
         varve_core::ExportKind::BazelDistdir => "export-bazel-distdir",
         varve_core::ExportKind::Vsix => "export-vsix",
         varve_core::ExportKind::Sdk => "export-sdk",
+        varve_core::ExportKind::Wit => "export-wit",
     }
 }
 
@@ -4710,6 +4711,22 @@ fn verify_declared_exports(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()
                     dir.display()
                 ))
             }
+            varve_core::DeclaredExportStatus::ContentDrift(d) => faults.push(format!(
+                "{} ({}) — CONTENT CHANGED: {d}. The directory no longer holds what the export \
+                 wrote; re-run `varve {} --out {}`.",
+                dir.display(),
+                decl.kind,
+                producing_command(decl.kind),
+                decl.out
+            )),
+            varve_core::DeclaredExportStatus::Unverifiable => faults.push(format!(
+                "{} ({}) — UNVERIFIABLE: the stamp predates content digests, so nothing records \
+                 what this directory held. Re-export with `varve {} --out {}`.",
+                dir.display(),
+                decl.kind,
+                producing_command(decl.kind),
+                decl.out
+            )),
             varve_core::DeclaredExportStatus::Unreadable(why) => faults.push(format!(
                 "{} ({}) — UNREADABLE stamp: {why}. Re-running the export is not the fix for a \
                  permissions fault or a truncated file.",
@@ -4734,33 +4751,57 @@ fn verify_declared_exports(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()
 /// resolves is stale; an absent or malformed stamp is not a verified export.
 /// Any of these fails the command — the whole point is a loud CI gate.
 fn verify_exports(current_digest: &str, exports: &[PathBuf]) -> anyhow::Result<()> {
-    use varve_core::exportstamp::{ExportStatus, read_stamp, status};
-    let mut stale = Vec::new();
+    use varve_core::exportstamp::{
+        ContentStatus, ExportStatus, read_stamp, status, verify_content,
+    };
+    let mut faults = Vec::new();
     for dir in exports {
         let stamp = read_stamp(dir)?;
-        match status(&stamp, current_digest) {
-            ExportStatus::Current => println!(
-                "export {} — fresh: bound to layer {} ({})",
+        if let ExportStatus::Stale { stamped, current } = status(&stamp, current_digest) {
+            eprintln!(
+                "export {} — STALE: stamped from layer {} ({stamped}); the pin now \
+                 resolves {current}. Re-run the export against the current pin.",
+                dir.display(),
+                stamp.layer
+            );
+            faults.push(format!("{} (stale)", dir.display()));
+            continue;
+        }
+        // Fresh against the pin says the directory was written from this layer.
+        // It does not say the directory still holds what was written, so
+        // re-hash it (varve#288).
+        match verify_content(dir, &stamp)? {
+            ContentStatus::Intact => println!(
+                "export {} — fresh: bound to layer {} ({}); {} file(s) unchanged",
                 dir.display(),
                 stamp.layer,
-                stamp.kind
+                stamp.kind,
+                stamp.files.len()
             ),
-            ExportStatus::Stale { stamped, current } => {
+            ContentStatus::Unverifiable => {
                 eprintln!(
-                    "export {} — STALE: stamped from layer {} ({stamped}); the pin now \
-                     resolves {current}. Re-run the export against the current pin.",
-                    dir.display(),
-                    stamp.layer
+                    "export {} — UNVERIFIABLE: the stamp predates content digests, so nothing \
+                     records what this directory held. A re-export (run the export command \
+                     again) writes a verifiable stamp.",
+                    dir.display()
                 );
-                stale.push(dir.display().to_string());
+                faults.push(format!("{} (unverifiable)", dir.display()));
+            }
+            ContentStatus::Drifted(d) => {
+                eprintln!(
+                    "export {} — CONTENT CHANGED: {d}. The directory no longer holds what \
+                     the export wrote; re-run the export.",
+                    dir.display()
+                );
+                faults.push(format!("{} ({d})", dir.display()));
             }
         }
     }
-    if !stale.is_empty() {
+    if !faults.is_empty() {
         bail!(
-            "{} stale export(s) diverged from the pin (REQ-EXPORT-SYNC-001): {}",
-            stale.len(),
-            stale.join(", ")
+            "{} export(s) failed verification (REQ-EXPORT-SYNC-001, REQ-EXPORTDECL-001): {}",
+            faults.len(),
+            faults.join("; ")
         );
     }
     Ok(())
