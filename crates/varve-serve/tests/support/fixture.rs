@@ -177,6 +177,46 @@ pub fn install_layer(tools: Vec<DepositTool>) -> Fx {
 }
 
 impl Fx {
+    /// Deposit and install ANOTHER layer of the same line into the same store,
+    /// signed by the same root, without touching the project's pin.
+    pub fn install_another(&self, layer: &str, counter: u64, tools: Vec<DepositTool>) {
+        let layout = self.tmp.path().join(format!("layout-{layer}"));
+        varve_core::deposit(
+            &DepositSpec {
+                includes: Vec::<DepositInclude>::new(),
+                layer: layer.parse().unwrap(),
+                channel: "rolling".into(),
+                counter,
+                issued_at: "2026-10-21T00:00:00Z".into(),
+                tools,
+            },
+            &self.secret_key,
+            "fixture-1",
+            &layout,
+        )
+        .expect("deposits");
+        let text = format!(
+            "manifest-version = 1\n[toolchain]\nchannel = \"rolling\"\nlayer = \"{layer}\"\n"
+        );
+        let pin = Pin::parse(&text, "varve.toml").unwrap();
+        let mut marks = HighWaterMarks::load(&self.root).unwrap();
+        let verifier = PinnedKeyVerifier::from_public_key_bytes(&self.public_key).unwrap();
+        install(
+            &pin,
+            &source_at(&layout),
+            &verifier,
+            &self.store,
+            &mut marks,
+            &InstallPolicy {
+                index: None,
+                now: "2026-10-21T00:00:00Z",
+                staleness_threshold_days: 3650,
+                platform: &varve_core::host_platform(),
+            },
+        )
+        .expect("installs");
+    }
+
     /// The verified composition of the installed layer, as `main` walks it.
     pub fn composed(&self) -> Vec<varve_core::compose::ComposedLayer> {
         let entry = self.store.get(&self.digest).unwrap().unwrap();

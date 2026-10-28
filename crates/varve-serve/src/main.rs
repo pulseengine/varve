@@ -34,18 +34,21 @@ fn main() -> anyhow::Result<()> {
         return docs::show(topic);
     }
 
+    // varve#286: this was declared and documented and never read, so
+    // `--layer X` served the PIN's documentation. Every path reads it now.
+    let layer = cli.layer.as_deref();
     match &cli.command {
-        Some(Cmd::Context { format }) => return run_context(*format),
+        Some(Cmd::Context { format }) => return run_context(layer, *format),
         Some(Cmd::Ask {
             words,
             format,
             limit,
-        }) => return run_ask(&words.join(" "), *format, *limit),
-        Some(Cmd::Page { doc, path }) => return run_page(doc, path),
+        }) => return run_ask(layer, &words.join(" "), *format, *limit),
+        Some(Cmd::Page { doc, path }) => return run_page(layer, doc, path),
         None => {}
     }
 
-    let payloads = collect()?;
+    let payloads = collect(layer)?;
     let chosen = varve_core::docsexport::select(&payloads, cli.select.as_deref())
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let label = chosen.title.clone().unwrap_or_else(|| chosen.name.clone());
@@ -118,7 +121,9 @@ fn main() -> anyhow::Result<()> {
 ///
 /// Both the viewer and the orientation start here, so there is one answer to
 /// "what does this pin contain" (see `tests/follows_composition.rs`).
-fn resolve_layers() -> anyhow::Result<(
+fn resolve_layers(
+    layer: Option<&str>,
+) -> anyhow::Result<(
     varve_core::InstalledLayer,
     Vec<varve_core::compose::ComposedLayer>,
 )> {
@@ -130,7 +135,16 @@ fn resolve_layers() -> anyhow::Result<(
         "no varve.toml found walking up from here — this project pins no layer, so there \
          is no documentation to read",
     )?;
-    let pin = varve_core::Pin::load(&pin_path)?;
+    let mut pin = varve_core::Pin::load(&pin_path)?;
+    if let Some(l) = layer {
+        // Another layer of the pin's realm and channel, resolved by NAME. The
+        // pin's digest names the pin's layer, so it does not travel with it;
+        // what is read is still re-verified below like any other layer.
+        pin.layer = l
+            .parse()
+            .map_err(|e| anyhow::anyhow!("--layer {l:?} is not a layer id: {e}"))?;
+        pin.digest = None;
+    }
 
     let (store, verifier) = match &pin.realm {
         Some(name) => {
@@ -202,8 +216,8 @@ fn resolve_layers() -> anyhow::Result<(
 /// for the same reason the producer reads `layer.toml` itself: a second
 /// implementation of "which payloads does this layer have" is a second thing
 /// to keep in step.
-fn collect() -> anyhow::Result<Vec<DocsPayload>> {
-    let (entry, layers) = resolve_layers()?;
+fn collect(layer: Option<&str>) -> anyhow::Result<Vec<DocsPayload>> {
+    let (entry, layers) = resolve_layers(layer)?;
     let out: Vec<DocsPayload> = layers::docs_sources(&layers, &varve_core::host_platform())?
         .into_iter()
         .map(|d| d.payload)
@@ -225,8 +239,8 @@ fn collect() -> anyhow::Result<Vec<DocsPayload>> {
 
 /// The orientation for the pin. Everything is verified before anything is read
 /// or run; a failure anywhere returns an error and the caller prints nothing.
-fn orient() -> anyhow::Result<context::Context> {
-    let (entry, layers) = resolve_layers()?;
+fn orient(layer: Option<&str>) -> anyhow::Result<context::Context> {
+    let (entry, layers) = resolve_layers(layer)?;
     // Harvesting RUNS the host's binaries, so the layer must have been
     // verified for the host. One installed for another platform (varve#189)
     // was verified for that platform's payloads, not for the ones run here.
@@ -244,8 +258,8 @@ fn orient() -> anyhow::Result<context::Context> {
     Ok(context::orient(pinned, &Sandbox::default()))
 }
 
-fn run_context(format: Format) -> anyhow::Result<()> {
-    let ctx = orient()?;
+fn run_context(layer: Option<&str>, format: Format) -> anyhow::Result<()> {
+    let ctx = orient(layer)?;
     // One write, after everything succeeded: a half-printed orientation is
     // worse than none.
     print!(
@@ -258,8 +272,8 @@ fn run_context(format: Format) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_ask(query: &str, format: Format, limit: usize) -> anyhow::Result<()> {
-    let ctx = orient()?;
+fn run_ask(layer: Option<&str>, query: &str, format: Format, limit: usize) -> anyhow::Result<()> {
+    let ctx = orient(layer)?;
     let units = ask::index(&ctx)?;
     let hits = ask::search(&units, query, limit);
     print!(
@@ -272,8 +286,8 @@ fn run_ask(query: &str, format: Format, limit: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_page(doc: &str, path: &str) -> anyhow::Result<()> {
-    let (_, layers) = resolve_layers()?;
+fn run_page(layer: Option<&str>, doc: &str, path: &str) -> anyhow::Result<()> {
+    let (_, layers) = resolve_layers(layer)?;
     let sources = layers::docs_sources(&layers, &varve_core::host_platform())?;
     let Some(source) = sources.iter().find(|d| d.payload.name == doc) else {
         let names: Vec<&str> = sources.iter().map(|d| d.payload.name.as_str()).collect();

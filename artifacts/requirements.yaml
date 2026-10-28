@@ -5248,7 +5248,7 @@ artifacts:
   - id: REQ-SERVELAYER-001
     type: requirement
     title: varve-serve reads the layer it is told to read
-    status: approved
+    status: implemented
     release: v0.44.0
     description: "varve#286: --layer is declared and documented but main.rs never reads it, so varve-serve --layer X exits 0 and serves the pin's documentation instead. Clauses: (1) With --layer X different from the pin, the documents served shall be X's; shown by a fixture with two installed layers carrying distinct docs where --check --layer X prints X's label and version. (2) An unknown or uninstalled --layer shall exit non-zero and name the layer. (3) Every flag of the CLI shall be read; removing the use of --layer makes (1) fail."
     links:
