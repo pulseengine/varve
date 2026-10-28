@@ -28,7 +28,7 @@ use crate::help::{self, Help, Sub};
 use crate::layers::{DocsSource, Facts, Held};
 
 /// More subcommands than this and a tool is listed by name only.
-pub const COLLAPSE_ABOVE: usize = 12;
+pub const COLLAPSE_ABOVE: usize = 60;
 
 /// The size an orientation for the pulseengine layer stays within: about 4k
 /// tokens (REQ-AGENTDOCS-001 clause 3), checked in CI by a test.
@@ -245,11 +245,11 @@ pub fn get_command(h: &Held) -> String {
         "crate" => "varve export-cargo --out ./cargo-registry".into(),
         "vsix" => "varve export-vsix --out ./vsix".into(),
         "docs" => format!(
-            "varve export-docs --out ./doc --select {}",
+            "varve export-docs --out ./doc --select={}",
             shell_word(&h.name)
         ),
         "sdk" => format!(
-            "varve export-sdk --out ./sdk --select {}",
+            "varve export-sdk --out ./sdk --select={}",
             shell_word(&h.name)
         ),
         "wit" if h.name.contains(':') => format!(
@@ -399,6 +399,14 @@ pub fn render_md(c: &Context) -> String {
         o.push_str("\n## Documentation payloads (varve's own wording)\n\n```\n");
         o.push_str(&docs_block(&c.docs));
         o.push_str("```\n");
+        // Measured: agents told only where a payload STARTS answered "where
+        // is the page for type X" with the index, every time. Say, at the
+        // point they read, that pages are not listed and how to get one.
+        o.push_str(
+            "\nIndividual pages are NOT listed here. For a named type, function or \
+             topic, run `varve-serve ask \"<Name>\"`: it returns the exact page and the \
+             `varve-serve page ...` command that prints it.\n",
+        );
     }
     if !c.absent.is_empty() {
         o.push_str("\n## Named by a tool but NOT in this pin\n\n");
@@ -567,20 +575,20 @@ mod tests {
         assert!(m.contains("run `<tool> <sub> --help` before stating exact flags"));
     }
 
-    /// Twelve subcommands list in full; thirteen list names, and the caveat
-    /// line is kept in both.
+    /// Up to COLLAPSE_ABOVE subcommands list in full; one more lists names,
+    /// and the caveat line is kept in both.
     // rivet: verifies REQ-AGENTDOCS-001
     #[test]
     fn a_long_list_collapses_to_names_and_keeps_every_caveat() {
-        let twelve = md(vec![input("t", Some(&many(12, "")), &[])]);
-        assert!(twelve.contains("- `c11`: Command number 11"), "{twelve}");
+        let twelve = md(vec![input("t", Some(&many(COLLAPSE_ABOVE, "")), &[])]);
+        assert!(twelve.contains("- `c59`: Command number 59"), "{twelve}");
         assert!(
             !twelve.contains("subcommands:"),
-            "twelve is not 'above twelve'"
+            "the threshold itself is not above it"
         );
 
         let extra = "  verify  Verify rules (NOT YET IMPLEMENTED — always exits 2)\n";
-        let thirteen = md(vec![input("t", Some(&many(12, extra)), &[])]);
+        let thirteen = md(vec![input("t", Some(&many(COLLAPSE_ABOVE, extra)), &[])]);
         assert!(thirteen.contains("subcommands: `c00`, `c01`"), "{thirteen}");
         assert!(!thirteen.contains("Command number 3"), "{thirteen}");
         assert!(
@@ -590,7 +598,7 @@ mod tests {
             "{thirteen}"
         );
         // a collapsed list without a caveat has no caveat lines
-        let plain = md(vec![input("t", Some(&many(13, "")), &[])]);
+        let plain = md(vec![input("t", Some(&many(COLLAPSE_ABOVE + 1, "")), &[])]);
         assert!(!plain.contains("caveat,"), "{plain}");
     }
 
@@ -720,11 +728,11 @@ mod tests {
         );
         assert_eq!(
             get_command(&h("docs", "api")),
-            "varve export-docs --out ./doc --select api"
+            "varve export-docs --out ./doc --select=api"
         );
         assert_eq!(
             get_command(&h("sdk", "s")),
-            "varve export-sdk --out ./sdk --select s"
+            "varve export-sdk --out ./sdk --select=s"
         );
         assert_eq!(
             get_command(&h("wit", "wasi:io")),
@@ -812,7 +820,7 @@ mod tests {
         );
         let collapsed = json_of(&build(
             facts(),
-            vec![input("t", Some(&many(13, "")), &[])],
+            vec![input("t", Some(&many(COLLAPSE_ABOVE + 1, "")), &[])],
             vec![],
             vec![],
         ));

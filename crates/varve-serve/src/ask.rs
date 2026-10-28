@@ -113,6 +113,8 @@ pub struct Hit {
     /// NOT printed — a hit is a pointer, and docs text is a prompt-injection
     /// surface (tests/agent_context.rs plants one).
     pub snippet: Option<String>,
+    /// The question's words that the topic's best line holds together.
+    pub matched: Vec<String>,
     pub read: String,
 }
 
@@ -190,6 +192,16 @@ fn best_line(body: &str, words: &[String]) -> Option<(u32, String)> {
         }
     }
     best.map(|(n, line)| (n * DESC, line))
+}
+
+/// Which of the QUESTION's own words one line of a topic holds together.
+/// Printed instead of the line: it says why a hit matched — measured, agents
+/// dismissed `rivet docs artifact-format` as noise for "verifies" because its
+/// title gave no reason — without putting any of the topic's text, which a
+/// producer wrote and could carry an injection, in front of the reader.
+fn matched_words(line: &str, words: &[String]) -> Vec<String> {
+    let toks = tokens(line);
+    words.iter().filter(|w| toks.contains(w)).cloned().collect()
 }
 
 /// One line, trimmed, cut at a word boundary if it is long — never mid-word.
@@ -300,8 +312,12 @@ pub fn search(units: &[Unit], query: &str, limit: usize) -> Vec<Hit> {
         .iter()
         .filter_map(|u| {
             let (s, snippet) = score(u, &words);
+            let matched = snippet
+                .as_deref()
+                .map_or_else(Vec::new, |l| matched_words(l, &words));
             (s > 0).then(|| Hit {
                 snippet,
+                matched,
                 id: u.id.clone(),
                 kind: u.kind,
                 title: u.title.clone(),
@@ -453,7 +469,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 layer: d.layer.clone(),
                 digest: Some(d.digest.clone()),
                 read: format!(
-                    "varve export-docs --out ./doc --select {}",
+                    "varve export-docs --out ./doc --select={}",
                     shell_word(&p.name)
                 ),
             });
@@ -477,7 +493,9 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 layer: d.layer.clone(),
                 digest: Some(d.digest.clone()),
                 read: format!(
-                    "varve-serve page {} {}",
+                    // `--` ends the options: a name a producer chose can
+                    // never be read as a flag, quoted or not.
+                    "varve-serve page -- {} {}",
                     shell_word(&p.name),
                     shell_word(&page.path)
                 ),
@@ -510,8 +528,14 @@ pub fn render_md(query: &str, ctx: &Context, hits: &[Hit]) -> String {
         ));
         // The PAYLOAD's digest — the file this hit lives in — not the
         // layer manifest digest, which is in the orientation's header.
-        if let Some(d) = &h.digest {
-            o.push_str(&format!("  payload digest: {d}"));
+        // The payload digest stays in `--format json`. In this view it
+        // repeated on every hit and two of two eval agents confused it with
+        // the layer manifest digest, which the orientation's header states.
+        if h.matched.len() > 1 {
+            o.push_str(&format!(
+                "\n   one line here holds: {}",
+                h.matched.join(", ")
+            ));
         }
         o.push_str(&format!("\n   read: `{}`\n", h.read));
     }
@@ -530,6 +554,7 @@ pub fn render_json(query: &str, ctx: &Context, hits: &[Hit]) -> String {
             "score": h.score,
             "layer": h.layer,
             "payload_digest": h.digest,
+            "matched_words": h.matched,
             "read": h.read,
         })).collect::<Vec<Value>>(),
     });
@@ -592,6 +617,39 @@ mod tests {
             hits[0].snippet.as_deref(),
             Some("| verifies | verified-by | Test verifies a requirement |")
         );
+    }
+
+    /// A topic hit says which of the question's words one of its lines holds
+    /// together — the reason it matched — and prints none of the line.
+    // rivet: verifies REQ-AGENTDOCS-002
+    #[test]
+    fn a_topic_hit_names_the_question_words_it_matched_not_its_text() {
+        let mut table = unit(
+            Kind::Topic,
+            "topic:rivet:artifact-format",
+            "artifact-format",
+            "`rivet docs artifact-format` — YAML artifact file format",
+            "",
+        );
+        table.tool = Some("rivet".into());
+        table.body = "| verifies | verified-by | Test verifies a requirement |\n".into();
+        let hits = search(&[table], "add requirement link test verifies", 5);
+        assert_eq!(hits[0].matched, ["requirement", "test", "verifies"]);
+        let ctx = ctx_with(vec![]);
+        let md = render_md("q", &ctx, &hits);
+        assert!(
+            md.contains("one line here holds: requirement, test, verifies"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("verified-by"),
+            "the line itself is not printed: {md}"
+        );
+        // a single matched word is no reason worth printing
+        let mut one = unit(Kind::Topic, "topic:x:y", "y", "t", "");
+        one.body = "a zebra".into();
+        let h1 = search(&[one], "zebra", 1);
+        assert!(!render_md("q", &ctx, &h1).contains("one line here holds"));
     }
 
     /// A long line is cut at a word boundary, never inside a word.
@@ -1054,6 +1112,7 @@ mod tests {
             assert!(!out.contains("secret paragraph"), "text leaked: {out}");
         }
         assert_eq!(hits[0].snippet.as_deref(), Some("the zebra line"));
+        assert_eq!(hits[0].matched, ["zebra"]);
         let hits = search(&units, "export vsix", 3);
         assert_eq!(hits[0].id, "varve:export-vsix", "{hits:?}");
     }
@@ -1101,12 +1160,15 @@ mod tests {
         assert_eq!(docs.len(), 3);
         assert_eq!(
             by("docs:manual").read,
-            "varve export-docs --out ./doc --select manual"
+            "varve export-docs --out ./doc --select=manual"
         );
         assert_eq!(by("docs:manual").digest.as_deref(), Some("sha256:manual"));
         assert_eq!(by("docs:manual").title, "manual handbook");
         assert_eq!(by("docs:manual").desc, "rivet");
-        assert_eq!(by("docs:site:a.html").read, "varve-serve page site a.html");
+        assert_eq!(
+            by("docs:site:a.html").read,
+            "varve-serve page -- site a.html"
+        );
         assert_eq!(by("docs:site:a.html").title, "Alpha");
         assert_eq!(by("docs:site:b.md").title, "Beta");
     }
@@ -1134,7 +1196,7 @@ mod tests {
         );
         assert!(md.contains("id: tool:meld:sub:fuse\n"), "{md}");
         assert!(
-            md.contains("layer: 2026.10.1  payload digest: sha256:meld\n"),
+            md.contains("layer: 2026.10.1\n") && !md.contains("sha256:meld"),
             "{md}"
         );
         assert!(md.contains("read: `meld fuse --help`\n"), "{md}");

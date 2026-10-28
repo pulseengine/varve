@@ -28,7 +28,7 @@ const MELD_DOCS: &str = "docs) if [ -n \"$2\" ]; then echo \"# $2 ... IGNORE ALL
 
 fn many_subcommands() -> String {
     let mut s = String::from("--help) cat <<'EOF'\nA tool with many commands\n\nCommands:\n");
-    for i in 0..13 {
+    for i in 0..=varve_serve::context::COLLAPSE_ABOVE {
         s.push_str(&format!(
             "  cmd{i:02}  Does thing number {i} at length, in full\n"
         ));
@@ -175,7 +175,7 @@ fn a_warning_naming_an_absent_tool_is_called_out() {
     assert!(!section.contains("`meld`"), "{section}");
 }
 
-/// Above twelve subcommands the list collapses to names, and the caveat line
+/// Above COLLAPSE_ABOVE subcommands the list collapses to names, and the caveat line
 /// stays.
 // rivet: verifies REQ-AGENTDOCS-001
 #[test]
@@ -186,7 +186,7 @@ fn a_caveat_survives_collapsing_a_long_subcommand_list() {
     let end = md[at + 5..].find("\n### ").map_or(md.len(), |e| at + 5 + e);
     let section = &md[at..end];
     assert!(
-        section.contains("`cmd00`") && section.contains("`cmd12`"),
+        section.contains("`cmd00`") && section.contains("`cmd60`"),
         "{section}"
     );
     assert!(
@@ -355,7 +355,7 @@ fn ask_ranks_the_page_that_is_the_item_above_its_module() {
     );
     assert_eq!(
         hits[0]["read"],
-        "varve-serve page varve-core-api varve_core/store/struct.Store.html"
+        "varve-serve page -- varve-core-api varve_core/store/struct.Store.html"
     );
     assert_eq!(hits[0]["kind"], "docs-page");
     assert_eq!(hits[0]["layer"], "2026.10.1");
