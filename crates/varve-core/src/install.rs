@@ -605,16 +605,32 @@ fn consent_why_not(
         return Some("there is no trust root to verify a line-status against".to_string());
     };
     let line = manifest.layer.line();
-    match crate::linestatus::current_line_status(
+    let served = match crate::linestatus::current_line_status(
         source,
         layer_ref,
         line,
         root_pk,
         crate::linestatus::Published::BestEffort,
     ) {
-        Ok(Some((_, doc))) => consent_from_status(manifest, &doc, now),
-        Ok(None) => cached_consent_why_not(manifest, store_root, root_pk, now),
-        Err(e) => Some(format!("the one served does not verify: {e}")),
+        Ok(served) => served.map(|(_, doc)| doc),
+        Err(e) => return Some(format!("the one served does not verify: {e}")),
+    };
+    // The registry is the party anti-rollback constrains, so what it serves
+    // cannot outrank what this machine already holds: a validly-signed status
+    // from BEFORE a yank, replayed, would otherwise re-enable the yanked
+    // layer. The newer signed word decides, whichever side it came from.
+    let cached = match crate::linestatus::StatusCache::at_root(store_root).load(line, root_pk) {
+        Ok(cached) => cached,
+        Err(e) => return Some(format!("the cached one does not verify: {e}")),
+    };
+    match (served, cached) {
+        (Some(s), Some(c)) if c.counter > s.counter => consent_from_status(manifest, &c, now),
+        (Some(s), _) => consent_from_status(manifest, &s, now),
+        (None, Some(c)) => consent_from_status(manifest, &c, now),
+        (None, None) => Some(format!(
+            "none is available for line {line}: the source carries none and none was cached by \
+             an earlier install"
+        )),
     }
 }
 
@@ -650,6 +666,15 @@ fn consent_from_status(
         return Some(format!(
             "the line-status served covers line {}, not {line}",
             doc.line
+        ));
+    }
+    if let Some(floor) = doc.min_counter
+        && manifest.counter < floor
+    {
+        return Some(format!(
+            "the line-status sets a floor of counter {floor} for line {line} and this layer \
+             presents {}; consent does not override the line's own floor",
+            manifest.counter
         ));
     }
     let report = doc.report_for(&manifest.layer);
@@ -1811,9 +1836,19 @@ mod tests {
         yanked: &[(&str, &str)],
         sk: &[u8],
     ) -> Vec<u8> {
+        status_numbered(1, line, support_until, yanked, sk)
+    }
+
+    fn status_numbered(
+        counter: u64,
+        line: &str,
+        support_until: Option<&str>,
+        yanked: &[(&str, &str)],
+        sk: &[u8],
+    ) -> Vec<u8> {
         crate::linestatus::LineStatus {
             line: line.into(),
-            counter: 1,
+            counter,
             issued_at: "2026-08-01T00:00:00Z".into(),
             support_until: support_until.map(str::to_string),
             min_counter: None,
@@ -2138,6 +2173,92 @@ mod tests {
             &policy(),
         )
         .expect("an offline machine that cached a verified status may consent");
+        assert!(outcome.digest_consent.is_some());
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_registry_replaying_an_older_status_cannot_undo_a_cached_yank() {
+        // The attacker REQ-ROLLBACK-001 exists for controls the registry. A
+        // yank issued at status #2 is cached here; the registry then serves
+        // the validly-signed status #1 from before the yank. Consent must
+        // follow the NEWER signed word, or a replay re-enables a yanked layer.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let yank = status_numbered(2, "2026.07", None, &[("2026.07.0", "bad")], &f.sk);
+        let doc = crate::linestatus::LineStatus::verify_and_parse(&yank, &f.pk).unwrap();
+        crate::linestatus::StatusCache::at_root(f.store.root())
+            .update(&line, &yank, &doc)
+            .unwrap();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_numbered(1, "2026.07", None, &[], &f.sk));
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("an older served status must not outrank the cached yank");
+        assert!(err.to_string().contains("YANKED"), "{err}");
+        assert!(f.store.get(&manifest_digest(&f.older)).unwrap().is_none());
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_signed_floor_is_not_overridden_by_a_digest() {
+        // The line-status's `min-counter` is the line's own statement that no
+        // layer below it is acceptable. Consent is the line standing behind a
+        // layer; a floor above it says the line does not.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let mut doc = crate::linestatus::LineStatus::verify_and_parse(
+            &status_for("2026.07", None, &[], &f.sk),
+            &f.pk,
+        )
+        .unwrap();
+        doc.min_counter = Some(2);
+        let envelope = doc.sign(&f.sk, "root-1").unwrap().as_bytes().to_vec();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&envelope);
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("a counter below the signed floor stays refused");
+        assert!(err.to_string().contains("floor"), "{err}");
+    }
+
+    // rivet: verifies REQ-ROLLBACK-002
+    #[test]
+    fn a_newer_served_status_outranks_an_older_cached_one() {
+        // The other direction: a cached yank later LIFTED by a newer status
+        // the registry serves. The newer word wins here too.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let yank = status_numbered(1, "2026.07", None, &[("2026.07.0", "bad")], &f.sk);
+        let doc = crate::linestatus::LineStatus::verify_and_parse(&yank, &f.pk).unwrap();
+        crate::linestatus::StatusCache::at_root(f.store.root())
+            .update(&line, &yank, &doc)
+            .unwrap();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_numbered(2, "2026.07", None, &[], &f.sk));
+        let outcome = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect("a newer signed status that lifts the yank consents");
         assert!(outcome.digest_consent.is_some());
     }
 
