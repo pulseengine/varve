@@ -652,6 +652,43 @@ mod tests {
         assert!(!render_md("q", &ctx, &h1).contains("one line here holds"));
     }
 
+    /// The exact arithmetic of a topic's best line: words times DESC, the
+    /// FIRST of equally good lines, and the subcommand bonus added once.
+    // rivet: verifies REQ-AGENTDOCS-002
+    #[test]
+    fn best_line_scores_exactly_and_prefers_the_first_of_equals() {
+        let w: Vec<String> = ["alpha", "beta", "gamma"].map(String::from).to_vec();
+        let (n, line) = best_line("x alpha beta gamma\nalpha beta gamma y\n", &w).unwrap();
+        assert_eq!(n, 3 * DESC, "three words, DESC each");
+        assert_eq!(line, "x alpha beta gamma", "the first of two equal lines");
+        let (one, _) = best_line("only alpha\n", &w).unwrap();
+        assert_eq!(one, DESC);
+        assert_eq!(best_line("nothing\n", &w), None);
+
+        let mut add = unit(
+            Kind::ToolSubcommand,
+            "tool:rivet:sub:add",
+            "add",
+            "`rivet add` — Add a new artifact",
+            "Add a new artifact",
+        );
+        add.tool = Some("rivet".into());
+        let hits = search(&[add], "rivet add requirement", 1);
+        assert_eq!(hits[0].score, NAME + SUBCOMMAND_NAMED + NAMED_TOOL);
+    }
+
+    /// The cut keeps a word that lands EXACTLY on the limit and drops one
+    /// that would pass it by one.
+    // rivet: verifies REQ-AGENTDOCS-002
+    #[test]
+    fn a_snippet_cut_is_exact_at_the_limit() {
+        let first = "a".repeat(SNIPPET_MAX - 11);
+        let fits = format!("{first} {} zz", "b".repeat(10));
+        assert_eq!(snippet_of(&fits), format!("{first} {} …", "b".repeat(10)));
+        let over = format!("{}a {} zz", first, "b".repeat(10));
+        assert_eq!(snippet_of(&over), format!("{first}a …"));
+    }
+
     /// A long line is cut at a word boundary, never inside a word.
     // rivet: verifies REQ-AGENTDOCS-002
     #[test]
