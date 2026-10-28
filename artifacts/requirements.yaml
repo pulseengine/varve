@@ -5237,7 +5237,7 @@ artifacts:
   - id: REQ-SHIMFALLBACK-001
     type: requirement
     title: A shim asked for a tool the pinned layer does not carry says what it can do instead
-    status: approved
+    status: implemented
     description: "varve#273 (maintainer): in a pinned project, a shim for a tool the layer does not carry refuses, so a tool installed locally cannot be used without editing PATH, which then shadows the layer. Asked for: fall through to the tool on PATH with a warning that it ran outside the layer; and where nothing is on PATH but another installed layer carries it, list the options. UNDECIDED, because it cuts against a stated property: a shim that falls back to an ambient binary is the mixed-toolchain hazard varve exists to close, and REQ-SHADOW-001 reports exactly that shadowing as a defect. Decide: fall-through with a warning (per project opt-in, or default), list-only (refuse but name what is on PATH and which layers carry it), or keep the refusal. . DECIDED 2026-10-21 by the maintainer: refuse, but list the options. Clauses: (1) A shim for a tool the pinned layer does not carry keeps refusing, and no ambient binary ever runs through a shim. (2) The refusal names the matching executable on PATH (outside the shim directory) and the exact command that runs it directly, and every installed layer that carries the tool, with the pin change that would select it. (3) The refusal still exits 1."
     provenance:
       created-by: ai
