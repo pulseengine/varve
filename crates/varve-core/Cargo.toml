@@ -34,7 +34,7 @@ toml = "1.1.4"
 # version it builds against wherever no lockfile decides: the fuzz workspace
 # (all five fuzz jobs went red on #279) and `cargo install varve` without
 # --locked. Lift it when sigil ships a wsc that builds against 3.5.
-ureq = ">=3, <3.5"
+ureq = ">=3, <3.6"
 # Reading a binary WIT package (DD-036). The `wit` payload form is the one
 # `wkg`'s local backend reads, so the closure must be derived by DECODING that
 # form — and hand-rolling a component-model reader to avoid a dependency would
