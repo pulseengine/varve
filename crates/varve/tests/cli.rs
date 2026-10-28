@@ -8392,49 +8392,49 @@ fn export_then_tamper_in(fx: &Fixture, root: &Root, adapter: &str, extra: &[&str
     );
 }
 
-// rivet: verifies REQ-EXPORTDECL-001
+// rivet: verifies REQ-EXPORTCONTENT-001
 #[test]
 fn verify_export_catches_tampering_in_a_cargo_registry() {
     export_then_tamper("export-cargo", &[]);
 }
 
-// rivet: verifies REQ-EXPORTDECL-001
+// rivet: verifies REQ-EXPORTCONTENT-001
 #[test]
 fn verify_export_catches_tampering_in_a_crates_vendor_tree() {
     export_then_tamper("export-crates-vendor", &[]);
 }
 
-// rivet: verifies REQ-EXPORTDECL-001
+// rivet: verifies REQ-EXPORTCONTENT-001
 #[test]
 fn verify_export_catches_tampering_in_a_bazel_registry() {
     export_then_tamper("export-bazel", &[]);
 }
 
-// rivet: verifies REQ-EXPORTDECL-001
+// rivet: verifies REQ-EXPORTCONTENT-001
 #[test]
 fn verify_export_catches_tampering_in_a_bazel_distdir() {
     export_then_tamper("export-bazel-distdir", &[]);
 }
 
-// rivet: verifies REQ-EXPORTDECL-001
+// rivet: verifies REQ-EXPORTCONTENT-001
 #[test]
 fn verify_export_catches_tampering_in_a_vsix_export() {
     export_then_tamper("export-vsix", &[]);
 }
 
-// rivet: verifies REQ-EXPORTDECL-001
+// rivet: verifies REQ-EXPORTCONTENT-001
 #[test]
 fn verify_export_catches_tampering_in_a_docs_export() {
     export_then_tamper("export-docs", &[]);
 }
 
-// rivet: verifies REQ-EXPORTDECL-001
+// rivet: verifies REQ-EXPORTCONTENT-001
 #[test]
 fn verify_export_catches_tampering_in_a_wit_export() {
     export_then_tamper("export-wit", &["--package", "acme:app@0.3.0"]);
 }
 
-// rivet: verifies REQ-EXPORTDECL-001
+// rivet: verifies REQ-EXPORTCONTENT-001
 #[cfg(unix)]
 #[test]
 fn verify_export_catches_tampering_in_an_sdk_export() {
@@ -8461,7 +8461,7 @@ fn verify_export_catches_tampering_in_an_sdk_export() {
     export_then_tamper_in(&fx, &root, "export-sdk", &[]);
 }
 
-// rivet: verifies REQ-EXPORTDECL-001
+// rivet: verifies REQ-EXPORTCONTENT-001
 #[test]
 fn verify_export_refuses_a_stamp_that_predates_content_digests() {
     // A stamp written before varve#288 binds the directory to a layer and says
@@ -8493,7 +8493,7 @@ fn verify_export_refuses_a_stamp_that_predates_content_digests() {
     );
 }
 
-// rivet: verifies REQ-EXPORTDECL-001
+// rivet: verifies REQ-EXPORTCONTENT-001
 #[test]
 fn a_declared_export_that_was_edited_is_not_current() {
     // The same hole through the declared path: `verify` with no flags checks

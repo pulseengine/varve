@@ -1457,7 +1457,7 @@ path   = "before-shims"
         ));
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn a_declared_export_whose_files_changed_or_whose_stamp_is_old_is_not_current() {
         use crate::exportstamp::{ContentDrift, STAMP_FILE, read_stamp};

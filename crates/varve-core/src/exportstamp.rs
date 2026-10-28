@@ -26,6 +26,12 @@
 //! silently omitting a path from the digest is how a tree gets vouched for
 //! while holding something unhashed. Directories themselves are not entries;
 //! an empty directory is not content and is not tracked.
+//!
+//! **What this does not defend against.** The stamp is not signed. It catches
+//! an export patched, pruned or overwritten in place — by a person, a build
+//! step or a tool — not an adversary who can rewrite the stamp as well: anyone
+//! with write access to the directory can also edit `varve.toml`. The layer
+//! itself stays verifiable against its signature with `varve verify`.
 
 use std::path::Path;
 
@@ -182,10 +188,21 @@ pub fn scan_tree(dir: &Path) -> Result<Vec<FileEntry>, ExportStampError> {
                 if rel == STAMP_FILE {
                     continue;
                 }
-                let bytes = std::fs::read(entry.path()).map_err(io)?;
+                // Streamed: one Zephyr HAL is a gigabyte unpacked, and reading
+                // it whole to hash it would hold it all in memory.
+                let mut h = Sha256::new();
+                let mut file = std::fs::File::open(entry.path()).map_err(io)?;
+                let mut buf = vec![0u8; 1 << 16];
+                loop {
+                    let n = std::io::Read::read(&mut file, &mut buf).map_err(io)?;
+                    if n == 0 {
+                        break;
+                    }
+                    h.update(&buf[..n]);
+                }
                 out.push(FileEntry {
                     path: rel,
-                    digest: format!("sha256:{}", hex::encode(Sha256::digest(&bytes))),
+                    digest: format!("sha256:{}", hex::encode(h.finalize())),
                 });
             } else {
                 return Err(ExportStampError::Unhashable(
@@ -442,7 +459,7 @@ mod tests {
         );
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn the_stamp_records_a_sorted_per_file_list_and_one_digest_over_it() {
         let (dir, stamp) = stamped_export();
@@ -477,7 +494,7 @@ mod tests {
         );
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn the_tree_digest_depends_on_every_path_and_every_digest() {
         let e = |p: &str, d: &str| FileEntry {
@@ -501,7 +518,7 @@ mod tests {
         assert_eq!(base, tree_digest(&[e("a", "sha256:1"), e("b", "sha256:2")]));
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn one_flipped_byte_is_a_modified_path() {
         let (dir, stamp) = stamped_export();
@@ -512,7 +529,7 @@ mod tests {
         );
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn a_deleted_file_is_a_missing_path() {
         for gone in ["a.txt", "m/b.txt", "z.txt"] {
@@ -526,7 +543,7 @@ mod tests {
         }
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn an_added_file_is_an_extra_path_wherever_it_sorts() {
         // Before the first entry, between two, and after the last: the merge
@@ -542,7 +559,7 @@ mod tests {
         }
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn the_first_differing_path_in_sorted_order_is_the_one_named() {
         let (dir, stamp) = stamped_export();
@@ -559,7 +576,7 @@ mod tests {
         );
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn only_the_stamp_at_the_root_is_exempt_from_the_digest() {
         let dir = tempfile::tempdir().unwrap();
@@ -575,7 +592,7 @@ mod tests {
         assert_eq!(scan_tree(dir.path()).unwrap(), stamp.files);
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn a_stamp_without_a_content_digest_is_unverifiable_not_current() {
         let dir = tempfile::tempdir().unwrap();
@@ -599,7 +616,7 @@ mod tests {
         );
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn a_file_list_that_disagrees_with_its_own_digest_is_malformed() {
         let (dir, mut stamp) = stamped_export();
@@ -612,7 +629,7 @@ mod tests {
         }
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn an_empty_export_verifies_and_gaining_a_file_is_caught() {
         let dir = tempfile::tempdir().unwrap();
@@ -629,7 +646,7 @@ mod tests {
         );
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[test]
     fn a_drift_names_its_path_and_says_how() {
         let m = ContentDrift::Modified("a/b".into());
@@ -643,7 +660,7 @@ mod tests {
         assert!(e.to_string().contains("unexpected"));
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[cfg(unix)]
     #[test]
     fn a_symlink_is_recorded_by_target_and_never_followed() {
@@ -681,7 +698,7 @@ mod tests {
         );
     }
 
-    // rivet: verifies REQ-EXPORTDECL-001
+    // rivet: verifies REQ-EXPORTCONTENT-001
     #[cfg(unix)]
     #[test]
     fn a_special_file_is_refused_rather_than_skipped() {
