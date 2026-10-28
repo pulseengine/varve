@@ -60,6 +60,7 @@ pub mod sdkexport;
 pub mod selfverify;
 pub mod shadow;
 pub mod shellquote;
+pub mod shimfallback;
 pub mod source;
 pub mod store;
 pub mod support;

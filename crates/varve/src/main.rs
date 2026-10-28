@@ -1855,6 +1855,7 @@ fn run_tool(
     // the realm is what makes that sentence answer the user's real question.
     let pin_file = ctx.root.join("varve.toml");
     let pinned_realm = ctx.pin.realm.clone();
+    let pinned_channel = ctx.pin.channel;
     let mut pin = ctx.pin.clone();
     if let Some(layer) = override_layer {
         // A one-off: resolve another layer for this invocation only. The
@@ -1888,12 +1889,35 @@ fn run_tool(
         // the user can open. Reported from a real session: a `rivet` shim
         // refused inside a project pinned to an unrelated realm, and the
         // message named neither the realm nor the varve.toml that chose it.
+        //
+        // Then say what the person CAN do (REQ-SHIMFALLBACK-001): this refuses
+        // and runs nothing — an ambient binary never executes through varve —
+        // but a refusal that hides the tool installed next door, or the layer
+        // that carries it, sends people to edit PATH, which shadows the layer.
+        let args_quoted = args
+            .iter()
+            .map(|a| varve_core::shellquote::quote_sh(&a.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let options = varve_core::shimfallback::describe(
+            tool,
+            &args_quoted,
+            &pin_file,
+            &varve_core::shimfallback::on_path(
+                std::env::var_os("PATH").as_deref(),
+                tool,
+                &store.root().join("shims"),
+            ),
+            &varve_core::shimfallback::carriers(&ctx.store, tool, &resolved.layer.digest),
+            pinned_channel,
+            pinned_realm.as_deref(),
+        );
         bail!(
             "tool '{tool}' is not part of layer {} — it exposes: {}.\n\
              This directory is pinned by {}{}, which is why '{tool}' does not \
              resolve here even though a shim for it exists (one shim directory \
              serves every realm). `varve inspect` lists every payload in the \
-             pinned layer; `varve docs pins` explains switching.",
+             pinned layer; `varve docs pins` explains switching.\n{options}",
             resolved.layer.layer,
             addressable(&resolved),
             pin_file.display(),

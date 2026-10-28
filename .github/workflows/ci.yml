@@ -389,6 +389,13 @@ jobs:
           - shard: varve-core (delta)
             files: >-
               -f crates/varve-core/src/delta.rs
+          # NEW at v0.44.0 (REQ-SHIMFALLBACK-001). It decides what a refused
+          # shim tells the person to do — which binary to run, which pin line
+          # to write — so a wrong answer is a wrong instruction. Small, so its
+          # own shard rather than growing one that was already split.
+          - shard: varve-core (shim-fallback)
+            files: >-
+              -f crates/varve-core/src/shimfallback.rs
           # GATED ON ARRIVAL, and this one was earned the hard way. An
           # independent review mutated the `Other` arm of `linkage` to round an
           # unrecognised PT_INTERP to glibc and watched all 311 producer tests

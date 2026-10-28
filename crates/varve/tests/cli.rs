@@ -8524,3 +8524,134 @@ fn a_declared_export_that_was_edited_is_not_current() {
                 .and(predicate::str::contains("modified")),
         );
 }
+
+/// A fixture pinned to 2026.07.0 (which carries only `probe`), plus a directory
+/// holding an executable `ghost` that writes a marker when it runs.
+#[cfg(unix)]
+fn shim_fallback_fixture() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = fixture(
+        Some(PIN_JULY),
+        &[(MANIFEST_JULY, &[("probe", b"#!/bin/sh\n")])],
+    );
+    let bin = fx.root.with_file_name("ambient-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let marker = fx.root.with_file_name("ghost-ran");
+    let ghost = bin.join("ghost");
+    std::fs::write(
+        &ghost,
+        format!("#!/bin/sh\necho ran > {}\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ghost, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (fx, bin, marker)
+}
+
+// rivet: verifies REQ-SHIMFALLBACK-001
+#[cfg(unix)]
+#[test]
+fn a_refused_tool_on_path_is_named_with_the_direct_command_and_never_run() {
+    let (fx, bin, marker) = shim_fallback_fixture();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = varve(&fx)
+        .env("PATH", &path)
+        .args(["run", "ghost", "--version"])
+        .output()
+        .unwrap();
+    // Clause 3: still a refusal, exit 1.
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Clause 1: refused, and the ambient binary did not run.
+    assert!(stderr.contains("is not part of layer"), "{stderr}");
+    assert!(!marker.exists(), "an ambient binary ran through varve");
+    // Clause 2: the executable and the exact command that runs it.
+    let ghost = bin.join("ghost");
+    assert!(
+        stderr.contains(&format!("on PATH at {}", ghost.display())),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("'{}' '--version'", ghost.display())),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Nothing else provides"), "{stderr}");
+}
+
+// rivet: verifies REQ-SHIMFALLBACK-001
+#[cfg(unix)]
+#[test]
+fn a_refused_tool_another_installed_layer_carries_names_it_and_the_pin_line() {
+    let (fx, _bin, marker) = shim_fallback_fixture();
+    let store = varve_core::Store::at(&fx.root);
+    store
+        .lay_down(
+            MANIFEST_JULY
+                .replace("2026.07.0", "2026.09.0")
+                .replace("qualified", "rolling")
+                .as_bytes(),
+            &[("ghost", b"#!/bin/sh\n")],
+        )
+        .unwrap();
+    let out = varve(&fx).args(["run", "ghost"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!marker.exists());
+    assert!(
+        stderr.contains("installed layer 2026.09.0 (rolling) carries 'ghost'"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("layer = \"2026.09.0\"; channel = \"rolling\""),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&fx.project.join("varve.toml").display().to_string()),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Nothing else provides"), "{stderr}");
+}
+
+// rivet: verifies REQ-SHIMFALLBACK-001
+#[cfg(unix)]
+#[test]
+fn the_shim_directory_on_path_is_not_offered_as_the_way_around_itself() {
+    let (fx, _bin, _marker) = shim_fallback_fixture();
+    varve(&fx)
+        .args(["shim", "install", "--tool", "ghost"])
+        .assert()
+        .success();
+    let shims = fx.root.join("shims");
+    assert!(shims.join("ghost").exists(), "the shim exists");
+    let out = std::process::Command::new(shims.join("ghost"))
+        .current_dir(&fx.project)
+        .env("VARVE_ROOT", &fx.root)
+        .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
+        .env("PATH", format!("{}:/usr/bin:/bin", shims.display()))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("is not part of layer"), "{stderr}");
+    assert!(stderr.contains("Nothing else provides 'ghost'"), "{stderr}");
+    assert!(!stderr.contains("on PATH at"), "{stderr}");
+}
+
+// rivet: verifies REQ-SHIMFALLBACK-001
+#[cfg(unix)]
+#[test]
+fn a_refused_tool_nothing_provides_says_so_and_still_exits_1() {
+    let (fx, _bin, marker) = shim_fallback_fixture();
+    let out = varve(&fx)
+        .args(["run", "nobody-has-this"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("is not part of layer"), "{stderr}");
+    assert!(
+        stderr.contains("Nothing else provides 'nobody-has-this'"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Options"), "{stderr}");
+    assert!(!marker.exists());
+}
