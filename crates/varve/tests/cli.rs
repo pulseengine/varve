@@ -8571,7 +8571,7 @@ fn a_refused_tool_on_path_is_named_with_the_direct_command_and_never_run() {
         "{stderr}"
     );
     assert!(
-        stderr.contains(&format!("{} '--version'", ghost.display())),
+        stderr.contains(&format!("'{}' '--version'", ghost.display())),
         "{stderr}"
     );
     assert!(!stderr.contains("Nothing else provides"), "{stderr}");

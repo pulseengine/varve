@@ -153,7 +153,7 @@ pub fn describe(
             "\n  - '{tool}' is on PATH at {} — it is NOT part of the pinned layer. Run it \
              directly, outside the layer: {}{suffix}",
             p.display(),
-            p.display()
+            crate::shellquote::quote_sh(&p.to_string_lossy())
         ));
     }
     for c in carriers {
@@ -198,6 +198,25 @@ mod tests {
     }
 
     // rivet: verifies REQ-SHIMFALLBACK-001
+    // rivet: verifies REQ-SHIMFALLBACK-001
+    #[test]
+    fn the_direct_command_survives_a_path_with_a_space() {
+        let p = PathBuf::from("/opt/my tools/ghost");
+        let s = describe(
+            "ghost",
+            "'--version'",
+            Path::new("/p/varve.toml"),
+            std::slice::from_ref(&p),
+            &[],
+            Channel::Rolling,
+            None,
+        );
+        assert!(
+            s.contains("outside the layer: '/opt/my tools/ghost' '--version'"),
+            "the command must paste into a shell as one word: {s}"
+        );
+    }
+
     #[test]
     fn on_path_skips_the_shim_directory_however_it_is_spelled() {
         let shims = tempfile::tempdir().unwrap();
@@ -281,7 +300,7 @@ mod tests {
             None,
         );
         assert!(s.contains("varve ran nothing"), "{s}");
-        assert!(s.contains("/opt/bin/ghost '--version'"), "{s}");
+        assert!(s.contains("'/opt/bin/ghost' '--version'"), "{s}");
         assert!(!s.contains("Nothing else"), "{s}");
         let bare = describe(
             "ghost",
@@ -293,7 +312,7 @@ mod tests {
             None,
         );
         assert!(
-            bare.ends_with("directly, outside the layer: /opt/bin/ghost"),
+            bare.ends_with("directly, outside the layer: '/opt/bin/ghost'"),
             "{bare}"
         );
     }
