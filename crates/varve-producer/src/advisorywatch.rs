@@ -465,8 +465,9 @@ pub struct PayloadGhsa {
 /// machine-readable; an exact match has no `detection` at all.
 pub fn qualifier(packages: &[String], repo: &str) -> String {
     format!(
-        "qualified: names {} from the same repository ({repo}); affects this binary if it \
-         embeds that crate",
+        "{}names {} from the same repository ({repo}); affects this binary if it embeds that \
+         crate",
+        crate::statusdraft::QUALIFIED_PREFIX,
         packages.join(", ")
     )
 }
@@ -517,13 +518,19 @@ pub fn ghsa_for_payload(
 /// (maintainer, 2026-10-29). Only an advisory that every payload matched as a
 /// sibling package keeps its qualifier.
 pub fn unify_qualifiers(proposed: &mut [Proposed]) {
+    // Every name a CERTAIN finding is known by: its id and its aliases. The
+    // same problem often arrives as a GHSA and as a RUSTSEC aliasing it, and
+    // the certain one may be either (found by the v0.44.0 clean-room review).
     let exact: Vec<String> = proposed
         .iter()
         .filter(|p| p.detection.is_none())
-        .map(|p| p.id.clone())
+        .flat_map(|p| std::iter::once(p.id.clone()).chain(p.aliases.iter().cloned()))
         .collect();
     for p in proposed.iter_mut() {
-        if exact.contains(&p.id) {
+        let named = std::iter::once(&p.id)
+            .chain(p.aliases.iter())
+            .any(|n| exact.contains(n));
+        if named {
             p.detection = None;
         }
     }
@@ -5701,6 +5708,30 @@ patched = [">= 1.0.5"]
             qualifier(&["a".to_string(), "b".to_string()], "o/r")
                 .starts_with("qualified: names a, b ")
         );
+    }
+
+    /// The same problem under ANOTHER id (an alias): a certain RustSec
+    /// advisory aliasing a qualified GHSA makes the GHSA certain too.
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn an_exact_match_under_an_alias_makes_the_qualified_one_certain() {
+        let mk = |id: &str, aliases: &[&str], d: Option<&str>| Proposed {
+            id: id.to_string(),
+            aliases: aliases.iter().map(|a| a.to_string()).collect(),
+            title: String::new(),
+            severity: "high".into(),
+            affected: vec![],
+            workaround: None,
+            detection: d.map(str::to_string),
+        };
+        let mut v = vec![
+            mk("GHSA-sib", &[], Some("qualified: names x")),
+            mk("RUSTSEC-2026-9999", &["GHSA-sib"], None),
+            mk("GHSA-other", &[], Some("qualified: names y")),
+        ];
+        unify_qualifiers(&mut v);
+        let d: Vec<Option<&str>> = v.iter().map(|p| p.detection.as_deref()).collect();
+        assert_eq!(d, [None, None, Some("qualified: names y")]);
     }
 
     // rivet: verifies REQ-ADVISORYWATCH-002
