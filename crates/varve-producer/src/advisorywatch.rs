@@ -38,7 +38,7 @@
 //! LONGER support window than the clock itself, only ever the SAME one the
 //! newest layer already asserts.
 
-use crate::advisory::{self, AdvisoryError, Finding, GhsaResult, Version};
+use crate::advisory::{self, AdvisoryError, Finding, Version};
 use crate::statusdraft::{self, DraftError, Proposed};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -447,84 +447,83 @@ pub fn ghsa_package_names(json: &str) -> Result<Vec<String>, WatchError> {
     Ok(names.into_iter().collect())
 }
 
-/// Every advisory of the repository none of whose vulnerable packages is in
-/// `own_names`, as `GHSA-id (package, package)`. These are the advisories
-/// [`ghsa_for_payload`] does not match against the payload; they are reported
-/// so that not matching them is never silent.
-pub fn ghsa_not_naming(json: &str, own_names: &[String]) -> Result<Vec<String>, WatchError> {
-    let v: serde_json::Value =
-        serde_json::from_str(json).map_err(|e| failed("GHSA advisories JSON", e))?;
-    let arr = v.as_array().ok_or_else(|| {
-        failed(
-            "GHSA advisories JSON",
-            "expected a JSON array of advisories",
-        )
-    })?;
-    let mut out = Vec::new();
-    for advisory in arr {
-        let Some(id) = advisory.get("ghsa_id").and_then(|i| i.as_str()) else {
-            continue;
-        };
-        let mut packages = BTreeSet::new();
-        if let Some(vulns) = advisory.get("vulnerabilities").and_then(|v| v.as_array()) {
-            for vuln in vulns {
-                if let Some(name) = vuln
-                    .get("package")
-                    .and_then(|p| p.get("name"))
-                    .and_then(|n| n.as_str())
-                {
-                    packages.insert(name);
-                }
-            }
-        }
-        if packages.is_empty() || packages.iter().any(|n| own_names.iter().any(|o| o == n)) {
-            continue;
-        }
-        out.push(format!(
-            "{id} ({})",
-            packages.into_iter().collect::<Vec<_>>().join(", ")
-        ));
-    }
-    Ok(out)
+/// What a repository's GHSA advisories say about one payload.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PayloadGhsa {
+    /// Advisories whose vulnerable range names the payload itself: certain.
+    pub findings: Vec<Finding>,
+    /// Advisories naming only OTHER packages of the same repository, whose
+    /// range covers the payload's version, with the sibling packages that
+    /// matched. Affected only if the payload embeds that crate, so they are
+    /// findings, but qualified (REQ-ADVISORYWATCH-002 clause 5).
+    pub qualified: Vec<(Finding, Vec<String>)>,
+    pub undecidable: Vec<advisory::Undecidable>,
 }
 
-/// Every finding and every undecidable advisory affecting `version`, matched
-/// against the package ranges that NAME the payload (`own_names`) and no
-/// other range of the repository (REQ-ADVISORYWATCH-002 clause 5). An
-/// advisory that lists another package of the same repository, with a range
-/// the payload's version happens to fall inside, is not a finding about this
-/// payload. A single advisory id is kept at most once.
+/// The qualifier text a sibling-package finding carries in the line-status
+/// entry's `detection` field. The fixed `qualified:` prefix keeps it
+/// machine-readable; an exact match has no `detection` at all.
+pub fn qualifier(packages: &[String], repo: &str) -> String {
+    format!(
+        "qualified: names {} from the same repository ({repo}); affects this binary if it \
+         embeds that crate",
+        packages.join(", ")
+    )
+}
+
+/// Every finding and every undecidable advisory affecting `version` in the
+/// repository's GHSA JSON, split by whether the advisory's range names the
+/// payload (`own_names`, certain) or only a sibling package of the same
+/// repository (qualified). An advisory that names the payload is certain
+/// even when it also lists siblings. A single advisory id is kept at most
+/// once in each list. A sibling whose range does not cover `version` is not
+/// a finding at all.
 pub fn ghsa_for_payload(
     json: &str,
     version: &Version,
     own_names: &[String],
-) -> Result<GhsaResult, WatchError> {
-    let names: Vec<String> = ghsa_package_names(json)?
-        .into_iter()
-        .filter(|n| own_names.contains(n))
-        .collect();
-    let mut findings: Vec<Finding> = Vec::new();
-    let mut undecidable: Vec<advisory::Undecidable> = Vec::new();
-    for name in names {
+) -> Result<PayloadGhsa, WatchError> {
+    let mut out = PayloadGhsa::default();
+    for name in ghsa_package_names(json)? {
+        let own = own_names.contains(&name);
         let r = advisory::ghsa_findings(json, &name, version)?;
         for f in r.findings {
-            if !findings.iter().any(|existing| existing.id == f.id) {
-                findings.push(f);
+            if own {
+                if !out.findings.iter().any(|e| e.id == f.id) {
+                    out.findings.push(f);
+                }
+            } else if let Some((_, pkgs)) = out.qualified.iter_mut().find(|(e, _)| e.id == f.id) {
+                pkgs.push(name.clone());
+            } else {
+                out.qualified.push((f, vec![name.clone()]));
             }
         }
         for u in r.undecidable {
-            // By id alone, matching how `findings` above is deduplicated —
-            // one GHSA advisory is one row in the report no matter which
-            // package name's query surfaced it.
-            if !undecidable.iter().any(|existing| existing.id == u.id) {
-                undecidable.push(u);
+            // By id alone: one advisory is one row in the report no matter
+            // which package name's query surfaced it.
+            if !out.undecidable.iter().any(|e| e.id == u.id) {
+                out.undecidable.push(u);
             }
         }
     }
-    Ok(GhsaResult {
-        findings,
-        undecidable,
-    })
+    let exact: Vec<String> = out.findings.iter().map(|f| f.id.clone()).collect();
+    out.qualified.retain(|(f, _)| !exact.contains(&f.id));
+    Ok(out)
+}
+
+/// When one advisory reaches the draft through several payloads and any of
+/// them is qualified, the entry keeps the qualifier: a draft must not read
+/// as certain for layers where it is not.
+pub fn unify_qualifiers(proposed: &mut [Proposed]) {
+    let known: Vec<(String, String)> = proposed
+        .iter()
+        .filter_map(|p| p.detection.clone().map(|d| (p.id.clone(), d)))
+        .collect();
+    for p in proposed.iter_mut() {
+        if let Some((_, d)) = known.iter().find(|(id, _)| *id == p.id) {
+            p.detection = Some(d.clone());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1257,28 +1256,16 @@ fn watch_line<G: AdvisoryGh, S: LayerSource>(
                 j
             }
         };
-        // Only the package range that names THIS payload decides
-        // (REQ-ADVISORYWATCH-002 clause 5). When the repository's advisories
-        // name packages and none is this payload, nothing was matched, and
-        // that is said rather than read as a clean check.
-        let unmatched = ghsa_not_naming(&json, std::slice::from_ref(&p.tool))?;
-        if !unmatched.is_empty() {
-            unchecked.push(UncheckedReport {
-                tool: p.tool.clone(),
-                version: p.version.clone(),
-                repo: p.repo.clone(),
-                reason: format!(
-                    "{} advisor{} of the repository name only other packages and {} not matched \
-                     against this payload: {}",
-                    unmatched.len(),
-                    if unmatched.len() == 1 { "y" } else { "ies" },
-                    if unmatched.len() == 1 { "was" } else { "were" },
-                    unmatched.join(", ")
-                ),
-            });
-        }
+        // The package range that NAMES this payload is certain; a range
+        // naming only a sibling package of the repository is a qualified
+        // finding (REQ-ADVISORYWATCH-002 clause 5).
         let result = ghsa_for_payload(&json, &version, std::slice::from_ref(&p.tool))?;
-        for f in &result.findings {
+        let exact = result.findings.iter().map(|f| (f, None));
+        let qualified = result
+            .qualified
+            .iter()
+            .map(|(f, pkgs)| (f, Some(qualifier(pkgs, &p.repo))));
+        for (f, detection) in exact.chain(qualified) {
             let (severity, defaulted_reason) = ghsa_severity(f);
             if let Some(reason) = defaulted_reason {
                 push_unique(
@@ -1296,6 +1283,7 @@ fn watch_line<G: AdvisoryGh, S: LayerSource>(
                 severity,
                 affected: p.layers.clone(),
                 workaround: None,
+                detection,
             });
         }
         for u in &result.undecidable {
@@ -1605,6 +1593,7 @@ fn watch_line<G: AdvisoryGh, S: LayerSource>(
                             severity,
                             affected: p.layers.clone(),
                             workaround: None,
+                            detection: None,
                         });
                     }
                     advisory::RustSecOutcome::NotAffected => {}
@@ -1649,6 +1638,7 @@ fn watch_line<G: AdvisoryGh, S: LayerSource>(
         }
     }
 
+    unify_qualifiers(&mut proposed);
     let next = statusdraft::next_document(&baseline, &proposed, today)?;
 
     let mut report = LineReport {
@@ -2259,6 +2249,35 @@ mod tests {
             ["GHSA-aaaa".to_string(), "GHSA-bbbb".to_string()].into()
         );
         assert!(ids(&["unrelated"]).is_empty());
+        // What names the payload is certain; the rest is qualified, once.
+        let r = ghsa_for_payload(MULTI_PACKAGE_GHSA, &v, &["wasmtime".to_string()]).unwrap();
+        assert_eq!(r.qualified.len(), 1, "{r:?}");
+        assert_eq!(r.qualified[0].0.id, "GHSA-bbbb");
+        let r = ghsa_for_payload(MULTI_PACKAGE_GHSA, &v, &["unrelated".to_string()]).unwrap();
+        assert!(r.findings.is_empty());
+        assert_eq!(r.qualified.len(), 2, "{r:?}");
+    }
+
+    /// One advisory naming two sibling packages is ONE qualified finding
+    /// that names both.
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn one_advisory_naming_two_siblings_is_one_qualified_finding_naming_both() {
+        let json = r#"[{
+            "ghsa_id": "GHSA-two",
+            "severity": "high",
+            "summary": "s",
+            "html_url": null,
+            "vulnerabilities": [
+                {"package": {"name": "a"}, "vulnerable_version_range": ">= 1.0.0", "patched_versions": null},
+                {"package": {"name": "b"}, "vulnerable_version_range": ">= 1.0.0", "patched_versions": null},
+                {"package": {"name": "c"}, "vulnerable_version_range": "< 0.5.0", "patched_versions": null}
+            ]
+        }]"#;
+        let v = Version::parse("1.0.0").unwrap();
+        let r = ghsa_for_payload(json, &v, &["me".to_string()]).unwrap();
+        assert_eq!(r.qualified.len(), 1, "{r:?}");
+        assert_eq!(r.qualified[0].1, ["a", "b"]);
     }
 
     /// A single advisory matched under TWO different package names must not
@@ -3036,7 +3055,7 @@ unaffected = ["< 0.21.0"]
                 crate::orchestrate::ReleaseSbomOutcome::NoSbom,
             );
         let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
-        assert_eq!(report.lines[0].new_known_problems.len(), 15);
+        assert_eq!(report.lines[0].new_known_problems.len(), 23);
 
         let written: LineStatus = serde_json::from_str(
             &std::fs::read_to_string(root.join("line-status/2026.10.json")).unwrap(),
@@ -3095,14 +3114,38 @@ unaffected = ["< 0.21.0"]
         let line = &report.lines[0];
         assert_eq!(line.line, "2026.10");
         assert!(line.wrote);
-        assert_eq!(line.new_known_problems.len(), 15, "{line:?}");
+        assert_eq!(line.new_known_problems.len(), 23, "{line:?}");
 
         let written: LineStatus = serde_json::from_str(
             &std::fs::read_to_string(root.join("line-status/2026.10.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(written.counter, 1);
-        assert_eq!(written.known_problems.len(), 15);
+        assert_eq!(written.known_problems.len(), 23);
+        // 15 advisories name the `wasmtime` package itself and are certain;
+        // 8 name only a sibling package of the same repository and are
+        // qualified, never presented as certain (REQ-ADVISORYWATCH-002
+        // clause 5).
+        let qualified: Vec<&varve_core::linestatus::KnownProblem> = written
+            .known_problems
+            .iter()
+            .filter(|kp| kp.detection.is_some())
+            .collect();
+        assert_eq!(qualified.len(), 8, "{qualified:?}");
+        assert_eq!(written.known_problems.len() - qualified.len(), 15);
+        // The advisory this requirement exists for names only `wasmtime-wasi`.
+        let m9f7 = written
+            .known_problems
+            .iter()
+            .find(|kp| kp.id == "GHSA-m9f7-9w4p-gv38")
+            .expect("the wasmtime-wasi sandbox escape must be a finding");
+        assert_eq!(
+            m9f7.detection.as_deref(),
+            Some(
+                "qualified: names wasmtime-wasi from the same repository \
+                 (bytecodealliance/wasmtime); affects this binary if it embeds that crate"
+            )
+        );
         // 49.0.1's layer is affected; 49.0.3's is not.
         for kp in &written.known_problems {
             assert_eq!(kp.affected, vec!["2026.10.0".to_string()], "{kp:?}");
@@ -3976,7 +4019,7 @@ patched = ["not a requirement at all"]
         // The OTHER payload (wasmtime) is still checked normally.
         assert_eq!(
             report.lines[0].new_known_problems.len(),
-            15,
+            23,
             "{:?}",
             report.lines[0]
         );
@@ -5407,29 +5450,24 @@ patched = [">= 1.0.5"]
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Clause 5. An advisory whose ranges name only a DIFFERENT package of
-    /// the same repository must not match the payload, even though the
-    /// payload's version sits inside that other package's range; and the
-    /// gap is reported rather than read as "nothing new".
-    // rivet: verifies REQ-ADVISORYWATCH-002
-    #[test]
-    fn an_advisory_naming_a_different_package_in_the_repo_does_not_match_the_payload() {
-        let root = scratch("other-package");
+    const SIBLING_ONLY_GHSA: &str = r#"[{
+            "ghsa_id": "GHSA-sibling",
+            "severity": "high",
+            "summary": "only the sibling package",
+            "html_url": null,
+            "vulnerabilities": [
+                {"package": {"name": "wasmtime-wasi"}, "vulnerable_version_range": ">= 49.0.0, <= 49.0.2", "patched_versions": "49.0.3"}
+            ]
+        }]"#;
+
+    fn wasmtime_49_0_1(name: &str, ghsa: &str) -> (PathBuf, MemorySource, FakeGh) {
+        let root = scratch(name);
         let (source, digest) = with_layer(
             MemorySource::new(),
             "2026.10.0",
             &[("wasmtime", "49.0.1", "bytecodealliance/wasmtime", "")],
         );
         write_index(&root, "2026.10", &[("2026.10.0", &digest)]);
-        let ghsa = r#"[{
-            "ghsa_id": "GHSA-other",
-            "severity": "high",
-            "summary": "only the other package",
-            "html_url": null,
-            "vulnerabilities": [
-                {"package": {"name": "wasmtime-wasi"}, "vulnerable_version_range": ">= 49.0.0, <= 49.0.2", "patched_versions": "49.0.3"}
-            ]
-        }]"#;
         let gh = FakeGh::default()
             .ghsa("bytecodealliance/wasmtime", ghsa)
             .release_sbom_outcome(
@@ -5438,18 +5476,83 @@ patched = [">= 1.0.5"]
                 "49.0.1",
                 crate::orchestrate::ReleaseSbomOutcome::NoSbom,
             );
+        (root, source, gh)
+    }
+
+    /// Clause 5. An advisory whose ranges name only a DIFFERENT package of
+    /// the same repository, with a range that covers the payload's version,
+    /// is a QUALIFIED finding: present, and marked as not certain.
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn an_advisory_naming_a_sibling_package_is_a_qualified_finding() {
+        let (root, source, gh) = wasmtime_49_0_1("sibling-qualified", SIBLING_ONLY_GHSA);
+        let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
+        let line = &report.lines[0];
+        assert_eq!(line.new_known_problems, vec!["GHSA-sibling".to_string()]);
+        let written: LineStatus = serde_json::from_str(
+            &std::fs::read_to_string(root.join("line-status/2026.10.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            written.known_problems[0].detection.as_deref(),
+            Some(
+                "qualified: names wasmtime-wasi from the same repository \
+                 (bytecodealliance/wasmtime); affects this binary if it embeds that crate"
+            )
+        );
+        assert!(
+            line.unchecked
+                .iter()
+                .all(|u| !u.reason.contains("GHSA-sibling"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Clause 5 negative control: a sibling package whose range does NOT
+    /// cover the payload's version is not a finding, and is not an unchecked
+    /// gap either (the versions were comparable and disagree).
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn a_sibling_package_whose_range_misses_the_payload_version_is_not_a_finding() {
+        let ghsa = SIBLING_ONLY_GHSA.replace(">= 49.0.0, <= 49.0.2", "< 40.0.0");
+        let (root, source, gh) = wasmtime_49_0_1("sibling-miss", &ghsa);
         let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
         let line = &report.lines[0];
         assert!(line.new_known_problems.is_empty(), "{line:?}");
-        let unchecked = line
-            .unchecked
-            .iter()
-            .find(|u| u.reason.contains("wasmtime-wasi"))
-            .unwrap_or_else(|| panic!("the unmatched advisory must be reported: {line:?}"));
-        assert_eq!(unchecked.tool, "wasmtime");
-
+        assert!(!line.wrote, "{line:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// An advisory naming the payload exactly is certain (no qualifier),
+    /// even when the same advisory also lists a sibling package.
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn an_exact_name_match_is_certain_and_carries_no_qualifier() {
+        let ghsa = r#"[{
+            "ghsa_id": "GHSA-both",
+            "severity": "high",
+            "summary": "both",
+            "html_url": null,
+            "vulnerabilities": [
+                {"package": {"name": "wasmtime"}, "vulnerable_version_range": ">= 49.0.0, <= 49.0.2", "patched_versions": "49.0.3"},
+                {"package": {"name": "wasmtime-wasi"}, "vulnerable_version_range": ">= 49.0.0, <= 49.0.2", "patched_versions": "49.0.3"}
+            ]
+        }]"#;
+        let (root, source, gh) = wasmtime_49_0_1("exact-certain", ghsa);
+        let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
+        assert_eq!(
+            report.lines[0].new_known_problems,
+            vec!["GHSA-both".to_string()]
+        );
+        let written: LineStatus = serde_json::from_str(
+            &std::fs::read_to_string(root.join("line-status/2026.10.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written.known_problems.len(), 1);
+        assert_eq!(written.known_problems[0].detection, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Clause 5, positive side: the range that names the payload still
     /// matches when the same advisory also lists other packages.
     // rivet: verifies REQ-ADVISORYWATCH-002
@@ -5469,10 +5572,15 @@ patched = [">= 1.0.5"]
         let own = ["wasmtime".to_string()];
         let r = ghsa_for_payload(json, &v, &own).unwrap();
         assert!(r.findings.is_empty(), "{r:?}");
+        // The sibling's range covers 49.0.1: qualified, naming that sibling.
+        assert_eq!(r.qualified.len(), 1, "{r:?}");
+        assert_eq!(r.qualified[0].1, ["wasmtime-wasi"]);
         let v = Version::parse("39.0.0").unwrap();
         let r = ghsa_for_payload(json, &v, &own).unwrap();
         assert_eq!(r.findings.len(), 1, "{r:?}");
         assert_eq!(r.findings[0].package, "wasmtime");
+        // Certain wins: the same advisory is not also qualified.
+        assert!(r.qualified.is_empty(), "{r:?}");
     }
 
     fn comp(name: &str, version: Option<&str>, purl: Option<&str>) -> SbomComponent {
@@ -5554,24 +5662,6 @@ patched = [">= 1.0.5"]
 
     // rivet: verifies REQ-ADVISORYWATCH-002
     #[test]
-    fn ghsa_not_naming_lists_the_advisories_that_name_only_other_packages() {
-        let json = r#"[
-            {"ghsa_id":"GHSA-1","vulnerabilities":[{"package":{"name":"x"}},{"package":{"name":"y"}}]},
-            {"ghsa_id":"GHSA-2","vulnerabilities":[{"package":{"name":"me"}},{"package":{"name":"y"}}]},
-            {"ghsa_id":"GHSA-3","vulnerabilities":[]},
-            {"vulnerabilities":[{"package":{"name":"z"}}]},
-            {"ghsa_id":"GHSA-4","vulnerabilities":[{"package":{"name":"z"}}]}
-        ]"#;
-        assert_eq!(
-            ghsa_not_naming(json, &["me".to_string()]).unwrap(),
-            ["GHSA-1 (x, y)", "GHSA-4 (z)"]
-        );
-        assert!(ghsa_not_naming("not json", &[]).is_err());
-        assert!(ghsa_not_naming("{}", &[]).is_err());
-    }
-
-    // rivet: verifies REQ-ADVISORYWATCH-002
-    #[test]
     fn dedup_keeps_releases_tools_and_kinds_apart() {
         let base = payload("o/r", "1.0.0");
         let mut other_release = base.clone();
@@ -5598,35 +5688,38 @@ patched = [">= 1.0.5"]
 
     // rivet: verifies REQ-ADVISORYWATCH-002
     #[test]
-    fn a_single_unmatched_advisory_is_reported_in_the_singular() {
-        let root = scratch("one-other");
-        let (source, digest) = with_layer(
-            MemorySource::new(),
-            "2026.10.0",
-            &[("wasmtime", "49.0.1", "bytecodealliance/wasmtime", "")],
+    fn the_qualifier_names_every_matching_sibling_and_the_repository() {
+        assert_eq!(
+            qualifier(&["wasmtime-wasi".to_string()], "bytecodealliance/wasmtime"),
+            "qualified: names wasmtime-wasi from the same repository \
+             (bytecodealliance/wasmtime); affects this binary if it embeds that crate"
         );
-        write_index(&root, "2026.10", &[("2026.10.0", &digest)]);
-        let ghsa = r#"[{"ghsa_id":"GHSA-other","severity":"high","summary":"s","html_url":null,
-            "vulnerabilities":[{"package":{"name":"wasmtime-wasi"},"vulnerable_version_range":">= 1.0.0","patched_versions":null}]}]"#;
-        let gh = FakeGh::default()
-            .ghsa("bytecodealliance/wasmtime", ghsa)
-            .release_sbom_outcome(
-                "bytecodealliance/wasmtime",
-                "49.0.1",
-                "49.0.1",
-                crate::orchestrate::ReleaseSbomOutcome::NoSbom,
-            );
-        let report = run(&root, &gh, &source, "2026-10-15").expect("runs");
-        let r = report.lines[0]
-            .unchecked
-            .iter()
-            .find(|u| u.reason.contains("GHSA-other"))
-            .unwrap();
         assert!(
-            r.reason
-                .starts_with("1 advisory of the repository name only other packages and was not"),
-            "{r:?}"
+            qualifier(&["a".to_string(), "b".to_string()], "o/r")
+                .starts_with("qualified: names a, b ")
         );
-        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn a_qualifier_on_any_proposal_of_an_advisory_applies_to_all_of_its_proposals() {
+        let mk = |id: &str, d: Option<&str>| Proposed {
+            id: id.to_string(),
+            aliases: vec![],
+            title: String::new(),
+            severity: "high".into(),
+            affected: vec![],
+            workaround: None,
+            detection: d.map(str::to_string),
+        };
+        let mut v = vec![
+            mk("A", None),
+            mk("B", None),
+            mk("A", Some("q")),
+            mk("C", Some("r")),
+        ];
+        unify_qualifiers(&mut v);
+        let d: Vec<Option<&str>> = v.iter().map(|p| p.detection.as_deref()).collect();
+        assert_eq!(d, [Some("q"), None, Some("q"), Some("r")]);
     }
 }

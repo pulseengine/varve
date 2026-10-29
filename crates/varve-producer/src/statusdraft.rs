@@ -27,6 +27,11 @@ pub struct Proposed {
     pub severity: String,
     pub affected: Vec<String>,
     pub workaround: Option<String>,
+    /// How certain the match is, when it is not certain: a finding that
+    /// names a sibling package of the payload's repository carries the
+    /// qualifier here (the entry's `detection` field). `None` is an exact
+    /// match.
+    pub detection: Option<String>,
 }
 
 /// Why a proposed finding could not become a draft.
@@ -173,7 +178,7 @@ pub fn next_document(
                     severity,
                     affected,
                     workaround: finding.workaround.clone(),
-                    detection: None,
+                    detection: finding.detection.clone(),
                     mitigation: None,
                 });
                 changed = true;
@@ -305,6 +310,7 @@ mod tests {
             severity: "HIGH".into(),
             affected: vec!["2026.09.2".into(), "2026.09.20".into()],
             workaround: Some("upgrade to rustls 0.23.46".into()),
+            detection: None,
         }
     }
 
@@ -359,6 +365,7 @@ mod tests {
             severity: "critical".into(),
             affected: vec!["2026.09.18".into()],
             workaround: None,
+            detection: None,
         };
         let next = next_document(&current, &[finding], "2026-10-15T00:00:00Z")
             .unwrap()
@@ -392,6 +399,7 @@ mod tests {
             severity: "medium".into(),
             affected: vec!["2026.09.19".into()],
             workaround: Some("scanner's own workaround, must NOT win".into()),
+            detection: None,
         };
         let next = next_document(&current, &[finding], "2026-10-15T00:00:00Z")
             .unwrap()
@@ -435,6 +443,7 @@ mod tests {
             severity: "high".into(),
             affected: vec!["2026.09.2".into()],
             workaround: None,
+            detection: None,
         };
         assert_eq!(
             next_document(&current, &[finding], "2026-10-15T00:00:00Z").unwrap(),
@@ -453,6 +462,7 @@ mod tests {
             severity: "low".into(),
             affected: vec!["2026.10.1".into()],
             workaround: None,
+            detection: None,
         };
         let err = next_document(&current, &[finding], "2026-10-15T00:00:00Z").unwrap_err();
         assert!(
@@ -472,6 +482,7 @@ mod tests {
             severity: "low".into(),
             affected: vec!["not-a-layer".into()],
             workaround: None,
+            detection: None,
         };
         let err = next_document(&current, &[finding], "2026-10-15T00:00:00Z").unwrap_err();
         assert!(
@@ -501,6 +512,7 @@ mod tests {
             severity: "catastrophic".into(),
             affected: vec!["2026.09.3".into()],
             workaround: None,
+            detection: None,
         };
         let err = next_document(&current, &[finding], "2026-10-15T00:00:00Z").unwrap_err();
         assert!(matches!(err, DraftError::BadSeverity { .. }), "got: {err}");

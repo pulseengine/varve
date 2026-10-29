@@ -22,11 +22,16 @@ Run it from a layer repository's root — the directory holding `layer.toml`,
    stated `support-until`, is never skipped on that basis.
 3. For every payload a layer's manifest names (`eu.pulseengine.tool` +
    `eu.pulseengine.tool.version` + `eu.pulseengine.source.repo`), asks GitHub's
-   repository security advisories for that repo and matches them against the
-   package range that NAMES the payload (its `eu.pulseengine.tool`) — not
-   against every package range in the repository. Advisories that name only
-   other packages of the repository are not matched, and are listed as
-   unchecked for that payload. A payload of kind `crate` is also checked
+   repository security advisories for that repo. An advisory whose range
+   names the payload (its `eu.pulseengine.tool`) is a certain finding. An
+   advisory that names only OTHER packages of the same repository, with a
+   range that covers the payload's version, is still a finding but a
+   QUALIFIED one: its `known-problems` entry carries a `detection` of the form
+   `qualified: names <package> from the same repository (<repo>); affects this
+   binary if it embeds that crate`. A sibling package whose range does not
+   cover the version is not a finding. If one advisory reaches the draft
+   through several payloads and any is qualified, the entry keeps the
+   qualifier. A payload of kind `crate` is also checked
    against RustSec by its own crate name and version. When the manifest
    recorded an upstream SBOM annotation, or the release publishes one, it is
    read for that payload's own release (two releases sharing a repository and
