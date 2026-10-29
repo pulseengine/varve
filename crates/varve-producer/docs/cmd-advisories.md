@@ -22,9 +22,28 @@ Run it from a layer repository's root — the directory holding `layer.toml`,
    stated `support-until`, is never skipped on that basis.
 3. For every payload a layer's manifest names (`eu.pulseengine.tool` +
    `eu.pulseengine.tool.version` + `eu.pulseengine.source.repo`), asks GitHub's
-   repository security advisories for that repo, and — when the manifest
-   recorded an upstream SBOM annotation — downloads it, checks its sha256,
-   and asks the RustSec advisory-db about every component it names.
+   repository security advisories for that repo. An advisory whose range
+   names the payload (its `eu.pulseengine.tool`) is a certain finding. An
+   advisory that names only OTHER packages of the same repository, with a
+   range that covers the payload's version, is still a finding but a
+   QUALIFIED one: its `known-problems` entry carries a `detection` of the form
+   `qualified: names <package> from the same repository (<repo>); affects this
+   binary if it embeds that crate`. A sibling package whose range does not
+   cover the version is not a finding. If one advisory reaches the draft
+   through several payloads and any is qualified, the entry keeps the
+   qualifier. A payload of kind `crate` is also checked
+   against RustSec by its own crate name and version. When the manifest
+   recorded an upstream SBOM annotation, or the release publishes one, it is
+   read for that payload's own release (two releases sharing a repository and
+   version each have their own), its sha256 is checked, and every component
+   is either checked against RustSec or reported unchecked:
+   - the ecosystem is the purl type, never the bare name: only `pkg:cargo/...`
+     is looked up, and the crate is the one the purl names, so an npm package
+     called `serde` never matches a crate advisory;
+   - components nested inside components are walked;
+   - a component with no version, no purl, an unreadable purl, or of an
+     ecosystem RustSec does not cover is printed as unchecked with that
+     reason, under the payload that carries it.
 4. Turns every match into a prepared `line-status/<line>.json` — never
    signed, never published. A pull request against it, and merging THAT, is
    what signs and publishes (REQ-ADVISORYWATCH-001 clause 3).

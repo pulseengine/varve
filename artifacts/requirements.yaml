@@ -4282,8 +4282,8 @@ artifacts:
   - id: REQ-MIRROR-001
     type: requirement
     title: A realm may be served from more than one place
-    status: verified
-    description: "Today a realm names exactly one registry. If it is unreachable — outage, partition, an org-level package change, a blocked region — no consumer can install or update, and a fresh consumer cannot bootstrap at all. . Mirroring is SAFE BY CONSTRUCTION here in a way it is not for most package managers, and that is the whole reason to do it: varve's trust does not rest on where bytes came from. A layer is accepted because its manifest verifies against the realm's trust root and its payload digests match, so the registry is transport, not authority. A tampered mirror fails the DSSE check; a truncated one fails the digest check. A second source can therefore be added without widening the trust surface at all. . A partial escape hatch already exists and is currently undocumented as one: varve archive writes a portable OCI layout and varve install --from consumes it, so a filesystem, an internal registry or a USB stick already works for recovery. . Clauses: (1) A realm shall be able to declare an ordered list of sources rather than a single registry. (2) Sources shall be tried in order, and a source that fails for transport reasons shall fall through to the next. (3) A source that returns bytes which FAIL VERIFICATION shall NOT fall through — it shall abort, because a mirror serving bad bytes is a fact the operator must see, and silently trying the next source would hide exactly the event this design makes detectable. (4) Which source served a layer shall be reportable, so an operator can tell a mirror is being used before an incident rather than during one. (5) The realms file shall stay backward compatible: a realm naming one registry shall keep working unchanged."
+    status: implemented
+    description: "Today a realm names exactly one registry. If it is unreachable — outage, partition, an org-level package change, a blocked region — no consumer can install or update, and a fresh consumer cannot bootstrap at all. . Mirroring is SAFE BY CONSTRUCTION here in a way it is not for most package managers, and that is the whole reason to do it: varve's trust does not rest on where bytes came from. A layer is accepted because its manifest verifies against the realm's trust root and its payload digests match, so the registry is transport, not authority. A tampered mirror fails the DSSE check; a truncated one fails the digest check. A second source can therefore be added without widening the trust surface at all. . A partial escape hatch already exists and is currently undocumented as one: varve archive writes a portable OCI layout and varve install --from consumes it, so a filesystem, an internal registry or a USB stick already works for recovery. . Clauses: (1) A realm shall be able to declare an ordered list of sources rather than a single registry. (2) Sources shall be tried in order, and a source that fails for transport reasons shall fall through to the next. (3) A source that returns bytes which FAIL VERIFICATION shall NOT fall through — it shall abort, because a mirror serving bad bytes is a fact the operator must see, and silently trying the next source would hide exactly the event this design makes detectable. (4) Which source served a layer shall be reportable, so an operator can tell a mirror is being used before an incident rather than during one. (5) The realms file shall stay backward compatible: a realm naming one registry shall keep working unchanged. DEMOTED to implemented on 2026-10-29 by the maintainer (varve#301): the evidence that verified this exercised the library (varve_core::mirror::Mirrors) and the realms-file parse, never a fetch. No product code path constructs Mirrors or reads Realm::sources, so a declared mirror is never used. It returns to verified with REQ-MIRROR-002's system test, which installs with the primary unreachable."
     release: v0.32.0
 
   - id: REQ-ROTATE-002
@@ -5198,7 +5198,7 @@ artifacts:
   - id: REQ-ADVISORYWATCH-002
     type: requirement
     title: The advisory watch runs unattended in every layers repository, and nothing a layer carries is skipped without a report
-    status: approved
+    status: implemented
     release: v0.44.0
     description: "Moved out of REQ-ADVISORYWATCH-001 by the v0.43.0 clean-room reviews. Clauses: (1) Each layers repository shall run varve-producer advisories on a schedule and open the prepared line-status as a signed pull request, so an advisory arrives as something to merge, not news to notice; this needs a released varve carrying the watcher, which is why it could not be shown inside v0.43.0. (2) A Rust crate payload shall be checked against RustSec by its own crate name and version, not only its repository's GitHub advisories. (3) Every component of an upstream SBOM shall be checked or reported unchecked with its reason: a component with no version, nested components, and components of an ecosystem RustSec does not cover (looked up by purl type, never by bare name, so an npm package cannot match a crate advisory). (4) Payloads that share a repository and version but come from different releases shall each have their own SBOM read, not only the first. (5) A GitHub advisory shall be matched against the package range that names the payload, not against every package range in the repository. TRIMMED 2026-10-29 by the maintainer (v0.44.0 ships what is built; the rest moves to v0.45.0): clause 1 (the scheduled watcher in each layers repository) moved to REQ-ADVISORYWATCH-003; what ships is clauses 2-5."
     links:
@@ -5456,3 +5456,17 @@ artifacts:
     links:
       - type: traces-to
         target: REQ-ADVISORYWATCH-002
+
+  - id: REQ-MIRROR-002
+    type: requirement
+    title: "A realm's declared mirrors are actually used: every fetch fails over through them, verified against the one root"
+    status: approved
+    release: v0.45.0
+    description: "varve#301, raised by the maintainer on 2026-10-29: `mirrors` in varve-realms.toml are parsed into Realm::sources and never used. Every fetch builds its source from realm.registry (the primary only), and the failover type varve_core::mirror::Mirrors is constructed nowhere outside its own tests, so a down primary fails although the realm declares working mirrors. REQ-MIRROR-001 was verified on library-level evidence that never fetched through a mirror. Clauses: (1) Every fetch from a realm (layer manifests, blobs, the signed line index, line-status documents) goes through Mirrors built from Realm::sources, primary first and then mirrors in the order written. (2) Bytes from any source are accepted only if they verify against the realm's ONE trust root. A mirror is transport, not authority, so a mirror serving tampered bytes, or a different layer for a digest, is refused and the next source is tried. (3) The user is told which source answered whenever it was not the primary. (4) A system test with the primary unreachable and a mirror serving the same layer: `varve install` succeeds and names the mirror. The same test with the mirror serving different bytes fails closed. (5) A test fails if any realm fetch site constructs a source from realm.registry alone, so the wiring cannot regress silently."
+    tags: [distribution, availability]
+    fields:
+      category: functional
+      priority: must
+    links:
+      - type: traces-to
+        target: REQ-MIRROR-001
