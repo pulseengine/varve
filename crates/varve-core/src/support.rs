@@ -389,6 +389,10 @@ pub trait RealmAccess {
 /// Deeper than any real composition; a bound, not a policy.
 const MAX_INCLUDE_DEPTH: usize = 16;
 
+/// Distinct layers one walk may visit. A diamond shares a base, which is
+/// read once (memoized); this bounds what a hostile manifest could fan out to.
+const MAX_INCLUDE_NODES: usize = 256;
+
 /// The window an include brings, TRANSITIVELY (REQ-COMPOSEWINDOW-002 clause
 /// 1): the earliest support-until anywhere in its composition, each read from
 /// that layer's OWN realm's signed line-status, never trusted from the
@@ -399,7 +403,9 @@ pub fn include_window_deep(
     digest: &str,
     realm: &str,
 ) -> Result<IncludeWindow, IncludeWindowError> {
-    deep_window(access, digest, realm, 0)
+    let mut seen = std::collections::BTreeMap::new();
+    let mut opened = 0;
+    deep_window(access, digest, realm, 0, &mut seen, &mut opened)
 }
 
 fn deep_window(
@@ -407,7 +413,13 @@ fn deep_window(
     digest: &str,
     realm: &str,
     depth: usize,
+    seen: &mut std::collections::BTreeMap<(String, String), IncludeWindow>,
+    opened: &mut usize,
 ) -> Result<IncludeWindow, IncludeWindowError> {
+    let key = (realm.to_string(), digest.to_string());
+    if let Some(w) = seen.get(&key) {
+        return Ok(w.clone());
+    }
     let fail = |reason: String| IncludeWindowError {
         include: digest.to_string(),
         realm: realm.to_string(),
@@ -418,22 +430,34 @@ fn deep_window(
             "the composition is nested deeper than {MAX_INCLUDE_DEPTH} layers"
         )));
     }
+    // Counted as each distinct layer is OPENED, so the layers still being
+    // walked count too, not only the ones already finished.
+    *opened += 1;
+    if *opened > MAX_INCLUDE_NODES {
+        return Err(fail(format!(
+            "the composition reaches more than {MAX_INCLUDE_NODES} distinct layers"
+        )));
+    }
     let view = access.open(realm).map_err(fail)?;
     let (own, nested) = window_and_includes(view.source, view.verifier, view.root, digest, realm)?;
     let mut best = own;
     for inc in nested {
         // An include naming no realm is in the including layer's realm.
         let r = inc.realm.as_deref().unwrap_or(realm);
-        let sub = deep_window(access, &inc.digest, r, depth + 1)?;
+        let sub = deep_window(access, &inc.digest, r, depth + 1, seen, opened)?;
         best = earlier(best, sub);
     }
+    seen.insert(key, best.clone());
     Ok(best)
 }
 
-/// The earlier of two windows. A window that is not stated is the most
-/// binding of all (it is what `cap_by_includes` must refuse), so it wins.
+/// The earlier of two windows, compared as DATES. A window that is not
+/// stated, or does not parse, is the most binding of all (it is what
+/// `cap_by_includes` must refuse), so it wins and reaches that refusal
+/// instead of being discarded by a string comparison.
 fn earlier(a: IncludeWindow, b: IncludeWindow) -> IncludeWindow {
-    match (&a.support_until, &b.support_until) {
+    let day = |w: &IncludeWindow| w.support_until.as_deref().and_then(epoch_days);
+    match (day(&a), day(&b)) {
         (None, _) => a,
         (_, None) => b,
         (Some(x), Some(y)) if y < x => b,
@@ -1050,6 +1074,106 @@ mod tests {
             assert!(err.to_string().contains("nested deeper than 16"), "{err}");
         }
 
+        /// A wide composition is memoized (a shared base is read once) and the
+        /// number of distinct layers is bounded.
+        // rivet: verifies REQ-COMPOSEWINDOW-002
+        #[test]
+        fn a_composition_wider_than_the_node_cap_is_refused() {
+            let (sk, pk) = generate_root_keypair();
+            let mut source = MemorySource::new().with_line_status(
+                status(1, Some("2026-12-31"))
+                    .sign(&sk, "k")
+                    .unwrap()
+                    .as_bytes(),
+            );
+            let mut leaves = Vec::new();
+            for k in 0..MAX_INCLUDE_NODES {
+                let leaf = including(&format!("2026.10.{k}"), &[]);
+                source = source.with_manifest(&leaf);
+                leaves.push(manifest_digest(&leaf));
+            }
+            let refs: Vec<(&str, &str)> = leaves.iter().map(|d| (d.as_str(), "one")).collect();
+            let wide = including("2026.10.999", &refs);
+            source = source.with_manifest(&wide);
+            let realm = OneRealm { source, pk };
+            let err = include_window_deep(&realm, &manifest_digest(&wide), "one").unwrap_err();
+            assert!(
+                err.to_string().contains("more than 256 distinct layers"),
+                "{err}"
+            );
+            // One fewer leaf fits: 255 leaves and the top are 256 layers.
+            let (sk2, pk2) = generate_root_keypair();
+            let mut s2 = MemorySource::new().with_line_status(
+                status(1, Some("2026-12-31"))
+                    .sign(&sk2, "k")
+                    .unwrap()
+                    .as_bytes(),
+            );
+            let mut l2 = Vec::new();
+            for k in 0..MAX_INCLUDE_NODES - 1 {
+                let leaf = including(&format!("2026.10.{k}"), &[]);
+                s2 = s2.with_manifest(&leaf);
+                l2.push(manifest_digest(&leaf));
+            }
+            let r2: Vec<(&str, &str)> = l2.iter().map(|d| (d.as_str(), "one")).collect();
+            let fits = including("2026.10.999", &r2);
+            s2 = s2.with_manifest(&fits);
+            let realm2 = OneRealm {
+                source: s2,
+                pk: pk2,
+            };
+            assert!(include_window_deep(&realm2, &manifest_digest(&fits), "one").is_ok());
+        }
+
+        /// A diamond (two includes sharing one base) reads the base once.
+        // rivet: verifies REQ-COMPOSEWINDOW-002
+        #[test]
+        fn a_diamond_reads_its_shared_base_once() {
+            let (sk, pk) = generate_root_keypair();
+            let base = wasm_layer();
+            let bd = manifest_digest(&base);
+            let left = including("2026.10.1", &[(&bd, "one")]);
+            let right = including("2026.10.2", &[(&bd, "one")]);
+            let top = including(
+                "2026.10.3",
+                &[
+                    (&manifest_digest(&left), "one"),
+                    (&manifest_digest(&right), "one"),
+                ],
+            );
+            let source = MemorySource::new()
+                .with_line_status(
+                    status(1, Some("2026-12-31"))
+                        .sign(&sk, "k")
+                        .unwrap()
+                        .as_bytes(),
+                )
+                .with_manifest(&base)
+                .with_manifest(&left)
+                .with_manifest(&right)
+                .with_manifest(&top);
+            let counting = Counting {
+                inner: OneRealm { source, pk },
+                opens: std::cell::Cell::new(0),
+            };
+            include_window_deep(&counting, &manifest_digest(&top), "one").unwrap();
+            assert_eq!(
+                counting.opens.get(),
+                4,
+                "top, left, right, and the base ONCE"
+            );
+        }
+        struct Counting {
+            inner: OneRealm,
+            opens: std::cell::Cell<usize>,
+        }
+        impl RealmAccess for Counting {
+            fn open(&self, realm: &str) -> Result<RealmView<'_>, String> {
+                self.opens.set(self.opens.get() + 1);
+                self.inner.open(realm)
+            }
+        }
+
         /// `earlier`: an unstated window always binds; of two dates the
         /// earlier; of two equal dates the first.
         // rivet: verifies REQ-COMPOSEWINDOW-002
@@ -1063,6 +1187,17 @@ mod tests {
             assert_eq!(earlier(w("a", None), w("b", Some("2026-01-01"))).layer, "a");
             // Both unstated: the first is the one named in the refusal.
             assert_eq!(earlier(w("a", None), w("b", None)).layer, "a");
+            // Compared as DATES, and an unparseable date binds (it then
+            // reaches cap_by_includes' BadDate refusal instead of being
+            // dropped by a string comparison that ranks "soon" after 2026).
+            assert_eq!(
+                earlier(w("a", Some("2026-01-01")), w("b", Some("soon"))).layer,
+                "b"
+            );
+            assert_eq!(
+                earlier(w("a", Some("soon")), w("b", Some("2026-01-01"))).layer,
+                "a"
+            );
             assert_eq!(earlier(w("a", Some("2026-01-01")), w("b", None)).layer, "b");
             assert_eq!(
                 earlier(w("a", Some("2026-02-01")), w("b", Some("2026-01-01"))).layer,
