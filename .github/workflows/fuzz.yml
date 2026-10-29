@@ -14,6 +14,13 @@ on:
   # this keeps the requirement and drops the condition (~60s per target, run in
   # parallel).
   pull_request:
+  # GitHub merge queue: the five `cargo fuzz (...)` contexts are required, so
+  # this runs on merge_group too, unconditionally (a matrix job skipped at job
+  # level reports under its unexpanded name, never as the five variants).
+  # 60s per target, as on a PR.
+  merge_group:
+    # Spelled out, not bare: action_coverage.rs refuses a key with nothing under it.
+    types: [checks_requested]
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
