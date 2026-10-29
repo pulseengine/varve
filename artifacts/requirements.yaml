@@ -5198,7 +5198,7 @@ artifacts:
   - id: REQ-ADVISORYWATCH-002
     type: requirement
     title: The advisory watch runs unattended in every layers repository, and nothing a layer carries is skipped without a report
-    status: approved
+    status: implemented
     release: v0.44.0
     description: "Moved out of REQ-ADVISORYWATCH-001 by the v0.43.0 clean-room reviews. Clauses: (1) Each layers repository shall run varve-producer advisories on a schedule and open the prepared line-status as a signed pull request, so an advisory arrives as something to merge, not news to notice; this needs a released varve carrying the watcher, which is why it could not be shown inside v0.43.0. (2) A Rust crate payload shall be checked against RustSec by its own crate name and version, not only its repository's GitHub advisories. (3) Every component of an upstream SBOM shall be checked or reported unchecked with its reason: a component with no version, nested components, and components of an ecosystem RustSec does not cover (looked up by purl type, never by bare name, so an npm package cannot match a crate advisory). (4) Payloads that share a repository and version but come from different releases shall each have their own SBOM read, not only the first. (5) A GitHub advisory shall be matched against the package range that names the payload, not against every package range in the repository. TRIMMED 2026-10-29 by the maintainer (v0.44.0 ships what is built; the rest moves to v0.45.0): clause 1 (the scheduled watcher in each layers repository) moved to REQ-ADVISORYWATCH-003; what ships is clauses 2-5."
     links:
