@@ -4504,7 +4504,7 @@ artifacts:
       created-by: ai
       model: claude-opus-5
       timestamp: 2026-09-18T06:54:05Z
-    release: v0.44.0
+    release: v0.45.0
 
   - id: REQ-KEYROLES-001
     type: requirement
@@ -4520,7 +4520,7 @@ artifacts:
       created-by: ai
       model: claude-opus-5
       timestamp: 2026-09-18T06:54:44Z
-    release: v0.44.0
+    release: v0.45.0
 
   - id: REQ-COMPOSEINSTALL-001
     type: requirement
@@ -4647,7 +4647,7 @@ artifacts:
       created-by: ai-assisted
       model: claude-opus-5
       timestamp: 2026-09-29T20:24:40Z
-    release: v0.44.0
+    release: v0.45.0
 
   - id: DD-033
     type: design-decision
@@ -5186,7 +5186,7 @@ artifacts:
     title: A composition's support cap holds transitively, refuses an expired include, and signs the reason it is exceeded
     status: approved
     release: v0.44.0
-    description: "Moved out of REQ-COMPOSEWINDOW-001 by the v0.43.0 clean-room reviews, which found the cap correct for DIRECT includes and incomplete beyond them. Clauses: (1) The cap shall hold transitively: an include that itself includes is capped at the earliest window anywhere below it, read from each layer's own signed line-status, not trusted from the intermediate realm having applied it. (2) An include whose support-until is earlier than the composition's issued-at shall refuse the horizon, never yield a date already in the past. (3) A reason given to exceed the cap shall be carried in the signed line-status beside the date, so 'on the record' means signed, not a CI log. (4) Every layers repository whose layers include others shall pass the layer's manifest to support-horizon in its deposit, and a deposit of a composing layer without it shall be refused rather than silently use the channel's window. Clause 4 needs a released varve carrying REQ-COMPOSEWINDOW-001 first, which is why it was not part of v0.43.0. . CLAUSE 5 ADDED 2026-10-27 from varve#285, measured in production: covalent included pulseengine-wasm 2026.09.0, whose support ended 2026-10-24, and its layers kept promising support to late November for three days with nothing saying so, because the scanner looks for newer layers on the SAME line and line 2026.09 had none (fixed by hand in covalent-layers#43; layer 2026.10.10 is the first covalent layer capped by its includes, at 2026-11-21). (5) The scanner shall report an include whose line is out of support, or will be within the channel's notice period, and propose the newest supported layer of the next line as a line change in a reviewed pull request, never an unattended move."
+    description: "Moved out of REQ-COMPOSEWINDOW-001 by the v0.43.0 clean-room reviews, which found the cap correct for DIRECT includes and incomplete beyond them. Clauses: (1) The cap shall hold transitively: an include that itself includes is capped at the earliest window anywhere below it, read from each layer's own signed line-status, not trusted from the intermediate realm having applied it. (2) An include whose support-until is earlier than the composition's issued-at shall refuse the horizon, never yield a date already in the past. (3) A reason given to exceed the cap shall be carried in the signed line-status beside the date, so 'on the record' means signed, not a CI log. (4) Every layers repository whose layers include others shall pass the layer's manifest to support-horizon in its deposit, and a deposit of a composing layer without it shall be refused rather than silently use the channel's window. Clause 4 needs a released varve carrying REQ-COMPOSEWINDOW-001 first, which is why it was not part of v0.43.0. . CLAUSE 5 ADDED 2026-10-27 from varve#285, measured in production: covalent included pulseengine-wasm 2026.09.0, whose support ended 2026-10-24, and its layers kept promising support to late November for three days with nothing saying so, because the scanner looks for newer layers on the SAME line and line 2026.09 had none (fixed by hand in covalent-layers#43; layer 2026.10.10 is the first covalent layer capped by its includes, at 2026-11-21). (5) The scanner shall report an include whose line is out of support, or will be within the channel's notice period, and propose the newest supported layer of the next line as a line change in a reviewed pull request, never an unattended move. TRIMMED 2026-10-29 by the maintainer (v0.44.0 ships what is built; the rest moves to v0.45.0): clauses 3-5 moved to REQ-COMPOSEWINDOW-003; what ships is clauses 1 (transitive cap) and 2 (an include expired at issue refuses the horizon)."
     links:
       - type: derives-from
         target: REQ-COMPOSEWINDOW-001
@@ -5200,7 +5200,7 @@ artifacts:
     title: The advisory watch runs unattended in every layers repository, and nothing a layer carries is skipped without a report
     status: approved
     release: v0.44.0
-    description: "Moved out of REQ-ADVISORYWATCH-001 by the v0.43.0 clean-room reviews. Clauses: (1) Each layers repository shall run varve-producer advisories on a schedule and open the prepared line-status as a signed pull request, so an advisory arrives as something to merge, not news to notice; this needs a released varve carrying the watcher, which is why it could not be shown inside v0.43.0. (2) A Rust crate payload shall be checked against RustSec by its own crate name and version, not only its repository's GitHub advisories. (3) Every component of an upstream SBOM shall be checked or reported unchecked with its reason: a component with no version, nested components, and components of an ecosystem RustSec does not cover (looked up by purl type, never by bare name, so an npm package cannot match a crate advisory). (4) Payloads that share a repository and version but come from different releases shall each have their own SBOM read, not only the first. (5) A GitHub advisory shall be matched against the package range that names the payload, not against every package range in the repository."
+    description: "Moved out of REQ-ADVISORYWATCH-001 by the v0.43.0 clean-room reviews. Clauses: (1) Each layers repository shall run varve-producer advisories on a schedule and open the prepared line-status as a signed pull request, so an advisory arrives as something to merge, not news to notice; this needs a released varve carrying the watcher, which is why it could not be shown inside v0.43.0. (2) A Rust crate payload shall be checked against RustSec by its own crate name and version, not only its repository's GitHub advisories. (3) Every component of an upstream SBOM shall be checked or reported unchecked with its reason: a component with no version, nested components, and components of an ecosystem RustSec does not cover (looked up by purl type, never by bare name, so an npm package cannot match a crate advisory). (4) Payloads that share a repository and version but come from different releases shall each have their own SBOM read, not only the first. (5) A GitHub advisory shall be matched against the package range that names the payload, not against every package range in the repository. TRIMMED 2026-10-29 by the maintainer (v0.44.0 ships what is built; the rest moves to v0.45.0): clause 1 (the scheduled watcher in each layers repository) moved to REQ-ADVISORYWATCH-003; what ships is clauses 2-5."
     links:
       - type: derives-from
         target: REQ-ADVISORYWATCH-001
@@ -5262,9 +5262,9 @@ artifacts:
   - id: REQ-AGENTDOCS-001
     type: requirement
     title: An agent told to check in here learns what the pin holds and where to look, without running every tool
-    status: approved
+    status: implemented
     release: v0.44.0
-    description: "Decided by the maintainer on 2026-10-27 after the MCP research, and RESHAPED on 2026-10-28: the benefit is not a search engine but orientation. An agent told \"check in here\" should learn what the pin holds and where to look WITHOUT reading or running every tool, the way agents already use Context7's first call (resolve-library-id), but answered locally, for exactly the pinned versions, from verified material. Step 1 of a two-step shape; REQ-AGENTDOCS-002 is step 2. Clauses: (1) `varve-serve context` shall print an orientation for the pin: one entry per payload of the composition, {id, realm, layer, name, version, kind, summary, ask (the command that goes deeper: `<tool> docs <topic>`, `varve-serve ask <id>`, or `--help` only), topics (names only), docs:[{name, format, entry, digest}]}, as Markdown by default and `--format json`. A tool with no documentation still appears, saying so. (2) Sources, decided by the maintainer: a tool's `summary` and `docs-command` come from new optional fields of its `[[tool]]` entry in layer.toml, signed with the manifest; ONLY where a tool declares neither does varve-serve run the verified, pinned binary's `--help`/`docs` to fill the gap, never an ambient one, and caches the result keyed by the layer's manifest digest. Every entry states its source (`signed` or `harvested`). Nothing is run in the signing pipeline. (3) The orientation carries metadata and topic NAMES only, never documentation bodies: it is loaded into an agent's context unasked, and docs text can carry prompt injection. It shall stay within a stated size budget for the pulseengine layer (about 4k tokens), checked in CI. (4) If any layer fails verification it shall exit non-zero with empty stdout (flip one byte in the store). (5) Two runs shall produce byte-identical output, harvested entries included. (6) varve itself only locates and instructs (REQ-LAYERDOCS-001 clause 4), which is why these commands live in varve-serve."
+    description: "Decided by the maintainer on 2026-10-27 after the MCP research, and RESHAPED on 2026-10-28: the benefit is not a search engine but orientation. An agent told \"check in here\" should learn what the pin holds and where to look WITHOUT reading or running every tool, the way agents already use Context7's first call (resolve-library-id), but answered locally, for exactly the pinned versions, from verified material. Step 1 of a two-step shape; REQ-AGENTDOCS-002 is step 2. Clauses: (1) `varve-serve context` shall print an orientation for the pin: one entry per payload of the composition, {id, realm, layer, name, version, kind, summary, ask (the command that goes deeper: `<tool> docs <topic>`, `varve-serve ask <id>`, or `--help` only), topics (names only), docs:[{name, format, entry, digest}]}, as Markdown by default and `--format json`. A tool with no documentation still appears, saying so. (2) Sources, decided by the maintainer: a tool's `summary` and `docs-command` come from new optional fields of its `[[tool]]` entry in layer.toml, signed with the manifest; ONLY where a tool declares neither does varve-serve run the verified, pinned binary's `--help`/`docs` to fill the gap, never an ambient one, and caches the result keyed by the layer's manifest digest. Every entry states its source (`signed` or `harvested`). Nothing is run in the signing pipeline. (3) The orientation carries metadata and topic NAMES only, never documentation bodies: it is loaded into an agent's context unasked, and docs text can carry prompt injection. It shall stay within a stated size budget for the pulseengine layer (about 4k tokens), checked in CI. (4) If any layer fails verification it shall exit non-zero with empty stdout (flip one byte in the store). (5) Two runs shall produce byte-identical output, harvested entries included. (6) varve itself only locates and instructs (REQ-LAYERDOCS-001 clause 4), which is why these commands live in varve-serve. TRIMMED 2026-10-29 by the maintainer (v0.44.0 ships what is built; the rest moves to v0.45.0): clause 2's SIGNED summary/docs-command fields moved to REQ-AGENTDOCS-004; what ships is the harvested orientation with the seam where signed values take precedence."
     links:
       - type: derives-from
         target: REQ-LAYERDOCS-001
@@ -5276,9 +5276,9 @@ artifacts:
   - id: REQ-AGENTDOCS-002
     type: requirement
     title: An agent asks one narrow question about one thing in the pin and gets pointers into verified documentation
-    status: approved
+    status: implemented
     release: v0.44.0
-    description: "Step 2 of the two-step shape (REQ-AGENTDOCS-001 is step 1), the counterpart of Context7's query-docs, answered with POINTERS into verified material rather than generated text. Clauses: (1) `varve-serve ask <id> \"<question>\" --format json` shall return the few best hits {id, doc, path or topic, title, score, layer, digest, read (the exact command that shows the whole page or topic)}, ordered by score then (doc, path), byte-identical across runs. It covers docs payloads AND a tool's built-in topics (from the signed or harvested topic list of REQ-AGENTDOCS-001). The index is built at query time from verified bytes and never signed or shipped (a producer-built signed index adds a claim no consumer can check without recomputing it). (2) `varve-serve page <doc> <path>` shows one member of a verified docs payload; hits and pages come only from members of verified payloads: a stray file planted in the store never appears and a tampered archive is refused. (3) page for a member that does not exist, including ../ paths, shall exit non-zero and name the doc. (4) Each hit's digest shall equal the payload digest in the signed manifest. (5) It shall succeed with no network, shown on Linux CI under unshare -rn. (6) Markdown, HTML and rustdoc HTML docs payloads shall all be searchable as text."
+    description: "Step 2 of the two-step shape (REQ-AGENTDOCS-001 is step 1), the counterpart of Context7's query-docs, answered with POINTERS into verified material rather than generated text. Clauses: (1) `varve-serve ask <id> \"<question>\" --format json` shall return the few best hits {id, doc, path or topic, title, score, layer, digest, read (the exact command that shows the whole page or topic)}, ordered by score then (doc, path), byte-identical across runs. It covers docs payloads AND a tool's built-in topics (from the signed or harvested topic list of REQ-AGENTDOCS-001). The index is built at query time from verified bytes and never signed or shipped (a producer-built signed index adds a claim no consumer can check without recomputing it). (2) `varve-serve page <doc> <path>` shows one member of a verified docs payload; hits and pages come only from members of verified payloads: a stray file planted in the store never appears and a tampered archive is refused. (3) page for a member that does not exist, including ../ paths, shall exit non-zero and name the doc. (4) Each hit's digest shall equal the payload digest in the signed manifest. (5) It shall succeed with no network, shown on Linux CI under unshare -rn. (6) Markdown, HTML and rustdoc HTML docs payloads shall all be searchable as text. TRIMMED 2026-10-29 by the maintainer (v0.44.0 ships what is built; the rest moves to v0.45.0): clause 6's search of page TEXT moved to REQ-AGENTDOCS-005; what ships searches page titles and paths, tool subcommands, and built-in topic text by best line."
     links:
       - type: derives-from
         target: REQ-AGENTDOCS-001
@@ -5305,7 +5305,7 @@ artifacts:
     type: requirement
     title: The pulseengine layer carries varve's own documentation, and Markdown counts as documentation
     status: approved
-    release: v0.44.0
+    release: v0.45.0
     description: "The MCP research measured the pinned pulseengine layer at ONE docs payload (varve-core's rustdoc) and the wasm layer at none, so an agent docs server would have almost nothing to serve. Decided by the maintainer on 2026-10-27. Clauses: (1) The pulseengine realm's layer shall carry the documentation varve's release already signs: varve's rustdoc and its traceability HTML report, each as a [[docs]] payload ingested through the release's verified sums. (2) A tool's Markdown documentation (a docs/ tree or a book) shall be acceptable as a docs payload in format markdown, and varve-serve shall render it as text for map, search and page. (3) Each new docs payload is shown by varve-serve map listing it for the pinned layer."
     links:
       - type: derives-from
@@ -5319,7 +5319,7 @@ artifacts:
     type: requirement
     title: A tool's built-in docs topics are served from the verified binary that carries them
     status: approved
-    release: v0.44.0
+    release: v0.45.0
     description: "rivet, varve-producer and varve-serve answer version-exact questions with their own docs command (rivet docs has 57 topics), and harvesting that output at deposit would mean running third-party binaries in the signing pipeline. Decided by the maintainer on 2026-10-27: serve them on demand from the verified binary. Clauses: (1) layer.toml shall be able to declare a tool's docs-command (the argv that lists topics and the one that prints one, with --format json where the tool offers it), signed into the layer as an annotation. (2) varve-serve map shall list those topics, and page shall print one, by running ONLY the binary the layer verified, re-verified against its signed digest at that moment, with no shell, a clean environment, no network where the platform allows, and a time limit. (3) A tool with no declared docs-command is never executed by varve-serve. (4) The output is treated as untrusted text (the same prompt-injection warning as REQ-AGENTDOCS-003 clause 5)."
     links:
       - type: derives-from
@@ -5400,3 +5400,59 @@ artifacts:
         target: REQ-EXPORTDECL-001
       - type: traces-to
         target: REQ-EXPORT-SYNC-001
+
+  - id: REQ-AGENTDOCS-004
+    type: requirement
+    title: A tool can state its own purpose and docs command in the signed layer, so an agent reads the producer's word, not a harvest
+    status: approved
+    release: v0.45.0
+    description: "Split from REQ-AGENTDOCS-001 clause 2 on 2026-10-29. Clauses: (1) A `[[tool]]` entry in layer.toml may carry `summary` and `docs-command`, signed with the manifest. (2) `varve-serve context` prefers the signed values and marks them `source: signed`; it harvests (`--help` only, `docs` only where advertised) ONLY for a tool that declares neither. (3) varve-producer plan validates both fields (one line, no control characters, a docs-command that names the tool itself), so a layer cannot sign a command that runs something else. Measured motive: ordeal, kilnd and with-device give no usable purpose line from `--help`, and harvesting `kilnd docs` started the runtime."
+    tags: [trimmed-from-v0.44.0]
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-AGENTDOCS-001
+
+  - id: REQ-AGENTDOCS-005
+    type: requirement
+    title: varve-serve ask searches the TEXT of documentation pages, not only their titles and paths
+    status: approved
+    release: v0.45.0
+    description: "Split from REQ-AGENTDOCS-002 clause 6 on 2026-10-29. Clauses: (1) Markdown, HTML and rustdoc HTML pages of a verified docs payload are searched by their text, ranked by best line as topics are. (2) Hits stay pointers: no page text is printed (the prompt-injection boundary REQ-AGENTDOCS-002 established), only the question's own words a line holds. (3) The index is built at query time, deterministic, offline."
+    tags: [trimmed-from-v0.44.0]
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-AGENTDOCS-002
+
+  - id: REQ-COMPOSEWINDOW-003
+    type: requirement
+    title: A reason to exceed a composition's cap is signed, every composing deposit uses the cap, and an include whose line ends arrives as a proposed line change
+    status: approved
+    release: v0.45.0
+    description: "Split from REQ-COMPOSEWINDOW-002 clauses 3-5 on 2026-10-29. Clauses: (1) A reason given to exceed the cap is carried in the signed line-status beside the date, so 'on the record' means signed, not a CI log. (2) Every layers repository whose layers include others passes the layer's manifest to support-horizon in its deposit, and a deposit of a composing layer without it is refused rather than silently using the channel's window. (3) The scanner reports an include whose line is out of support, or will be within the channel's notice period, and proposes the newest supported layer of the next line as a line change in a reviewed pull request, never an unattended move (varve#285)."
+    tags: [trimmed-from-v0.44.0]
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-COMPOSEWINDOW-002
+
+  - id: REQ-ADVISORYWATCH-003
+    type: requirement
+    title: Each layers repository runs the advisory watch on a schedule and opens the prepared line-status as a pull request
+    status: approved
+    release: v0.45.0
+    description: "Split from REQ-ADVISORYWATCH-002 clause 1 on 2026-10-29. Clauses: (1) Each layers repository runs `varve-producer advisories` on a schedule (needs a released varve carrying the watcher and REQ-ADVISORYWATCH-002's coverage) and opens the prepared line-status as a signed pull request, so an advisory arrives as something to merge, not news to notice. (2) A scheduled run that cannot reach an advisory source fails loudly rather than reporting nothing found."
+    tags: [trimmed-from-v0.44.0]
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-ADVISORYWATCH-002
