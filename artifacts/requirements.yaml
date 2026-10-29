@@ -5456,3 +5456,17 @@ artifacts:
     links:
       - type: traces-to
         target: REQ-ADVISORYWATCH-002
+
+  - id: REQ-MIRROR-002
+    type: requirement
+    title: "A realm's declared mirrors are actually used: every fetch fails over through them, verified against the one root"
+    status: approved
+    release: v0.45.0
+    description: "varve#301, raised by the maintainer on 2026-10-29: `mirrors` in varve-realms.toml are parsed into Realm::sources and never used. Every fetch builds its source from realm.registry (the primary only), and the failover type varve_core::mirror::Mirrors is constructed nowhere outside its own tests, so a down primary fails although the realm declares working mirrors. REQ-MIRROR-001 was verified on library-level evidence that never fetched through a mirror. Clauses: (1) Every fetch from a realm (layer manifests, blobs, the signed line index, line-status documents) goes through Mirrors built from Realm::sources, primary first and then mirrors in the order written. (2) Bytes from any source are accepted only if they verify against the realm's ONE trust root. A mirror is transport, not authority, so a mirror serving tampered bytes, or a different layer for a digest, is refused and the next source is tried. (3) The user is told which source answered whenever it was not the primary. (4) A system test with the primary unreachable and a mirror serving the same layer: `varve install` succeeds and names the mirror. The same test with the mirror serving different bytes fails closed. (5) A test fails if any realm fetch site constructs a source from realm.registry alone, so the wiring cannot regress silently."
+    tags: [distribution, availability]
+    fields:
+      category: functional
+      priority: must
+    links:
+      - type: traces-to
+        target: REQ-MIRROR-001
