@@ -13,9 +13,19 @@
 //! What this guards is the WIRING — that the viewer uses it rather than growing
 //! a second answer, which is how the defect happened in the first place.
 
+/// The viewer's entry point AND the module that collects payloads for it:
+/// `collect()` moved its payload collection into `layers.rs` so that the
+/// orientation commands share it, and the wiring being guarded is the same.
 fn main_rs() -> String {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
-    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
+    ["src/main.rs", "src/layers.rs"]
+        .iter()
+        .map(|f| {
+            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f);
+            std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // rivet: verifies REQ-COMPOSEEXPORT-001

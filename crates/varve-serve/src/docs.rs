@@ -5,7 +5,9 @@
 //! second one's gate would repeat that mistake a binary later, so the gate
 //! enumerates `crates/*/src/main.rs` and this file is what it looks for.
 //!
-//! **This binary has no subcommands**, so a subcommand-shaped gate would pass
+//! **The program's surface was once flags only** (it now also has `context`,
+//! `ask` and `page`, and the gate covers their names and their flags too). A
+//! subcommand-shaped gate over a binary with no subcommands would pass
 //! unconditionally — and a gate that cannot fail is the exact defect mutation
 //! testing found in varve's own docs gate in v0.34.0 (`coverage_gaps` was
 //! replaceable by `vec![]` and every test still passed). So what is enumerated
@@ -38,6 +40,21 @@ pub fn topics() -> &'static [Topic] {
             "cmd-serve.md"
         ),
         topic!(
+            "context",
+            "context — an orientation for an agent told to check in",
+            "cmd-context.md"
+        ),
+        topic!(
+            "ask",
+            "ask — one narrow question, answered with pointers",
+            "cmd-ask.md"
+        ),
+        topic!(
+            "page",
+            "page — one page of a verified documentation payload",
+            "cmd-page.md"
+        ),
+        topic!(
             "security",
             "security — what listening on a socket does and does not expose",
             "concept-security.md"
@@ -66,18 +83,30 @@ pub fn coverage_gaps(cmd: &clap::Command) -> Vec<String> {
             .iter()
             .any(|t| t.body.contains(&format!("--{needle}")))
     };
-    let mut gaps: Vec<String> = cmd
-        .get_arguments()
-        .filter_map(|a| a.get_long())
-        .filter(|l| !matches!(*l, "help" | "version"))
-        .filter(|l| !mentioned(l))
-        .map(|l| format!("--{l}"))
-        .collect();
-    // Subcommands too, so this keeps working if the binary ever grows one.
+    let mut gaps: Vec<String> = Vec::new();
+    // The flags of the program AND of every subcommand: `context` and `ask`
+    // have flags of their own, and a gate that only read the top level would
+    // pass while `--limit` was documented nowhere.
+    let mut seen: Vec<&clap::Command> = vec![cmd];
+    seen.extend(cmd.get_subcommands().filter(|c| c.get_name() != "help"));
+    for c in seen {
+        for l in c
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .filter(|l| !matches!(*l, "help" | "version"))
+            .filter(|l| !mentioned(l))
+        {
+            let flag = format!("--{l}");
+            if !gaps.contains(&flag) {
+                gaps.push(flag);
+            }
+        }
+    }
+    // Subcommands too: each needs a topic of its own name.
     gaps.extend(
         cmd.get_subcommands()
             .map(|c| c.get_name().to_string())
-            .filter(|n| find(n).is_none()),
+            .filter(|n| n != "help" && find(n).is_none()),
     );
     gaps
 }
@@ -145,6 +174,46 @@ mod tests {
             coverage_gaps(&probe),
             vec!["--undocumented-probe".to_string()],
             "a gate that cannot report a gap is not a gate"
+        );
+    }
+
+    /// A subcommand's own flag and a subcommand with no topic are gaps too: a
+    /// gate that read only the top level passed while `--limit` was written
+    /// down nowhere.
+    // rivet: verifies REQ-AGENTDOCS-001
+    #[test]
+    fn the_gate_reads_subcommands_and_their_flags() {
+        let probe = clap::Command::new("probe").subcommand(
+            clap::Command::new("undocumented-sub").arg(
+                clap::Arg::new("undocumented-flag")
+                    .long("undocumented-flag")
+                    .action(clap::ArgAction::SetTrue),
+            ),
+        );
+        let gaps = coverage_gaps(&probe);
+        assert!(
+            gaps.contains(&"--undocumented-flag".to_string()),
+            "{gaps:?}"
+        );
+        assert!(gaps.contains(&"undocumented-sub".to_string()), "{gaps:?}");
+        // a documented subcommand with a documented flag is no gap, and the
+        // same flag in two subcommands is reported once
+        let ok = clap::Command::new("probe").subcommand(
+            clap::Command::new("ask").arg(
+                clap::Arg::new("limit")
+                    .long("limit")
+                    .action(clap::ArgAction::SetTrue),
+            ),
+        );
+        assert!(coverage_gaps(&ok).is_empty(), "{:?}", coverage_gaps(&ok));
+        let twice = clap::Command::new("probe")
+            .subcommand(clap::Command::new("a").arg(clap::Arg::new("zz-flag").long("zz-flag")))
+            .subcommand(clap::Command::new("b").arg(clap::Arg::new("zz-flag").long("zz-flag")));
+        let gaps = coverage_gaps(&twice);
+        assert_eq!(
+            gaps.iter().filter(|g| *g == "--zz-flag").count(),
+            1,
+            "{gaps:?}"
         );
     }
 

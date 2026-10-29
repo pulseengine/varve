@@ -9,7 +9,13 @@ varve-serve --port 8080          # somewhere else; --port 0 picks a free one
 varve-serve --layer 2026.09.3    # a layer other than the pin
 varve-serve --check              # what would be served, without listening
 varve-serve --docs security      # this program's own documentation
+varve-serve context              # an orientation for an agent: what the pin holds
+varve-serve ask "sign wasm"      # one question, answered with pointers
+varve-serve page <doc> <path>    # one page of a documentation payload, as text
 ```
+
+`context`, `ask` and `page` read the same verified store but open no socket; see
+`varve-serve --docs context`, `--docs ask` and `--docs page`.
 
 ## Why not just open the file?
 

@@ -1,0 +1,50 @@
+# Agent-orientation eval (REQ-AGENTDOCS-001/002). Fixed pin: realm pulseengine,
+# layer 2026.10.31, sha256:f6bb7788f247c534c16d7d5d0c466c44f05a6d470f277dde79a05b05c54279ae.
+# Each task: the question as a user would ask it, and what a correct answer must contain.
+
+[[task]]
+id = "T1-provenance"
+q = "Which version of witness does this project use, and exactly which varve layer and manifest digest does it come from?"
+must = ["0.45.0", "2026.10.31", "f6bb7788"]
+
+[[task]]
+id = "T2-fuse"
+q = "I want to combine two WebAssembly components into a single module. Which tool in this project's pinned toolchain does that, and what subcommand do I start with?"
+must = ["meld", "fuse"]
+
+[[task]]
+id = "T3-sign"
+q = "How do I sign a wasm module and then verify the signature with the tools pinned here? Name the tool and the two subcommands."
+must = ["wsc", "sign", "verify"]
+
+[[task]]
+id = "T4-api"
+q = "Where can I read the API documentation for varve-core's Store type, for exactly the version this project pins? Give the version and a way to open it."
+must = ["0.43.0", "struct.Store.html|store/struct.Store", "export-docs|varve-serve"]
+
+[[task]]
+id = "T5-mcdc"
+q = "Which pinned tool measures branch / MC/DC coverage of a wasm module, and what are the first commands in that workflow?"
+must = ["witness", "instrument", "run"]
+
+[[task]]
+id = "T6-kiln-trap"
+q = "Can I run the kiln WebAssembly runtime in this project under the command name `kiln`?"
+must = ["kilnd", "not|no|isn't|does not"]
+note = "Correct: the layer carries only kilnd 0.6.0, which itself says it is deprecated in favour of kiln; `kiln` is not in the pin."
+
+[[task]]
+id = "T7-rivet"
+q = "Using the pinned rivet, how do I add a new requirement and record that a test verifies it?"
+must = ["rivet add", "verifies"]
+
+[[task]]
+id = "T8-vsix"
+q = "Is there a VS Code extension for AADL in this pinned layer? Which version, and how do I get it out of the layer?"
+must = ["spar-aadl", "0.47.0", "export-vsix"]
+
+[[task]]
+id = "T9-loom-verify"
+q = "Can I use loom in this project to formally verify its optimization rules?"
+must = ["not yet|NOT YET|not implemented|exits 2"]
+note = "loom verify is listed but NOT YET IMPLEMENTED and always exits 2."
