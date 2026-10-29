@@ -31,6 +31,8 @@ on:
   # level: a skipped matrix job reports under its unexpanded name, so the
   # per-variant contexts would never report. Advisory jobs skip in the queue.
   merge_group:
+    # Spelled out, not bare: action_coverage.rs refuses a key with nothing under it.
+    types: [checks_requested]
   push:
     branches: [main]
 

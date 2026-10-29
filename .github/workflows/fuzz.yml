@@ -19,6 +19,8 @@ on:
   # level reports under its unexpanded name, never as the five variants).
   # 60s per target, as on a PR.
   merge_group:
+    # Spelled out, not bare: action_coverage.rs refuses a key with nothing under it.
+    types: [checks_requested]
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
