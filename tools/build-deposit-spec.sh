@@ -138,7 +138,9 @@ release_assets() { # repo version
 # about until some bytes are on disk — and because the attested subject list
 # then vouches for all of them at once.
 harvest_release() { # repo version
-  local repo="$1" version="$2" dir="downloads/${repo##*/}"
+  # Two `local`s: in one, `${repo##*/}` expands before `repo` is assigned.
+  local repo="$1" version="$2"
+  local dir="downloads/${repo##*/}"
   mkdir -p "$dir"
   gh release download "$version" --repo "$repo" -p '*' -D "$dir"
 }
