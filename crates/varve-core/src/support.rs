@@ -79,6 +79,15 @@ pub enum SupportError {
     },
     /// `--past-includes` was given with nothing in it.
     OverrideWithoutReason,
+    /// An include's window ended before the composition is issued: the
+    /// composition would promise support over bytes their own realm no longer
+    /// vouches for (REQ-COMPOSEWINDOW-002 clause 2, varve#285).
+    IncludeExpired {
+        layer: String,
+        realm: String,
+        until: String,
+        issued_at: String,
+    },
 }
 
 impl fmt::Display for SupportError {
@@ -107,6 +116,19 @@ impl fmt::Display for SupportError {
                 f,
                 "promising support past an included layer's window needs a reason on \
                  the record; an empty one is not a decision"
+            ),
+            SupportError::IncludeExpired {
+                layer,
+                realm,
+                until,
+                issued_at,
+            } => write!(
+                f,
+                "included layer {layer} (realm '{realm}') was supported until {until}, before \
+                 this composition's issue date {issued_at}. Signing it would promise support \
+                 over bytes their own realm no longer vouches for; move the include to a \
+                 supported layer (its next line, if this one has ended) and deposit again. No \
+                 --past-includes reason overrides this."
             ),
         }
     }
@@ -195,10 +217,16 @@ pub fn cap_by_includes(
     own: &str,
     includes: &[IncludeWindow],
     past_includes: Option<&str>,
+    issued_at: &str,
 ) -> Result<Capped, SupportError> {
     let own_days = epoch_days(own).ok_or_else(|| SupportError::BadDate {
         field: "support-until",
         value: own.to_string(),
+    })?;
+    let issued_date = issued_at.get(..10).unwrap_or(issued_at);
+    let issued_days = epoch_days(issued_date).ok_or_else(|| SupportError::BadDate {
+        field: "issued-at",
+        value: issued_at.to_string(),
     })?;
     let mut earliest: Option<(i64, &IncludeWindow, &str)> = None;
     for inc in includes {
@@ -216,6 +244,16 @@ pub fn cap_by_includes(
         if earliest.is_none_or(|(e, _, _)| days < e) {
             earliest = Some((days, inc, until));
         }
+    }
+    if let Some((days, inc, until)) = earliest
+        && days < issued_days
+    {
+        return Err(SupportError::IncludeExpired {
+            layer: inc.layer.clone(),
+            realm: inc.realm.clone(),
+            until: until.to_string(),
+            issued_at: issued_date.to_string(),
+        });
     }
     let own_stands = Capped {
         until: own.to_string(),
@@ -281,6 +319,17 @@ pub fn include_window(
     digest: &str,
     realm: &str,
 ) -> Result<IncludeWindow, IncludeWindowError> {
+    window_and_includes(source, verifier, root_pk, digest, realm).map(|(w, _)| w)
+}
+
+/// One layer's own window, and the layers it includes.
+fn window_and_includes(
+    source: &dyn crate::source::LayerSource,
+    verifier: &dyn crate::install::ManifestVerifier,
+    root_pk: &[u8],
+    digest: &str,
+    realm: &str,
+) -> Result<(IncludeWindow, Vec<crate::compose::Include>), IncludeWindowError> {
     let fail = |reason: String| IncludeWindowError {
         include: digest.to_string(),
         realm: realm.to_string(),
@@ -300,6 +349,9 @@ pub fn include_window(
     }
     let manifest = crate::manifest::LayerManifest::parse(&payload)
         .map_err(|e| fail(format!("its manifest does not parse: {e}")))?;
+    let includes = crate::compose::view(&payload)
+        .map_err(|e| fail(format!("its includes do not read: {e}")))?
+        .includes;
     let status = crate::linestatus::current_line_status(
         source,
         &layer_ref,
@@ -308,11 +360,109 @@ pub fn include_window(
         crate::linestatus::Published::Required,
     )
     .map_err(|e| fail(format!("layer {}: its line-status: {e}", manifest.layer)))?;
-    Ok(IncludeWindow {
-        layer: manifest.layer.to_string(),
+    Ok((
+        IncludeWindow {
+            layer: manifest.layer.to_string(),
+            realm: realm.to_string(),
+            support_until: status
+                .and_then(|(_, doc)| doc.report_for(&manifest.layer).support_until),
+        },
+        includes,
+    ))
+}
+
+/// One realm, as the transitive window walk needs it: where its layers are
+/// served from, what verifies them, and the root its line-status is signed by.
+pub struct RealmView<'a> {
+    pub source: &'a dyn crate::source::LayerSource,
+    pub verifier: &'a dyn crate::install::ManifestVerifier,
+    pub root: &'a [u8],
+}
+
+/// How the walk reaches a realm BY NAME. varve-core does not read
+/// varve-realms.toml; the caller resolves names, so an include naming a realm
+/// this machine does not define is an error the caller words.
+pub trait RealmAccess {
+    fn open(&self, realm: &str) -> Result<RealmView<'_>, String>;
+}
+
+/// Deeper than any real composition; a bound, not a policy.
+const MAX_INCLUDE_DEPTH: usize = 16;
+
+/// Distinct layers one walk may visit. A diamond shares a base, which is
+/// read once (memoized); this bounds what a hostile manifest could fan out to.
+const MAX_INCLUDE_NODES: usize = 256;
+
+/// The window an include brings, TRANSITIVELY (REQ-COMPOSEWINDOW-002 clause
+/// 1): the earliest support-until anywhere in its composition, each read from
+/// that layer's OWN realm's signed line-status, never trusted from the
+/// intermediate realm having applied the cap itself. A layer whose status
+/// states no window yields `None`, which `cap_by_includes` refuses.
+pub fn include_window_deep(
+    access: &dyn RealmAccess,
+    digest: &str,
+    realm: &str,
+) -> Result<IncludeWindow, IncludeWindowError> {
+    let mut seen = std::collections::BTreeMap::new();
+    let mut opened = 0;
+    deep_window(access, digest, realm, 0, &mut seen, &mut opened)
+}
+
+fn deep_window(
+    access: &dyn RealmAccess,
+    digest: &str,
+    realm: &str,
+    depth: usize,
+    seen: &mut std::collections::BTreeMap<(String, String), IncludeWindow>,
+    opened: &mut usize,
+) -> Result<IncludeWindow, IncludeWindowError> {
+    let key = (realm.to_string(), digest.to_string());
+    if let Some(w) = seen.get(&key) {
+        return Ok(w.clone());
+    }
+    let fail = |reason: String| IncludeWindowError {
+        include: digest.to_string(),
         realm: realm.to_string(),
-        support_until: status.and_then(|(_, doc)| doc.report_for(&manifest.layer).support_until),
-    })
+        reason,
+    };
+    if depth > MAX_INCLUDE_DEPTH {
+        return Err(fail(format!(
+            "the composition is nested deeper than {MAX_INCLUDE_DEPTH} layers"
+        )));
+    }
+    // Counted as each distinct layer is OPENED, so the layers still being
+    // walked count too, not only the ones already finished.
+    *opened += 1;
+    if *opened > MAX_INCLUDE_NODES {
+        return Err(fail(format!(
+            "the composition reaches more than {MAX_INCLUDE_NODES} distinct layers"
+        )));
+    }
+    let view = access.open(realm).map_err(fail)?;
+    let (own, nested) = window_and_includes(view.source, view.verifier, view.root, digest, realm)?;
+    let mut best = own;
+    for inc in nested {
+        // An include naming no realm is in the including layer's realm.
+        let r = inc.realm.as_deref().unwrap_or(realm);
+        let sub = deep_window(access, &inc.digest, r, depth + 1, seen, opened)?;
+        best = earlier(best, sub);
+    }
+    seen.insert(key, best.clone());
+    Ok(best)
+}
+
+/// The earlier of two windows, compared as DATES. A window that is not
+/// stated, or does not parse, is the most binding of all (it is what
+/// `cap_by_includes` must refuse), so it wins and reaches that refusal
+/// instead of being discarded by a string comparison.
+fn earlier(a: IncludeWindow, b: IncludeWindow) -> IncludeWindow {
+    let day = |w: &IncludeWindow| w.support_until.as_deref().and_then(epoch_days);
+    match (day(&a), day(&b)) {
+        (None, _) => a,
+        (_, None) => b,
+        (Some(x), Some(y)) if y < x => b,
+        _ => a,
+    }
 }
 
 /// Where a layer stands against its stated horizon.
@@ -564,6 +714,7 @@ mod tests {
                 inc("2026.10.3", Some("2026-10-30")),
             ],
             None,
+            "2026-01-01",
         )
         .unwrap();
         assert_eq!(got.until, "2026-10-24");
@@ -589,6 +740,7 @@ mod tests {
                 inc("tied", Some("2026-10-24")),
             ],
             None,
+            "2026-01-01",
         )
         .unwrap();
         assert_eq!(got.until, "2026-10-24");
@@ -606,12 +758,18 @@ mod tests {
     // rivet: verifies REQ-COMPOSEWINDOW-001
     #[test]
     fn the_own_window_stands_when_it_is_already_the_shortest() {
-        let got = cap_by_includes("2026-11-02", &[inc("x", Some("2027-01-01"))], None).unwrap();
+        let got = cap_by_includes(
+            "2026-11-02",
+            &[inc("x", Some("2027-01-01"))],
+            None,
+            "2026-01-01",
+        )
+        .unwrap();
         assert_eq!(
             (got.until.as_str(), &got.bound_by),
             ("2026-11-02", &Bound::Own)
         );
-        let alone = cap_by_includes("2026-11-02", &[], None).unwrap();
+        let alone = cap_by_includes("2026-11-02", &[], None, "2026-01-01").unwrap();
         assert_eq!(
             (alone.until.as_str(), &alone.bound_by),
             ("2026-11-02", &Bound::Own)
@@ -622,7 +780,13 @@ mod tests {
     // rivet: verifies REQ-COMPOSEWINDOW-001
     #[test]
     fn an_include_ending_the_same_day_is_not_a_cap() {
-        let got = cap_by_includes("2026-11-02", &[inc("x", Some("2026-11-02"))], None).unwrap();
+        let got = cap_by_includes(
+            "2026-11-02",
+            &[inc("x", Some("2026-11-02"))],
+            None,
+            "2026-01-01",
+        )
+        .unwrap();
         assert_eq!(got.bound_by, Bound::Own);
     }
 
@@ -636,6 +800,7 @@ mod tests {
             "2026-11-02",
             &[inc("a", Some("2026-12-01")), inc("b", None)],
             None,
+            "2026-01-01",
         )
         .unwrap_err();
         assert_eq!(
@@ -652,7 +817,8 @@ mod tests {
     // rivet: verifies REQ-COMPOSEWINDOW-001
     #[test]
     fn an_unparseable_include_window_refuses() {
-        let err = cap_by_includes("2026-11-02", &[inc("a", Some("soon"))], None).unwrap_err();
+        let err = cap_by_includes("2026-11-02", &[inc("a", Some("soon"))], None, "2026-01-01")
+            .unwrap_err();
         assert!(matches!(err, SupportError::BadDate { .. }), "{err:?}");
     }
 
@@ -666,6 +832,7 @@ mod tests {
             "2026-11-02",
             &[inc("2026.10.0", Some("2026-10-24"))],
             Some("wasm-layers 2026.11.0 is staged and carries the same tools"),
+            "2026-01-01",
         )
         .unwrap();
         assert_eq!(got.until, "2026-11-02");
@@ -682,8 +849,13 @@ mod tests {
     // rivet: verifies REQ-COMPOSEWINDOW-001
     #[test]
     fn an_override_without_a_reason_is_refused() {
-        let err =
-            cap_by_includes("2026-11-02", &[inc("a", Some("2026-10-24"))], Some("  ")).unwrap_err();
+        let err = cap_by_includes(
+            "2026-11-02",
+            &[inc("a", Some("2026-10-24"))],
+            Some("  "),
+            "2026-01-01",
+        )
+        .unwrap_err();
         assert_eq!(err, SupportError::OverrideWithoutReason);
         assert!(!err.to_string().is_empty());
     }
@@ -697,9 +869,41 @@ mod tests {
             "2026-11-02",
             &[inc("a", Some("2027-01-01"))],
             Some("because"),
+            "2026-01-01",
         )
         .unwrap();
         assert_eq!(got.bound_by, Bound::Own);
+    }
+
+    /// Clause 2: an include whose window ended BEFORE the composition is
+    /// issued refuses the horizon outright — even with a reason, because no
+    /// reason makes a promise over bytes their own realm no longer vouches for.
+    // rivet: verifies REQ-COMPOSEWINDOW-002
+    #[test]
+    fn an_include_already_expired_at_issue_refuses_the_horizon() {
+        let inc = IncludeWindow {
+            layer: "2026.09.0".into(),
+            realm: "wasm".into(),
+            support_until: Some("2026-10-24".into()),
+        };
+        for past in [None, Some("we know")] {
+            let err = cap_by_includes("2026-11-30", std::slice::from_ref(&inc), past, "2026-10-27")
+                .unwrap_err();
+            assert_eq!(
+                err,
+                SupportError::IncludeExpired {
+                    layer: "2026.09.0".into(),
+                    realm: "wasm".into(),
+                    until: "2026-10-24".into(),
+                    issued_at: "2026-10-27".into(),
+                }
+            );
+            assert!(err.to_string().contains("2026-10-24"), "{err}");
+        }
+        // The last supported day itself is still supported.
+        assert!(
+            cap_by_includes("2026-11-30", std::slice::from_ref(&inc), None, "2026-10-24").is_ok()
+        );
     }
 
     mod from_source {
@@ -737,6 +941,296 @@ mod tests {
                 support_until: until.map(str::to_string),
                 yanked: Default::default(),
                 known_problems: Vec::new(),
+            }
+        }
+
+        /// A manifest that includes other layers, each in a named realm.
+        fn including(layer: &str, includes: &[(&str, &str)]) -> Vec<u8> {
+            let entries = includes
+                .iter()
+                .map(|(digest, realm)| {
+                    format!(
+                        r#"{{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"{digest}","size":0,"annotations":{{"eu.pulseengine.varve.kind":"layer","{}":"{realm}"}}}}"#,
+                        crate::compose::ANN_INCLUDE_REALM
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{layer}","eu.pulseengine.varve.line":"{line}","eu.pulseengine.varve.channel":"rolling","eu.pulseengine.varve.counter":"0","org.opencontainers.image.created":"2026-09-24T00:00:00Z"}},"manifests":[{entries}]}}"#,
+                line = &layer[..layer.rfind('.').unwrap()],
+            )
+            .into_bytes()
+        }
+
+        /// Two realms: `mid` carries a layer that includes `deep`'s layer.
+        struct TwoRealms {
+            mid: MemorySource,
+            deep: MemorySource,
+            pk: Vec<u8>,
+        }
+        impl RealmAccess for TwoRealms {
+            fn open(&self, realm: &str) -> Result<RealmView<'_>, String> {
+                let source: &dyn crate::source::LayerSource = match realm {
+                    "mid" => &self.mid,
+                    "deep" => &self.deep,
+                    other => return Err(format!("realm '{other}' is not defined here")),
+                };
+                Ok(RealmView {
+                    source,
+                    verifier: &AcceptAll,
+                    root: &self.pk,
+                })
+            }
+        }
+
+        fn two_realms(mid_until: &str, deep_until: &str) -> (TwoRealms, String) {
+            let (sk, pk) = generate_root_keypair();
+            let deep_bytes = wasm_layer();
+            let deep_digest = manifest_digest(&deep_bytes);
+            let mid_bytes = including("2026.10.3", &[(&deep_digest, "deep")]);
+            let st = |until: &str| {
+                status(1, Some(until))
+                    .sign(&sk, "k")
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec()
+            };
+            let realms = TwoRealms {
+                mid: MemorySource::new()
+                    .with_manifest(&mid_bytes)
+                    .with_line_status(&st(mid_until)),
+                deep: MemorySource::new()
+                    .with_manifest(&deep_bytes)
+                    .with_line_status(&st(deep_until)),
+                pk,
+            };
+            (realms, manifest_digest(&mid_bytes))
+        }
+
+        /// Clause 1: the cap holds TRANSITIVELY — an include that itself
+        /// includes is capped at the earliest window below it, read from each
+        /// layer's own signed status, not trusted from the intermediate.
+        // rivet: verifies REQ-COMPOSEWINDOW-002
+        #[test]
+        fn a_window_deeper_in_the_composition_caps_the_include() {
+            let (realms, mid) = two_realms("2026-12-31", "2026-11-01");
+            let w = include_window_deep(&realms, &mid, "mid").unwrap();
+            assert_eq!(w.support_until.as_deref(), Some("2026-11-01"), "{w:?}");
+            assert_eq!((w.layer.as_str(), w.realm.as_str()), ("2026.10.0", "deep"));
+            // When the intermediate's own window is the earliest, it binds.
+            let (realms, mid) = two_realms("2026-10-30", "2026-11-01");
+            let w = include_window_deep(&realms, &mid, "mid").unwrap();
+            assert_eq!(w.support_until.as_deref(), Some("2026-10-30"));
+            assert_eq!(w.realm, "mid");
+        }
+
+        /// One realm whose source carries a whole chain of layers.
+        struct OneRealm {
+            source: MemorySource,
+            pk: Vec<u8>,
+        }
+        impl RealmAccess for OneRealm {
+            fn open(&self, _: &str) -> Result<RealmView<'_>, String> {
+                Ok(RealmView {
+                    source: &self.source,
+                    verifier: &AcceptAll,
+                    root: &self.pk,
+                })
+            }
+        }
+
+        /// A chain of `n` layers, each including the next; returns the top.
+        fn chain(n: usize) -> (OneRealm, String) {
+            let (sk, pk) = generate_root_keypair();
+            let mut source = MemorySource::new().with_line_status(
+                status(1, Some("2026-12-31"))
+                    .sign(&sk, "k")
+                    .unwrap()
+                    .as_bytes(),
+            );
+            let mut below = wasm_layer();
+            source = source.with_manifest(&below);
+            for k in 1..n {
+                let next = including(
+                    &format!("2026.10.{k}"),
+                    &[(&manifest_digest(&below), "one")],
+                );
+                source = source.with_manifest(&next);
+                below = next;
+            }
+            (OneRealm { source, pk }, manifest_digest(&below))
+        }
+
+        /// The walk is bounded: a composition exactly MAX_INCLUDE_DEPTH deep
+        /// below its top reads, one more is refused by name.
+        // rivet: verifies REQ-COMPOSEWINDOW-002
+        #[test]
+        fn the_walk_is_bounded_at_exactly_max_include_depth() {
+            let (realm, top) = chain(MAX_INCLUDE_DEPTH + 1);
+            assert!(include_window_deep(&realm, &top, "one").is_ok());
+            let (realm, top) = chain(MAX_INCLUDE_DEPTH + 2);
+            let err = include_window_deep(&realm, &top, "one").unwrap_err();
+            assert!(err.to_string().contains("nested deeper than 16"), "{err}");
+        }
+
+        /// A wide composition is memoized (a shared base is read once) and the
+        /// number of distinct layers is bounded.
+        // rivet: verifies REQ-COMPOSEWINDOW-002
+        #[test]
+        fn a_composition_wider_than_the_node_cap_is_refused() {
+            let (sk, pk) = generate_root_keypair();
+            let mut source = MemorySource::new().with_line_status(
+                status(1, Some("2026-12-31"))
+                    .sign(&sk, "k")
+                    .unwrap()
+                    .as_bytes(),
+            );
+            let mut leaves = Vec::new();
+            for k in 0..MAX_INCLUDE_NODES {
+                let leaf = including(&format!("2026.10.{k}"), &[]);
+                source = source.with_manifest(&leaf);
+                leaves.push(manifest_digest(&leaf));
+            }
+            let refs: Vec<(&str, &str)> = leaves.iter().map(|d| (d.as_str(), "one")).collect();
+            let wide = including("2026.10.999", &refs);
+            source = source.with_manifest(&wide);
+            let realm = OneRealm { source, pk };
+            let err = include_window_deep(&realm, &manifest_digest(&wide), "one").unwrap_err();
+            assert!(
+                err.to_string().contains("more than 256 distinct layers"),
+                "{err}"
+            );
+            // One fewer leaf fits: 255 leaves and the top are 256 layers.
+            let (sk2, pk2) = generate_root_keypair();
+            let mut s2 = MemorySource::new().with_line_status(
+                status(1, Some("2026-12-31"))
+                    .sign(&sk2, "k")
+                    .unwrap()
+                    .as_bytes(),
+            );
+            let mut l2 = Vec::new();
+            for k in 0..MAX_INCLUDE_NODES - 1 {
+                let leaf = including(&format!("2026.10.{k}"), &[]);
+                s2 = s2.with_manifest(&leaf);
+                l2.push(manifest_digest(&leaf));
+            }
+            let r2: Vec<(&str, &str)> = l2.iter().map(|d| (d.as_str(), "one")).collect();
+            let fits = including("2026.10.999", &r2);
+            s2 = s2.with_manifest(&fits);
+            let realm2 = OneRealm {
+                source: s2,
+                pk: pk2,
+            };
+            assert!(include_window_deep(&realm2, &manifest_digest(&fits), "one").is_ok());
+        }
+
+        /// A diamond (two includes sharing one base) reads the base once.
+        // rivet: verifies REQ-COMPOSEWINDOW-002
+        #[test]
+        fn a_diamond_reads_its_shared_base_once() {
+            let (sk, pk) = generate_root_keypair();
+            let base = wasm_layer();
+            let bd = manifest_digest(&base);
+            let left = including("2026.10.1", &[(&bd, "one")]);
+            let right = including("2026.10.2", &[(&bd, "one")]);
+            let top = including(
+                "2026.10.3",
+                &[
+                    (&manifest_digest(&left), "one"),
+                    (&manifest_digest(&right), "one"),
+                ],
+            );
+            let source = MemorySource::new()
+                .with_line_status(
+                    status(1, Some("2026-12-31"))
+                        .sign(&sk, "k")
+                        .unwrap()
+                        .as_bytes(),
+                )
+                .with_manifest(&base)
+                .with_manifest(&left)
+                .with_manifest(&right)
+                .with_manifest(&top);
+            let counting = Counting {
+                inner: OneRealm { source, pk },
+                opens: std::cell::Cell::new(0),
+            };
+            include_window_deep(&counting, &manifest_digest(&top), "one").unwrap();
+            assert_eq!(
+                counting.opens.get(),
+                4,
+                "top, left, right, and the base ONCE"
+            );
+        }
+        struct Counting {
+            inner: OneRealm,
+            opens: std::cell::Cell<usize>,
+        }
+        impl RealmAccess for Counting {
+            fn open(&self, realm: &str) -> Result<RealmView<'_>, String> {
+                self.opens.set(self.opens.get() + 1);
+                self.inner.open(realm)
+            }
+        }
+
+        /// `earlier`: an unstated window always binds; of two dates the
+        /// earlier; of two equal dates the first.
+        // rivet: verifies REQ-COMPOSEWINDOW-002
+        #[test]
+        fn earlier_prefers_the_unstated_then_the_earliest_then_the_first() {
+            let w = |l: &str, u: Option<&str>| IncludeWindow {
+                layer: l.into(),
+                realm: "r".into(),
+                support_until: u.map(str::to_string),
+            };
+            assert_eq!(earlier(w("a", None), w("b", Some("2026-01-01"))).layer, "a");
+            // Both unstated: the first is the one named in the refusal.
+            assert_eq!(earlier(w("a", None), w("b", None)).layer, "a");
+            // Compared as DATES, and an unparseable date binds (it then
+            // reaches cap_by_includes' BadDate refusal instead of being
+            // dropped by a string comparison that ranks "soon" after 2026).
+            assert_eq!(
+                earlier(w("a", Some("2026-01-01")), w("b", Some("soon"))).layer,
+                "b"
+            );
+            assert_eq!(
+                earlier(w("a", Some("soon")), w("b", Some("2026-01-01"))).layer,
+                "a"
+            );
+            assert_eq!(earlier(w("a", Some("2026-01-01")), w("b", None)).layer, "b");
+            assert_eq!(
+                earlier(w("a", Some("2026-02-01")), w("b", Some("2026-01-01"))).layer,
+                "b"
+            );
+            assert_eq!(
+                earlier(w("a", Some("2026-01-01")), w("b", Some("2026-02-01"))).layer,
+                "a"
+            );
+            assert_eq!(
+                earlier(w("a", Some("2026-01-01")), w("b", Some("2026-01-01"))).layer,
+                "a"
+            );
+        }
+
+        /// A nested include in a realm this machine cannot resolve is an
+        /// error naming it — never skipped, which would drop its window.
+        // rivet: verifies REQ-COMPOSEWINDOW-002
+        #[test]
+        fn a_nested_include_in_an_unknown_realm_is_refused_by_name() {
+            let (realms, mid) = two_realms("2026-12-31", "2026-11-01");
+            let only_mid = OnlyMid(&realms);
+            let err = include_window_deep(&only_mid, &mid, "mid").unwrap_err();
+            assert!(err.to_string().contains("deep"), "{err}");
+        }
+        struct OnlyMid<'a>(&'a TwoRealms);
+        impl RealmAccess for OnlyMid<'_> {
+            fn open(&self, realm: &str) -> Result<RealmView<'_>, String> {
+                if realm == "mid" {
+                    self.0.open(realm)
+                } else {
+                    Err(format!("realm '{realm}' is not defined here"))
+                }
             }
         }
 
@@ -865,7 +1359,7 @@ mod tests {
             let w =
                 include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm").unwrap();
             assert_eq!(w.support_until, None);
-            assert!(cap_by_includes("2026-11-02", &[w], None).is_err());
+            assert!(cap_by_includes("2026-11-02", &[w], None, "2026-01-01").is_err());
         }
 
         /// The include's manifest must verify under its realm before anything

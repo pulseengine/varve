@@ -2083,6 +2083,52 @@ fn composition_for_export(
 /// composition walk verifies each included layer against. varve-core does not
 /// read varve-realms.toml, deliberately: the crate that verifies should have no
 /// opinion about where trust material lives.
+/// The realms this checkout's varve-realms.toml defines, each with its source
+/// and verifier, for walking a composition across realms.
+struct DefinedRealms {
+    realms: std::collections::BTreeMap<
+        String,
+        (
+            varve_core::RegistrySource,
+            varve_core::PinnedKeyVerifier,
+            Vec<u8>,
+        ),
+    >,
+}
+
+impl DefinedRealms {
+    fn open(cwd: &std::path::Path) -> anyhow::Result<Self> {
+        let mut realms = std::collections::BTreeMap::new();
+        if let Ok(names) = varve_core::realm::realm_names(cwd) {
+            for name in names {
+                let realm = varve_core::resolve_realm(cwd, &name)?;
+                let source = varve_core::RegistrySource::parse(&realm.registry)?;
+                let verifier =
+                    varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
+                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                realms.insert(name, (source, verifier, realm.trust_root.clone()));
+            }
+        }
+        Ok(DefinedRealms { realms })
+    }
+}
+
+impl varve_core::support::RealmAccess for DefinedRealms {
+    fn open(&self, realm: &str) -> Result<varve_core::support::RealmView<'_>, String> {
+        let (source, verifier, root) = self.realms.get(realm).ok_or_else(|| {
+            format!(
+                "names realm '{realm}', which is not defined in this checkout's \
+                 varve-realms.toml, so no root here can vouch for its support window"
+            )
+        })?;
+        Ok(varve_core::support::RealmView {
+            source,
+            verifier,
+            root,
+        })
+    }
+}
+
 fn realm_roots(
     cwd: &std::path::Path,
 ) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
@@ -3515,6 +3561,9 @@ fn support_horizon(
         None => Vec::new(),
     };
     let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    // Every realm this checkout defines, opened once: an include's own
+    // includes may name any of them (REQ-COMPOSEWINDOW-002 clause 1).
+    let realms = DefinedRealms::open(&cwd)?;
     let mut windows = Vec::new();
     for inc in &includes {
         let Some(realm_name) = inc.realm.as_deref() else {
@@ -3523,24 +3572,13 @@ fn support_horizon(
                 inc.digest
             );
         };
-        let realm = varve_core::resolve_realm(&cwd, realm_name).with_context(|| {
-            format!(
-                "include {} names realm '{realm_name}', which is not defined here",
-                inc.digest
-            )
-        })?;
-        let source = varve_core::RegistrySource::parse(&realm.registry)?;
-        let verifier = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        windows.push(support::include_window(
-            &source,
-            &verifier,
-            &realm.trust_root,
+        windows.push(support::include_window_deep(
+            &realms,
             &inc.digest,
             realm_name,
         )?);
     }
-    let capped = support::cap_by_includes(&own, &windows, past_includes)?;
+    let capped = support::cap_by_includes(&own, &windows, past_includes, issued_at)?;
     let note = match &capped.bound_by {
         Bound::Own => None,
         Bound::Include { layer, realm } => Some(format!(
