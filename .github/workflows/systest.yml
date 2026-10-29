@@ -32,7 +32,10 @@ permissions:
 jobs:
   selfhost-vendor:
     name: self-host via export-crates-vendor (clause 1)
-    runs-on: [self-hosted, linux, x64, rust-cpu]
+    # Routes fork PRs to GitHub-hosted runners by default. This is NOT a security
+    # boundary: a fork PR can edit this file. Isolation is enforced by the org's
+    # smithy runner-group policy and fork-PR approval (pulseengine/warte#35).
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,7 +64,7 @@ jobs:
     # signal, not a gate (cf. publish-crates.yml) — but so is a permanently
     # skipped one, which is why this comment must not outlive the condition.
     if: vars.VARVE_SYSTEST_EXPORT_CARGO == '1'
-    runs-on: [self-hosted, linux, x64, rust-cpu]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -74,7 +77,7 @@ jobs:
 
   oci-roundtrip:
     name: OCI registry round trip (clause 2, varve#62)
-    runs-on: [self-hosted, linux, x64, rust-cpu]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -115,7 +118,7 @@ jobs:
 
   deposit-layer:
     name: layer assembly, end to end without publishing (REQ-SYSTEST-002)
-    runs-on: [self-hosted, linux, x64, rust-cpu]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     # Minutes, not tens of minutes: no network, no registry, ~50 fixture files
     # and 24 tiny payloads. A producer gate that took as long as the self-host
     # jobs would be one people learn to ignore.
@@ -145,7 +148,7 @@ jobs:
 
   compose-realms:
     name: two realms composed, end to end (REQ-REALM2-001 clause 3)
-    runs-on: [self-hosted, linux, x64, rust-cpu]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     # Longer than deposit-layer: the negative control rebuilds varve from a
     # mutated copy of the source, which is a second release build.
     timeout-minutes: 30
@@ -178,7 +181,7 @@ jobs:
 
   wit-export:
     name: a flat WIT layer composed for wkg (REQ-WIT-001 clause 3)
-    runs-on: [self-hosted, linux, x64, rust-cpu]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     # Two packages of a few hundred bytes each: no network, no registry, no
     # cargo fetch. A gate this cheap has no excuse to be skipped.
     timeout-minutes: 15
@@ -236,7 +239,7 @@ jobs:
 
   line-index:
     name: a published signed line index, read and acted on (REQ-LAYERDIFF-001 clause 1)
-    runs-on: [self-hosted, linux, x64, rust-cpu]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -264,7 +267,7 @@ jobs:
 
   install-shadow:
     name: the installer names which varve will run (REQ-INSTALLSHADOW-001)
-    runs-on: [self-hosted, linux, x64, rust-cpu]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # A maintainer followed the documented install and ended up running a

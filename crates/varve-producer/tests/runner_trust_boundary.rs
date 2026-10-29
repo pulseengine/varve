@@ -76,7 +76,21 @@ fn the_pr_gates_run_on_the_pool_and_name_a_class() {
         ("mutants.yml", 1),
     ] {
         let w = workflow(name);
-        let n = w.matches("runs-on: [self-hosted, linux, x64,").count();
+        // Two spellings of "this job runs on the pool and names its class":
+        // the literal list, and the fork-routing expression (#296), whose
+        // same-repo branch is the same list as JSON. A fork PR goes to a
+        // hosted runner; everything else still waits on the pool, and that is
+        // what this counts. A job reverted to a bare `ubuntu-latest` matches
+        // neither, which is the regression this test exists for.
+        let n = w
+            .lines()
+            .filter(|l| {
+                let l = l.trim_start();
+                l.starts_with("runs-on: [self-hosted, linux, x64,")
+                    || (l.starts_with("runs-on: ${{")
+                        && l.contains(r#"fromJSON('["self-hosted","linux","x64","#))
+            })
+            .count();
         assert!(
             n >= want,
             "{name} has {n} jobs on the self-hosted pool, expected at least \
