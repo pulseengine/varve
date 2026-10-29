@@ -511,17 +511,20 @@ pub fn ghsa_for_payload(
     Ok(out)
 }
 
-/// When one advisory reaches the draft through several payloads and any of
-/// them is qualified, the entry keeps the qualifier: a draft must not read
-/// as certain for layers where it is not.
+/// One advisory can reach the draft through several payloads. If ANY of them
+/// matched it exactly, the layer is certainly affected, so the entry is
+/// certain everywhere: understating a security finding is the worse error
+/// (maintainer, 2026-10-29). Only an advisory that every payload matched as a
+/// sibling package keeps its qualifier.
 pub fn unify_qualifiers(proposed: &mut [Proposed]) {
-    let known: Vec<(String, String)> = proposed
+    let exact: Vec<String> = proposed
         .iter()
-        .filter_map(|p| p.detection.clone().map(|d| (p.id.clone(), d)))
+        .filter(|p| p.detection.is_none())
+        .map(|p| p.id.clone())
         .collect();
     for p in proposed.iter_mut() {
-        if let Some((_, d)) = known.iter().find(|(id, _)| *id == p.id) {
-            p.detection = Some(d.clone());
+        if exact.contains(&p.id) {
+            p.detection = None;
         }
     }
 }
@@ -5702,7 +5705,7 @@ patched = [">= 1.0.5"]
 
     // rivet: verifies REQ-ADVISORYWATCH-002
     #[test]
-    fn a_qualifier_on_any_proposal_of_an_advisory_applies_to_all_of_its_proposals() {
+    fn an_exact_match_on_any_proposal_makes_the_advisory_certain_for_all() {
         let mk = |id: &str, d: Option<&str>| Proposed {
             id: id.to_string(),
             aliases: vec![],
@@ -5720,6 +5723,9 @@ patched = [">= 1.0.5"]
         ];
         unify_qualifiers(&mut v);
         let d: Vec<Option<&str>> = v.iter().map(|p| p.detection.as_deref()).collect();
-        assert_eq!(d, [Some("q"), None, Some("q"), Some("r")]);
+        // A: one payload matched it exactly, so the layer IS affected; the
+        // qualifier would understate a certain finding. C: only ever
+        // qualified, so it stays qualified.
+        assert_eq!(d, [None, None, None, Some("r")]);
     }
 }
