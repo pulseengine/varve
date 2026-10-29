@@ -2,6 +2,14 @@ name: ci
 
 on:
   pull_request:
+  # GitHub merge queue: this workflow emits required contexts, so it must run
+  # on merge_group or a queued PR waits on checks nothing reports. Heavy jobs
+  # skip on docs-only changes by job-level `if:` on the `changes` detector
+  # (tools/ci/detect-changes.sh), which diffs against merge_group.base_sha in
+  # the queue. Matrix jobs carrying required contexts are NEVER skipped at job
+  # level: a skipped matrix job reports under its unexpanded name, so the
+  # per-variant contexts would never report. Advisory jobs skip in the queue.
+  merge_group:
   push:
     branches: [main]
 
@@ -9,6 +17,22 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect changed areas (ci)
+    runs-on: [self-hosted, linux, x64, light]
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: bash tools/ci/detect-changes.sh
+
   rust:
     # The check name must stay `fmt · clippy · test (ubuntu-latest)` — branch
     # protection matches on it, and a renamed required check can never report,
@@ -53,6 +77,8 @@ jobs:
     # runners do not grant; VARVE_REQUIRE_FISH makes the test FAIL rather than
     # skip if the install did not take.
     name: varve env round trip in fish (REQ-ENVQUOTE-001)
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -161,6 +187,8 @@ jobs:
 
   msrv:
     name: MSRV (1.89)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -171,6 +199,8 @@ jobs:
 
   coverage:
     name: coverage (advisory evidence)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -222,6 +252,8 @@ jobs:
 
   corrosion:
     name: corrosion offline build (REQ-CORROSION-001)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     # The real test is 36-97s. Without a bound, a hung apt mirror held a
     # required check open indefinitely and there was nothing to end it.
@@ -275,6 +307,8 @@ jobs:
     # stops matching the rule that required it, and the gate quietly becomes
     # optional the next time the file list changes.
     name: cargo mutants (${{ matrix.shard }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # MEASURED, then reverted. These five shards moved to the pool with the
     # rest of the gates and it made them worse, because they are the one job
     # shape a shared host cannot absorb: 21-39 minutes each, five wide, and
@@ -587,16 +621,25 @@ jobs:
   # nobody remembers to update.
   mutants-gate:
     name: cargo mutants (trust-critical gate)
-    needs: [mutants]
+    needs: [changes, mutants]
     if: always()
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","light"]') }}
     steps:
       - name: Every shard must have passed
         env:
           RESULT: ${{ needs.mutants.result }}
+          CODE: ${{ needs.changes.outputs.code }}
         run: |
           set -euo pipefail
-          echo "shard result: $RESULT"
+          echo "shard result: $RESULT; detector code=$CODE"
+          # The one sanctioned skip: the detector ran and classified the change
+          # as docs-only (code=false, never empty), so the shards were skipped
+          # by their `if:`. A failed detector leaves CODE empty and the shards
+          # run, so this cannot turn a failure into a pass.
+          if [ "$RESULT" = "skipped" ] && [ "$CODE" = "false" ]; then
+            echo "docs-only change: no mutable source, shards skipped"
+            exit 0
+          fi
           # `success` only. A skipped or cancelled matrix is NOT a pass — a
           # cancelled shard is how a 60-minute timeout previously reported
           # nothing at all, and this gate exists to be believed.
@@ -607,6 +650,8 @@ jobs:
 
   proofs:
     name: SMT obligations (ordeal, certificate-checked)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

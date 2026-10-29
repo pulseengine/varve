@@ -23,6 +23,14 @@ name: systest
 
 on:
   pull_request:
+  # GitHub merge queue: this workflow emits required contexts, so it must run
+  # on merge_group or a queued PR waits on checks nothing reports. Heavy jobs
+  # skip on docs-only changes by job-level `if:` on the `changes` detector
+  # (tools/ci/detect-changes.sh), which diffs against merge_group.base_sha in
+  # the queue. Matrix jobs carrying required contexts are NEVER skipped at job
+  # level: a skipped matrix job reports under its unexpanded name, so the
+  # per-variant contexts would never report. Advisory jobs skip in the queue.
+  merge_group:
   push:
     branches: [main]
 
@@ -30,8 +38,26 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect changed areas (systest)
+    runs-on: [self-hosted, linux, x64, light]
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: bash tools/ci/detect-changes.sh
+
   selfhost-vendor:
     name: self-host via export-crates-vendor (clause 1)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # Routes fork PRs to GitHub-hosted runners by default. This is NOT a security
     # boundary: a fork PR can edit this file. Isolation is enforced by the org's
     # smithy runner-group policy and fork-PR approval (pulseengine/warte#35).
@@ -63,7 +89,8 @@ jobs:
     # deliberately if the adapter regresses. A perpetually-red job is a dead
     # signal, not a gate (cf. publish-crates.yml) — but so is a permanently
     # skipped one, which is why this comment must not outlive the condition.
-    if: vars.VARVE_SYSTEST_EXPORT_CARGO == '1'
+    needs: changes
+    if: ${{ !cancelled() && vars.VARVE_SYSTEST_EXPORT_CARGO == '1' && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     timeout-minutes: 45
     steps:
@@ -77,6 +104,8 @@ jobs:
 
   oci-roundtrip:
     name: OCI registry round trip (clause 2, varve#62)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     timeout-minutes: 45
     steps:
@@ -118,6 +147,8 @@ jobs:
 
   deposit-layer:
     name: layer assembly, end to end without publishing (REQ-SYSTEST-002)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     # Minutes, not tens of minutes: no network, no registry, ~50 fixture files
     # and 24 tiny payloads. A producer gate that took as long as the self-host
@@ -148,6 +179,8 @@ jobs:
 
   compose-realms:
     name: two realms composed, end to end (REQ-REALM2-001 clause 3)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     # Longer than deposit-layer: the negative control rebuilds varve from a
     # mutated copy of the source, which is a second release build.
@@ -181,6 +214,8 @@ jobs:
 
   wit-export:
     name: a flat WIT layer composed for wkg (REQ-WIT-001 clause 3)
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     # Two packages of a few hundred bytes each: no network, no registry, no
     # cargo fetch. A gate this cheap has no excuse to be skipped.
@@ -206,6 +241,8 @@ jobs:
 
   sdk-relocation:
     name: an sdk exported to a shorter path still runs (REQ-SDK-001)
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.changes.outputs.code != 'false' }}
     # GitHub-HOSTED, deliberately: it needs an x86_64 Linux host to execute
     # the relocated loader, and nothing a self-hosted runner has. Reported
     # against varve 0.39 — zephyr-sdk 1.0.1 exported to a shorter path could
@@ -239,6 +276,8 @@ jobs:
 
   line-index:
     name: a published signed line index, read and acted on (REQ-LAYERDIFF-001 clause 1)
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     timeout-minutes: 25
     steps:
@@ -267,6 +306,8 @@ jobs:
 
   install-shadow:
     name: the installer names which varve will run (REQ-INSTALLSHADOW-001)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
