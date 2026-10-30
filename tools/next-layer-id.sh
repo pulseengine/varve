@@ -84,7 +84,6 @@ if [ -z "$HIGHEST" ]; then
   COUNTER=1
   note "line $LINE is new — layer $LAYER, counter $COUNTER"
 else
-  STATUS_TYPE='application/vnd.pulseengine.varve.line-status.v1+json'
   MAN="$(curl -fsS -H "$AUTH" -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
          "https://$HOST/v2/$REPO/manifests/$HIGHEST")" \
     || die "could not fetch the manifest of $HIGHEST"
