@@ -8230,6 +8230,33 @@ fn support_horizon_caps_a_composition_at_its_includes_signed_window() {
         .stderr(predicate::str::contains("2026-11-02"));
 }
 
+/// REQ-COMPOSEWINDOW-002 clause 2, end to end: an include whose signed window
+/// ended (2026-09-30) BEFORE the composition is issued (2026-10-02) refuses
+/// the horizon, and no `--past-includes` reason overrides it. The v0.44.0
+/// clean-room review found that replacing the issued date with 1970-01-01 in
+/// main.rs left every support-horizon CLI test passing; this one fails then.
+// rivet: verifies REQ-COMPOSEWINDOW-002
+#[test]
+fn support_horizon_refuses_an_include_already_expired_at_issue() {
+    let fx = composing_project(Some(Some("2026-09-30")));
+    for extra in [&[][..], &["--past-includes", "we know"][..]] {
+        varve(&fx)
+            .args(support_horizon_args(extra))
+            .assert()
+            .failure()
+            .stdout("")
+            .stderr(predicate::str::contains("2026-09-30"))
+            .stderr(predicate::str::contains("issue date 2026-10-02"));
+    }
+    // The last supported day is still supported.
+    let fx = composing_project(Some(Some("2026-10-02")));
+    varve(&fx)
+        .args(support_horizon_args(&[]))
+        .assert()
+        .success()
+        .stdout("2026-10-02\n");
+}
+
 /// An include that outlives the composition does not lengthen it: the cap only
 /// ever shortens, and nothing is said about a bound that did not bind.
 // rivet: verifies REQ-COMPOSEWINDOW-001
