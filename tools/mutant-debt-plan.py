@@ -58,7 +58,13 @@ import os
 import re
 import subprocess
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11, e.g. macOS /usr/bin/python3 (3.9)
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        sys.exit("mutant-debt-plan.py: needs Python 3.11+ (tomllib) or the tomli package")
 
 DEFAULT_TARGET = 300
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")

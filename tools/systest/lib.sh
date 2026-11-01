@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared plumbing for the REQ-SYSTEST-001 system gates. Sourced, not run.
 #
 # The producing half every systest job shares: build varve, turn varve's OWN
@@ -419,6 +420,7 @@ systest_push_layout() {
             { mediaType: "application/octet-stream", digest: .digest, size: .size } ])
     }' > "$scratch/artifact-manifest.json"
   "$ORAS" manifest push --plain-http "$REPO_REF:$TAG" "$scratch/artifact-manifest.json" >/dev/null
+  # shellcheck disable=SC2034  # read by the sourcing script (line-index.sh)
   SYSTEST_PAYLOAD_DIGEST="$PAYLOAD_DIGEST"
   rm -rf "$scratch"
 }
