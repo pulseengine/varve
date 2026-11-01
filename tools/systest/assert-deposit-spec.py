@@ -27,7 +27,13 @@ Usage: assert-deposit-spec.py <deposit-spec.toml>
 import hashlib
 import pathlib
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11, e.g. macOS /usr/bin/python3 (3.9)
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        sys.exit("assert-deposit-spec.py: needs Python 3.11+ (tomllib) or the tomli package")
 
 PLATFORMS = [
     "aarch64-apple-darwin",
