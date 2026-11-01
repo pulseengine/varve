@@ -1,6 +1,7 @@
 name: ci
 
 on:
+  merge_group:
   pull_request:
   # GitHub merge queue: this workflow emits required contexts, so it must run
   # on merge_group or a queued PR waits on checks nothing reports. Heavy jobs
