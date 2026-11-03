@@ -9424,3 +9424,42 @@ fn real_cmake_reads_the_exported_script_with_dash_c_and_include() {
         );
     }
 }
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn a_re_export_replaces_what_varve_wrote_and_refuses_what_it_did_not() {
+    let (fx, root) = zephyr_layer(&[("gale", zephyr_module("gale", &[]))]);
+    let parent = fx.project.parent().unwrap();
+    let export = |out: &std::path::Path| {
+        varve(&fx)
+            .env("VARVE_TRUST_ROOT", &root.trust_root)
+            .args(["export-zephyr-modules", "--layer", "2026.07.0", "--out"])
+            .arg(out)
+            .output()
+            .unwrap()
+    };
+    // A second export over a first replaces cleanly, and still verifies.
+    let out = parent.join("zmods");
+    assert!(export(&out).status.success());
+    std::fs::write(out.join("gale/src/stale.c"), "x").unwrap();
+    assert!(export(&out).status.success());
+    assert!(!out.join("gale/src/stale.c").exists());
+    assert!(verify_export(&fx, &root, &out).status.success());
+
+    // A `gale/` that is the user's own is refused, and survives untouched.
+    let mine = parent.join("my-workspace");
+    std::fs::create_dir_all(mine.join("gale")).unwrap();
+    std::fs::write(mine.join("gale/MARKER"), "my checkout").unwrap();
+    let res = export(&mine);
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+    assert_eq!(res.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("was not written by varve export-zephyr-modules"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(mine.join("gale/MARKER")).unwrap(),
+        "my checkout"
+    );
+    assert!(!mine.join(".varve-export.json").exists());
+}

@@ -22,7 +22,11 @@ hex = "0.4.3"
 # maturity buys less here than the pure-Rust property does.
 lzma-rs = "0.3"
 serde = { version = "1.0.229", features = ["derive"] }
-serde-saphyr = { version = "2.1.0", default-features = false, features = ["deserialize"] }
+# Pinned EXACTLY to 2.0.0 (2026-10-13), the established release. 2.1.0 was
+# published hours before this was written (2026-11-03), and a crate that new
+# does not belong in the path that reads untrusted module.yml files. Lift the
+# pin deliberately, after the release has aged.
+serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 tar = "0.4.46"

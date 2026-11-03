@@ -87,6 +87,16 @@ exported module fails it, and so does a missing directory.
   half export would pass `verify --export` while being incomplete. Narrowing
   `--select` past a dependency is the same refusal.
 - **A symlink in a module tree**, and a member path that leaves the tree.
+- **Members that differ only in case** (`zephyr/Module.yml` beside
+  `zephyr/module.yml`), and a `zephyr/module.yaml` beside the parsed
+  description. On a case-insensitive file system one would overwrite the other
+  at export, replacing the checked description with an unchecked one. Refused at
+  deposit.
+- **A `<out>/<name>/` varve did not write.** An export replaces a module
+  directory only when `<out>` carries a `zephyr-module` stamp listing files
+  under it; otherwise it refuses (`exists and was not written by varve
+  export-zephyr-modules; remove it or choose another --out`) before writing or
+  deleting anything, so a checkout of your own is never removed.
 
 ### What it does not check yet
 

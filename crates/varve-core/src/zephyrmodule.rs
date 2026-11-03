@@ -107,8 +107,27 @@ pub enum ZephyrModuleError {
          refused"
     )]
     Symlink { payload: String, member: String },
-    #[error("zephyr-module '{payload}' lists the path {path:?} twice")]
+    #[error(
+        "zephyr-module '{payload}' lists the path {path:?} twice, or twice differing only in \
+         case (compared lowercased, as a case-insensitive file system such as macOS's would). \
+         One would overwrite the other at export, and which one survives is not what was \
+         parsed or checked."
+    )]
     DuplicateMember { payload: String, path: String },
+    #[error(
+        "zephyr-module '{payload}' carries {member:?} beside the {MODULE_YML} varve parsed. \
+         Compared ignoring case it names the same file Zephyr reads for the module \
+         description, so on a case-insensitive file system it could replace the checked \
+         description with an unchecked one (a pip dependency nobody opted into). Remove it."
+    )]
+    ModuleYmlCollision { payload: String, member: String },
+    #[error(
+        "{path} exists and was not written by varve export-zephyr-modules; remove it or choose \
+         another --out. varve replaces a module directory only when this --out carries a \
+         zephyr-module export stamp listing files under it, so a checkout of your own is \
+         never deleted."
+    )]
+    NotWrittenByVarve { path: String },
     #[error("zephyr-module '{payload}': member {member:?} is not a usable path: {detail}")]
     UnsafeMember {
         payload: String,
@@ -205,6 +224,16 @@ where
 /// resource budgets against hostile input). Nothing here shells out, so no
 /// Python is needed to deposit or export a module (clause 5).
 pub fn parse_module_yml(payload: &str, text: &str) -> Result<ModuleYml, ZephyrModuleError> {
+    // Decided here, not left to the YAML library: serde-saphyr 2.0.0 reads an
+    // empty document as "all defaults" and 2.1.0 refuses it, so the answer
+    // would change with a version bump. A module.yml that says nothing is not
+    // a description of a module.
+    if text.trim().is_empty() {
+        return Err(ZephyrModuleError::BadModuleYml {
+            payload: payload.to_string(),
+            detail: "the file is empty".to_string(),
+        });
+    }
     let raw: RawYml =
         serde_saphyr::from_str(text).map_err(|e| ZephyrModuleError::BadModuleYml {
             payload: payload.to_string(),
@@ -259,7 +288,14 @@ pub fn open(payload: &str, archive: &[u8]) -> Result<ModuleTree, ZephyrModuleErr
                 member: path,
             });
         }
-        if !seen.insert(path.clone()) {
+        // Compared LOWERCASED: macOS and Windows file systems are
+        // case-insensitive, so `zephyr/Module.yml` and `zephyr/module.yml` are
+        // one file there, and which of the two a tar reader writes last wins.
+        // That is how an unchecked description could replace the one parsed
+        // (and pip-checked). Unicode normalisation is NOT handled: it is not
+        // needed for the module-description names, which are ASCII, and the
+        // `create_new` write at export refuses any collision this misses.
+        if !seen.insert(path.to_lowercase()) {
             return Err(ZephyrModuleError::DuplicateMember {
                 payload: payload.to_string(),
                 path,
@@ -311,6 +347,18 @@ pub fn open(payload: &str, archive: &[u8]) -> Result<ModuleTree, ZephyrModuleErr
                 })
             })
             .collect();
+    }
+    // Nothing else may fold onto the description varve parsed (see above): the
+    // case-folded duplicate check catches `Module.yml`; this catches the
+    // sibling spelling Zephyr also looks for.
+    for m in &members {
+        let lower = m.path.to_lowercase();
+        if m.path != MODULE_YML && (lower == MODULE_YML || lower == "zephyr/module.yaml") {
+            return Err(ZephyrModuleError::ModuleYmlCollision {
+                payload: payload.to_string(),
+                member: m.path.clone(),
+            });
+        }
     }
     Ok(ModuleTree { yml, members })
 }
@@ -635,24 +683,39 @@ pub fn export(
             "the export directory must be absolute: the CMake script names it",
         ));
     }
-    let mut report = ExportReport::default();
+    // EVERY destination is judged before anything is written or removed, so a
+    // refusal leaves neither a half export nor a deleted directory behind.
+    let stamp = crate::exportstamp::read_stamp(out).ok();
     for m in modules {
         let dir = out.join(&m.name);
-        // A previous export of this module is REPLACED, not merged into: a file
-        // left over from the last pin would sit in a tree the stamp then
-        // vouches for. A symlink or a file where the directory belongs is
-        // refused, never followed.
         match std::fs::symlink_metadata(&dir) {
-            Ok(md) if md.is_dir() => std::fs::remove_dir_all(&dir).map_err(|e| io_err(&dir, e))?,
-            Ok(_) => {
-                return Err(io_err(
-                    &dir,
-                    "exists and is not a plain directory (a file or a symlink)",
-                ));
-            }
             // Nothing there (or nothing readable there): `create_dir_all`
             // below reports any real failure, with its own error.
             Err(_) => {}
+            // Replaced, not merged into — a file left over from the last pin
+            // would sit in a tree the stamp then vouches for — but ONLY a real
+            // directory varve itself recorded writing. Anything else is
+            // somebody's own, and `remove_dir_all` on it is not recoverable.
+            Ok(md) => {
+                let prefix = format!("{}/", m.name);
+                let ours = md.is_dir()
+                    && stamp.as_ref().is_some_and(|st| {
+                        st.kind == crate::kind::PayloadKind::ZephyrModule.as_str()
+                            && st.files.iter().any(|f| f.path.starts_with(&prefix))
+                    });
+                if !ours {
+                    return Err(ZephyrModuleError::NotWrittenByVarve {
+                        path: dir.display().to_string(),
+                    });
+                }
+            }
+        }
+    }
+    let mut report = ExportReport::default();
+    for m in modules {
+        let dir = out.join(&m.name);
+        if std::fs::symlink_metadata(&dir).is_ok() {
+            std::fs::remove_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
         }
         std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
         for member in &m.tree.members {
@@ -663,7 +726,16 @@ pub fn export(
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
                     }
-                    std::fs::write(&dest, bytes).map_err(|e| io_err(&dest, e))?;
+                    // `create_new`: a file is CREATED, never overwritten. The
+                    // directory is fresh, so a collision here means two members
+                    // landed on one path, and the later must not win.
+                    use std::io::Write;
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&dest)
+                        .and_then(|mut f| f.write_all(bytes))
+                        .map_err(|e| io_err(&dest, e))?;
                     set_mode(&dest, *mode)?;
                     report.files += 1;
                 }
@@ -809,6 +881,7 @@ mod tests {
             "build:\n  depends: not-a-list\n",
             "name:\n  - a\n  - b\n",
             "",
+            "  \n\t\n",
             "\t\t: : :\n",
         ] {
             let e = parse_module_yml("gale", bad).expect_err(bad);
@@ -1581,29 +1654,131 @@ mod tests {
         std::fs::remove_dir_all(&out).unwrap();
     }
 
+    /// What the CLI does after `export`: stamp the directory, which is the
+    /// record that varve wrote what is in it.
+    fn stamp(out: &Path, kind: &str) {
+        let st = crate::exportstamp::stamp_for(out, "l", "sha256:d", kind).unwrap();
+        crate::exportstamp::write_stamp(out, &st).unwrap();
+    }
+
     // rivet: verifies REQ-ZMODEXPORT-001
     #[test]
-    fn export_replaces_a_stale_module_directory_rather_than_merging_into_it() {
+    fn a_second_export_over_a_first_replaces_cleanly_rather_than_merging() {
         let out = temp("stale");
-        std::fs::create_dir_all(out.join("x")).unwrap();
-        std::fs::write(out.join("x/stale.txt"), "old").unwrap();
         let mods = prepare(&[("x".to_string(), module("x", &[]))], None).unwrap();
         export(&mods, &out, "l", "d").unwrap();
+        stamp(&out, "zephyr-module");
+        std::fs::write(out.join("x/stale.txt"), "old").unwrap();
+        export(&mods, &out, "l2", "d2").unwrap();
         assert!(!out.join("x/stale.txt").exists(), "a stale file survived");
         assert!(out.join("x/zephyr/module.yml").is_file());
         std::fs::remove_dir_all(&out).unwrap();
     }
 
     // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_directory_varve_did_not_write_is_refused_and_survives() {
+        let out = temp("foreign");
+        std::fs::create_dir_all(out.join("gale")).unwrap();
+        std::fs::write(out.join("gale/MARKER"), "my own checkout").unwrap();
+        let mods = prepare(
+            &payloads(&[
+                ("alpha", module("alpha", &[])),
+                ("gale", module("gale", &[])),
+            ]),
+            None,
+        )
+        .unwrap();
+        let e = export(&mods, &out, "l", "d").expect_err("not ours");
+        assert!(
+            matches!(&e, ZephyrModuleError::NotWrittenByVarve { path } if path.ends_with("gale")),
+            "{e:?}"
+        );
+        let msg = e.to_string();
+        assert!(
+            msg.contains("was not written by varve export-zephyr-modules")
+                && msg.contains("choose another --out"),
+            "{msg}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("gale/MARKER")).unwrap(),
+            "my own checkout"
+        );
+        // Refused BEFORE anything is written: alpha sorts first and is not there.
+        assert!(!out.join("alpha").exists());
+        assert!(!out.join(CMAKE_FILE).exists());
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn only_a_zephyr_stamp_that_lists_files_under_the_name_licenses_a_replace() {
+        let mods = prepare(&[("gale".to_string(), module("gale", &[]))], None).unwrap();
+        // Another export kind's stamp, even one listing gale/ files.
+        let out = temp("otherkind");
+        export(&mods, &out, "l", "d").unwrap();
+        stamp(&out, "cargo");
+        let e = export(&mods, &out, "l", "d").expect_err("a cargo stamp is not ours");
+        assert!(
+            matches!(e, ZephyrModuleError::NotWrittenByVarve { .. }),
+            "{e:?}"
+        );
+        std::fs::remove_dir_all(&out).unwrap();
+        // A zephyr stamp that records nothing under gale/.
+        let out = temp("otherfiles");
+        export(&mods, &out, "l", "d").unwrap();
+        std::fs::write(out.join("elsewhere.txt"), "x").unwrap();
+        std::fs::remove_dir_all(out.join("gale")).unwrap();
+        stamp(&out, "zephyr-module");
+        std::fs::create_dir_all(out.join("gale")).unwrap();
+        std::fs::write(out.join("gale/MARKER"), "mine").unwrap();
+        let e = export(&mods, &out, "l", "d").expect_err("stamp lists nothing under gale/");
+        assert!(
+            matches!(e, ZephyrModuleError::NotWrittenByVarve { .. }),
+            "{e:?}"
+        );
+        assert!(out.join("gale/MARKER").is_file());
+        std::fs::remove_dir_all(&out).unwrap();
+        // A stamp that is not JSON at all.
+        let out = temp("badstamp");
+        std::fs::create_dir_all(out.join("gale")).unwrap();
+        std::fs::write(out.join(crate::exportstamp::STAMP_FILE), "{nope").unwrap();
+        assert!(matches!(
+            export(&mods, &out, "l", "d"),
+            Err(ZephyrModuleError::NotWrittenByVarve { .. })
+        ));
+        std::fs::remove_dir_all(&out).unwrap();
+        // A name that merely PREFIXES another's directory name is not under it.
+        let out = temp("prefix");
+        let two = prepare(&[("gal".to_string(), module("gal", &[]))], None).unwrap();
+        export(&two, &out, "l", "d").unwrap();
+        stamp(&out, "zephyr-module");
+        std::fs::remove_dir_all(out.join("gal")).unwrap();
+        std::fs::create_dir_all(out.join("ga")).unwrap();
+        let ga = prepare(&[("ga".to_string(), module("ga", &[]))], None).unwrap();
+        assert!(matches!(
+            export(&ga, &out, "l", "d"),
+            Err(ZephyrModuleError::NotWrittenByVarve { .. })
+        ));
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
     #[cfg(unix)]
     #[test]
-    fn export_refuses_to_write_through_a_symlinked_module_directory() {
+    fn export_refuses_a_symlinked_module_directory_even_if_stamped() {
         let out = temp("link");
         let elsewhere = temp("elsewhere");
-        std::os::unix::fs::symlink(&elsewhere, out.join("x")).unwrap();
         let mods = prepare(&[("x".to_string(), module("x", &[]))], None).unwrap();
+        export(&mods, &out, "l", "d").unwrap();
+        stamp(&out, "zephyr-module");
+        std::fs::remove_dir_all(out.join("x")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, out.join("x")).unwrap();
         let e = export(&mods, &out, "l", "d").expect_err("symlink at destination");
-        assert!(matches!(e, ZephyrModuleError::Io { .. }), "{e:?}");
+        assert!(
+            matches!(e, ZephyrModuleError::NotWrittenByVarve { .. }),
+            "{e:?}"
+        );
         assert!(
             std::fs::read_dir(&elsewhere).unwrap().next().is_none(),
             "something was written through the link"
@@ -1620,9 +1795,105 @@ mod tests {
         let mods = prepare(&[("x".to_string(), module("x", &[]))], None).unwrap();
         assert!(matches!(
             export(&mods, &out, "l", "d"),
-            Err(ZephyrModuleError::Io { .. })
+            Err(ZephyrModuleError::NotWrittenByVarve { .. })
         ));
+        assert_eq!(std::fs::read_to_string(out.join("x")).unwrap(), "a file");
         std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    /// Second guard: files are created, never overwritten. Two members that
+    /// land on one path (which a case-insensitive file system turns two
+    /// differently-cased names into) must fail rather than let the later win.
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn export_never_overwrites_a_file_it_wrote_a_moment_ago() {
+        let mut mods = prepare(&[("x".to_string(), module("x", &[]))], None).unwrap();
+        mods[0].tree.members.push(Member {
+            path: "zephyr/module.yml".into(),
+            body: MemberBody::File {
+                mode: 0o644,
+                bytes: b"name: overwritten\n".to_vec(),
+            },
+        });
+        let out = temp("nooverwrite");
+        let e = export(&mods, &out, "l", "d").expect_err("second write must fail");
+        assert!(matches!(e, ZephyrModuleError::Io { .. }), "{e:?}");
+        assert_eq!(
+            std::fs::read_to_string(out.join("x/zephyr/module.yml")).unwrap(),
+            "name: x\nbuild:\n  cmake: .\n",
+            "the first write must be the one that stands"
+        );
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    // ------------------------------------------- case-insensitive collisions
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn members_that_differ_only_in_case_are_refused_at_open() {
+        for twin in [
+            "zephyr/Module.yml",
+            "ZEPHYR/module.yml",
+            "Zephyr/MODULE.YML",
+        ] {
+            let a = archive(&[
+                ("zephyr/module.yml", "name: good\n"),
+                (twin, "package-managers:\n  pip: {}\n"),
+            ]);
+            let e = open("p", &a).expect_err(twin);
+            assert!(
+                matches!(&e, ZephyrModuleError::DuplicateMember { .. }),
+                "{twin}: {e:?}"
+            );
+            assert!(e.to_string().contains("case"), "{e}");
+        }
+        // Any member, not only module.yml: two files one file system merges.
+        let a = archive(&[
+            ("zephyr/module.yml", "name: x\n"),
+            ("src/A.c", "1"),
+            ("src/a.c", "2"),
+        ]);
+        assert!(matches!(
+            open("p", &a),
+            Err(ZephyrModuleError::DuplicateMember { .. })
+        ));
+        // Distinct names are still fine.
+        let a = archive(&[
+            ("zephyr/module.yml", "name: x\n"),
+            ("src/a.c", "1"),
+            ("src/b.c", "2"),
+        ]);
+        open("p", &a).unwrap();
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_second_module_description_beside_the_parsed_one_is_refused() {
+        for twin in ["zephyr/module.yaml", "Zephyr/Module.yaml"] {
+            let a = archive(&[("zephyr/module.yml", "name: x\n"), (twin, "name: y\n")]);
+            let e = open("p", &a).expect_err(twin);
+            assert!(
+                matches!(&e, ZephyrModuleError::ModuleYmlCollision { member, .. } if member == twin),
+                "{twin}: {e:?}"
+            );
+        }
+        // Also inside a wrapper directory.
+        let a = archive(&[
+            ("w/zephyr/module.yml", "name: x\n"),
+            ("w/zephyr/module.yaml", "name: y\n"),
+        ]);
+        assert!(matches!(
+            open("p", &a),
+            Err(ZephyrModuleError::ModuleYmlCollision { .. })
+        ));
+        // The parsed member itself is not its own collision.
+        open("p", &archive(&[("zephyr/module.yml", "name: x\n")])).unwrap();
+        // A file that merely sits beside it is fine.
+        open(
+            "p",
+            &archive(&[("zephyr/module.yml", "name: x\n"), ("zephyr/Kconfig", "")]),
+        )
+        .unwrap();
     }
 
     // rivet: verifies REQ-ZMODEXPORT-001
