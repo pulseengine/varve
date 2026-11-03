@@ -101,6 +101,17 @@ pub struct Context {
     pub held: Vec<Held>,
     pub docs: Vec<DocsSource>,
     pub absent: Vec<Absent>,
+    /// The `--layer` the user gave, when there was one. Every command printed
+    /// from this orientation carries it, or it would act on the PIN's layer.
+    pub layer_override: Option<String>,
+}
+
+impl Context {
+    /// Record the `--layer` this orientation was read with (varve#286).
+    pub fn with_layer_override(mut self, layer: Option<&str>) -> Self {
+        self.layer_override = layer.map(str::to_string);
+        self
+    }
 }
 
 impl ToolView {
@@ -108,7 +119,7 @@ impl ToolView {
     pub fn ask(&self) -> String {
         match (&self.docs_command, self.topics.is_empty()) {
             (Some(c), false) => c.clone(),
-            _ => format!("{} --help", self.name),
+            _ => format!("{} --help", shell_word(&self.name)),
         }
     }
 }
@@ -150,7 +161,7 @@ fn view(t: ToolInput) -> ToolView {
     let docs_command = signed
         .docs_command
         .clone()
-        .or_else(|| (!topics.is_empty()).then(|| format!("{} docs", src.name)));
+        .or_else(|| (!topics.is_empty()).then(|| format!("{} docs", shell_word(&src.name))));
     ToolView {
         collapsed: subs.len() > COLLAPSE_ABOVE,
         help_available: parsed.is_some(),
@@ -199,6 +210,7 @@ pub fn build(
         held,
         docs,
         absent,
+        layer_override: None,
     }
 }
 
@@ -239,25 +251,37 @@ pub fn shell_word(s: &str) -> String {
     }
 }
 
+/// ` --layer X` when a layer override is in effect, else nothing. Without it a
+/// printed command reads the PIN's layer, not the one the reader asked about
+/// (varve#286, one level down). The id is validated before anything prints.
+pub fn layer_arg(layer: Option<&str>) -> String {
+    match layer {
+        Some(l) => format!(" --layer {}", shell_word(l)),
+        None => String::new(),
+    }
+}
+
 /// The command that gets a held payload out of the store, exactly as typed.
-pub fn get_command(h: &Held) -> String {
+pub fn get_command(h: &Held, layer: Option<&str>) -> String {
+    let l = layer_arg(layer);
     match h.kind.as_str() {
-        "crate" => "varve export-cargo --out ./cargo-registry".into(),
-        "vsix" => "varve export-vsix --out ./vsix".into(),
+        "crate" => format!("varve export-cargo --out ./cargo-registry{l}"),
+        "vsix" => format!("varve export-vsix --out ./vsix{l}"),
         "docs" => format!(
-            "varve export-docs --out ./doc --select={}",
+            "varve export-docs --out ./doc --select={}{l}",
             shell_word(&h.name)
         ),
         "sdk" => format!(
-            "varve export-sdk --out ./sdk --select={}",
+            "varve export-sdk --out ./sdk --select={}{l}",
             shell_word(&h.name)
         ),
+        // `=` so a value that begins with `-` is still a value, not a flag.
         "wit" if h.name.contains(':') => format!(
-            "varve export-wit --out ./wit --package {}@{}",
-            h.name, h.version
+            "varve export-wit --out ./wit --package={}{l}",
+            shell_word(&format!("{}@{}", h.name, h.version))
         ),
         "wit" => "varve export-wit --help".into(),
-        _ => "varve inspect".into(),
+        _ => format!("varve inspect{l}"),
     }
 }
 
@@ -270,7 +294,8 @@ fn platforms_phrase(h: &Held) -> String {
 }
 
 /// The documentation block, in `varve inspect`'s own words.
-fn docs_block(docs: &[DocsSource]) -> String {
+fn docs_block(docs: &[DocsSource], layer: Option<&str>) -> String {
+    let l = layer_arg(layer);
     let mut out = String::from("documentation for the versions this layer pins:\n");
     for d in docs {
         let p = &d.payload;
@@ -285,26 +310,27 @@ fn docs_block(docs: &[DocsSource]) -> String {
         }
         if let Some(of) = &p.documents {
             out.push_str(&format!(
-                "    documents {of}    (varve export-docs --for {of})\n"
+                "    documents {of}    (varve export-docs --for={}{l})\n",
+                shell_word(of)
             ));
         }
     }
     match docs {
         [one] => {
-            out.push_str("\n  read it, copying nothing:  varve-serve\n");
+            out.push_str(&format!("\n  read it, copying nothing:  varve-serve{l}\n"));
             out.push_str(&format!(
-                "  or write a copy:           varve export-docs --out ./doc   ({})\n",
+                "  or write a copy:           varve export-docs --out ./doc{l}   ({})\n",
                 one.payload.name
             ));
         }
         many => {
             out.push_str(&format!(
-                "\n  {} documents, so name one:  varve-serve --select <NAME>\n",
+                "\n  {} documents, so name one:  varve-serve --select <NAME>{l}\n",
                 many.len()
             ));
-            out.push_str(
-                "  or:                        varve export-docs --out ./doc --select <NAME>\n",
-            );
+            out.push_str(&format!(
+                "  or:                        varve export-docs --out ./doc --select <NAME>{l}\n"
+            ));
         }
     }
     out
@@ -313,6 +339,7 @@ fn docs_block(docs: &[DocsSource]) -> String {
 /// The orientation as Markdown.
 pub fn render_md(c: &Context) -> String {
     let f = &c.facts;
+    let l = layer_arg(c.layer_override.as_deref());
     let mut o = String::new();
     o.push_str(&format!(
         "# Pinned toolchain: realm {}, layer {} ({})\n\n",
@@ -323,12 +350,12 @@ pub fn render_md(c: &Context) -> String {
         f.manifest_digest
     ));
     o.push_str("## First move for any \"where is / how do I\" question\n\n");
-    o.push_str(
-        "Run `varve-serve ask \"<a few words>\"` BEFORE answering. One call searches the \
+    o.push_str(&format!(
+        "Run `varve-serve ask{l} \"<a few words>\"` BEFORE answering. One call searches the \
          documentation pages, every tool's subcommands, and the TEXT of every built-in docs \
          topic, and prints the exact command that opens each hit. This file only says what \
-         exists; ask says where the answer is.\n\n",
-    );
+         exists; ask says where the answer is.\n\n"
+    ));
     o.push_str(
         "Rules: flags are not listed here — run `<tool> <sub> --help` before stating exact \
          flags. Anything not listed is not in the pin (a shim for it refuses). `varve inspect` \
@@ -392,21 +419,21 @@ pub fn render_md(c: &Context) -> String {
             h.name,
             h.version,
             platforms_phrase(h),
-            get_command(h)
+            get_command(h, c.layer_override.as_deref())
         ));
     }
     if !c.docs.is_empty() {
         o.push_str("\n## Documentation payloads (varve's own wording)\n\n```\n");
-        o.push_str(&docs_block(&c.docs));
+        o.push_str(&docs_block(&c.docs, c.layer_override.as_deref()));
         o.push_str("```\n");
         // Measured: agents told only where a payload STARTS answered "where
         // is the page for type X" with the index, every time. Say, at the
         // point they read, that pages are not listed and how to get one.
-        o.push_str(
+        o.push_str(&format!(
             "\nIndividual pages are NOT listed here. For a named type, function or \
-             topic, run `varve-serve ask \"<Name>\"`: it returns the exact page and the \
-             `varve-serve page ...` command that prints it.\n",
-        );
+             topic, run `varve-serve ask{l} \"<Name>\"`: it returns the exact page and the \
+             `varve-serve page ...` command that prints it.\n"
+        ));
     }
     if !c.absent.is_empty() {
         o.push_str("\n## Named by a tool but NOT in this pin\n\n");
@@ -465,7 +492,8 @@ pub fn render_json(c: &Context) -> String {
         .map(|h| {
             json!({
                 "kind": h.kind, "name": h.name, "version": h.version,
-                "platforms": h.platforms, "get": get_command(h),
+                "platforms": h.platforms,
+                "get": get_command(h, c.layer_override.as_deref()),
             })
         })
         .collect();
@@ -491,7 +519,10 @@ pub fn render_json(c: &Context) -> String {
         "layer": f.layer,
         "channel": f.channel,
         "manifest_digest": f.manifest_digest,
-        "first_move": "varve-serve ask \"<a few words>\"",
+        "first_move": format!(
+            "varve-serve ask{} \"<a few words>\"",
+            layer_arg(c.layer_override.as_deref())
+        ),
         "tools": tools,
         "held": held,
         "docs": docs,
@@ -503,7 +534,7 @@ pub fn render_json(c: &Context) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::harvest::Topic;
 
@@ -719,27 +750,30 @@ mod tests {
             platforms: vec!["any".into()],
         };
         assert_eq!(
-            get_command(&h("crate", "x")),
+            get_command(&h("crate", "x"), None),
             "varve export-cargo --out ./cargo-registry"
         );
         assert_eq!(
-            get_command(&h("vsix", "x")),
+            get_command(&h("vsix", "x"), None),
             "varve export-vsix --out ./vsix"
         );
         assert_eq!(
-            get_command(&h("docs", "api")),
+            get_command(&h("docs", "api"), None),
             "varve export-docs --out ./doc --select=api"
         );
         assert_eq!(
-            get_command(&h("sdk", "s")),
+            get_command(&h("sdk", "s"), None),
             "varve export-sdk --out ./sdk --select=s"
         );
         assert_eq!(
-            get_command(&h("wit", "wasi:io")),
-            "varve export-wit --out ./wit --package wasi:io@1.0.0"
+            get_command(&h("wit", "wasi:io"), None),
+            "varve export-wit --out ./wit --package=wasi:io@1.0.0"
         );
-        assert_eq!(get_command(&h("wit", "plain")), "varve export-wit --help");
-        assert_eq!(get_command(&h("toolchain", "t")), "varve inspect");
+        assert_eq!(
+            get_command(&h("wit", "plain"), None),
+            "varve export-wit --help"
+        );
+        assert_eq!(get_command(&h("toolchain", "t"), None), "varve inspect");
         let mut spar = h("vsix", "spar-aadl");
         spar.platforms = vec!["aarch64-apple-darwin".into(), "x86_64-apple-darwin".into()];
         let c = build(
@@ -930,12 +964,12 @@ mod tests {
     // rivet: verifies REQ-AGENTDOCS-001
     #[test]
     fn the_documentation_block_uses_varve_inspects_words() {
-        let one = docs_block(&[docs_source("varve-core-api", Some("varve-core"))]);
+        let one = docs_block(&[docs_source("varve-core-api", Some("varve-core"))], None);
         assert_eq!(
             one,
-            "documentation for the versions this layer pins:\n  varve-core API 0.43.0 (rustdoc)\n    starts at varve_core/index.html\n    documents varve-core    (varve export-docs --for varve-core)\n\n  read it, copying nothing:  varve-serve\n  or write a copy:           varve export-docs --out ./doc   (varve-core-api)\n"
+            "documentation for the versions this layer pins:\n  varve-core API 0.43.0 (rustdoc)\n    starts at varve_core/index.html\n    documents varve-core    (varve export-docs --for=varve-core)\n\n  read it, copying nothing:  varve-serve\n  or write a copy:           varve export-docs --out ./doc   (varve-core-api)\n"
         );
-        let two = docs_block(&[docs_source("a", None), docs_source("b", None)]);
+        let two = docs_block(&[docs_source("a", None), docs_source("b", None)], None);
         assert!(
             two.contains("  2 documents, so name one:  varve-serve --select <NAME>\n"),
             "{two}"
@@ -958,7 +992,8 @@ mod tests {
         for words in [
             "documentation for the versions this layer pins:",
             "starts at {entry}",
-            "documents {of}    (varve export-docs --for {of})",
+            // `inspect` prints the name raw; this block quotes it.
+            "documents {of}    (varve export-docs --for",
             "read it, copying nothing:  varve-serve",
             "or write a copy:           varve export-docs --out ./doc   ({})",
             "documents, so name one:  varve-serve --select <NAME>",
@@ -981,5 +1016,180 @@ mod tests {
             ),
             "{md}"
         );
+    }
+
+    pub(crate) const HOSTILE: [&str; 5] = ["x;touch PWNED", "$(id)", "`id`", "-rf", "a b|c&d"];
+
+    /// Outside single quotes a generated command may hold no character `sh`
+    /// would act on, and a single-quoted run must close.
+    pub(crate) fn assert_inert(cmd: &str) {
+        let mut quoted = false;
+        for c in cmd.chars() {
+            if c == '\'' {
+                quoted = !quoted;
+            } else if !quoted {
+                assert!(
+                    c.is_ascii_alphanumeric() || " ._/:@%+=,-".contains(c),
+                    "unquoted {c:?} in {cmd:?}"
+                );
+            }
+        }
+        assert!(!quoted, "unterminated quote in {cmd:?}");
+    }
+
+    /// The reviewer's three real examples, and the other layer-supplied words.
+    // rivet: verifies REQ-AGENTDOCS-001
+    #[test]
+    fn every_layer_supplied_word_in_a_held_command_is_quoted() {
+        for bad in HOSTILE {
+            for kind in ["docs", "sdk", "wit"] {
+                let name = if kind == "wit" {
+                    format!("a:{bad}")
+                } else {
+                    bad.to_string()
+                };
+                let h = Held {
+                    kind: kind.into(),
+                    name,
+                    version: format!("1.0.0{bad}"),
+                    platforms: vec!["any".into()],
+                };
+                for layer in [None, Some("2026.10.2")] {
+                    let cmd = get_command(&h, layer);
+                    assert_inert(&cmd);
+                    assert!(cmd.starts_with("varve export-"), "{cmd}");
+                }
+            }
+        }
+        let h = |kind: &str, name: &str, version: &str| Held {
+            kind: kind.into(),
+            name: name.into(),
+            version: version.into(),
+            platforms: vec!["any".into()],
+        };
+        assert_eq!(
+            get_command(&h("wit", "a:b;touch PWNED", "1.0.0"), None),
+            "varve export-wit --out ./wit --package='a:b;touch PWNED@1.0.0'"
+        );
+        assert_eq!(
+            get_command(&h("wit", "-a:b", "1"), None),
+            "varve export-wit --out ./wit --package='-a:b@1'"
+        );
+        assert_eq!(
+            get_command(&h("docs", "$(id)", "1"), None),
+            "varve export-docs --out ./doc --select='$(id)'"
+        );
+        assert_eq!(
+            get_command(&h("sdk", "-rf", "1"), Some("2026.10.2")),
+            "varve export-sdk --out ./sdk --select='-rf' --layer 2026.10.2"
+        );
+    }
+
+    /// A tool named by a layer reaches the printed `--help` command quoted.
+    // rivet: verifies REQ-AGENTDOCS-001
+    #[test]
+    fn a_hostile_tool_name_is_quoted_in_the_ask_command() {
+        for bad in HOSTILE {
+            let c = build(
+                facts(),
+                vec![input(bad, None, &[("t", "b")])],
+                vec![],
+                vec![],
+            );
+            let t = &c.tools[0];
+            assert_inert(&t.ask());
+            assert_inert(t.docs_command.as_deref().unwrap());
+        }
+        let c = build(
+            facts(),
+            vec![input("t$(touch PWNED)", None, &[])],
+            vec![],
+            vec![],
+        );
+        assert_eq!(c.tools[0].ask(), "'t$(touch PWNED)' --help");
+        let c = build(facts(), vec![input("-x", None, &[])], vec![], vec![]);
+        assert_eq!(c.tools[0].ask(), "'-x' --help");
+    }
+
+    /// `documents` reaches `--for`, and the layer override reaches every
+    /// printed command, in both renderings.
+    // rivet: verifies REQ-AGENTDOCS-001
+    // rivet: verifies REQ-SERVELAYER-001
+    #[test]
+    fn documents_is_quoted_and_the_layer_override_is_carried() {
+        let hostile = docs_block(&[docs_source("a", Some("t$(touch PWNED)"))], None);
+        assert!(
+            hostile.contains("(varve export-docs --for='t$(touch PWNED)')"),
+            "{hostile}"
+        );
+        let dash = docs_block(&[docs_source("a", Some("-x"))], None);
+        assert!(dash.contains("--for='-x')"), "{dash}");
+
+        let one = docs_block(&[docs_source("a", Some("a"))], Some("2026.10.2"));
+        assert!(
+            one.contains("(varve export-docs --for=a --layer 2026.10.2)"),
+            "{one}"
+        );
+        assert!(
+            one.contains("  read it, copying nothing:  varve-serve --layer 2026.10.2\n"),
+            "{one}"
+        );
+        assert!(
+            one.contains("varve export-docs --out ./doc --layer 2026.10.2   (a)\n"),
+            "{one}"
+        );
+        let two = docs_block(
+            &[docs_source("a", None), docs_source("b", None)],
+            Some("2026.10.2"),
+        );
+        assert!(
+            two.contains("varve-serve --select <NAME> --layer 2026.10.2\n"),
+            "{two}"
+        );
+        assert!(two.contains("--select <NAME> --layer 2026.10.2\n"), "{two}");
+
+        let base = || {
+            build(
+                facts(),
+                vec![],
+                vec![Held {
+                    kind: "vsix".into(),
+                    name: "v".into(),
+                    version: "1".into(),
+                    platforms: vec!["any".into()],
+                }],
+                vec![docs_source("a", None)],
+            )
+        };
+        let plain = render_md(&base());
+        assert!(!plain.contains("--layer"), "{plain}");
+        let with = base().with_layer_override(Some("2026.10.2"));
+        let md = render_md(&with);
+        assert!(
+            md.contains("varve export-vsix --out ./vsix --layer 2026.10.2`"),
+            "{md}"
+        );
+        assert!(
+            md.contains("`varve-serve ask --layer 2026.10.2 \"<a few words>\"` BEFORE"),
+            "{md}"
+        );
+        assert!(
+            md.contains("run `varve-serve ask --layer 2026.10.2 \"<Name>\"`"),
+            "{md}"
+        );
+        let v: Value = serde_json::from_str(&render_json(&with)).unwrap();
+        assert_eq!(
+            v["first_move"],
+            "varve-serve ask --layer 2026.10.2 \"<a few words>\""
+        );
+        assert_eq!(
+            v["held"][0]["get"],
+            "varve export-vsix --out ./vsix --layer 2026.10.2"
+        );
+        let v: Value = serde_json::from_str(&render_json(&base())).unwrap();
+        assert_eq!(v["first_move"], "varve-serve ask \"<a few words>\"");
+        assert_eq!(v["held"][0]["get"], "varve export-vsix --out ./vsix");
+        assert_eq!(layer_arg(None), "");
+        assert_eq!(layer_arg(Some("2026.10.2")), " --layer 2026.10.2");
     }
 }

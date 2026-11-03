@@ -26,7 +26,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 7777)]
     pub port: u16,
     /// Layer to read, e.g. `2026.09.3`. Defaults to the resolved project pin.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub layer: Option<String>,
     /// Print what would be served and exit, without listening.
     ///
