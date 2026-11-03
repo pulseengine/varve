@@ -558,6 +558,9 @@ pub struct ExportModule {
     pub payload: String,
     pub name: String,
     pub tree: ModuleTree,
+    /// THIS payload's own signed opt-in. Carried here and never looked up by
+    /// name: two payloads of a composition can share a payload name.
+    pub allow_pip: Option<Vec<String>>,
 }
 
 /// One verified `zephyr-module` payload as an export receives it.
@@ -592,7 +595,6 @@ pub fn prepare<P: Into<ModulePayload> + Clone>(
     select: Option<&str>,
 ) -> Result<Vec<ExportModule>, ZephyrModuleError> {
     let mut modules = Vec::with_capacity(payloads.len());
-    let mut opt_ins = Vec::with_capacity(payloads.len());
     for p in payloads {
         let ModulePayload {
             name: payload,
@@ -601,11 +603,11 @@ pub fn prepare<P: Into<ModulePayload> + Clone>(
         } = p.clone().into();
         let tree = open(&payload, &bytes)?;
         let name = module_name(&payload, &tree.yml)?;
-        opt_ins.push((payload.clone(), allow_pip));
         modules.push(ExportModule {
             payload,
             name,
             tree,
+            allow_pip,
         });
     }
     modules.sort_by(|a, b| (&a.name, &a.payload).cmp(&(&b.name, &b.payload)));
@@ -624,11 +626,7 @@ pub fn prepare<P: Into<ModulePayload> + Clone>(
         }
     }
     for m in &modules {
-        let allow = opt_ins
-            .iter()
-            .find(|(payload, _)| *payload == m.payload)
-            .and_then(|(_, allow)| allow.as_deref());
-        check_pip(&m.payload, &m.tree.yml, allow)?;
+        check_pip(&m.payload, &m.tree.yml, m.allow_pip.as_deref())?;
     }
     for (i, m) in modules.iter().enumerate() {
         if let Some(first) = modules[..i]
@@ -2153,6 +2151,58 @@ mod tests {
         ];
         assert_eq!(prepare(&two, Some("plain")).unwrap().len(), 1);
         assert!(prepare(&two, Some("py")).is_err());
+    }
+
+    /// Two layers of a composition can carry payloads with the SAME payload name
+    /// (different versions both export). Each module is judged on ITS OWN signed
+    /// opt-in: B declares the same pip files as A and has none, and must not be
+    /// passed on A's.
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_pip_module_cannot_borrow_the_opt_in_of_a_payload_with_the_same_name() {
+        let pip_named = |module_name: &str| {
+            archive(&[(
+                "zephyr/module.yml",
+                &format!(
+                    "name: {module_name}\npackage-managers:\n  pip:\n    requirement-files:\n      - r.txt\n"
+                ),
+            )])
+        };
+        let a = ModulePayload {
+            name: "py".into(),
+            bytes: pip_named("py_a"),
+            allow_pip: Some(strings(&["r.txt"])),
+        };
+        let b = ModulePayload {
+            name: "py".into(),
+            bytes: pip_named("py_b"),
+            allow_pip: None,
+        };
+        for order in [vec![a.clone(), b.clone()], vec![b.clone(), a.clone()]] {
+            let e = prepare(&order, None).expect_err("B has no opt-in of its own");
+            assert!(
+                matches!(&e, ZephyrModuleError::PipWithoutOptIn { .. }),
+                "{e:?}"
+            );
+        }
+        // A alone is fine; so is B with an opt-in of its own.
+        prepare(std::slice::from_ref(&a), None).unwrap();
+        let b_ok = ModulePayload {
+            allow_pip: Some(strings(&["r.txt"])),
+            ..b.clone()
+        };
+        assert_eq!(prepare(&[a.clone(), b_ok], None).unwrap().len(), 2);
+        // The SAME module name from two payloads is refused outright.
+        let dup = ModulePayload {
+            bytes: pip_named("py_a"),
+            allow_pip: Some(strings(&["r.txt"])),
+            ..b
+        };
+        let e = prepare(&[a, dup], None).expect_err("one module name twice");
+        assert!(
+            matches!(e, ZephyrModuleError::DuplicateModule { .. }),
+            "{e:?}"
+        );
     }
 
     // ------------------------------------------- YAML tags (the merge bypass)
