@@ -25,6 +25,7 @@ fn tool(name: &str, kind: Option<PayloadKind>) -> DepositTool {
         docs_entry: None,
         docs_title: None,
         docs_documents: None,
+        zephyr_allow_pip: None,
         libc: None,
     }
 }
@@ -34,6 +35,7 @@ fn rustdoc(documents: &str) -> DepositTool {
         docs_format: Some("rustdoc".into()),
         docs_entry: Some("varve_core/index.html".into()),
         docs_documents: Some(documents.into()),
+        zephyr_allow_pip: None,
         ..tool("varve-core-api", Some(PayloadKind::Docs))
     }
 }

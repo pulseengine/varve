@@ -393,6 +393,33 @@ enum Cmd {
         #[arg(long, value_name = "NAME")]
         registry: Option<String>,
     },
+    /// Lay the layer's verified `zephyr-module` payloads out for a Zephyr
+    /// build, and write the CMake script that adds them to
+    /// `ZEPHYR_EXTRA_MODULES` (REQ-ZMODEXPORT-001).
+    ///
+    /// Each module lands in `<out>/<module-name>/`, the tree as stored, and
+    /// `<out>/zephyr-extra-modules.cmake` APPENDS them to the list. Use it as
+    /// `west build ... -- -C <out>/zephyr-extra-modules.cmake`, or `include()`
+    /// it from a plain CMake build. Your `west.yml` is never touched.
+    ///
+    /// Offline, and no Python: `module.yml` is read in Rust. A module whose
+    /// `module.yml` declares a `build: depends` the export does not carry is
+    /// refused naming both, and nothing is written.
+    ExportZephyrModules {
+        /// Layer to export, e.g. `2026.11.0`. Defaults to the resolved project
+        /// pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
+        #[arg(long)]
+        layer: Option<String>,
+        /// Output directory: holds one directory per module and the CMake
+        /// script. Created if absent.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// Export only this module, by its `module.yml` name or its payload
+        /// name. A module it depends on must be exported too, or the export is
+        /// refused.
+        #[arg(long, value_name = "NAME")]
+        select: Option<String>,
+    },
     /// Unpack and RELOCATE the layer's verified `sdk` tree into a directory
     /// you can source (REQ-SDK-001 clause 3). The store keeps the archive
     /// exactly as its producer signed it; the usable tree lives here, with the
@@ -867,6 +894,9 @@ fn run() -> anyhow::Result<Outcome> {
         ),
         Cmd::ExportSdk { layer, out, select } => {
             export_sdk(&store, layer.as_deref(), &out, select.as_deref())
+        }
+        Cmd::ExportZephyrModules { layer, out, select } => {
+            export_zephyr_modules(&store, layer.as_deref(), &out, select.as_deref())
         }
         Cmd::Sbom { layer, format, out } => {
             sbom_cmd(&store, layer.as_deref(), &format, out.as_deref())
@@ -3017,6 +3047,64 @@ fn export_sdk(
     Ok(())
 }
 
+/// `varve export-zephyr-modules --out D` (REQ-ZMODEXPORT-001): each verified
+/// `zephyr-module` of the composition under `D/<name>/`, a CMake script
+/// appending them to `ZEPHYR_EXTRA_MODULES`, and a stamp over the lot.
+///
+/// Every decision — what counts as a module, the name, the dependency closure,
+/// what is safe to put in a CMake list — is `varve_core::zephyrmodule`'s, where
+/// the mutation gate can reach it. This is plumbing. Nothing is written until
+/// every module has been opened and the closure checked, so a refusal leaves
+/// no half export behind for `verify --export` to wave through.
+fn export_zephyr_modules(
+    store: &Store,
+    layer: Option<&str>,
+    out: &std::path::Path,
+    select: Option<&str>,
+) -> anyhow::Result<()> {
+    let target = export_target(store, layer)?;
+    let layers = composition_for_export(&target)?;
+    report_composition(&layers);
+    let payloads: Vec<(String, Vec<u8>)> =
+        collect_verified_payloads(&layers, varve_core::PayloadKind::ZephyrModule)?
+            .into_iter()
+            .map(|p| (p.name, p.bytes))
+            .collect();
+    let modules = varve_core::zephyrmodule::prepare(&payloads, select)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let out = &absolute_export_dir(out)?;
+    let report = varve_core::zephyrmodule::export(
+        &modules,
+        out,
+        &target.entry.layer.to_string(),
+        &target.entry.digest,
+    )
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    println!(
+        "exported {} zephyr module(s) to {} — {} file(s)",
+        report.modules.len(),
+        out.display(),
+        report.files
+    );
+    for (name, dir) in &report.modules {
+        println!("  {name}  {dir}");
+    }
+    let script = out.join(varve_core::zephyrmodule::CMAKE_FILE);
+    println!(
+        "wrote {} — it appends them to ZEPHYR_EXTRA_MODULES; your west.yml is untouched.\n  \
+         west build ... -- -C {}\n  or, in a plain CMake build:  include(\"{}\")",
+        script.display(),
+        script.display(),
+        script.display(),
+    );
+    write_export_stamp(
+        out,
+        &target.entry,
+        varve_core::ExportKind::ZephyrModule.as_str(),
+    )?;
+    Ok(())
+}
+
 fn export_crates_vendor(
     store: &Store,
     layer: Option<&str>,
@@ -3131,6 +3219,7 @@ fn deposit_cmd(
             docs_entry: None,
             docs_title: None,
             docs_documents: None,
+            zephyr_allow_pip: None,
             libc: None,
         });
     }
@@ -4764,6 +4853,7 @@ fn producing_command(kind: varve_core::ExportKind) -> &'static str {
         varve_core::ExportKind::Vsix => "export-vsix",
         varve_core::ExportKind::Sdk => "export-sdk",
         varve_core::ExportKind::Wit => "export-wit",
+        varve_core::ExportKind::ZephyrModule => "export-zephyr-modules",
     }
 }
 

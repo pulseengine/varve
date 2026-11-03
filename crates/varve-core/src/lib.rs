@@ -69,6 +69,7 @@ pub mod verify;
 pub mod vsixexport;
 pub mod witclosure;
 pub mod witexport;
+pub mod zephyrmodule;
 
 pub use archive::{
     ArchiveError, ArchiveOptions, ExportSummary, OciLayoutSource, export as export_archive,

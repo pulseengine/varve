@@ -114,6 +114,13 @@ pub(crate) struct Row {
     /// a human chooses by — all from SIGNED annotations
     /// (REQ-LAYERDOCS-001). `None` for every other kind.
     pub(crate) docs: Option<DocsRow>,
+    /// For a `zephyr-module`: the pip requirement files the operator accepted
+    /// as a Python dependency, from the SIGNED annotation
+    /// (REQ-ZMODEXPORT-001 clause 5). `None` where no opt-in was recorded —
+    /// the ordinary case, a module that needs no Python. Shown, because a
+    /// module that adds Python to every build that uses it is a fact a reader
+    /// must not have to discover by running the build.
+    pub(crate) zephyr_allow_pip: Option<Vec<String>>,
     /// Which mechanism vouched for this payload's UPSTREAM bytes
     /// (REQ-INGEST-001 clause 5). `unrecorded` where the layer predates the
     /// requirement — absence of a claim is not a claim, and restating a
@@ -229,6 +236,10 @@ pub(crate) fn rows_of(layers: &[varve_core::compose::ComposedLayer]) -> anyhow::
                             .get(varve_core::deposit::ANN_DOCS_DOCUMENTS)
                             .cloned(),
                     }),
+                zephyr_allow_pip: e
+                    .annotations
+                    .get(varve_core::zephyrmodule::ANN_ALLOW_PIP)
+                    .map(|raw| varve_core::zephyrmodule::allow_pip_from_annotation(raw)),
                 present: store_of(l).entry_path(&l.entry, e).is_some(),
                 layer: l.entry.layer.to_string(),
                 realm: l.realm.clone(),
@@ -272,7 +283,8 @@ fn store_of(l: &varve_core::compose::ComposedLayer) -> &Store {
 ///   "composition": [ {"layer","manifest_digest","realm","root"} ],
 ///   "payloads":    [ {"name","version","kind","known_kind","platform",
 ///                     "target","libc","dispatch","ingest_proof",
-///                     "proof_signer","digest","present","layer","realm"} ],
+///                     "proof_signer","digest","present","layer","realm",
+///                     "docs_*", "zephyr_allow_pip"} ],
 ///   "summary": {"payloads","dispatched","held","layers",
 ///               "unverified","unrecorded"}
 /// }
@@ -323,6 +335,10 @@ fn payload_json(rows: &[Row]) -> Vec<serde_json::Value> {
                 "docs_entry": r.docs.as_ref().and_then(|d| d.entry.as_ref()),
                 "docs_title": r.docs.as_ref().and_then(|d| d.title.as_ref()),
                 "docs_documents": r.docs.as_ref().and_then(|d| d.documents.as_ref()),
+                // The pip requirement files a `zephyr-module` was accepted
+                // WITH, or null (REQ-ZMODEXPORT-001 clause 5). The text form
+                // prints them; a machine must be able to see the same fact.
+                "zephyr_allow_pip": r.zephyr_allow_pip,
             })
         })
         .collect()
@@ -579,6 +595,32 @@ fn print_text(
             }
         }
     }
+    // A Zephyr module accepted WITH a Python dependency says so here, in the
+    // words the deposit used (REQ-ZMODEXPORT-001 clause 5): varve itself needs
+    // no Python, and this is the one case where what it distributes does.
+    let with_pip: Vec<(&Row, &Vec<String>)> = rows
+        .iter()
+        .filter_map(|r| r.zephyr_allow_pip.as_ref().map(|f| (r, f)))
+        .collect();
+    if !with_pip.is_empty() {
+        println!("\nzephyr modules accepted with a Python dependency (allow-pip):");
+        for (row, files) in &with_pip {
+            let files = if files.is_empty() {
+                "pip declared, no requirement files".to_string()
+            } else {
+                files.join(", ")
+            };
+            println!(
+                "  {} {} — allow-pip: {files}",
+                row.name,
+                row.version.as_deref().unwrap_or("-"),
+            );
+        }
+        println!(
+            "  Every build that uses these needs the pip packages they list, on the \
+             consumer's machine. varve does not install them and never runs Python."
+        );
+    }
     if rows.iter().any(|r| !r.known_kind) {
         println!(
             "\nAn entry above carries a payload kind this varve does not know. Its bytes still \
@@ -606,6 +648,7 @@ mod tests {
             digest: "sha256:0".into(),
             dispatch: if docs.is_some() { HELD } else { DISPATCHED },
             docs,
+            zephyr_allow_pip: None,
             ingest_proof: "cosign-sums".into(),
             proof_signer: None,
             present: true,

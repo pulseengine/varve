@@ -85,9 +85,9 @@ Tracked as varve#73.
 `varve which` sees the composed tools but an export contains only your own
 layer's payloads — silently. Tracked as varve#79.
 
-**`sdk`, `wit` and `zephyr-module` are declarable, not distributable.** They
-deposit, install and verify like anything else, and no adapter consumes them
-yet. An SDK also needs tree-shaped storage and relocation (varve#67).
+**`sdk` and `wit` have their own adapters; `zephyr-module` has `export-zephyr-modules`.**
+A Zephyr module tree is laid out under `<out>/<name>/` with a CMake script that
+appends it to `ZEPHYR_EXTRA_MODULES` (`varve docs export-zephyr-modules`).
 
 ## The worked example: varve's own release
 

@@ -48,6 +48,7 @@ pub fn script_tool(name: &str, version: &str, body: &str) -> DepositTool {
         docs_entry: None,
         docs_title: None,
         docs_documents: None,
+        zephyr_allow_pip: None,
         libc: None,
     }
 }
@@ -75,6 +76,7 @@ pub fn docs_tool(name: &str, documents: Option<&str>, files: &[(&str, &str)]) ->
         docs_entry: Some(files[0].0.to_string()),
         docs_title: Some(format!("{name} API")),
         docs_documents: documents.map(str::to_string),
+        zephyr_allow_pip: None,
         ..script_tool(name, "1.2.3", "")
     }
 }

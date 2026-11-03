@@ -74,6 +74,9 @@ pub enum ExportKind {
     Vsix,
     Sdk,
     Wit,
+    /// Zephyr modules laid out for `ZEPHYR_EXTRA_MODULES`, with the CMake
+    /// script that appends them (REQ-ZMODEXPORT-001). Pointed at, not sourced.
+    ZephyrModule,
 }
 
 impl ExportKind {
@@ -86,6 +89,7 @@ impl ExportKind {
             ExportKind::Vsix => "vsix",
             ExportKind::Sdk => "sdk",
             ExportKind::Wit => "wit",
+            ExportKind::ZephyrModule => "zephyr-module",
         }
     }
 
@@ -110,6 +114,7 @@ impl ExportKind {
         ExportKind::Vsix,
         ExportKind::Sdk,
         ExportKind::Wit,
+        ExportKind::ZephyrModule,
     ];
 }
 
@@ -1207,11 +1212,12 @@ path   = "before-shims"
             (ExportKind::Vsix, "vsix"),
             (ExportKind::Sdk, "sdk"),
             (ExportKind::Wit, "wit"),
+            (ExportKind::ZephyrModule, "zephyr-module"),
         ] {
             assert_eq!(kind.as_str(), wire);
             assert_eq!(ExportKind::from_str(wire).unwrap(), kind);
         }
-        assert_eq!(ExportKind::ALL.len(), 7, "ALL must list every variant");
+        assert_eq!(ExportKind::ALL.len(), 8, "ALL must list every variant");
     }
 
     // rivet: verifies REQ-EXPORTDECL-001

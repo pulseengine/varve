@@ -271,6 +271,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "cmd-export-wit.md"
     ),
     topic!(
+        "export-zephyr-modules",
+        "export-zephyr-modules — Zephyr modules your build adds, verified",
+        "cmd-export-zephyr-modules.md"
+    ),
+    topic!(
         "export-sdk",
         "export-sdk — a relocated, sourceable SDK tree",
         "cmd-export-sdk.md"
@@ -486,6 +491,11 @@ pub const TOPICS_NEEDING_EXAMPLES: &[&str] = &[
     // build prefix is refused, and an undeclared sourced SDK makes `verify`
     // report a hijack. Prose about any of those teaches nothing.
     "export-sdk",
+    // REQ-ZMODEXPORT-001. Every fact here is one a reader is REFUSED for not
+    // knowing — a tree with no `zephyr/module.yml`, pip without an exact
+    // `allow-pip`, a `depends` the export does not carry — and the script is
+    // used by copying its `-C` line.
+    "export-zephyr-modules",
     // Both audit-demanded workflow topics are command sequences; prose-only
     // versions would be the stub form this gate exists to refuse.
     "discovery",

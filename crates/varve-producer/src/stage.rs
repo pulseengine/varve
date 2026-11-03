@@ -151,6 +151,11 @@ pub fn staged_path_for(
             None => format!("toolchain/{name}-{version}{ext}"),
         };
     }
+    // A module tree: no platform, and its own prefix so it can never be taken
+    // for something `export-sdk` would relocate.
+    if kind == PayloadKind::ZephyrModule {
+        return format!("zephyr/{name}-{version}{ext}");
+    }
     if kind == PayloadKind::Sdk {
         return match platform {
             Some(p) => format!("sdk/{name}-{p}-{version}{ext}"),
@@ -166,7 +171,11 @@ pub fn staged_path_for(
             Some(p) => format!("tools/{name}-{p}"),
             None => format!("tools/{name}"),
         },
-        PayloadKind::Sdk | PayloadKind::Toolchain | PayloadKind::Docs(_) | PayloadKind::Crate => {
+        PayloadKind::Sdk
+        | PayloadKind::Toolchain
+        | PayloadKind::Docs(_)
+        | PayloadKind::Crate
+        | PayloadKind::ZephyrModule => {
             unreachable!("handled above, where the extension is kept")
         }
     }
@@ -450,6 +459,15 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.starts_with("vsix/") && a.ends_with(".vsix"), "{a}");
         assert!(b.ends_with("ext-1.0.0.vsix"), "{b}");
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_zephyr_module_is_staged_under_its_own_prefix_keeping_the_extension() {
+        assert_eq!(
+            staged_path_for(PayloadKind::ZephyrModule, "gale", "0.1.0", None, ".tar.gz"),
+            "zephyr/gale-0.1.0.tar.gz"
+        );
     }
 
     // rivet: verifies REQ-PRODUCER-002

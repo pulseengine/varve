@@ -30,6 +30,7 @@ plus `[tool.source]`**, both set at deposit time.
 | Bazel `rules_rust`, air-gapped | `varve export-bazel-distdir --out D` | `.crate` tarballs for `bazel build --distdir=D` | `kind = "crate"` |
 | Bazel `rules_wasm_component` | `varve export-bazel --out D` | one `<tool>.json` checksum registry per tool | any entry with a **platform** and **`[tool.source]`** |
 | VS Code / VSCodium | `varve export-vsix --out D` | `publisher.name-version.vsix` files for `code --install-extension` | `kind = "vsix"` |
+| Zephyr (`west build`, CMake) | `varve export-zephyr-modules --out D` | one directory per module + `zephyr-extra-modules.cmake` appending them to `ZEPHYR_EXTRA_MODULES` | `kind = "zephyr-module"` |
 
 `export-bazel` is the exception because a Bazel toolchain repository rule
 fetches from the upstream URL itself — so varve can only emit a registry for an

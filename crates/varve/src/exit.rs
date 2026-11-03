@@ -345,6 +345,7 @@ mod tests {
             "tools/systest/deposit-layer.sh",
             "tools/systest/oci-roundtrip.sh",
             "tools/systest/wit-export.sh",
+            "tools/systest/zephyr-export.sh",
             ".github/workflows/systest.yml",
         ] {
             gate_text.push_str(&std::fs::read_to_string(root.join(rel)).unwrap_or_default());

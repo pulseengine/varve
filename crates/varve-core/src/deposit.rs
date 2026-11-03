@@ -136,6 +136,17 @@ pub struct DepositTool {
     /// as cleanly as the right name, and would then answer every such question
     /// with "nothing documents that".
     pub docs_documents: Option<String>,
+    /// The operator's opt-in to a `zephyr-module`'s pip requirement files,
+    /// signed as `eu.pulseengine.varve.zephyr.allow-pip` (REQ-ZMODEXPORT-001
+    /// clause 5).
+    ///
+    /// A module whose `zephyr/module.yml` declares `package-managers: pip`
+    /// adds a Python dependency to every build that uses it, which varve does
+    /// not distribute and does not need. The deposit refuses such a module
+    /// unless this names EXACTLY the declared files; `None` is no opt-in, and
+    /// `Some(vec![])` is the explicit opt-in for `pip` declared with no files.
+    /// Only a `zephyr-module` may carry it.
+    pub zephyr_allow_pip: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -283,6 +294,11 @@ pub struct SpecTool {
     /// `docs-documents` — the payload this document documents, by name.
     #[serde(rename = "docs-documents", default)]
     pub docs_documents: Option<String>,
+    /// `allow-pip` — the requirement files of a `zephyr-module` the operator
+    /// accepts as a Python dependency (REQ-ZMODEXPORT-001 clause 5). Must name
+    /// exactly the files the module's `zephyr/module.yml` declares.
+    #[serde(rename = "allow-pip", default)]
+    pub zephyr_allow_pip: Option<Vec<String>>,
     /// `libc` — what this payload needs from the host (REQ-LIBCSTATED-001).
     /// MEASURED by the producer from the ELF, never declared by hand: a
     /// hand-written floor is a claim, and this annotation exists because the
@@ -374,6 +390,7 @@ impl SpecTool {
             docs_entry: self.docs_entry,
             docs_title: self.docs_title,
             docs_documents: self.docs_documents,
+            zephyr_allow_pip: self.zephyr_allow_pip,
         })
     }
 }
@@ -504,6 +521,17 @@ pub enum DepositError {
          or deposit this payload as kind = \"docs\"."
     )]
     DocsDocumentsOnNonDocs { name: String, kind: String },
+    /// A `zephyr-module` the deposit cannot accept (REQ-ZMODEXPORT-001
+    /// clauses 1 and 5). Transparent: the message is the module checker's own,
+    /// which names the payload and what to do.
+    #[error(transparent)]
+    ZephyrModule(#[from] crate::zephyrmodule::ZephyrModuleError),
+    #[error(
+        "payload '{name}' is kind {kind} and carries `allow-pip` — only a `zephyr-module` has \
+         pip requirement files to accept, so it would be signed into the manifest, read by \
+         nothing, and believed. Drop it, or deposit this payload as kind = \"zephyr-module\"."
+    )]
+    ZephyrAllowPipOnNonModule { name: String, kind: String },
     #[error(
         "sdk '{name}' version {version} declares no `sdk-prefix` — the absolute path it was \
          BUILT for. Without it `varve export-sdk` has no relocation budget and no path to \
@@ -742,6 +770,36 @@ fn check_docs_metadata(tools: &[&DepositTool]) -> Result<(), DepositError> {
     Ok(())
 }
 
+/// A `zephyr-module` must be a module, and must not quietly bring Python
+/// (REQ-ZMODEXPORT-001 clauses 1 and 5).
+///
+/// Decided here, on the BYTES being signed, and not only in the producer: the
+/// producer checks what it fetched, but `varve deposit --spec` signs whatever
+/// archive a spec names, and a rule enforced only upstream of that is enforced
+/// where it cannot act. The opt-in is also refused on a payload that is not a
+/// module, for the reason `sdk-prefix` is: an annotation nothing reads is how a
+/// field ships inert.
+fn check_zephyr_modules(tools: &[&DepositTool]) -> Result<(), DepositError> {
+    for tool in tools {
+        let is_module = tool.kind == Some(crate::kind::PayloadKind::ZephyrModule);
+        if !is_module {
+            if tool.zephyr_allow_pip.is_some() {
+                return Err(DepositError::ZephyrAllowPipOnNonModule {
+                    name: tool.name.clone(),
+                    kind: tool.kind.unwrap_or_default().as_str().to_string(),
+                });
+            }
+            continue;
+        }
+        crate::zephyrmodule::check_deposit(
+            &tool.name,
+            &tool.bytes,
+            tool.zephyr_allow_pip.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
 fn check_sdk_prefixes(tools: &[&DepositTool]) -> Result<(), DepositError> {
     for tool in tools {
         let is_tree = tool.kind == Some(crate::kind::PayloadKind::Sdk);
@@ -931,6 +989,7 @@ pub fn deposit_with_options(
     check_identities(&tools)?;
     check_sdk_prefixes(&tools)?;
     check_docs_metadata(&tools)?;
+    check_zephyr_modules(&tools)?;
     check_ingest_proofs(&tools)?;
     check_sbom_fields(&tools)?;
 
@@ -1059,6 +1118,16 @@ pub fn deposit_with_options(
             }
             if let Some(documents) = &tool.docs_documents {
                 annotations.insert(ANN_DOCS_DOCUMENTS.into(), documents.clone().into());
+            }
+            // The operator's pip opt-in, inside the signature, so `varve
+            // inspect` shows what the module was accepted WITH
+            // (REQ-ZMODEXPORT-001 clause 5). `check_zephyr_modules` has already
+            // refused it unless it names exactly what the module declares.
+            if let Some(allow) = &tool.zephyr_allow_pip {
+                annotations.insert(
+                    crate::zephyrmodule::ANN_ALLOW_PIP.into(),
+                    crate::zephyrmodule::allow_pip_to_annotation(allow).into(),
+                );
             }
             if let Some(runner) = &tool.runner {
                 annotations.insert(crate::bazel::ANN_RUNNER.into(), runner.tool.clone().into());
@@ -1336,6 +1405,7 @@ mod libc_enforcement_tests {
             docs_entry: None,
             docs_title: None,
             docs_documents: None,
+            zephyr_allow_pip: None,
             libc: libc.map(str::to_string),
         }
     }
@@ -1452,6 +1522,7 @@ mod tests {
                     docs_entry: None,
                     docs_title: None,
                     docs_documents: None,
+                    zephyr_allow_pip: None,
                     libc: None,
                 },
                 DepositTool {
@@ -1468,6 +1539,7 @@ mod tests {
                     docs_entry: None,
                     docs_title: None,
                     docs_documents: None,
+                    zephyr_allow_pip: None,
                     libc: None,
                 },
             ],
@@ -1973,6 +2045,7 @@ mod tests {
             docs_entry: None,
             docs_title: None,
             docs_documents: None,
+            zephyr_allow_pip: None,
             libc: None,
         }
     }

@@ -796,6 +796,7 @@ mod tests {
             upstream_sums: None,
             title: None,
             documents: None,
+            allow_pip: None,
         };
         let root = std::path::Path::new("/w");
 
@@ -836,6 +837,7 @@ mod tests {
             upstream_sums: None,
             title: None,
             documents: None,
+            allow_pip: None,
             contains: None,
             name: name.into(),
             repo: repo.into(),
