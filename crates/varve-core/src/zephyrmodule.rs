@@ -25,6 +25,12 @@ pub const MODULE_YML: &str = "zephyr/module.yml";
 /// The CMake script an export writes beside the module directories.
 pub const CMAKE_FILE: &str = "zephyr-extra-modules.cmake";
 
+/// Written by an export into every module directory it creates. It is what
+/// says "varve wrote this directory", which is the only licence to replace or
+/// remove one: the export stamp lists everything under `--out`, a user's own
+/// files included, so a stamp alone proves nothing about who wrote a directory.
+pub const MODULE_MARKER: &str = ".varve-zephyr-module";
+
 /// Signed annotation recording the operator's opt-in to a module's pip
 /// requirement files, comma-separated (REQ-ZMODEXPORT-001 clause 5).
 pub const ANN_ALLOW_PIP: &str = "eu.pulseengine.varve.zephyr.allow-pip";
@@ -58,6 +64,14 @@ pub enum ZephyrModuleError {
     },
     #[error("zephyr-module '{payload}': {MODULE_YML} does not parse: {detail}")]
     BadModuleYml { payload: String, detail: String },
+    #[error(
+        "zephyr-module '{payload}': {MODULE_YML} carries the YAML tag {tag}. Zephyr's own \
+         reader (PyYAML) treats a key tagged `!!merge` as a merge key and varve's reader does \
+         not, so a tagged node can hide `package-managers: pip`, `build: depends` or `name` \
+         from every check varve makes while Zephyr still honours them. Real module.yml files \
+         use no tags; remove it."
+    )]
+    TaggedModuleYml { payload: String, tag: String },
     #[error(
         "zephyr-module '{payload}' declares `package-managers: pip` (requirement files: {files}), \
          which adds a Python dependency to every build that uses it. varve distributes the blocks \
@@ -234,6 +248,7 @@ pub fn parse_module_yml(payload: &str, text: &str) -> Result<ModuleYml, ZephyrMo
             detail: "the file is empty".to_string(),
         });
     }
+    refuse_yaml_tags(payload, text)?;
     let raw: RawYml =
         serde_saphyr::from_str(text).map_err(|e| ZephyrModuleError::BadModuleYml {
             payload: payload.to_string(),
@@ -244,6 +259,28 @@ pub fn parse_module_yml(payload: &str, text: &str) -> Result<ModuleYml, ZephyrMo
         depends: raw.build.and_then(|b| b.depends).unwrap_or_default(),
         pip: raw.package_managers.and_then(|p| p.pip),
     })
+}
+
+/// Refuse ANY explicit YAML tag, found by the YAML parser's own events and not
+/// by scanning text, so a `!` inside a quoted string, a comment or a block
+/// scalar is correctly not one.
+///
+/// Why this exists: PyYAML, which reads this file for Zephyr, honours a tag
+/// serde-saphyr ignores (`!!merge` on any key makes it a merge key), so a tagged
+/// node can carry `package-managers: pip` past varve's check while Zephyr still
+/// installs it. Refusing every tag closes that whole class, not one spelling.
+/// A scan error is left for the typed parse below to report.
+fn refuse_yaml_tags(payload: &str, text: &str) -> Result<(), ZephyrModuleError> {
+    for item in serde_saphyr::granit_parser::Parser::new_from_str(text) {
+        let Ok((event, _)) = item else { break };
+        if let Some(tag) = event.tag() {
+            return Err(ZephyrModuleError::TaggedModuleYml {
+                payload: payload.to_string(),
+                tag: format!("{}{}", tag.handle(), tag.suffix()),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The one top-level directory every member sits under, if there is one.
@@ -286,6 +323,16 @@ pub fn open(payload: &str, archive: &[u8]) -> Result<ModuleTree, ZephyrModuleErr
             return Err(ZephyrModuleError::Symlink {
                 payload: payload.to_string(),
                 member: path,
+            });
+        }
+        // The name an export marks its own directories with is not the
+        // module's to use: a tree carrying it would be indistinguishable from
+        // one varve wrote.
+        if path.to_lowercase() == MODULE_MARKER {
+            return Err(ZephyrModuleError::UnsafeMember {
+                payload: payload.to_string(),
+                member: m.path.clone(),
+                detail: "that name is reserved for varve's own marker".to_string(),
             });
         }
         // Compared LOWERCASED: macOS and Windows file systems are
@@ -513,18 +560,50 @@ pub struct ExportModule {
     pub tree: ModuleTree,
 }
 
+/// One verified `zephyr-module` payload as an export receives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModulePayload {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    /// The layer's SIGNED `allow-pip` annotation, decoded; `None` where the
+    /// entry carries none.
+    pub allow_pip: Option<Vec<String>>,
+}
+
+impl From<(String, Vec<u8>)> for ModulePayload {
+    fn from((name, bytes): (String, Vec<u8>)) -> Self {
+        ModulePayload {
+            name,
+            bytes,
+            allow_pip: None,
+        }
+    }
+}
+
 /// Open, name, (optionally) select and de-duplicate the modules of an export,
-/// then require a complete `build: depends` closure over what is exported.
-pub fn prepare(
-    payloads: &[(String, Vec<u8>)],
+/// re-check the pip rule against each one's signed opt-in, then require a
+/// complete `build: depends` closure over what is exported.
+///
+/// The pip rule is enforced HERE as well as at deposit: a layer signed by a
+/// varve that predates the deposit rule carries pip modules with no opt-in, and
+/// the export is the last place that can refuse them.
+pub fn prepare<P: Into<ModulePayload> + Clone>(
+    payloads: &[P],
     select: Option<&str>,
 ) -> Result<Vec<ExportModule>, ZephyrModuleError> {
     let mut modules = Vec::with_capacity(payloads.len());
-    for (payload, bytes) in payloads {
-        let tree = open(payload, bytes)?;
-        let name = module_name(payload, &tree.yml)?;
+    let mut opt_ins = Vec::with_capacity(payloads.len());
+    for p in payloads {
+        let ModulePayload {
+            name: payload,
+            bytes,
+            allow_pip,
+        } = p.clone().into();
+        let tree = open(&payload, &bytes)?;
+        let name = module_name(&payload, &tree.yml)?;
+        opt_ins.push((payload.clone(), allow_pip));
         modules.push(ExportModule {
-            payload: payload.clone(),
+            payload,
             name,
             tree,
         });
@@ -543,6 +622,13 @@ pub fn prepare(
                 carried,
             });
         }
+    }
+    for m in &modules {
+        let allow = opt_ins
+            .iter()
+            .find(|(payload, _)| *payload == m.payload)
+            .and_then(|(_, allow)| allow.as_deref());
+        check_pip(&m.payload, &m.tree.yml, allow)?;
     }
     for (i, m) in modules.iter().enumerate() {
         if let Some(first) = modules[..i]
@@ -591,8 +677,10 @@ pub fn cmake_quote(path: &str) -> Result<String, ZephyrModuleError> {
     for c in path.chars() {
         match c {
             ';' => return Err(unsafe_path("a ';' would split the module list in two")),
+            '[' | ']' => return Err(unsafe_path("a bracket can open a CMake bracket argument")),
+            '\\' => return Err(unsafe_path("a backslash is an escape in CMake")),
             c if c.is_control() => return Err(unsafe_path("it contains a control character")),
-            '\\' | '"' | '$' | '@' => {
+            '"' | '$' | '@' => {
                 out.push('\\');
                 out.push(c);
             }
@@ -658,6 +746,9 @@ pub struct ExportReport {
     pub modules: Vec<(String, String)>,
     pub files: usize,
     pub cmake: String,
+    /// Module directories of a previous export that this one no longer
+    /// carries, removed so the stamp never vouches for a leftover.
+    pub removed: Vec<String>,
 }
 
 fn io_err(path: &Path, e: impl std::fmt::Display) -> ZephyrModuleError {
@@ -667,10 +758,45 @@ fn io_err(path: &Path, e: impl std::fmt::Display) -> ZephyrModuleError {
     }
 }
 
+/// Does `out` carry a stamp that says a zephyr-module export is what is here?
+fn ours_stamp(out: &Path) -> bool {
+    crate::exportstamp::read_stamp(out)
+        .is_ok_and(|st| st.kind == crate::kind::PayloadKind::ZephyrModule.as_str())
+}
+
+/// Is `dir` a real directory varve marked as the module `name`?
+fn is_marked_dir(dir: &Path, name: &str) -> bool {
+    let is_dir = std::fs::symlink_metadata(dir).is_ok_and(|md| md.is_dir());
+    let marker = dir.join(MODULE_MARKER);
+    let marked = std::fs::symlink_metadata(&marker).is_ok_and(|md| md.is_file())
+        && std::fs::read_to_string(&marker)
+            .is_ok_and(|text| text.lines().next() == Some(&format!("module: {name}")));
+    is_dir && marked
+}
+
+fn not_ours(path: &Path) -> ZephyrModuleError {
+    ZephyrModuleError::NotWrittenByVarve {
+        path: path.display().to_string(),
+    }
+}
+
 /// Write each module under `out/<name>/` and the CMake script beside them.
 ///
 /// `out` must be absolute: the script names the module directories, and a
 /// relative path there would resolve against wherever the build runs.
+///
+/// Everything is decided BEFORE anything is written or removed: every path
+/// CMake must carry, every destination, the script and the stamp. A refusal
+/// therefore leaves neither a half export nor a deleted directory behind.
+///
+/// A directory is replaced or removed only if it carries varve's own marker
+/// ([`MODULE_MARKER`]) AND `out` carries a zephyr-module stamp. Neither alone
+/// is enough: the stamp lists whatever was under `out`, including a user's own
+/// files, and a marker without our stamp is not in an export directory of ours.
+///
+/// Known and deferred (REQ-ZMODEXPORT-002): the script persists the list in the
+/// CMake cache with `FORCE`, so a LATER build in the same build tree keeps the
+/// modules after the script is no longer passed with `-C`.
 pub fn export(
     modules: &[ExportModule],
     out: &Path,
@@ -683,41 +809,63 @@ pub fn export(
             "the export directory must be absolute: the CMake script names it",
         ));
     }
-    // EVERY destination is judged before anything is written or removed, so a
-    // refusal leaves neither a half export nor a deleted directory behind.
-    let stamp = crate::exportstamp::read_stamp(out).ok();
+    let ours = ours_stamp(out);
+    let dirs: Vec<(String, String)> = modules
+        .iter()
+        .map(|m| (m.name.clone(), out.join(&m.name).display().to_string()))
+        .collect();
+    // Quoting is validated here, not after the trees are on disk.
+    let script_text = cmake_script(layer, manifest_digest, &dirs)?;
+
     for m in modules {
         let dir = out.join(&m.name);
-        match std::fs::symlink_metadata(&dir) {
-            // Nothing there (or nothing readable there): `create_dir_all`
-            // below reports any real failure, with its own error.
-            Err(_) => {}
-            // Replaced, not merged into — a file left over from the last pin
-            // would sit in a tree the stamp then vouches for — but ONLY a real
-            // directory varve itself recorded writing. Anything else is
-            // somebody's own, and `remove_dir_all` on it is not recoverable.
-            Ok(md) => {
-                let prefix = format!("{}/", m.name);
-                let ours = md.is_dir()
-                    && stamp.as_ref().is_some_and(|st| {
-                        st.kind == crate::kind::PayloadKind::ZephyrModule.as_str()
-                            && st.files.iter().any(|f| f.path.starts_with(&prefix))
-                    });
-                if !ours {
-                    return Err(ZephyrModuleError::NotWrittenByVarve {
-                        path: dir.display().to_string(),
-                    });
-                }
-            }
+        // Nothing there (or nothing readable): `create_dir_all` below reports
+        // any real failure with its own error. Anything there must be varve's.
+        if std::fs::symlink_metadata(&dir).is_ok() && !(ours && is_marked_dir(&dir, &m.name)) {
+            return Err(not_ours(&dir));
         }
     }
+    // The script and the stamp are replaced only when they are ours: never
+    // followed through a symlink, never overwritten when somebody else wrote
+    // them. (The stamp is written by the caller, after this returns.)
+    let script = out.join(CMAKE_FILE);
+    let stamp_file = out.join(crate::exportstamp::STAMP_FILE);
+    for path in [&script, &stamp_file] {
+        match std::fs::symlink_metadata(path) {
+            Err(_) => {}
+            Ok(md) if md.is_file() && ours => {}
+            Ok(_) => return Err(not_ours(path)),
+        }
+    }
+    // Leftovers: directories a previous export of OURS made for modules this
+    // export no longer carries. The stamp must never vouch for one.
+    let mut leftovers = Vec::new();
+    if ours && let Ok(entries) = std::fs::read_dir(out) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !modules.iter().any(|m| m.name == name) && is_marked_dir(&entry.path(), &name) {
+                leftovers.push(name);
+            }
+        }
+        leftovers.sort();
+    }
+
     let mut report = ExportReport::default();
+    for name in &leftovers {
+        let dir = out.join(name);
+        std::fs::remove_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
+        report.removed.push(name.clone());
+    }
     for m in modules {
         let dir = out.join(&m.name);
         if std::fs::symlink_metadata(&dir).is_ok() {
             std::fs::remove_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
         }
         std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
+        create_file(
+            &dir.join(MODULE_MARKER),
+            format!("module: {}\nlayer: {layer}\n", m.name).as_bytes(),
+        )?;
         for member in &m.tree.members {
             let dest = dir.join(&member.path);
             match &member.body {
@@ -726,16 +874,7 @@ pub fn export(
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
                     }
-                    // `create_new`: a file is CREATED, never overwritten. The
-                    // directory is fresh, so a collision here means two members
-                    // landed on one path, and the later must not win.
-                    use std::io::Write;
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&dest)
-                        .and_then(|mut f| f.write_all(bytes))
-                        .map_err(|e| io_err(&dest, e))?;
+                    create_file(&dest, bytes)?;
                     set_mode(&dest, *mode)?;
                     report.files += 1;
                 }
@@ -747,14 +886,27 @@ pub fn export(
                 }
             }
         }
-        report
-            .modules
-            .push((m.name.clone(), dir.display().to_string()));
     }
-    report.cmake = cmake_script(layer, manifest_digest, &report.modules)?;
-    let script = out.join(CMAKE_FILE);
-    std::fs::write(&script, &report.cmake).map_err(|e| io_err(&script, e))?;
+    report.modules = dirs;
+    report.cmake = script_text;
+    if std::fs::symlink_metadata(&script).is_ok() {
+        std::fs::remove_file(&script).map_err(|e| io_err(&script, e))?;
+    }
+    create_file(&script, report.cmake.as_bytes())?;
     Ok(report)
+}
+
+/// `create_new`: a file is CREATED, never overwritten and never written
+/// through a link. The directory is fresh, so a collision means two members
+/// landed on one path, and the later must not win.
+fn create_file(path: &Path, bytes: &[u8]) -> Result<(), ZephyrModuleError> {
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .and_then(|mut f| f.write_all(bytes))
+        .map_err(|e| io_err(path, e))
 }
 
 /// Executable stays executable, everything else is plain; setuid/setgid and
@@ -1485,7 +1637,6 @@ mod tests {
         assert_eq!(cmake_quote("/plain/path").unwrap(), "\"/plain/path\"");
         assert_eq!(cmake_quote("/with space/x").unwrap(), "\"/with space/x\"");
         assert_eq!(cmake_quote("/q\"uote").unwrap(), "\"/q\\\"uote\"");
-        assert_eq!(cmake_quote("/back\\slash").unwrap(), "\"/back\\\\slash\"");
         assert_eq!(cmake_quote("/d$ollar").unwrap(), "\"/d\\$ollar\"");
         assert_eq!(cmake_quote("/${HOME}").unwrap(), "\"/\\${HOME}\"");
         assert_eq!(cmake_quote("/at@sign").unwrap(), "\"/at\\@sign\"");
@@ -1499,6 +1650,9 @@ mod tests {
         // `;` splits a CMake list: one path would become two modules.
         for (bad, why) in [
             ("/a;b", "semicolon"),
+            ("/a[b", "open bracket"),
+            ("/a]b", "close bracket"),
+            ("/a\\b", "backslash"),
             ("/a\nb", "newline"),
             ("/a\rb", "carriage return"),
             ("/a\0b", "NUL"),
@@ -1712,55 +1866,381 @@ mod tests {
 
     // rivet: verifies REQ-ZMODEXPORT-001
     #[test]
-    fn only_a_zephyr_stamp_that_lists_files_under_the_name_licenses_a_replace() {
+    fn only_a_marked_directory_under_a_zephyr_stamp_licenses_a_replace() {
         let mods = prepare(&[("gale".to_string(), module("gale", &[]))], None).unwrap();
-        // Another export kind's stamp, even one listing gale/ files.
+        let refused = |out: &Path, what: &str| {
+            let e = export(&mods, out, "l", "d").expect_err(what);
+            assert!(
+                matches!(e, ZephyrModuleError::NotWrittenByVarve { .. }),
+                "{what}: {e:?}"
+            );
+        };
+        // Another export kind's stamp, over a directory varve marked.
         let out = temp("otherkind");
         export(&mods, &out, "l", "d").unwrap();
         stamp(&out, "cargo");
-        let e = export(&mods, &out, "l", "d").expect_err("a cargo stamp is not ours");
-        assert!(
-            matches!(e, ZephyrModuleError::NotWrittenByVarve { .. }),
-            "{e:?}"
-        );
+        refused(&out, "a cargo stamp is not ours");
+        assert!(out.join("gale/zephyr/module.yml").is_file());
         std::fs::remove_dir_all(&out).unwrap();
-        // A zephyr stamp that records nothing under gale/.
-        let out = temp("otherfiles");
+        // A marked directory and NO stamp at all.
+        let out = temp("nostamp");
         export(&mods, &out, "l", "d").unwrap();
-        std::fs::write(out.join("elsewhere.txt"), "x").unwrap();
-        std::fs::remove_dir_all(out.join("gale")).unwrap();
+        refused(&out, "no stamp");
+        std::fs::remove_dir_all(&out).unwrap();
+        // A zephyr stamp over a directory with no marker.
+        let out = temp("nomarker");
+        export(&mods, &out, "l", "d").unwrap();
+        std::fs::remove_file(out.join("gale").join(MODULE_MARKER)).unwrap();
         stamp(&out, "zephyr-module");
-        std::fs::create_dir_all(out.join("gale")).unwrap();
         std::fs::write(out.join("gale/MARKER"), "mine").unwrap();
-        let e = export(&mods, &out, "l", "d").expect_err("stamp lists nothing under gale/");
-        assert!(
-            matches!(e, ZephyrModuleError::NotWrittenByVarve { .. }),
-            "{e:?}"
-        );
+        refused(&out, "no marker");
         assert!(out.join("gale/MARKER").is_file());
         std::fs::remove_dir_all(&out).unwrap();
-        // A stamp that is not JSON at all.
-        let out = temp("badstamp");
-        std::fs::create_dir_all(out.join("gale")).unwrap();
-        std::fs::write(out.join(crate::exportstamp::STAMP_FILE), "{nope").unwrap();
-        assert!(matches!(
-            export(&mods, &out, "l", "d"),
-            Err(ZephyrModuleError::NotWrittenByVarve { .. })
-        ));
-        std::fs::remove_dir_all(&out).unwrap();
-        // A name that merely PREFIXES another's directory name is not under it.
-        let out = temp("prefix");
-        let two = prepare(&[("gal".to_string(), module("gal", &[]))], None).unwrap();
-        export(&two, &out, "l", "d").unwrap();
+        // A marker naming a DIFFERENT module is not this one's.
+        let out = temp("wrongmarker");
+        export(&mods, &out, "l", "d").unwrap();
+        std::fs::write(
+            out.join("gale").join(MODULE_MARKER),
+            "module: other\nlayer: l\n",
+        )
+        .unwrap();
         stamp(&out, "zephyr-module");
-        std::fs::remove_dir_all(out.join("gal")).unwrap();
-        std::fs::create_dir_all(out.join("ga")).unwrap();
-        let ga = prepare(&[("ga".to_string(), module("ga", &[]))], None).unwrap();
-        assert!(matches!(
-            export(&ga, &out, "l", "d"),
-            Err(ZephyrModuleError::NotWrittenByVarve { .. })
-        ));
+        refused(&out, "marker names another module");
         std::fs::remove_dir_all(&out).unwrap();
+        // A malformed stamp.
+        let out = temp("badstamp");
+        export(&mods, &out, "l", "d").unwrap();
+        std::fs::write(out.join(crate::exportstamp::STAMP_FILE), "{nope").unwrap();
+        refused(&out, "malformed stamp");
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    /// The reviewer's reproduction. The stamp lists EVERYTHING under `--out`,
+    /// the user's files included, so a stamp listing `hal/…` proves nothing
+    /// about who wrote `hal/`. Only varve's own marker does.
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_stamp_that_swept_up_the_users_directory_does_not_license_deleting_it() {
+        let out = temp("sweep");
+        std::fs::create_dir_all(out.join("hal")).unwrap();
+        std::fs::write(out.join("hal/MARKER"), "my own hal").unwrap();
+        // 2. export {gale}: the stamp (scan_tree) now lists hal/MARKER too.
+        let gale = prepare(&[("gale".to_string(), module("gale", &[]))], None).unwrap();
+        export(&gale, &out, "l", "d").unwrap();
+        stamp(&out, "zephyr-module");
+        let st = crate::exportstamp::read_stamp(&out).unwrap();
+        assert!(st.files.iter().any(|f| f.path == "hal/MARKER"));
+        // 3. export {gale, hal}: hal/ is NOT varve's.
+        let both = prepare(
+            &payloads(&[("gale", module("gale", &[])), ("hal", module("hal", &[]))]),
+            None,
+        )
+        .unwrap();
+        let e = export(&both, &out, "l", "d").expect_err("hal is the user's");
+        assert!(
+            matches!(&e, ZephyrModuleError::NotWrittenByVarve { path } if path.ends_with("hal")),
+            "{e:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("hal/MARKER")).unwrap(),
+            "my own hal"
+        );
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_tree_may_not_carry_varves_own_marker_name() {
+        for name in [MODULE_MARKER, ".VARVE-ZEPHYR-MODULE"] {
+            let a = archive(&[("zephyr/module.yml", "name: x\n"), (name, "module: x\n")]);
+            let e = open("p", &a).expect_err(name);
+            assert!(matches!(e, ZephyrModuleError::UnsafeMember { .. }), "{e:?}");
+        }
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn every_module_directory_carries_the_marker_naming_module_and_layer() {
+        let out = temp("marker");
+        let mods = prepare(&[("x".to_string(), module("x", &[]))], None).unwrap();
+        export(&mods, &out, "2026.11.0", "sha256:d").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(out.join("x").join(MODULE_MARKER)).unwrap(),
+            "module: x\nlayer: 2026.11.0\n"
+        );
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_module_dropped_from_a_new_export_is_removed_and_the_users_directories_are_not() {
+        let out = temp("leftover");
+        let ab = prepare(
+            &payloads(&[("a", module("a", &[])), ("b", module("b", &[]))]),
+            None,
+        )
+        .unwrap();
+        export(&ab, &out, "l", "d").unwrap();
+        stamp(&out, "zephyr-module");
+        std::fs::create_dir_all(out.join("mine")).unwrap();
+        std::fs::write(out.join("mine/KEEP"), "k").unwrap();
+        std::fs::write(out.join("note.txt"), "n").unwrap();
+        let a = prepare(&[("a".to_string(), module("a", &[]))], None).unwrap();
+        let r = export(&a, &out, "l2", "d2").unwrap();
+        assert!(!out.join("b").exists(), "a leftover module survived");
+        assert!(out.join("a/zephyr/module.yml").is_file());
+        assert!(
+            out.join("mine/KEEP").is_file(),
+            "a user directory was touched"
+        );
+        assert!(out.join("note.txt").is_file());
+        assert_eq!(r.removed, vec!["b".to_string()]);
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn leftovers_are_removed_only_under_our_stamp() {
+        for kind in ["cargo", ""] {
+            let out = temp("leftover-foreign");
+            let ab = prepare(
+                &payloads(&[("a", module("a", &[])), ("b", module("b", &[]))]),
+                None,
+            )
+            .unwrap();
+            export(&ab, &out, "l", "d").unwrap();
+            if !kind.is_empty() {
+                stamp(&out, kind);
+            }
+            let a = prepare(&[("a".to_string(), module("a", &[]))], None).unwrap();
+            // `a` is refused here (no zephyr stamp), and b must survive too.
+            let _ = export(&a, &out, "l", "d");
+            assert!(out.join("b/zephyr/module.yml").is_file(), "{kind:?}");
+            std::fs::remove_dir_all(&out).unwrap();
+        }
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[cfg(unix)]
+    #[test]
+    fn the_script_and_the_stamp_are_never_written_through_a_link_or_over_a_foreign_file() {
+        let mods = prepare(&[("x".to_string(), module("x", &[]))], None).unwrap();
+        // The script is a symlink.
+        let out = temp("script-link");
+        let victim = temp("victim");
+        std::os::unix::fs::symlink(victim.join("target"), out.join(CMAKE_FILE)).unwrap();
+        let e = export(&mods, &out, "l", "d").expect_err("symlinked script");
+        assert!(
+            matches!(e, ZephyrModuleError::NotWrittenByVarve { .. }),
+            "{e:?}"
+        );
+        assert!(!victim.join("target").exists(), "written through the link");
+        assert!(
+            !out.join("x").exists(),
+            "refused before any tree is written"
+        );
+        std::fs::remove_dir_all(&out).unwrap();
+        // The script is somebody's regular file, with no stamp of ours.
+        let out = temp("script-file");
+        std::fs::write(out.join(CMAKE_FILE), "their own cmake").unwrap();
+        let e = export(&mods, &out, "l", "d").expect_err("foreign script");
+        assert!(
+            matches!(e, ZephyrModuleError::NotWrittenByVarve { .. }),
+            "{e:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join(CMAKE_FILE)).unwrap(),
+            "their own cmake"
+        );
+        std::fs::remove_dir_all(&out).unwrap();
+        // The stamp is a symlink, or another export's.
+        let out = temp("stamp-link");
+        std::os::unix::fs::symlink(
+            victim.join("stamp"),
+            out.join(crate::exportstamp::STAMP_FILE),
+        )
+        .unwrap();
+        let e = export(&mods, &out, "l", "d").expect_err("symlinked stamp");
+        assert!(
+            matches!(e, ZephyrModuleError::NotWrittenByVarve { .. }),
+            "{e:?}"
+        );
+        assert!(!victim.join("stamp").exists());
+        std::fs::remove_dir_all(&out).unwrap();
+        let out = temp("stamp-other");
+        stamp(&out, "cargo");
+        let e = export(&mods, &out, "l", "d").expect_err("another export's stamp");
+        assert!(
+            matches!(e, ZephyrModuleError::NotWrittenByVarve { .. }),
+            "{e:?}"
+        );
+        assert!(!out.join("x").exists());
+        std::fs::remove_dir_all(&out).unwrap();
+        std::fs::remove_dir_all(&victim).unwrap();
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn our_own_script_is_replaced_on_a_re_export() {
+        let out = temp("script-ours");
+        let mods = prepare(&[("x".to_string(), module("x", &[]))], None).unwrap();
+        export(&mods, &out, "l1", "d").unwrap();
+        stamp(&out, "zephyr-module");
+        export(&mods, &out, "l2", "d").unwrap();
+        let script = std::fs::read_to_string(out.join(CMAKE_FILE)).unwrap();
+        assert!(script.contains("# Layer: l2"), "{script}");
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    /// Nothing is written until everything is known to be writable: a path
+    /// CMake cannot carry must not leave the trees behind.
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn an_unquotable_out_directory_writes_no_tree_at_all() {
+        let base = temp("halfexport");
+        let out = base.join("o[ut");
+        std::fs::create_dir_all(&out).unwrap();
+        let mods = prepare(&[("x".to_string(), module("x", &[]))], None).unwrap();
+        let e = export(&mods, &out, "l", "d").expect_err("bracket in the path");
+        assert!(
+            matches!(e, ZephyrModuleError::UnsafeCmakePath { .. }),
+            "{e:?}"
+        );
+        assert!(
+            std::fs::read_dir(&out).unwrap().next().is_none(),
+            "something was written"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // -------------------------------------------- pip, re-checked at export
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn export_rechecks_pip_against_the_signed_opt_in() {
+        let pip = |allow: Option<Vec<String>>| {
+            vec![ModulePayload {
+                name: "py".into(),
+                bytes: pip_module(&["scripts/requirements.txt"]),
+                allow_pip: allow,
+            }]
+        };
+        // A layer signed before the deposit rule existed: no annotation.
+        let e = prepare(&pip(None), None).expect_err("no opt-in");
+        assert!(
+            matches!(e, ZephyrModuleError::PipWithoutOptIn { .. }),
+            "{e:?}"
+        );
+        let e = prepare(&pip(Some(strings(&["other.txt"]))), None).expect_err("wrong opt-in");
+        assert!(
+            matches!(e, ZephyrModuleError::PipOptInMismatch { .. }),
+            "{e:?}"
+        );
+        let ok = prepare(&pip(Some(strings(&["scripts/requirements.txt"]))), None).unwrap();
+        assert_eq!(ok.len(), 1);
+        // An unselected pip module does not block selecting another.
+        let two = vec![
+            ModulePayload {
+                name: "py".into(),
+                bytes: pip_module(&["a.txt"]),
+                allow_pip: None,
+            },
+            ModulePayload {
+                name: "plain".into(),
+                bytes: module("plain", &[]),
+                allow_pip: None,
+            },
+        ];
+        assert_eq!(prepare(&two, Some("plain")).unwrap().len(), 1);
+        assert!(prepare(&two, Some("py")).is_err());
+    }
+
+    // ------------------------------------------- YAML tags (the merge bypass)
+
+    const MERGE_SPELLINGS: &[&str] = &[
+        "name: gale\npackage-managers:\n  !!merge x: {pip: {requirement-files: [scripts/requirements.txt]}}\n",
+        "name: gale\npackage-managers:\n  !<tag:yaml.org,2002:merge> x: {pip: {requirement-files: [r.txt]}}\n",
+        "name: gale\npackage-managers:\n  !!merge \"zz\": {pip: {requirement-files: [r.txt]}}\n",
+        "name: gale\n!!merge x: {package-managers: {pip: {requirement-files: [r.txt]}}}\n",
+        "name: gale\n!!merge x: {build: {depends: [ghost]}}\n",
+        "name: gale\nbuild:\n  !!merge x: {depends: [ghost]}\n",
+        "!!merge x: {name: other}\n",
+        "name: !!str gale\n",
+        "name: gale\nbuild:\n  depends: !!seq [a]\n",
+        "name: gale\nbuild: !local {cmake: .}\n",
+    ];
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn any_yaml_tag_in_module_yml_is_refused_at_every_depth() {
+        for yml in MERGE_SPELLINGS {
+            let e = parse_module_yml("gale", yml).expect_err(yml);
+            assert!(
+                matches!(&e, ZephyrModuleError::TaggedModuleYml { payload, .. } if payload == "gale"),
+                "{yml:?} -> {e:?}"
+            );
+            // At deposit, at the archive root and inside a wrapper directory.
+            for (path, other) in [
+                ("zephyr/module.yml", "CMakeLists.txt"),
+                (
+                    "wrapper-1.0/zephyr/module.yml",
+                    "wrapper-1.0/CMakeLists.txt",
+                ),
+            ] {
+                let a = archive(&[(path, yml), (other, "x")]);
+                let e = check_deposit("gale", &a, None).expect_err(yml);
+                assert!(
+                    matches!(e, ZephyrModuleError::TaggedModuleYml { .. }),
+                    "{path} {yml:?}: {e:?}"
+                );
+            }
+        }
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn the_tag_refusal_names_the_tag() {
+        let e = parse_module_yml("gale", MERGE_SPELLINGS[0]).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("merge") && msg.contains("gale"), "{msg}");
+        let e = parse_module_yml("gale", "name: !local gale\n").unwrap_err();
+        assert!(e.to_string().contains("local"), "{e}");
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_bang_that_is_not_a_tag_is_not_refused() {
+        for yml in [
+            "name: \"a!!merge b\"\n",
+            "name: 'x !!merge y'\nbuild:\n  depends: ['!z', \"!!w\"]\n",
+            "# !!merge x: {pip: {}}\nname: gale  # !!str trailing\n",
+            "name: gale\ndescription: |\n  !!merge x: {pip: {}}\n  text\nbuild:\n  cmake: .\n",
+            "name: gale\ndescription: >\n  !<tag:yaml.org,2002:merge> folded\n",
+            "name: gale!\n",
+            "name: wow!!\n",
+        ] {
+            let y = parse_module_yml("gale", yml).unwrap_or_else(|e| panic!("{yml:?}: {e}"));
+            assert_eq!(y.pip, None, "{yml:?}");
+        }
+        // A normal module.yml passes.
+        let y =
+            parse_module_yml("gale", "name: gale\nbuild:\n  cmake: .\n  depends: [a]\n").unwrap();
+        assert_eq!(y.depends, strings(&["a"]));
+    }
+
+    /// The untagged merge key `<<` is understood by both parsers, so it must
+    /// not hide pip either.
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn the_plain_merge_key_cannot_hide_pip_either() {
+        let y = parse_module_yml(
+            "p",
+            "x: &a {pip: {requirement-files: [r.txt]}}\npackage-managers:\n  <<: *a\n",
+        );
+        // Refusing it is as safe as seeing through it.
+        if let Ok(y) = y {
+            assert_eq!(y.pip, Some(strings(&["r.txt"])));
+        }
     }
 
     // rivet: verifies REQ-ZMODEXPORT-001

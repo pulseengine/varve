@@ -3065,10 +3065,19 @@ fn export_zephyr_modules(
     let target = export_target(store, layer)?;
     let layers = composition_for_export(&target)?;
     report_composition(&layers);
-    let payloads: Vec<(String, Vec<u8>)> =
+    // The pip opt-in is read from the SIGNED annotation and re-checked by
+    // `prepare`: a layer signed before the deposit rule existed must not export
+    // a module that brings Python.
+    let payloads: Vec<varve_core::zephyrmodule::ModulePayload> =
         collect_verified_payloads(&layers, varve_core::PayloadKind::ZephyrModule)?
             .into_iter()
-            .map(|p| (p.name, p.bytes))
+            .map(|p| varve_core::zephyrmodule::ModulePayload {
+                allow_pip: p
+                    .annotation(varve_core::zephyrmodule::ANN_ALLOW_PIP)
+                    .map(varve_core::zephyrmodule::allow_pip_from_annotation),
+                name: p.name,
+                bytes: p.bytes,
+            })
             .collect();
     let modules = varve_core::zephyrmodule::prepare(&payloads, select)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -3088,6 +3097,9 @@ fn export_zephyr_modules(
     );
     for (name, dir) in &report.modules {
         println!("  {name}  {dir}");
+    }
+    for name in &report.removed {
+        println!("  removed {name}  (a module of the previous export this one no longer carries)");
     }
     let script = out.join(varve_core::zephyrmodule::CMAKE_FILE);
     println!(

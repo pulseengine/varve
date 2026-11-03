@@ -9463,3 +9463,88 @@ fn a_re_export_replaces_what_varve_wrote_and_refuses_what_it_did_not() {
     );
     assert!(!mine.join(".varve-export.json").exists());
 }
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn a_stamp_that_swept_up_the_users_directory_does_not_let_a_re_export_delete_it() {
+    // The reviewer's reproduction: the stamp hashes everything under --out.
+    let (fx, root) = zephyr_layer(&[
+        ("gale", zephyr_module("gale", &[])),
+        ("hal", zephyr_module("hal", &[])),
+    ]);
+    let parent = fx.project.parent().unwrap();
+    let out = parent.join("zmods");
+    std::fs::create_dir_all(out.join("hal")).unwrap();
+    std::fs::write(out.join("hal/MARKER"), "my own hal").unwrap();
+    let export = |extra: &[&str]| {
+        varve(&fx)
+            .env("VARVE_TRUST_ROOT", &root.trust_root)
+            .args(["export-zephyr-modules", "--layer", "2026.07.0", "--out"])
+            .arg(&out)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    // `hal/` is the user's, so even the FIRST export of {gale, hal} refuses.
+    assert_eq!(export(&[]).status.code(), Some(1));
+    assert!(export(&["--select", "gale"]).status.success());
+    assert!(
+        stamp_of(&out)["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "hal/MARKER"),
+        "the stamp swept up the user's file, as the review found"
+    );
+    let res = export(&[]);
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+    assert_eq!(res.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("was not written by varve export-zephyr-modules"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("hal/MARKER")).unwrap(),
+        "my own hal"
+    );
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn a_module_dropped_from_a_re_export_is_removed_and_the_export_still_verifies() {
+    let (fx, root) = zephyr_layer(&[
+        ("alpha", zephyr_module("alpha", &[])),
+        ("beta", zephyr_module("beta", &[])),
+    ]);
+    let parent = fx.project.parent().unwrap();
+    let out = parent.join("zmods");
+    let export = |extra: &[&str]| {
+        varve(&fx)
+            .env("VARVE_TRUST_ROOT", &root.trust_root)
+            .args(["export-zephyr-modules", "--layer", "2026.07.0", "--out"])
+            .arg(&out)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    assert!(export(&[]).status.success());
+    std::fs::create_dir_all(out.join("mine")).unwrap();
+    std::fs::write(out.join("mine/KEEP"), "k").unwrap();
+    let res = export(&["--select", "alpha"]);
+    assert!(
+        res.status.success(),
+        "{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    assert!(String::from_utf8_lossy(&res.stdout).contains("removed beta"));
+    assert!(!out.join("beta").exists(), "a leftover module survived");
+    assert!(out.join("alpha/zephyr/module.yml").is_file());
+    assert!(
+        out.join("mine/KEEP").is_file(),
+        "a user directory was touched"
+    );
+    let v = verify_export(&fx, &root, &out);
+    // `mine/KEEP` was not in the stamp (it was added after the first export,
+    // but the second export re-stamped over it), so this stays consistent.
+    assert!(v.status.success(), "{}", String::from_utf8_lossy(&v.stderr));
+}

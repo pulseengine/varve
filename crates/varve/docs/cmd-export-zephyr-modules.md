@@ -92,9 +92,24 @@ exported module fails it, and so does a missing directory.
   description. On a case-insensitive file system one would overwrite the other
   at export, replacing the checked description with an unchecked one. Refused at
   deposit.
-- **A `<out>/<name>/` varve did not write.** An export replaces a module
-  directory only when `<out>` carries a `zephyr-module` stamp listing files
-  under it; otherwise it refuses (`exists and was not written by varve
+- **A YAML tag anywhere in `module.yml`** (`!!merge`, `!<tag:…>`, `!local`).
+  Zephyr's own reader treats a key tagged `!!merge` as a merge key and varve's
+  does not, so a tag could hide `package-managers: pip` or `build: depends` from
+  varve's checks while Zephyr still honours them. Real module files use none.
+  A `!` inside a quoted string, a comment or a block scalar is not a tag.
+- **A pip module without the signed opt-in, at export too.** The rule is
+  re-checked against the layer's signed `allow-pip`, so a layer signed before
+  the deposit rule existed cannot export one.
+- **A path CMake cannot carry**: `--out` containing `;`, `[`, `]`, `\` or a
+  control character. Everything is checked before any tree is written.
+- **A script or stamp varve did not write**, or a symlink in their place.
+- **A `<out>/<name>/` varve did not write.** Each module directory varve
+  creates holds a `.varve-zephyr-module` marker. An export replaces a module
+  directory only when it carries that marker AND `<out>` carries a
+  `zephyr-module` stamp (the stamp alone proves nothing: it lists whatever was
+  under `<out>`). Directories of a previous export whose modules this export no
+  longer carries are removed; directories without the marker are never touched.
+  Otherwise it refuses (`exists and was not written by varve
   export-zephyr-modules; remove it or choose another --out`) before writing or
   deleting anything, so a checkout of your own is never removed.
 
