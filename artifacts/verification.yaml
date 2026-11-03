@@ -3494,3 +3494,21 @@ artifacts:
         target: REQ-ADVISORYWATCH-002
       - type: verifies
         target: REQ-COMPOSEWINDOW-002
+
+  - id: VER-REVIEW-ZMODEXPORT-001
+    type: verification
+    title: "REQ-ZMODEXPORT-001 independently reviewed twice: one high and one medium defect fixed test-first, the fixes held on re-review"
+    status: verified
+    release: v0.44.0
+    description: The recorded independent review of the Zephyr module export (REQ-INDEP-001, DD-019), advisory at v0.x. The first fresh-context review found a HIGH and a MEDIUM. A second fresh-context review tried to break both fixes and found nothing at medium or above.
+    fields:
+      baseline: "First review, 2026-11-03: HIGH, a YAML !!merge tag let PyYAML (Zephyr's loader) see package-managers: pip while serde-saphyr did not, bypassing the pip opt-in; MEDIUM, re-export deleted a pre-existing directory varve had not written. Both fixed in 2aef425: every YAML tag is refused using granit-parser events; a .varve-zephyr-module marker; only marked directories are replaced; validation runs before any write; nothing is written through a symlink; pip is re-checked at export. A security-hook finding (the opt-in was looked up by module name) was fixed in 8f8b6d8: each module carries its own allow_pip. Mutants: 92 tested, 86 caught, 6 unviable, 0 missed. Re-review, 2026-11-04, refute-framed: about 70 module.yml probes compared against PyYAML CSafeLoader. Every tag form is refused (!!merge in block and flow, verbatim, a %TAG handle). Plain << merges agree in both parsers. Wherever the parsers disagree, varve is the stricter one. The directory-deletion scenario held, including a symlinked marker, a symlinked module directory, a foreign stamp and a case-only rename. Low residuals, recorded and not fixed: (1) a hand-forged marker under a zephyr stamp licenses deletion of that directory, by design; (2) the reserved marker name is checked before the wrapper is stripped, so a signed payload carrying it fails mid-export and leaves a half export; (3) --out is created before the cmake quoting check, which leaves an empty directory; (4) a failed first export leaves marked directories with no stamp, so a rerun is refused until they are removed by hand. Not covered: Windows, non-UTF-8 --out paths, real cmake beyond the existing real_cmake test."
+      method: review
+      steps: cargo test -p varve-core --lib zephyrmodule; cargo test -p varve --test cli zephyr; tools/systest/zephyr-export.sh
+    links:
+      - type: verifies
+        target: REQ-ZMODEXPORT-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-03T23:24:57Z

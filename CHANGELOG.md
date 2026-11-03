@@ -8,7 +8,9 @@ are checked for what they hold.*
 
 Scope, trimmed by the maintainer on 2026-10-29 to what is built: REQ-ROLLBACK-002,
 REQ-SHIMFALLBACK-001, REQ-EXPORTCONTENT-001, REQ-AGENTDOCS-001, REQ-AGENTDOCS-002,
-REQ-SERVELAYER-001, REQ-ADVISORYWATCH-002 and REQ-COMPOSEWINDOW-002. Work that was planned and not built moved to v0.45.0 (see "Moved to
+REQ-SERVELAYER-001, REQ-ADVISORYWATCH-002 and REQ-COMPOSEWINDOW-002, plus
+REQ-ZMODEXPORT-001 (clauses 1, 2 and 5 and the `build: depends` closure), added
+on 2026-11-03. Work that was planned and not built moved to v0.45.0 (see "Moved to
 v0.45.0").
 
 ### Upgrading: behaviour that changes
@@ -51,9 +53,27 @@ v0.45.0").
     exact page for a named type.
 * **`varve-serve --layer` is honoured everywhere (REQ-SERVELAYER-001, #286)**, and
   every command it prints carries the same `--layer`.
+* **Zephyr modules without Python or a west.yml edit (REQ-ZMODEXPORT-001).**
+  - A `zephyr-module` payload must carry `zephyr/module.yml`, or the deposit
+    refuses it.
+  - `varve export-zephyr-modules --out D` writes each module and
+    `D/zephyr-extra-modules.cmake`, used as
+    `west build ... -- -C D/zephyr-extra-modules.cmake` or in a plain cmake build.
+  - A module whose `build: depends` names a module the export does not carry is
+    refused.
+  - A module that declares `package-managers: pip` is refused unless the layer
+    records an opt-in for it, and that opt-in is checked again at export.
+  - Not yet: the check for a name clash with the workspace's own modules, and
+    the offline gale build. Both are REQ-ZMODEXPORT-002, in v0.45.0.
 
 ### Security
 
+* **Zephyr export review findings, fixed before release.**
+  - `module.yml` refuses every YAML tag. A `!!merge` tag let PyYAML see a pip
+    requirement that varve's parser did not.
+  - Re-export replaces only directories varve marked as its own, and never
+    writes through a symlink.
+  - Duplicate module names that differ only in case are refused.
 * **Review findings (v0.44.0 clean-room review).**
   - Printed commands now quote every layer-supplied word.
   - A qualified advisory becomes certain when an exact match arrives under an
