@@ -1,5 +1,79 @@
 # Changelog
 
+## v0.44.0 — 2026-11-04
+
+*A digest in your pin is consent to install below the machine's anti-rollback
+mark, an agent learns what a pin holds without running every tool, and exports
+are checked for what they hold.*
+
+Scope, trimmed by the maintainer on 2026-10-29 to what is built: REQ-ROLLBACK-002,
+REQ-SHIMFALLBACK-001, REQ-EXPORTCONTENT-001, REQ-AGENTDOCS-001, REQ-AGENTDOCS-002,
+REQ-SERVELAYER-001, REQ-ADVISORYWATCH-002 and REQ-COMPOSEWINDOW-002. Work that was planned and not built moved to v0.45.0 (see "Moved to
+v0.45.0").
+
+### Upgrading: behaviour that changes
+
+* **`varve verify --export` re-hashes the exported tree** (#288). A file changed,
+  removed or added after export now fails, naming the first such path. A stamp
+  written by an earlier varve has no content digest and is reported
+  UNVERIFIABLE. Re-run the export once to fix it.
+* **A shim for a tool the pin does not carry still refuses**, and now lists what
+  you can do instead: the binary on PATH, with a command that runs it directly,
+  and installed layers that carry the tool, with the pin line that selects them
+  (#273).
+* **`support-horizon --manifest` refuses an include that was out of support
+  before the composition's issue date**, even with `--past-includes` (#285). The
+  cap also holds through includes of includes.
+* **The advisory watch reports more, and says how sure it is.**
+  - A crate payload is checked against RustSec by its own name.
+  - Every SBOM component is checked or reported unchecked, with its reason.
+  - An advisory that names a sibling crate of the payload's repository is a
+    *qualified* finding (`detection: "qualified: …"`), not silence. That
+    restores wasmtime's GHSA-m9f7-9w4p-gv38.
+
+### New
+
+* **Digest consent (REQ-ROLLBACK-002, #256).** A layer the project pins by digest
+  installs below this machine's anti-rollback mark when the line's newest signed
+  line-status reports it supported and not yanked, and the install says so.
+  These still refuse: a pin by name; a yanked layer; one past its support
+  window; one below the line's floor; one with no verifiable status. The mark
+  never lowers. A registry replaying an older status cannot undo a yank.
+* **`varve-serve context` and `varve-serve ask` (REQ-AGENTDOCS-001/002).**
+  - `context` prints an orientation: every tool's own help line, subcommands and
+    caveats, the held payloads with the command that gets each out, and names a
+    tool points to that the pin does not carry.
+  - `ask "<words>"` returns pointers into the verified docs, each with the exact
+    command that opens it. Commands are quoted so a layer cannot inject into
+    them, and no docs text is printed.
+  - Measured against fresh agents in `evals/agent-context/`: 2–4 fewer tool calls
+    a session, the same correctness, and the only setup that reliably finds the
+    exact page for a named type.
+* **`varve-serve --layer` is honoured everywhere (REQ-SERVELAYER-001, #286)**, and
+  every command it prints carries the same `--layer`.
+
+### Security
+
+* **Review findings (v0.44.0 clean-room review).**
+  - Printed commands now quote every layer-supplied word.
+  - A qualified advisory becomes certain when an exact match arrives under an
+    alias.
+  - The composition walk compares dates as dates and is bounded.
+
+### Moved to v0.45.0
+
+REQ-KEYROLES-001, REQ-DOCSINLAYER-001, REQ-BUILTINDOCS-001, REQ-EVIDENCE-001,
+REQ-VERIFYPAR-001, and the split-off clauses REQ-AGENTDOCS-004/005,
+REQ-COMPOSEWINDOW-003 and REQ-ADVISORYWATCH-003. Also
+REQ-MIRROR-002: realm mirrors are parsed and never used (#301). REQ-MIRROR-001 is
+demoted from verified to implemented until that lands.
+
+### Known
+
+* varve's own `varve.toml` pins 2026.09.12 by name. On a machine that has seen a
+  newer 2026.09 layer it is refused as a rollback; pinning it by digest fixes
+  that with this release.
+
 ## v0.43.0 — 2026-10-22
 
 *An advisory arrives as a prepared line-status, a composition's support is capped

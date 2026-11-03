@@ -3466,3 +3466,31 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-10-21T16:53:38Z
+
+  - id: VER-REVIEW-V0-44-0
+    type: verification
+    title: "v0.44.0 independently reviewed: PARTIAL, four medium defects reproduced and fixed test-first before promotion"
+    status: verified
+    release: v0.44.0
+    description: The recorded independent review for v0.44.0 (REQ-INDEP-001, DD-019). It is advisory at v0.x. The review dissented on four of the eight requirements, and every reproduced defect was fixed before any requirement was promoted.
+    fields:
+      baseline: "Independent clean-room review (fresh context, refute-framed) of the v0.44.0 scope at 8569298 (main 04ca5d9 plus #303), 2026-10-29. Verdicts: REQ-EXPORTCONTENT-001 CONFIRMED; REQ-SHIMFALLBACK-001 CONFIRMED with minor caveats (shim exclusion compares directories; a cross-realm carrier gets a placeholder pin line); REQ-ROLLBACK-002 CONFIRMED (a mutation of newest-status-wins was killed); REQ-AGENTDOCS-001/002 and REQ-SERVELAYER-001 PARTIAL: defect A, printed commands not shell-safe for tool names, the wit package@version and documents; defect B, printed commands dropped --layer; REQ-ADVISORYWATCH-002 PARTIAL: defect C, a qualified GHSA stayed qualified when an exact RUSTSEC alias existed, and was never upgraded across runs; REQ-COMPOSEWINDOW-002 PARTIAL: defect D, the CLI wiring had no system test (passing 1970-01-01 for issued-at survived). ALL FOUR FIXED test-first before promotion: A and B (every layer-supplied word through shell_word, --layer on every printed command and global; mutants 147 tested, 0 missed); C (alias-aware unify and a cross-run upgrade of the watch's own qualifier; 205 tested, 0 missed); D (a CLI test for an include expired at issue, which fails under the reviewer's exact mutation). Low residuals recorded, not fixed: unsigned harvest cache, size budget measured on a fixture, depth bound allows 17, node cap per top-level include, a crate payload with no repo not checked against RustSec. The reviewer used the ambient rivet 0.38.0, not the pinned one; CI's pinned rivet is the arbiter."
+      method: review
+      steps: cargo test --workspace; cargo test -p varve --test cli support_horizon_refuses_an_include_already_expired_at_issue; cargo test -p varve-serve --test serve_layer
+    links:
+      - type: verifies
+        target: REQ-ROLLBACK-002
+      - type: verifies
+        target: REQ-SHIMFALLBACK-001
+      - type: verifies
+        target: REQ-EXPORTCONTENT-001
+      - type: verifies
+        target: REQ-AGENTDOCS-001
+      - type: verifies
+        target: REQ-AGENTDOCS-002
+      - type: verifies
+        target: REQ-SERVELAYER-001
+      - type: verifies
+        target: REQ-ADVISORYWATCH-002
+      - type: verifies
+        target: REQ-COMPOSEWINDOW-002
