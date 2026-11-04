@@ -35,6 +35,7 @@
 
 use crate::source::{LayerRef, LayerSource, SourceError};
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 /// One named place a realm's layers can be obtained from.
 pub struct Mirror {
@@ -54,6 +55,34 @@ pub struct Mirrors {
     served_by: RefCell<Option<String>>,
     /// Why each earlier source did not answer, for the error if none does.
     attempts: RefCell<Vec<(String, String)>>,
+    /// The realm to name when telling the user a mirror answered. `None` for
+    /// a source set that is not a realm's (an explicit `--from`).
+    announce_for: Option<String>,
+    /// Mirrors already announced, so one install says it once, not once per
+    /// blob.
+    announced: RefCell<BTreeSet<String>>,
+    notices: RefCell<Vec<String>>,
+}
+
+/// Turn one source string into a source. An `oci://` / `oci+http://`
+/// reference is a registry; anything else is a path to an OCI image layout
+/// (the `varve archive` / `deposit` output) or a plain `manifests/` + `blobs/`
+/// directory. The shape changes availability, never acceptance.
+pub fn source_from_spec(spec: &str, platform: &str) -> Result<Box<dyn LayerSource>, SourceError> {
+    if spec.starts_with("oci://") || spec.starts_with("oci+http://") {
+        return Ok(Box::new(crate::RegistrySource::parse(spec)?));
+    }
+    let path = std::path::Path::new(spec);
+    if path.join("oci-layout").is_file() {
+        // Tell the layout which platform we want, so a payload it does not
+        // carry is reported as the single-platform archive it is rather than
+        // as a bare missing digest (varve#80).
+        Ok(Box::new(
+            crate::OciLayoutSource::at(path).for_platform(platform),
+        ))
+    } else {
+        Ok(Box::new(crate::DirSource::at(path)))
+    }
 }
 
 impl Mirrors {
@@ -62,6 +91,115 @@ impl Mirrors {
             mirrors,
             served_by: RefCell::new(None),
             attempts: RefCell::new(Vec::new()),
+            announce_for: None,
+            announced: RefCell::new(BTreeSet::new()),
+            notices: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The sources a realm declares, primary first and then its mirrors in the
+    /// order written (REQ-MIRROR-002 clause 1). `realm.sources` is the one
+    /// list; nothing else may decide where a realm's bytes come from.
+    ///
+    /// Tells the user on stderr, naming `realm_name`, whenever a source other
+    /// than the primary answers (clause 3).
+    pub fn for_realm(
+        realm_name: &str,
+        sources: &[String],
+        platform: &str,
+    ) -> Result<Self, SourceError> {
+        let mut mirrors = Vec::with_capacity(sources.len());
+        for spec in sources {
+            mirrors.push(Mirror {
+                label: spec.clone(),
+                source: source_from_spec(spec, platform)?,
+            });
+        }
+        let mut m = Mirrors::new(mirrors);
+        m.announce_for = Some(realm_name.to_string());
+        Ok(m)
+    }
+
+    /// One source, no realm: an explicit `--from`. Nothing to fail over to and
+    /// nothing to announce.
+    pub fn single(spec: &str, platform: &str) -> Result<Self, SourceError> {
+        Ok(Mirrors::new(vec![Mirror {
+            label: spec.to_string(),
+            source: source_from_spec(spec, platform)?,
+        }]))
+    }
+
+    /// Run a WHOLE operation (fetch AND verify) against each source in turn
+    /// until one succeeds. The per-fetch failover of `LayerSource for Mirrors`
+    /// cannot do this: it only sees transport errors, so bytes that fail the
+    /// realm's trust root would end the install instead of moving on
+    /// (REQ-MIRROR-002 clause 2). Here the closure verifies, so "did not
+    /// verify" is a reason to try the next source, and every source's bytes
+    /// are judged by the same root because the closure is the same.
+    ///
+    /// Returns the value, or every source's failure in order.
+    pub fn attempt<T, E>(
+        &self,
+        mut f: impl FnMut(&dyn LayerSource) -> Result<T, E>,
+    ) -> Result<T, Vec<(String, E)>> {
+        let mut failures: Vec<(String, E)> = Vec::new();
+        for (i, m) in self.mirrors.iter().enumerate() {
+            match f(m.source.as_ref()) {
+                Ok(v) => {
+                    *self.served_by.borrow_mut() = Some(m.label.clone());
+                    if i > 0 {
+                        let why = failures
+                            .iter()
+                            .map(|(l, _)| l.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        self.announce(
+                            &m.label,
+                            &format!("{why} did not supply a layer that verified"),
+                        );
+                    }
+                    return Ok(v);
+                }
+                Err(e) => failures.push((m.label.clone(), e)),
+            }
+        }
+        Err(failures)
+    }
+
+    /// Say, once per source, that a mirror and not the primary answered.
+    fn announce(&self, label: &str, why: &str) {
+        let Some(realm) = &self.announce_for else {
+            return;
+        };
+        if !self.announced.borrow_mut().insert(label.to_string()) {
+            return;
+        }
+        let primary = self.mirrors.first().map_or("", |m| m.label.as_str());
+        let notice = format!(
+            "note: realm '{realm}': primary {primary} was not used ({why}); answered by mirror \
+             {label}. A mirror is transport only: its bytes are accepted only if they verify \
+             against the realm's trust root."
+        );
+        eprintln!("{notice}");
+        self.notices.borrow_mut().push(notice);
+    }
+
+    /// What the user was told about sources, in order. Kept so the wording and
+    /// the once-per-source rule are testable without capturing stderr.
+    pub fn notices(&self) -> Vec<String> {
+        self.notices.borrow().clone()
+    }
+
+    fn note_served(&self, index: usize) {
+        if index > 0 {
+            let why = self
+                .attempts
+                .borrow()
+                .iter()
+                .map(|(l, e)| format!("{l}: {e}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.announce(&self.mirrors[index].label, &why);
         }
     }
 
@@ -100,10 +238,11 @@ impl Mirrors {
                 "this realm declares no sources at all".into(),
             ));
         }
-        for m in &self.mirrors {
+        for (i, m) in self.mirrors.iter().enumerate() {
             match f(m.source.as_ref()) {
                 Ok(v) => {
                     *self.served_by.borrow_mut() = Some(m.label.clone());
+                    self.note_served(i);
                     return Ok(v);
                 }
                 Err(e) => {
@@ -162,23 +301,31 @@ impl LayerSource for Mirrors {
     ) -> Result<Vec<crate::attestcarry::CarriedAttestation>, SourceError> {
         self.try_each("the attestations", |s| s.fetch_attestations(layer))
     }
+
+    fn served_layers(&self, line: &str) -> Result<Option<Vec<String>>, SourceError> {
+        // Left at the trait default this would say `Ok(None)` ("cannot
+        // enumerate") for a realm whose primary CAN, silently switching off
+        // the omission check. Delegated like every other fetch.
+        self.try_each_optional("the served layers", |s| s.served_layers(line))
+    }
 }
 
 impl Mirrors {
     /// For the `Option`-returning fetches: a source that returns `None` has
     /// answered honestly, but another source may still carry the document, so
     /// keep looking and report `None` only when nobody has it.
-    fn try_each_optional(
+    fn try_each_optional<T>(
         &self,
         what: &str,
-        mut f: impl FnMut(&dyn LayerSource) -> Result<Option<Vec<u8>>, SourceError>,
-    ) -> Result<Option<Vec<u8>>, SourceError> {
+        mut f: impl FnMut(&dyn LayerSource) -> Result<Option<T>, SourceError>,
+    ) -> Result<Option<T>, SourceError> {
         self.attempts.borrow_mut().clear();
         let mut any_answered = false;
-        for m in &self.mirrors {
+        for (i, m) in self.mirrors.iter().enumerate() {
             match f(m.source.as_ref()) {
                 Ok(Some(v)) => {
                     *self.served_by.borrow_mut() = Some(m.label.clone());
+                    self.note_served(i);
                     return Ok(Some(v));
                 }
                 Ok(None) => {
@@ -542,5 +689,220 @@ mod tests {
             Some(b"status".to_vec())
         );
         assert_eq!(m.served_by().as_deref(), Some("b"));
+    }
+
+    // ---- REQ-MIRROR-002 ----
+
+    /// A source that can only enumerate, for the `served_layers` delegation.
+    struct Serves(Option<Vec<String>>);
+    impl LayerSource for Serves {
+        fn fetch_manifest(&self, _l: &LayerRef) -> Result<Vec<u8>, SourceError> {
+            Err(SourceError::NotFound("x".into()))
+        }
+        fn fetch_blob(&self, _d: &str) -> Result<Vec<u8>, SourceError> {
+            Err(SourceError::NotFound("x".into()))
+        }
+        fn served_layers(&self, _line: &str) -> Result<Option<Vec<String>>, SourceError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn realm_mirrors(v: Vec<(&str, Box<Fake>)>) -> Mirrors {
+        let mut m = mirrors(v);
+        m.announce_for = Some("acme".into());
+        m
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn served_layers_is_delegated_not_left_at_the_cannot_enumerate_default() {
+        let m = Mirrors::new(vec![Mirror {
+            label: "primary".into(),
+            source: Box::new(Serves(Some(vec!["2026.10.0".into()]))),
+        }]);
+        assert_eq!(
+            m.served_layers("2026.10").unwrap(),
+            Some(vec!["2026.10.0".to_string()])
+        );
+        let none = Mirrors::new(vec![Mirror {
+            label: "primary".into(),
+            source: Box::new(Serves(None)),
+        }]);
+        assert_eq!(none.served_layers("2026.10").unwrap(), None);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn served_layers_reaches_a_mirror_that_can_enumerate_past_one_that_cannot() {
+        let m = Mirrors::new(vec![
+            Mirror {
+                label: "a".into(),
+                source: Box::new(Serves(None)),
+            },
+            Mirror {
+                label: "b".into(),
+                source: Box::new(Serves(Some(vec!["l".into()]))),
+            },
+        ]);
+        assert_eq!(m.served_layers("x").unwrap(), Some(vec!["l".to_string()]));
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn attempt_returns_the_first_success_and_asks_no_further() {
+        let m = realm_mirrors(vec![("primary", ok(b"p")), ("mirror", ok(b"m"))]);
+        let mut asked = 0;
+        let v: Result<u32, Vec<(String, String)>> = m.attempt(|_s| {
+            asked += 1;
+            Ok(7)
+        });
+        assert_eq!(v.unwrap(), 7);
+        assert_eq!(asked, 1);
+        assert_eq!(m.served_by().as_deref(), Some("primary"));
+        assert!(m.notices().is_empty(), "the primary answered");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn attempt_moves_on_when_a_source_fails_verification_and_names_the_mirror() {
+        let m = realm_mirrors(vec![("primary", ok(b"p")), ("mirror", ok(b"m"))]);
+        let mut n = 0;
+        let v: Result<&str, Vec<(String, String)>> = m.attempt(|_s| {
+            n += 1;
+            if n == 1 {
+                Err("signature does not verify".to_string())
+            } else {
+                Ok("fine")
+            }
+        });
+        assert_eq!(v.unwrap(), "fine");
+        assert_eq!(m.served_by().as_deref(), Some("mirror"));
+        let notices = m.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        for needle in ["acme", "primary", "mirror", "trust root"] {
+            assert!(notices[0].contains(needle), "{needle}: {}", notices[0]);
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn attempt_reports_every_source_failure_in_order_when_none_succeeds() {
+        let m = realm_mirrors(vec![("a", ok(b"p")), ("b", ok(b"m")), ("c", ok(b"c"))]);
+        let r: Result<(), Vec<(String, String)>> = m.attempt(|_s| Err("no".to_string()));
+        let failures = r.unwrap_err();
+        let labels: Vec<_> = failures.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["a", "b", "c"]);
+        assert!(m.notices().is_empty(), "nobody answered");
+        assert_eq!(m.served_by(), None);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_mirror_answering_a_fetch_is_announced_once_not_per_fetch() {
+        let m = realm_mirrors(vec![
+            ("primary", down("connection refused")),
+            ("mirror", ok(b"m")),
+        ]);
+        m.fetch_manifest(&LayerRef::Digest("d".into())).unwrap();
+        m.fetch_blob("sha256:x").unwrap();
+        m.fetch_line_status(&LayerRef::Digest("d".into())).unwrap();
+        let notices = m.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("connection refused"), "{}", notices[0]);
+        assert!(notices[0].contains("mirror"));
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_primary_answering_is_never_announced() {
+        let m = realm_mirrors(vec![("primary", ok(b"p")), ("mirror", ok(b"m"))]);
+        m.fetch_manifest(&LayerRef::Digest("d".into())).unwrap();
+        m.fetch_line_status(&LayerRef::Digest("d".into())).unwrap();
+        assert!(m.notices().is_empty());
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_source_set_that_is_not_a_realm_announces_nothing() {
+        let m = mirrors(vec![("primary", down("x")), ("mirror", ok(b"m"))]);
+        m.fetch_manifest(&LayerRef::Digest("d".into())).unwrap();
+        assert!(m.notices().is_empty());
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn for_realm_orders_sources_primary_first_then_mirrors_as_written() {
+        let m = Mirrors::for_realm(
+            "acme",
+            &[
+                "oci://primary.example/r".to_string(),
+                "oci+http://127.0.0.1:1/r".to_string(),
+                "/nonexistent/dir".to_string(),
+            ],
+            "linux-x86_64",
+        )
+        .unwrap();
+        assert_eq!(
+            m.labels(),
+            [
+                "oci://primary.example/r",
+                "oci+http://127.0.0.1:1/r",
+                "/nonexistent/dir"
+            ]
+        );
+        assert_eq!(m.announce_for.as_deref(), Some("acme"));
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn for_realm_refuses_a_malformed_source_instead_of_dropping_it() {
+        assert!(Mirrors::for_realm("acme", &["oci://".to_string()], "p").is_err());
+        assert!(Mirrors::for_realm("acme", &["oci+http://nohost".to_string()], "p").is_err());
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn single_is_one_source_with_nobody_to_announce_to() {
+        let m = Mirrors::single("oci://r.example/x", "p").unwrap();
+        assert_eq!(m.labels(), ["oci://r.example/x"]);
+        assert_eq!(m.announce_for, None);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn source_from_spec_tells_a_registry_a_layout_and_a_plain_directory_apart() {
+        // A plain directory is a DirSource: it serves what `put` wrote.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plain");
+        crate::DirSource::at(&dir)
+            .put(b"manifest-bytes", &[])
+            .unwrap();
+        let src = source_from_spec(dir.to_str().unwrap(), "p").unwrap();
+        let digest = crate::store::manifest_digest(b"manifest-bytes");
+        assert_eq!(
+            src.fetch_manifest(&LayerRef::Digest(digest)).unwrap(),
+            b"manifest-bytes".to_vec()
+        );
+        // A directory with an `oci-layout` marker is read as a layout, so it
+        // does NOT serve a DirSource's files.
+        let layout = tmp.path().join("layout");
+        std::fs::create_dir_all(&layout).unwrap();
+        std::fs::write(
+            layout.join("oci-layout"),
+            r#"{"imageLayoutVersion":"1.0.0"}"#,
+        )
+        .unwrap();
+        crate::DirSource::at(&layout)
+            .put(b"manifest-bytes", &[])
+            .unwrap();
+        let src = source_from_spec(layout.to_str().unwrap(), "p").unwrap();
+        let digest = crate::store::manifest_digest(b"manifest-bytes");
+        assert!(src.fetch_manifest(&LayerRef::Digest(digest)).is_err());
+        // Both registry schemes are registries (and a bad one is an error,
+        // not a directory named "oci://...").
+        assert!(source_from_spec("oci://r.example/x", "p").is_ok());
+        assert!(source_from_spec("oci+http://127.0.0.1:1/x", "p").is_ok());
+        assert!(source_from_spec("oci://", "p").is_err());
+        assert!(source_from_spec("oci+http://", "p").is_err());
     }
 }

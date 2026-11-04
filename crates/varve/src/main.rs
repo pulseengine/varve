@@ -2119,7 +2119,7 @@ struct DefinedRealms {
     realms: std::collections::BTreeMap<
         String,
         (
-            varve_core::RegistrySource,
+            varve_core::mirror::Mirrors,
             varve_core::PinnedKeyVerifier,
             Vec<u8>,
         ),
@@ -2132,7 +2132,13 @@ impl DefinedRealms {
         if let Ok(names) = varve_core::realm::realm_names(cwd) {
             for name in names {
                 let realm = varve_core::resolve_realm(cwd, &name)?;
-                let source = varve_core::RegistrySource::parse(&realm.registry)?;
+                // Primary then mirrors (REQ-MIRROR-002): a down primary must
+                // not fail a realm that declares working mirrors.
+                let source = varve_core::mirror::Mirrors::for_realm(
+                    &realm.name,
+                    &realm.sources,
+                    &varve_core::host_platform(),
+                )?;
                 let verifier =
                     varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
                         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -2157,6 +2163,23 @@ impl varve_core::support::RealmAccess for DefinedRealms {
             root,
         })
     }
+}
+
+/// Fold every source's failure into one error, listed in the order tried, so
+/// an operator sees that the mirror was asked and what it said.
+fn all_sources_failed<E: std::fmt::Display>(
+    realm: &str,
+    failures: Vec<(String, E)>,
+) -> anyhow::Error {
+    let listing = failures
+        .iter()
+        .map(|(label, e)| format!("\n  {label}: {e}"))
+        .collect::<String>();
+    anyhow::anyhow!(
+        "no source of realm '{realm}' supplied a layer that verifies against the realm's trust \
+         root. Tried {} source(s) in order:{listing}",
+        failures.len()
+    )
 }
 
 fn realm_roots(
@@ -3758,7 +3781,7 @@ fn fetch_included_layer(
     // realm 'pulseengine'" and succeeded, and the very next command said the
     // layer was not installed, because the composition walk looks for siblings.
     let store = Store::at(realm.effective_root(&ctx.base_root));
-    let source = varve_core::RegistrySource::parse(&realm.registry)?;
+    let sources = varve_core::mirror::Mirrors::for_realm(&realm.name, &realm.sources, platform)?;
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let index = Some(varve_core::IndexPolicy {
         realm: &realm.name,
@@ -3771,8 +3794,17 @@ fn fetch_included_layer(
         staleness_threshold_days: 90,
         platform,
     };
-    let outcome =
-        varve_core::install_by_digest(digest, &source, &verifier, &store, &mut marks, &policy)?;
+    let outcome = sources
+        .attempt(|source| {
+            varve_core::install_by_digest(digest, source, &verifier, &store, &mut marks, &policy)
+        })
+        .map_err(|mut failures| {
+            if failures.len() == 1 {
+                anyhow::Error::new(failures.remove(0).1)
+            } else {
+                all_sources_failed(&realm.name, failures)
+            }
+        })?;
     store
         .get(&outcome.digest)?
         .context("the fetched layer is not in the store it was installed into")
@@ -3796,8 +3828,6 @@ fn fetch_included_layer(
 /// Nothing is written: not the pin, not the store, not the high-water mark.
 /// Asking what would change must never be what changes it (clause 4).
 fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
-    // The fetch methods are on the source TRAIT, not the concrete registry.
-    use varve_core::LayerSource;
     let ctx = project_ctx(store)?;
     let pinned = &ctx.pin.layer;
     let line = pinned.line().to_string();
@@ -3827,9 +3857,11 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let source = varve_core::RegistrySource::parse(&realm.registry)?;
-    let envelope = source.fetch_line_index(&line)?;
-    let served = source.served_layers(&line)?;
+    let sources = varve_core::mirror::Mirrors::for_realm(
+        &realm.name,
+        &realm.sources,
+        &varve_core::host_platform(),
+    )?;
     let cached = varve_core::IndexCache::at_root(ctx.store.root()).load(&line)?;
     let policy = varve_core::IndexPolicy {
         realm: &realm.name,
@@ -3839,13 +3871,29 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
     // The same `check` the install path runs, so the two cannot disagree about
     // what a valid index is. It verifies against the realm root, refuses a
     // counter regression, and reports a layer the source declines to serve.
-    let verified = varve_core::lineindex::check(
-        &line,
-        envelope.as_deref(),
-        served.as_deref(),
-        cached.as_ref(),
-        &policy,
-    )?;
+    //
+    // Per source, fetch AND check: an index a mirror serves that the realm's
+    // root did not sign is refused and the next source is asked
+    // (REQ-MIRROR-002 clause 2).
+    let verified = sources
+        .attempt(|source| -> anyhow::Result<_> {
+            let envelope = source.fetch_line_index(&line)?;
+            let served = source.served_layers(&line)?;
+            Ok(varve_core::lineindex::check(
+                &line,
+                envelope.as_deref(),
+                served.as_deref(),
+                cached.as_ref(),
+                &policy,
+            )?)
+        })
+        .map_err(|mut failures| {
+            if failures.len() == 1 {
+                failures.remove(0).1
+            } else {
+                all_sources_failed(&realm.name, failures)
+            }
+        })?;
 
     let Some(index) = verified else {
         let msg = format!(
@@ -3937,37 +3985,21 @@ fn install(
 ) -> anyhow::Result<()> {
     let platform = platform.unwrap_or_else(varve_core::host_platform);
     let ctx = project_ctx(store)?;
-    let from = match (from, &ctx.realm) {
-        (Some(explicit), _) => explicit.to_string(),
-        (None, Some(realm)) => realm.registry.clone(),
+    // The sources: an explicit `--from` is one source the operator chose, which
+    // overrides the realm's list; otherwise the realm's own, primary first and
+    // then its mirrors in the order written (REQ-MIRROR-002 clause 1).
+    let sources = match (from, &ctx.realm) {
+        (Some(explicit), _) => varve_core::mirror::Mirrors::single(explicit, &platform)?,
+        (None, Some(realm)) => {
+            varve_core::mirror::Mirrors::for_realm(&realm.name, &realm.sources, &platform)?
+        }
         (None, None) => {
             bail!("no source: pass --from, or name a realm in the pin so its registry applies")
         }
     };
-    let from = from.as_str();
     let pin = &ctx.pin;
     let verifier = ctx_verifier(&ctx)?;
     let store = &ctx.store;
-    // Auto-detect the source shape: an oci:// registry reference, a standard
-    // OCI image layout (the `varve archive`/`deposit` output), or the plain
-    // manifests/+blobs/ directory. Either way the same pipeline and the same
-    // trust root decide — the source shape changes availability, never
-    // acceptance.
-    let source: Box<dyn varve_core::LayerSource> =
-        if from.starts_with("oci://") || from.starts_with("oci+http://") {
-            Box::new(varve_core::RegistrySource::parse(from)?)
-        } else {
-            let path = std::path::Path::new(from);
-            if path.join("oci-layout").is_file() {
-                // Tell the layout which platform we want, so a payload it does
-                // not carry is reported as the single-platform archive it is
-                // rather than as a bare missing digest (varve#80).
-                Box::new(varve_core::OciLayoutSource::at(path).for_platform(&platform))
-            } else {
-                Box::new(varve_core::DirSource::at(path))
-            }
-        };
-    let source = &*source;
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let now = today_rfc3339();
     // The realm's line-index obligation (REQ-INDEXAUTH-001). The realm is
@@ -3988,9 +4020,21 @@ fn install(
         staleness_threshold_days: 90,
         platform: &platform,
     };
-    let outcome = match varve_core::install(pin, source, &verifier, store, &mut marks, &policy) {
+    // Fetch AND verify against each source in turn: bytes that fail the realm's
+    // root are refused and the next source is asked, never accepted on a
+    // mirror's say-so (REQ-MIRROR-002 clause 2). With one source this is the
+    // plain install and its error is returned unchanged.
+    let installed = sources
+        .attempt(|source| varve_core::install(pin, source, &verifier, store, &mut marks, &policy));
+    let outcome = match installed {
         Ok(outcome) => outcome,
-        Err(e) => {
+        Err(mut failures) => {
+            let e: anyhow::Error = if failures.len() == 1 {
+                anyhow::Error::new(failures.remove(0).1)
+            } else {
+                let realm = ctx.realm.as_ref().map_or("-", |r| r.name.as_str());
+                all_sources_failed(realm, failures)
+            };
             // REQ-ROTATE-002 clause 3. "No valid signatures" is
             // indistinguishable from a forgery by a stranger, and the one
             // thing the consumer cannot deduce is which they are looking at.
@@ -4004,14 +4048,16 @@ fn install(
             // one.
             if let Some(realm) = ctx.realm.as_ref()
                 && !realm.retired_roots.is_empty()
-                && let Ok(bytes) =
-                    source.fetch_manifest(&varve_core::source::LayerRef::Name(pin.layer.clone()))
+                && let Ok(bytes) = varve_core::LayerSource::fetch_manifest(
+                    &sources,
+                    &varve_core::source::LayerRef::Name(pin.layer.clone()),
+                )
                 && let Some(why) =
                     realm.explain_retired_signature(&bytes, varve_core::verify::LAYER_PAYLOAD_TYPE)
             {
-                return Err(anyhow::Error::new(e).context(why));
+                return Err(e.context(why));
             }
-            return Err(e.into());
+            return Err(e);
         }
     };
     // Clause 4: REPORT what the realm asserts the line contains, beside what
@@ -4215,13 +4261,24 @@ fn install(
         None => varve_core::LayerRef::Name(pin.layer.clone()),
     };
     let root_pk = ctx_root_bytes(&ctx)?;
-    match varve_core::cache_baseline_line_status(source, &layer_ref, &line, &root_pk, store.root())
-    {
+    // Through the realm's sources too (REQ-MIRROR-002 clause 1): a line-status
+    // is a fetch like any other, and one source's unverifiable copy must not
+    // hide another's good one.
+    match sources.attempt(|source| {
+        varve_core::cache_baseline_line_status(source, &layer_ref, &line, &root_pk, store.root())
+    }) {
         Ok(Some(counter)) => {
             println!("cached baseline line-status #{counter} for line {line}");
         }
         Ok(None) => {}
-        Err(e) => eprintln!("note: layer carried a line-status but it was not cached: {e}"),
+        Err(failures) => {
+            let why = failures
+                .iter()
+                .map(|(label, e)| format!("{label}: {e}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            eprintln!("note: layer carried a line-status but it was not cached: {why}");
+        }
     }
     Ok(())
 }
