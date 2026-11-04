@@ -1092,6 +1092,7 @@ mod tests {
                         body: b.to_string(),
                     })
                     .collect(),
+                incomplete: None,
             },
             signed: Signed::default(),
         }
