@@ -26,11 +26,18 @@ struct Served {
 /// root. Two calls serve the same layer name signed by DIFFERENT roots.
 fn serve_layer() -> Served {
     let (sk, pk) = varve_core::generate_root_keypair();
+    serve_layer_signed(&sk, &pk, 1)
+}
+
+/// The same, signed by a GIVEN root and at a given anti-rollback counter, so
+/// two servers can be genuine under one realm root while differing in what
+/// they serve.
+fn serve_layer_signed(sk: &[u8], pk: &[u8], counter: u64) -> Served {
     let payload = format!(
-        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{LAYER}","eu.pulseengine.varve.line":"2026.10","eu.pulseengine.varve.channel":"rolling","eu.pulseengine.varve.counter":"1","org.opencontainers.image.created":"2026-09-24T00:00:00Z"}},"manifests":[]}}"#
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{LAYER}","eu.pulseengine.varve.line":"2026.10","eu.pulseengine.varve.channel":"rolling","eu.pulseengine.varve.counter":"{counter}","org.opencontainers.image.created":"2026-09-24T00:00:00Z"}},"manifests":[]}}"#
     );
     let digest = varve_core::manifest_digest(payload.as_bytes());
-    let envelope = varve_core::sign_layer_manifest(payload.as_bytes(), &sk, "test-root").unwrap();
+    let envelope = varve_core::sign_layer_manifest(payload.as_bytes(), sk, "test-root").unwrap();
     let env_digest = varve_core::manifest_digest(envelope.as_bytes());
     let mut blobs = std::collections::BTreeMap::new();
     blobs.insert(env_digest.clone(), envelope.into_bytes());
@@ -87,7 +94,7 @@ fn serve_layer() -> Served {
     });
     Served {
         registry: format!("oci+http://{addr}/inc/layers"),
-        root_hex: hex::encode(&pk),
+        root_hex: hex::encode(pk),
         digest,
         hits,
     }
@@ -297,5 +304,47 @@ fn when_no_source_verifies_the_error_names_every_source_tried() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
     assert!(stderr.contains(&forged_a.registry) && stderr.contains(&forged_b.registry));
+    assert!(!installed_anything(&p));
+}
+
+/// Seed the machine's high-water mark for the realm's line, as an earlier
+/// install of counter `counter` would have.
+fn seed_high_water(p: &Project, counter: u64) {
+    let realm = varve_core::resolve_realm(&p.dir, "acme").unwrap();
+    let store = varve_core::Store::at(realm.effective_root(&p.root));
+    let payload = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"2026.10.9","eu.pulseengine.varve.line":"2026.10","eu.pulseengine.varve.channel":"rolling","eu.pulseengine.varve.counter":"{counter}","org.opencontainers.image.created":"2026-09-24T00:00:00Z"}},"manifests":[]}}"#
+    );
+    let manifest = varve_core::LayerManifest::parse(payload.as_bytes()).unwrap();
+    let mut marks = varve_core::HighWaterMarks::load(store.root()).unwrap();
+    marks.advance(&manifest).unwrap();
+}
+
+/// A VERIFIED verdict is not a reason to ask another source. The primary
+/// serves a genuine, root-signed layer that this machine refuses as a
+/// rollback (its high-water mark is higher). A mirror serving a layer the
+/// machine WOULD accept must not get a second chance against a lower bar:
+/// that would let failover itself mount a freeze/rollback attack.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_verified_rollback_refusal_is_terminal_and_the_mirror_is_never_asked() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let primary = serve_layer_signed(&sk, &pk, 1);
+    let mirror = serve_layer_signed(&sk, &pk, 9);
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    seed_high_water(&p, 5);
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a rolled-back layer must not install:\n{stderr}"
+    );
+    assert!(stderr.contains("rollback refused"), "{stderr}");
+    assert_eq!(
+        mirror.hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the mirror must not be consulted after a verified verdict"
+    );
+    assert!(!stderr.contains("mirror"), "{stderr}");
     assert!(!installed_anything(&p));
 }

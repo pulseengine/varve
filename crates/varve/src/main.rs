@@ -2165,12 +2165,22 @@ impl varve_core::support::RealmAccess for DefinedRealms {
     }
 }
 
-/// Fold every source's failure into one error, listed in the order tried, so
+/// The error for a realm whose sources did not produce an answer.
+///
+/// A TERMINAL failure (a verified verdict such as a rollback refusal, or a
+/// local error) is returned on its own, unchanged: it is the answer, and the
+/// sources that came before it merely did not answer. Otherwise a single
+/// source keeps its own error, and several are listed in the order tried so
 /// an operator sees that the mirror was asked and what it said.
-fn all_sources_failed<E: std::fmt::Display>(
+fn sources_failed(
     realm: &str,
-    failures: Vec<(String, E)>,
+    mut failures: Vec<(String, varve_core::InstallError)>,
 ) -> anyhow::Error {
+    let terminal = failures.last().is_some_and(|(_, e)| !e.fails_over());
+    if terminal || failures.len() == 1 {
+        let (_, e) = failures.pop().expect("a failed attempt has a failure");
+        return anyhow::Error::new(e);
+    }
     let listing = failures
         .iter()
         .map(|(label, e)| format!("\n  {label}: {e}"))
@@ -3795,16 +3805,15 @@ fn fetch_included_layer(
         platform,
     };
     let outcome = sources
-        .attempt(|source| {
-            varve_core::install_by_digest(digest, source, &verifier, &store, &mut marks, &policy)
-        })
-        .map_err(|mut failures| {
-            if failures.len() == 1 {
-                anyhow::Error::new(failures.remove(0).1)
-            } else {
-                all_sources_failed(&realm.name, failures)
-            }
-        })?;
+        .attempt(
+            |source| {
+                varve_core::install_by_digest(
+                    digest, source, &verifier, &store, &mut marks, &policy,
+                )
+            },
+            varve_core::InstallError::fails_over,
+        )
+        .map_err(|failures| sources_failed(&realm.name, failures))?;
     store
         .get(&outcome.digest)?
         .context("the fetched layer is not in the store it was installed into")
@@ -3876,24 +3885,21 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
     // root did not sign is refused and the next source is asked
     // (REQ-MIRROR-002 clause 2).
     let verified = sources
-        .attempt(|source| -> anyhow::Result<_> {
-            let envelope = source.fetch_line_index(&line)?;
-            let served = source.served_layers(&line)?;
-            Ok(varve_core::lineindex::check(
-                &line,
-                envelope.as_deref(),
-                served.as_deref(),
-                cached.as_ref(),
-                &policy,
-            )?)
-        })
-        .map_err(|mut failures| {
-            if failures.len() == 1 {
-                failures.remove(0).1
-            } else {
-                all_sources_failed(&realm.name, failures)
-            }
-        })?;
+        .attempt(
+            |source| -> Result<_, varve_core::InstallError> {
+                let envelope = source.fetch_line_index(&line)?;
+                let served = source.served_layers(&line)?;
+                Ok(varve_core::lineindex::check(
+                    &line,
+                    envelope.as_deref(),
+                    served.as_deref(),
+                    cached.as_ref(),
+                    &policy,
+                )?)
+            },
+            varve_core::InstallError::fails_over,
+        )
+        .map_err(|failures| sources_failed(&realm.name, failures))?;
 
     let Some(index) = verified else {
         let msg = format!(
@@ -4024,17 +4030,15 @@ fn install(
     // root are refused and the next source is asked, never accepted on a
     // mirror's say-so (REQ-MIRROR-002 clause 2). With one source this is the
     // plain install and its error is returned unchanged.
-    let installed = sources
-        .attempt(|source| varve_core::install(pin, source, &verifier, store, &mut marks, &policy));
+    let installed = sources.attempt(
+        |source| varve_core::install(pin, source, &verifier, store, &mut marks, &policy),
+        varve_core::InstallError::fails_over,
+    );
     let outcome = match installed {
         Ok(outcome) => outcome,
-        Err(mut failures) => {
-            let e: anyhow::Error = if failures.len() == 1 {
-                anyhow::Error::new(failures.remove(0).1)
-            } else {
-                let realm = ctx.realm.as_ref().map_or("-", |r| r.name.as_str());
-                all_sources_failed(realm, failures)
-            };
+        Err(failures) => {
+            let realm = ctx.realm.as_ref().map_or("-", |r| r.name.as_str());
+            let e: anyhow::Error = sources_failed(realm, failures);
             // REQ-ROTATE-002 clause 3. "No valid signatures" is
             // indistinguishable from a forgery by a stranger, and the one
             // thing the consumer cannot deduce is which they are looking at.
@@ -4264,9 +4268,22 @@ fn install(
     // Through the realm's sources too (REQ-MIRROR-002 clause 1): a line-status
     // is a fetch like any other, and one source's unverifiable copy must not
     // hide another's good one.
-    match sources.attempt(|source| {
-        varve_core::cache_baseline_line_status(source, &layer_ref, &line, &root_pk, store.root())
-    }) {
+    //
+    // Only a failure of THAT source's document is a reason to ask the next. A
+    // verified verdict (a counter regression against the cache) or a local
+    // error stops here, as a note, rather than caching an older mirror copy.
+    match sources.attempt(
+        |source| {
+            varve_core::cache_baseline_line_status(
+                source,
+                &layer_ref,
+                &line,
+                &root_pk,
+                store.root(),
+            )
+        },
+        varve_core::LineStatusError::fails_over,
+    ) {
         Ok(Some(counter)) => {
             println!("cached baseline line-status #{counter} for line {line}");
         }

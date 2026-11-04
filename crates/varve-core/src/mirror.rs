@@ -138,9 +138,18 @@ impl Mirrors {
     /// are judged by the same root because the closure is the same.
     ///
     /// Returns the value, or every source's failure in order.
+    ///
+    /// `fails_over` says whether an error is about THIS source's bytes
+    /// (unavailable, unauthentic, substituted) and so a reason to ask the next.
+    /// An error it rejects is a verified verdict or a local failure and is
+    /// TERMINAL: it is returned at once, as the last entry, and no later
+    /// source is asked. Otherwise a stale mirror would get a second chance
+    /// against a lower bar than the primary's genuine, refused layer, and
+    /// failover itself would be the rollback attack.
     pub fn attempt<T, E>(
         &self,
         mut f: impl FnMut(&dyn LayerSource) -> Result<T, E>,
+        fails_over: impl Fn(&E) -> bool,
     ) -> Result<T, Vec<(String, E)>> {
         let mut failures: Vec<(String, E)> = Vec::new();
         for (i, m) in self.mirrors.iter().enumerate() {
@@ -160,7 +169,13 @@ impl Mirrors {
                     }
                     return Ok(v);
                 }
-                Err(e) => failures.push((m.label.clone(), e)),
+                Err(e) => {
+                    let terminal = !fails_over(&e);
+                    failures.push((m.label.clone(), e));
+                    if terminal {
+                        break;
+                    }
+                }
             }
         }
         Err(failures)
@@ -752,10 +767,13 @@ mod tests {
     fn attempt_returns_the_first_success_and_asks_no_further() {
         let m = realm_mirrors(vec![("primary", ok(b"p")), ("mirror", ok(b"m"))]);
         let mut asked = 0;
-        let v: Result<u32, Vec<(String, String)>> = m.attempt(|_s| {
-            asked += 1;
-            Ok(7)
-        });
+        let v: Result<u32, Vec<(String, String)>> = m.attempt(
+            |_s| {
+                asked += 1;
+                Ok(7)
+            },
+            |_| true,
+        );
         assert_eq!(v.unwrap(), 7);
         assert_eq!(asked, 1);
         assert_eq!(m.served_by().as_deref(), Some("primary"));
@@ -767,14 +785,17 @@ mod tests {
     fn attempt_moves_on_when_a_source_fails_verification_and_names_the_mirror() {
         let m = realm_mirrors(vec![("primary", ok(b"p")), ("mirror", ok(b"m"))]);
         let mut n = 0;
-        let v: Result<&str, Vec<(String, String)>> = m.attempt(|_s| {
-            n += 1;
-            if n == 1 {
-                Err("signature does not verify".to_string())
-            } else {
-                Ok("fine")
-            }
-        });
+        let v: Result<&str, Vec<(String, String)>> = m.attempt(
+            |_s| {
+                n += 1;
+                if n == 1 {
+                    Err("signature does not verify".to_string())
+                } else {
+                    Ok("fine")
+                }
+            },
+            |_| true,
+        );
         assert_eq!(v.unwrap(), "fine");
         assert_eq!(m.served_by().as_deref(), Some("mirror"));
         let notices = m.notices();
@@ -788,7 +809,7 @@ mod tests {
     #[test]
     fn attempt_reports_every_source_failure_in_order_when_none_succeeds() {
         let m = realm_mirrors(vec![("a", ok(b"p")), ("b", ok(b"m")), ("c", ok(b"c"))]);
-        let r: Result<(), Vec<(String, String)>> = m.attempt(|_s| Err("no".to_string()));
+        let r: Result<(), Vec<(String, String)>> = m.attempt(|_s| Err("no".to_string()), |_| true);
         let failures = r.unwrap_err();
         let labels: Vec<_> = failures.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(labels, ["a", "b", "c"]);
@@ -904,5 +925,55 @@ mod tests {
         assert!(source_from_spec("oci+http://127.0.0.1:1/x", "p").is_ok());
         assert!(source_from_spec("oci://", "p").is_err());
         assert!(source_from_spec("oci+http://", "p").is_err());
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_terminal_error_stops_failover_and_no_later_source_is_asked() {
+        let m = realm_mirrors(vec![
+            ("primary", ok(b"p")),
+            ("mirror", ok(b"m")),
+            ("third", ok(b"t")),
+        ]);
+        let mut asked = 0;
+        let r: Result<(), Vec<(String, String)>> = m.attempt(
+            |_s| {
+                asked += 1;
+                Err("rollback refused".to_string())
+            },
+            |e| e != "rollback refused",
+        );
+        let failures = r.unwrap_err();
+        assert_eq!(asked, 1, "a verified verdict must not be retried elsewhere");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0],
+            ("primary".to_string(), "rollback refused".to_string())
+        );
+        assert!(m.notices().is_empty(), "no mirror answered, none announced");
+        assert_eq!(m.served_by(), None);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_terminal_error_after_a_failover_error_is_the_last_entry() {
+        let m = realm_mirrors(vec![
+            ("primary", ok(b"p")),
+            ("mirror", ok(b"m")),
+            ("third", ok(b"t")),
+        ]);
+        let mut n = 0;
+        let r: Result<(), Vec<(String, String)>> = m.attempt(
+            |_s| {
+                n += 1;
+                Err(if n == 1 { "down" } else { "verdict" }.to_string())
+            },
+            |e| e == "down",
+        );
+        let failures = r.unwrap_err();
+        assert_eq!(n, 2, "the third source must not be asked");
+        let labels: Vec<_> = failures.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["primary", "mirror"]);
+        assert_eq!(failures[1].1, "verdict");
     }
 }

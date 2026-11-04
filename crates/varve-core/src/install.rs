@@ -171,6 +171,40 @@ pub enum InstallError {
     State(#[from] RollbackError),
 }
 
+impl InstallError {
+    /// May ANOTHER source of the same realm be asked after this failure?
+    /// (REQ-MIRROR-002 clause 2.)
+    ///
+    /// Only when this source's BYTES are the problem: unavailable, not
+    /// authentic, malformed, or substituted. A verified verdict about genuine
+    /// bytes (rollback, floor, no platform entry) or a local failure is
+    /// TERMINAL: asking a lagging mirror afterwards would hand the same
+    /// machine a second chance against a lower bar, and failover itself would
+    /// become the freeze/rollback attack.
+    ///
+    /// An exhaustive `match` with no `_` arm, so a new variant cannot be added
+    /// without deciding which side of that line it is on.
+    pub fn fails_over(&self) -> bool {
+        match self {
+            InstallError::Index(e) => e.fails_over(),
+            InstallError::Source(_)
+            | InstallError::Verify(_)
+            | InstallError::Manifest(_)
+            | InstallError::DigestMismatch { .. }
+            | InstallError::LayerMismatch { .. }
+            | InstallError::ChannelMismatch { .. }
+            | InstallError::BlobDigestMismatch { .. } => true,
+            InstallError::Rollback { .. }
+            | InstallError::RollbackConsentRefused { .. }
+            | InstallError::BelowFloor { .. }
+            | InstallError::NoPlatformEntry { .. }
+            | InstallError::UnnamedEntry { .. }
+            | InstallError::Store(_)
+            | InstallError::State(_) => false,
+        }
+    }
+}
+
 /// Policy inputs the caller supplies; time is data, not something the
 /// pipeline samples.
 pub struct InstallPolicy<'a> {
@@ -701,6 +735,85 @@ fn consent_from_status(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod failover_class_tests {
+    use super::*;
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn verdicts_about_genuine_bytes_and_local_failures_never_fail_over() {
+        let terminal = [
+            InstallError::Rollback {
+                line: "l".into(),
+                presented: 1,
+                high_water: 2,
+            },
+            InstallError::RollbackConsentRefused {
+                line: "l".into(),
+                presented: 1,
+                high_water: 2,
+                why: "w".into(),
+            },
+            InstallError::BelowFloor {
+                line: "l".into(),
+                presented: 1,
+                floor: 2,
+            },
+            InstallError::NoPlatformEntry {
+                layer: "l".into(),
+                platform: "p".into(),
+            },
+            InstallError::UnnamedEntry { digest: "d".into() },
+            InstallError::State(RollbackError::Io {
+                path: "p".into(),
+                source: std::io::Error::other("x"),
+            }),
+        ];
+        for e in &terminal {
+            assert!(!e.fails_over(), "{e} must be terminal");
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn unavailable_unauthentic_or_substituted_bytes_fail_over() {
+        let over = [
+            InstallError::Source(SourceError::Transport("down".into())),
+            InstallError::Source(SourceError::NotFound("x".into())),
+            InstallError::DigestMismatch {
+                pinned: "a".into(),
+                got: "b".into(),
+            },
+            InstallError::LayerMismatch {
+                pinned: "a".into(),
+                got: "b".into(),
+            },
+            InstallError::ChannelMismatch {
+                pinned: "a".into(),
+                got: "b".into(),
+            },
+            InstallError::BlobDigestMismatch {
+                tool: "t".into(),
+                digest: "d".into(),
+            },
+            InstallError::Manifest(ManifestError::Json("x".into())),
+            InstallError::Index(crate::lineindex::IndexError::Payload("x".into())),
+        ];
+        for e in &over {
+            assert!(e.fails_over(), "{e} must fail over");
+        }
+        let stale = InstallError::Index(crate::lineindex::IndexError::Stale {
+            line: "l".into(),
+            presented: 1,
+            cached: 2,
+        });
+        assert!(
+            !stale.fails_over(),
+            "a verified index regression is terminal"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -176,6 +176,28 @@ pub enum LineStatusError {
     },
 }
 
+impl LineStatusError {
+    /// May another source be asked after this failure? (REQ-MIRROR-002.)
+    ///
+    /// Yes where this source's document was unavailable, did not verify,
+    /// was malformed, or covers another line. No for a verified counter
+    /// regression against the local cache (`Stale`) and for everything that
+    /// is local or about producing a document. Exhaustive, no `_` arm.
+    pub fn fails_over(&self) -> bool {
+        match self {
+            LineStatusError::Envelope(_)
+            | LineStatusError::Payload(_)
+            | LineStatusError::LineMismatch { .. } => true,
+            LineStatusError::Sign(_)
+            | LineStatusError::Stale { .. }
+            | LineStatusError::DeadReference { .. }
+            | LineStatusError::UnknownLayer { .. }
+            | LineStatusError::NotALayout { .. }
+            | LineStatusError::Io { .. } => false,
+        }
+    }
+}
+
 /// What the signer could see of a line's layers when it validated an advisory
 /// (REQ-ADVISORY-002).
 ///
@@ -2699,6 +2721,42 @@ mod tests {
             r.note.starts_with("4 advisory references checked"),
             "wrong reference count: {}",
             r.note
+        );
+    }
+}
+
+#[cfg(test)]
+mod failover_class_tests {
+    use super::*;
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_sources_bad_status_fails_over_but_a_verified_regression_or_local_error_does_not() {
+        assert!(LineStatusError::Envelope("x".into()).fails_over());
+        assert!(LineStatusError::Payload("x".into()).fails_over());
+        assert!(
+            LineStatusError::LineMismatch {
+                expected: "a".into(),
+                got: "b".into()
+            }
+            .fails_over()
+        );
+        assert!(
+            !LineStatusError::Stale {
+                line: "l".into(),
+                presented: 1,
+                cached: 2
+            }
+            .fails_over()
+        );
+        assert!(!LineStatusError::Sign("x".into()).fails_over());
+        assert!(!LineStatusError::NotALayout { layout: "l".into() }.fails_over());
+        assert!(
+            !LineStatusError::Io {
+                path: "p".into(),
+                source: std::io::Error::other("x")
+            }
+            .fails_over()
         );
     }
 }
