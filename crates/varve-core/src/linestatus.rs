@@ -853,6 +853,8 @@ pub fn current_line_status(
     root_pk: &[u8],
     published: Published,
 ) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
+    // `published` is shadowed below by the document itself.
+    let mode = published;
     let baseline = source
         .fetch_line_status(layer)
         .map_err(|e| LineStatusError::Payload(format!("fetching baseline line-status: {e}")))?;
@@ -889,7 +891,13 @@ pub fn current_line_status(
     // consumer the good baseline it already had.
     let mut best: Option<(u64, Vec<u8>, LineStatus)> = None;
     let mut first_error: Option<LineStatusError> = None;
-    for envelope in [baseline, published].into_iter().flatten() {
+    // Whether the PUBLISHED document is the one selected below.
+    let had_published = published.is_some();
+    let mut published_selected = false;
+    for (from_published, envelope) in [(false, baseline), (true, published)]
+        .into_iter()
+        .filter_map(|(from_published, e)| e.map(|e| (from_published, e)))
+    {
         let doc = match LineStatus::verify_and_parse(&envelope, root_pk) {
             Ok(doc) => doc,
             Err(e) => {
@@ -910,7 +918,25 @@ pub fn current_line_status(
         }
         if best.as_ref().is_none_or(|(c, _, _)| doc.counter > *c) {
             best = Some((doc.counter, envelope, doc));
+            published_selected = from_published;
         }
+    }
+
+    // When a correction MUST be found (an earlier source could not be asked),
+    // a published envelope that is present but did not verify, covers another
+    // line, or was not the document selected has settled nothing: the
+    // baseline's window would be signed as if the correction had been read and
+    // found harmless. Refuse; only the published document itself answers.
+    if matches!(mode, Published::MustBePresent) && had_published && !published_selected {
+        let detail = first_error
+            .as_ref()
+            .map_or("it was not the newest verified document".to_string(), |e| {
+                e.to_string()
+            });
+        return Err(LineStatusError::Payload(format!(
+            "the correction published for line {line} did not verify as the line's current \
+             word ({detail}), so whether a correction exists could not be established"
+        )));
     }
 
     match best {
@@ -2811,6 +2837,68 @@ mod published_mode_tests {
         assert_eq!(read(&source, &pk, Published::BestEffort), Ok(Some(1)));
         assert_eq!(read(&source, &pk, Published::Required), Ok(Some(1)));
         let why = read(&source, &pk, Published::MustBePresent).unwrap_err();
+        assert!(why.contains("could not be established"), "{why}");
+    }
+
+    fn doc_for(line: &str, counter: u64, sk: &[u8]) -> Vec<u8> {
+        LineStatus {
+            min_counter: None,
+            line: line.into(),
+            counter,
+            issued_at: "2026-09-24T00:00:00Z".into(),
+            support_until: Some("2026-10-24".into()),
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        }
+        .sign(sk, "k")
+        .unwrap()
+        .into_bytes()
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_published_envelope_that_does_not_verify_is_no_answer_when_one_must_be_found() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let (other_sk, _) = crate::verify::generate_root_keypair();
+        // Present, but signed by a key that is not the realm's.
+        let forged = MemorySource::new()
+            .with_line_status(&doc(1, &sk))
+            .with_published_line_status(&doc_for("2026.10", 2, &other_sk));
+        // The baseline still answers in the weaker modes (as before) ...
+        assert_eq!(read(&forged, &pk, Published::Required), Ok(Some(1)));
+        // ... but a present-and-unverifiable correction cannot settle absence.
+        let why = read(&forged, &pk, Published::MustBePresent).unwrap_err();
+        assert!(why.contains("could not be established"), "{why}");
+        assert!(
+            why.contains("did not verify") || why.contains("No valid"),
+            "{why}"
+        );
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_published_envelope_for_another_line_is_no_answer_when_one_must_be_found() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let other_line = MemorySource::new()
+            .with_line_status(&doc(1, &sk))
+            .with_published_line_status(&doc_for("2026.09", 2, &sk));
+        assert_eq!(read(&other_line, &pk, Published::Required), Ok(Some(1)));
+        let why = read(&other_line, &pk, Published::MustBePresent).unwrap_err();
+        assert!(why.contains("could not be established"), "{why}");
+        assert!(why.contains("2026.09"), "{why}");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn only_the_published_document_itself_settles_it_not_a_baseline_that_outranks_it() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        // A verified correction that the baseline outranks is not the document
+        // selected, so it is not what settled the question.
+        let outranked = MemorySource::new()
+            .with_line_status(&doc(5, &sk))
+            .with_published_line_status(&doc_for("2026.10", 2, &sk));
+        assert_eq!(read(&outranked, &pk, Published::Required), Ok(Some(5)));
+        let why = read(&outranked, &pk, Published::MustBePresent).unwrap_err();
         assert!(why.contains("could not be established"), "{why}");
     }
 

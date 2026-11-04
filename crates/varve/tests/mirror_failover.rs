@@ -40,6 +40,8 @@ struct Spec<'a> {
     /// A correction published under the line's own tag, stating this
     /// `support-until`.
     published_until: Option<&'a str>,
+    /// Sign the published correction with a key that is NOT the realm's.
+    forge_published: bool,
 }
 
 /// An OCI registry on a loopback port serving one layer signed by a fresh
@@ -61,6 +63,7 @@ fn serve_layer_signed(sk: &[u8], pk: &[u8], counter: u64) -> Served {
         drop_tool_blob: false,
         baseline_until: None,
         published_until: None,
+        forge_published: false,
     })
 }
 
@@ -73,6 +76,7 @@ fn serve_spec(spec: Spec<'_>) -> Served {
         drop_tool_blob,
         baseline_until,
         published_until,
+        forge_published,
     } = spec;
     let entries = match &tool {
         Some((signed, _)) => format!(
@@ -131,7 +135,24 @@ fn serve_spec(spec: Spec<'_>) -> Served {
     let status_tag = varve_core::linestatus::status_tag("2026.10");
     let mut published_manifest = None;
     if let Some(until) = published_until {
-        let doc = signed_status(until, 2);
+        let doc = if forge_published {
+            // An envelope for the right line, from the wrong signer.
+            let (other_sk, _) = varve_core::generate_root_keypair();
+            varve_core::LineStatus {
+                line: "2026.10".into(),
+                counter: 2,
+                issued_at: "2026-09-24T00:00:00Z".into(),
+                support_until: Some(until.into()),
+                min_counter: None,
+                yanked: Default::default(),
+                known_problems: Vec::new(),
+            }
+            .sign(&other_sk, "k")
+            .unwrap()
+            .into_bytes()
+        } else {
+            signed_status(until, 2)
+        };
         let d = varve_core::manifest_digest(&doc);
         blobs.insert(d.clone(), doc);
         published_manifest = Some(
@@ -466,6 +487,7 @@ fn serve_with_tool(sk: &[u8], pk: &[u8], served: Vec<u8>, drop_blob: bool) -> Se
         drop_tool_blob: drop_blob,
         baseline_until: None,
         published_until: None,
+        forge_published: false,
     })
 }
 
@@ -818,6 +840,7 @@ fn serve_with_status(baseline: Option<&str>, published: Option<&str>) -> Served 
         drop_tool_blob: false,
         baseline_until: baseline,
         published_until: published,
+        forge_published: false,
     })
 }
 
@@ -929,6 +952,7 @@ fn a_mirror_cannot_grant_the_rollback_consent_the_primary_could_not_give() {
         drop_tool_blob: false,
         baseline_until: Some("2027-01-01"),
         published_until: None,
+        forge_published: false,
     });
     let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
     std::fs::write(
@@ -958,4 +982,34 @@ fn a_mirror_cannot_grant_the_rollback_consent_the_primary_could_not_give() {
         mirror.requests.lock().unwrap()
     );
     assert!(!installed_anything(&p));
+}
+
+/// "Present" is not "established": a published envelope the realm's root did
+/// not sign is no answer. With the primary unreachable, a mirror that serves a
+/// valid baseline beside a FORGED correction must not have its baseline window
+/// signed as though the correction had been read and found harmless.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn an_unverifiable_published_correction_on_a_mirror_does_not_establish_the_window() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let mirror = serve_spec(Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: Some("2026-12-01"),
+        published_until: Some("2026-10-24"),
+        forge_published: true,
+    });
+    let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
+    let out = support_horizon_via(&p, &mirror.digest);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a window was signed on an unverifiable correction:\nstdout:{}\nstderr:{stderr}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    assert!(stderr.contains("could not be established"), "{stderr}");
 }
