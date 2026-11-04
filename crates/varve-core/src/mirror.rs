@@ -82,18 +82,18 @@ fn url_scheme(spec: &str) -> Option<&str> {
 /// instead of saying what is wrong. The shape changes availability, never
 /// acceptance.
 pub fn source_from_spec(spec: &str, platform: &str) -> Result<Box<dyn LayerSource>, SourceError> {
-    build_source(spec, platform, None)
+    build_source(spec, platform, Role::Primary)
 }
 
 fn build_source(
     spec: &str,
     platform: &str,
-    mirror_of: Option<&str>,
+    role: Role<'_>,
 ) -> Result<Box<dyn LayerSource>, SourceError> {
     if spec.starts_with("oci://") || spec.starts_with("oci+http://") {
         let mut registry = crate::RegistrySource::parse(spec)?;
-        if let Some(primary_host) = mirror_of {
-            registry = registry.as_mirror_of(primary_host);
+        if let Role::Mirror { primary_origin } = role {
+            registry = registry.as_mirror_of(primary_origin);
         }
         return Ok(Box::new(registry));
     }
@@ -116,18 +116,32 @@ fn build_source(
     }
 }
 
-/// What a source at position `index` is a mirror OF: the primary's host for
-/// every source after the first, nothing for the primary itself. A mirror is
-/// credential-restricted to its own host (`RegistrySource::as_mirror_of`).
-fn mirror_of(index: usize, primary_host: Option<&str>) -> Option<&str> {
-    if index > 0 { primary_host } else { None }
+/// What a source is in its realm: the primary, or a mirror (with the
+/// primary's origin when the primary is a registry).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Role<'a> {
+    Primary,
+    Mirror { primary_origin: Option<&'a str> },
 }
 
-/// The `host[:port]` of an `oci://` / `oci+http://` source, if it is one.
-fn registry_host(spec: &str) -> Option<String> {
-    crate::registry::RegistryRef::parse(spec)
+/// The role of the source at position `index`. EVERY source after the first
+/// is a mirror, whether or not the primary is a registry: a mirror is
+/// credential-restricted unless it is provably the primary's origin
+/// (`RegistrySource::as_mirror_of`), so a directory primary fails closed.
+fn role(index: usize, primary_origin: Option<&str>) -> Role<'_> {
+    if index > 0 {
+        Role::Mirror { primary_origin }
+    } else {
+        Role::Primary
+    }
+}
+
+/// The origin (`scheme://host[:port]`) of an `oci://` / `oci+http://` source,
+/// if it is one.
+fn registry_origin(spec: &str) -> Option<String> {
+    crate::RegistrySource::parse(spec)
         .ok()
-        .map(|r| r.registry)
+        .map(|source| source.origin())
 }
 
 /// A reason in one short line, for a notice.
@@ -165,7 +179,7 @@ impl Mirrors {
         sources: &[String],
         platform: &str,
     ) -> Result<Self, SourceError> {
-        let primary_host = sources.first().and_then(|p| registry_host(p));
+        let primary_origin = sources.first().and_then(|p| registry_origin(p));
         let mut mirrors = Vec::with_capacity(sources.len());
         for (i, spec) in sources.iter().enumerate() {
             let refuse = |why: String| {
@@ -185,7 +199,7 @@ impl Mirrors {
                         .to_string(),
                 ));
             }
-            let source = build_source(spec, platform, mirror_of(i, primary_host.as_deref()))
+            let source = build_source(spec, platform, role(i, primary_origin.as_deref()))
                 .map_err(|e| refuse(e.to_string()))?;
             mirrors.push(Mirror {
                 label: spec.clone(),
@@ -1299,27 +1313,16 @@ mod tests {
 
     // rivet: verifies REQ-MIRROR-002
     #[test]
-    fn a_mirror_on_another_host_is_credential_restricted_but_the_primary_and_same_host_are_not() {
-        // Observable through the notice machinery only by construction, so
-        // check the host rule directly.
+    fn a_registry_origin_is_scheme_host_and_port_and_a_path_has_none() {
         assert_eq!(
-            registry_host("oci://ghcr.io/a/b").as_deref(),
-            Some("ghcr.io")
+            registry_origin("oci://ghcr.io/a/b").as_deref(),
+            Some("https://ghcr.io")
         );
         assert_eq!(
-            registry_host("oci+http://127.0.0.1:5000/a").as_deref(),
-            Some("127.0.0.1:5000")
+            registry_origin("oci+http://127.0.0.1:5000/a").as_deref(),
+            Some("http://127.0.0.1:5000")
         );
-        assert_eq!(registry_host("/some/dir"), None);
-    }
-
-    // rivet: verifies REQ-MIRROR-002
-    #[test]
-    fn only_sources_after_the_first_are_mirrors_of_the_primary_host() {
-        assert_eq!(mirror_of(0, Some("ghcr.io")), None);
-        assert_eq!(mirror_of(1, Some("ghcr.io")), Some("ghcr.io"));
-        assert_eq!(mirror_of(2, Some("ghcr.io")), Some("ghcr.io"));
-        assert_eq!(mirror_of(1, None), None);
+        assert_eq!(registry_origin("/some/dir"), None);
     }
 
     // rivet: verifies REQ-MIRROR-002
@@ -1354,6 +1357,26 @@ mod tests {
                 "{e}"
             );
         }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn every_source_after_the_first_is_a_mirror_even_when_the_primary_is_not_a_registry() {
+        assert_eq!(role(0, Some("https://ghcr.io")), Role::Primary);
+        assert_eq!(role(0, None), Role::Primary);
+        assert_eq!(
+            role(1, Some("https://ghcr.io")),
+            Role::Mirror {
+                primary_origin: Some("https://ghcr.io")
+            }
+        );
+        assert_eq!(
+            role(2, None),
+            Role::Mirror {
+                primary_origin: None
+            },
+            "a directory primary must not unlock mirrors: fail closed"
+        );
     }
 
     // rivet: verifies REQ-MIRROR-002

@@ -601,6 +601,20 @@ fn token_from_body(body: &str) -> Option<String> {
 
 // ───────────────────────── tags/list pagination ─────────────────────────
 
+/// An origin lowercased with its scheme's default port removed, so
+/// `https://ghcr.io:443` and `https://GHCR.io` compare equal.
+fn normalize_origin(origin: &str) -> String {
+    let o = origin.to_ascii_lowercase();
+    let stripped = if o.starts_with("https://") {
+        o.strip_suffix(":443")
+    } else if o.starts_with("http://") {
+        o.strip_suffix(":80")
+    } else {
+        None
+    };
+    stripped.map_or(o.clone(), str::to_string)
+}
+
 /// The scheme+authority of a URL, for same-origin comparison.
 fn origin_of(url: &str) -> Option<String> {
     let scheme_end = url.find("://")?;
@@ -817,14 +831,26 @@ impl RegistrySource {
         }
     }
 
-    /// Mark this source as a MIRROR of a realm whose primary lives on
-    /// `primary_host` (`host[:port]`). On the same host nothing changes; on
-    /// any other host the source is credential-restricted (see `restricted`).
-    pub fn as_mirror_of(mut self, primary_host: &str) -> Self {
-        if self.reference.registry != primary_host {
+    /// Mark this source as a MIRROR of a realm. It is credential-restricted
+    /// (see `restricted`) UNLESS it is provably the same ORIGIN as the
+    /// primary: same scheme, same host, same port (default ports normalised).
+    /// `None` means the primary is not a registry at all (a directory, an
+    /// OCI layout), so there is no origin to match and the mirror is
+    /// restricted: this fails closed. A cleartext `oci+http://` mirror on the
+    /// host of an `oci://` primary is a different origin and is restricted.
+    pub fn as_mirror_of(mut self, primary_origin: Option<&str>) -> Self {
+        if primary_origin.map(normalize_origin) != Some(self.origin()) {
             self.restricted = true;
         }
         self
+    }
+
+    /// `scheme://host[:port]`, lowercased, default port dropped.
+    pub fn origin(&self) -> String {
+        normalize_origin(&format!(
+            "{}://{}",
+            self.reference.scheme, self.reference.registry
+        ))
     }
 
     /// The `host[:port]` this source talks to.
@@ -919,10 +945,8 @@ impl RegistrySource {
         let mut request = self.agent.get(&url).header("Accept", "application/json");
         // A restricted source sends its credential only to a token endpoint on
         // the registry's own host; anywhere else it asks anonymously.
-        let own_origin =
-            format!("{}://{}", self.reference.scheme, self.reference.registry).to_ascii_lowercase();
-        let credential_allowed =
-            !self.restricted || origin_of(&url).as_deref() == Some(&own_origin);
+        let credential_allowed = !self.restricted
+            || origin_of(&url).map(|o| normalize_origin(&o)) == Some(self.origin());
         if credential_allowed && let CredentialLookup::Found(credential) = self.credential() {
             request = request.header("Authorization", &credential.basic_header());
         }
@@ -1988,8 +2012,21 @@ mod tests {
         assert!(primary.offers_env_credential());
         let mirror = RegistrySource::parse("oci://m.example/a/b")
             .unwrap()
-            .as_mirror_of("ghcr.io");
+            .as_mirror_of(Some("https://ghcr.io"));
         assert!(!mirror.offers_env_credential());
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_cleartext_mirror_on_the_primarys_host_is_a_different_origin_and_restricted() {
+        let mirror = RegistrySource::parse("oci+http://ghcr.io/acme/layers")
+            .unwrap()
+            .as_mirror_of(Some("https://ghcr.io"));
+        assert!(
+            mirror.restricted,
+            "an http mirror of an https primary on the same host would receive the \
+             credential in cleartext"
+        );
     }
 
     // rivet: verifies REQ-MIRROR-002
@@ -2000,15 +2037,29 @@ mod tests {
         assert_eq!(primary.host(), "ghcr.io");
         let same_host = RegistrySource::parse("oci://ghcr.io/acme/other")
             .unwrap()
-            .as_mirror_of("ghcr.io");
-        assert!(!same_host.restricted, "same host: same credential scope");
+            .as_mirror_of(Some("https://ghcr.io"));
+        assert!(!same_host.restricted, "same origin: same credential scope");
+        let default_port = RegistrySource::parse("oci://GHCR.io:443/acme/other")
+            .unwrap()
+            .as_mirror_of(Some("https://ghcr.io"));
+        assert!(
+            !default_port.restricted,
+            "case and the default port do not make another origin"
+        );
         let other = RegistrySource::parse("oci://mirror.example/acme")
             .unwrap()
-            .as_mirror_of("ghcr.io");
+            .as_mirror_of(Some("https://ghcr.io"));
         assert!(other.restricted);
+        let no_registry_primary = RegistrySource::parse("oci://ghcr.io/acme/other")
+            .unwrap()
+            .as_mirror_of(None);
+        assert!(
+            no_registry_primary.restricted,
+            "a primary that is not a registry unlocks nothing: fail closed"
+        );
         let other_port = RegistrySource::parse("oci+http://ghcr.io:5000/acme")
             .unwrap()
-            .as_mirror_of("ghcr.io");
+            .as_mirror_of(Some("https://ghcr.io"));
         assert!(
             other_port.restricted,
             "a different port is a different host"
@@ -2064,7 +2115,7 @@ mod tests {
         let (realm, rx) = token_endpoint();
         let mirror = RegistrySource::parse("oci+http://127.0.0.1:1/acme/layers")
             .unwrap()
-            .as_mirror_of("registry.primary.example")
+            .as_mirror_of(Some("https://registry.primary.example"))
             .with_credential("ci", "hunter2-secret");
         let token = mirror.obtain_token(&challenge_for(&realm)).unwrap();
         assert_eq!(token, "t");
@@ -2101,7 +2152,7 @@ mod tests {
             .to_string();
         let mirror = RegistrySource::parse(&format!("oci+http://{authority}/acme/layers"))
             .unwrap()
-            .as_mirror_of("registry.primary.example")
+            .as_mirror_of(Some("https://registry.primary.example"))
             .with_credential("ci", "hunter2-secret");
         assert!(mirror.restricted);
         mirror.obtain_token(&challenge_for(&realm)).unwrap();
@@ -2110,6 +2161,25 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("authorization: basic"),
             "a same-host token realm is the mirror's own"
+        );
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn origins_compare_by_scheme_host_and_port_with_defaults_normalised() {
+        assert_eq!(normalize_origin("HTTPS://GHCR.io"), "https://ghcr.io");
+        assert_eq!(normalize_origin("https://ghcr.io:443"), "https://ghcr.io");
+        assert_eq!(normalize_origin("http://h:80"), "http://h");
+        assert_eq!(normalize_origin("https://h:80"), "https://h:80");
+        assert_eq!(normalize_origin("http://h:443"), "http://h:443");
+        assert_eq!(normalize_origin("https://h:5000"), "https://h:5000");
+        assert_eq!(
+            RegistrySource::parse("oci+http://H:80/x").unwrap().origin(),
+            "http://h"
+        );
+        assert_eq!(
+            RegistrySource::parse("oci://h/x").unwrap().origin(),
+            "https://h"
         );
     }
 }

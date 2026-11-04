@@ -34,6 +34,12 @@ struct Spec<'a> {
     tool: Option<(Vec<u8>, Vec<u8>)>,
     /// Hang up on the tool's blob request: the source dies after its manifest.
     drop_tool_blob: bool,
+    /// A line-status baseline carried beside the layer, stating this
+    /// `support-until`.
+    baseline_until: Option<&'a str>,
+    /// A correction published under the line's own tag, stating this
+    /// `support-until`.
+    published_until: Option<&'a str>,
 }
 
 /// An OCI registry on a loopback port serving one layer signed by a fresh
@@ -53,6 +59,8 @@ fn serve_layer_signed(sk: &[u8], pk: &[u8], counter: u64) -> Served {
         counter,
         tool: None,
         drop_tool_blob: false,
+        baseline_until: None,
+        published_until: None,
     })
 }
 
@@ -63,6 +71,8 @@ fn serve_spec(spec: Spec<'_>) -> Served {
         counter,
         tool,
         drop_tool_blob,
+        baseline_until,
+        published_until,
     } = spec;
     let entries = match &tool {
         Some((signed, _)) => format!(
@@ -85,15 +95,57 @@ fn serve_spec(spec: Spec<'_>) -> Served {
         tool_digest = varve_core::manifest_digest(signed);
         blobs.insert(tool_digest.clone(), served.clone());
     }
+    let signed_status = |until: &str, counter: u64| {
+        varve_core::LineStatus {
+            line: "2026.10".into(),
+            counter,
+            issued_at: "2026-09-24T00:00:00Z".into(),
+            support_until: Some(until.into()),
+            min_counter: None,
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        }
+        .sign(sk, "k")
+        .unwrap()
+        .into_bytes()
+    };
+    let mut layers = vec![serde_json::json!({
+        "mediaType": "application/json", "digest": env_digest, "size": 0,
+        "annotations": { "eu.pulseengine.varve.role": "envelope" }
+    })];
+    if let Some(until) = baseline_until {
+        let doc = signed_status(until, 1);
+        let d = varve_core::manifest_digest(&doc);
+        blobs.insert(d.clone(), doc);
+        layers.push(serde_json::json!({
+            "mediaType": "application/json", "digest": d, "size": 0,
+            "annotations": { "eu.pulseengine.varve.role": "line-status" }
+        }));
+    }
     let manifest = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "layers": [{
-            "mediaType": "application/json", "digest": env_digest, "size": 0,
-            "annotations": { "eu.pulseengine.varve.role": "envelope" }
-        }],
+        "layers": layers,
     }))
     .unwrap();
+    let status_tag = varve_core::linestatus::status_tag("2026.10");
+    let mut published_manifest = None;
+    if let Some(until) = published_until {
+        let doc = signed_status(until, 2);
+        let d = varve_core::manifest_digest(&doc);
+        blobs.insert(d.clone(), doc);
+        published_manifest = Some(
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "layers": [{
+                    "mediaType": "application/json", "digest": d, "size": 0,
+                    "annotations": { "eu.pulseengine.varve.role": "line-status" }
+                }],
+            }))
+            .unwrap(),
+        );
+    }
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -128,6 +180,11 @@ fn serve_spec(spec: Spec<'_>) -> Served {
                 )
             } else if path == format!("/v2/inc/layers/manifests/{LAYER}") {
                 ("200 OK", manifest.clone())
+            } else if let Some(pm) = published_manifest
+                .as_ref()
+                .filter(|_| path == format!("/v2/inc/layers/manifests/{status_tag}"))
+            {
+                ("200 OK", pm.clone())
             } else if let Some(d) = path.strip_prefix("/v2/inc/layers/blobs/") {
                 match blobs.get(d) {
                     Some(b) => ("200 OK", b.clone()),
@@ -296,37 +353,18 @@ fn a_mirror_serving_bytes_the_root_did_not_sign_fails_closed() {
 // rivet: verifies REQ-MIRROR-002
 #[test]
 fn support_horizon_reads_an_include_through_a_mirror() {
-    let mirror = serve_layer();
+    // The primary is down; the mirror carries the layer, its baseline AND the
+    // published correction, so it can establish the window on its own (a
+    // mirror that carried no correction could not: see the test below).
+    let mirror = serve_with_status(Some("2026-12-01"), Some("2026-10-24"));
     let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
-    // The double serves a layer but no line-status, so the horizon is refused
-    // ("states no support window") — which proves the include WAS read, from
-    // the mirror, rather than the realm being unreachable.
-    std::fs::write(
-        p.dir.join("layer.toml"),
-        format!(
-            "[varve]\nversion = \"v0.41.0\"\n\n[realm]\nname = \"acme\"\nchannel = \"rolling\"\n\
-             registry = \"oci://ghcr.io/acme/layers\"\n\n[[tool]]\nname = \"rivet\"\nversion = \"v0.34.0\"\n\n\
-             [[include]]\ndigest = \"{}\"\nrealm = \"acme\"\nlayer = \"{LAYER}\"\n",
-            mirror.digest
-        ),
-    )
-    .unwrap();
-    let out = varve(&p)
-        .args([
-            "support-horizon",
-            "--channel",
-            "rolling",
-            "--issued-at",
-            "2026-10-02T10:00:00Z",
-            "--manifest",
-            "layer.toml",
-        ])
-        .output()
-        .unwrap();
+    let out = support_horizon_via(&p, &mirror.digest);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("states no support window"),
-        "the include must have been READ (from the mirror):\n{stderr}"
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "2026-10-24\n",
+        "the include's window was READ, from the mirror"
     );
     assert!(
         stderr.contains(&mirror.registry) && stderr.contains("mirror"),
@@ -426,6 +464,8 @@ fn serve_with_tool(sk: &[u8], pk: &[u8], served: Vec<u8>, drop_blob: bool) -> Se
         counter: 1,
         tool: Some((probe_bytes(), served)),
         drop_tool_blob: drop_blob,
+        baseline_until: None,
+        published_until: None,
     })
 }
 
@@ -672,35 +712,17 @@ fn the_primary_still_receives_its_credential() {
 // rivet: verifies REQ-MIRROR-002
 #[test]
 fn support_horizon_tries_the_mirror_when_the_primary_serves_bytes_the_root_did_not_sign() {
-    let real = serve_layer();
-    let forged = serve_layer();
+    let real = serve_with_status(Some("2026-12-01"), Some("2026-10-24"));
+    let forged = serve_layer(); // same payload, signed by another key
+    assert_eq!(forged.digest, real.digest);
     let p = project(&forged.registry, &[&real.registry], &real.root_hex);
-    std::fs::write(
-        p.dir.join("layer.toml"),
-        format!(
-            "[varve]\nversion = \"v0.41.0\"\n\n[realm]\nname = \"acme\"\nchannel = \"rolling\"\n\
-             registry = \"oci://ghcr.io/acme/layers\"\n\n[[tool]]\nname = \"rivet\"\nversion = \"v0.34.0\"\n\n\
-             [[include]]\ndigest = \"{}\"\nrealm = \"acme\"\nlayer = \"{LAYER}\"\n",
-            real.digest
-        ),
-    )
-    .unwrap();
-    let out = varve(&p)
-        .args([
-            "support-horizon",
-            "--channel",
-            "rolling",
-            "--issued-at",
-            "2026-10-02T10:00:00Z",
-            "--manifest",
-            "layer.toml",
-        ])
-        .output()
-        .unwrap();
+    let out = support_horizon_via(&p, &real.digest);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("states no support window"),
-        "the genuine include must have been READ from the mirror:\n{stderr}"
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "2026-10-24\n",
+        "the genuine include must have been READ from the mirror"
     );
     assert!(stderr.contains(&real.registry), "{stderr}");
 }
@@ -760,4 +782,180 @@ fn a_bad_mirror_spec_breaks_only_its_own_realm() {
         stderr.contains("realm 'broken'") && stderr.contains("https://not-a-registry.example/z"),
         "{stderr}"
     );
+}
+
+fn support_horizon_via(p: &Project, digest: &str) -> std::process::Output {
+    std::fs::write(
+        p.dir.join("layer.toml"),
+        format!(
+            "[varve]\nversion = \"v0.41.0\"\n\n[realm]\nname = \"acme\"\nchannel = \"rolling\"\n\
+             registry = \"oci://ghcr.io/acme/layers\"\n\n[[tool]]\nname = \"rivet\"\nversion = \"v0.34.0\"\n\n\
+             [[include]]\ndigest = \"{digest}\"\nrealm = \"acme\"\nlayer = \"{LAYER}\"\n"
+        ),
+    )
+    .unwrap();
+    varve(p)
+        .args([
+            "support-horizon",
+            "--channel",
+            "rolling",
+            "--issued-at",
+            "2026-10-02T10:00:00Z",
+            "--manifest",
+            "layer.toml",
+        ])
+        .output()
+        .unwrap()
+}
+
+fn serve_with_status(baseline: Option<&str>, published: Option<&str>) -> Served {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    serve_spec(Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: baseline,
+        published_until: published,
+    })
+}
+
+/// "Could not ask" is not "nothing published". The primary is unreachable, so
+/// whether it holds a correction that SHORTENS the window is unknown; a mirror
+/// that carries the layer and its baseline but no correction cannot prove the
+/// primary has none. The horizon must not be signed on its say-so.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_mirror_saying_nothing_is_published_does_not_stand_in_for_a_primary_that_could_not_be_asked() {
+    let mirror = serve_with_status(Some("2026-10-24"), None);
+    let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
+    let out = support_horizon_via(&p, &mirror.digest);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a horizon was signed with the primary unasked:\nstdout:{}\nstderr:{stderr}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    assert!(stderr.contains("could not be established"), "{stderr}");
+    assert!(stderr.contains(&mirror.registry), "{stderr}");
+}
+
+/// The mirror that DOES carry the correction (and the baseline) answers, so the
+/// primary being down costs nothing: the window comes from the mirror.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_mirror_that_carries_the_correction_answers_for_a_primary_that_is_down() {
+    let mirror = serve_with_status(Some("2026-12-01"), Some("2026-10-24"));
+    let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
+    let out = support_horizon_via(&p, &mirror.digest);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "2026-10-24\n",
+        "the published correction (earlier than the baseline) binds"
+    );
+    assert!(stderr.contains(&mirror.registry), "{stderr}");
+}
+
+/// When the primary ANSWERS (no correction published) nothing failed before it,
+/// so absence is established and the baseline stands.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_primary_that_answers_with_no_correction_establishes_absence() {
+    let primary = serve_with_status(Some("2026-10-24"), None);
+    let p = project(&primary.registry, &[], &primary.root_hex);
+    let out = support_horizon_via(&p, &primary.digest);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "2026-10-24\n");
+}
+
+/// Fail CLOSED on credential binding: when the primary is not a registry at all
+/// (a local directory), there is no origin a mirror could be "the same as", so
+/// every registry mirror is restricted and sees nothing of $VARVE_REGISTRY_AUTH.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_directory_primary_does_not_unlock_the_credential_for_registry_mirrors() {
+    let (token_url, token_reqs) = token_server();
+    let (mirror, mirror_reqs) = challenge_server(token_url);
+    let (_, pk) = varve_core::generate_root_keypair();
+    let empty = tempfile::tempdir().unwrap();
+    let p = project(
+        empty.path().to_str().unwrap(),
+        &[&mirror],
+        &hex::encode(&pk),
+    );
+    let out = varve(&p)
+        .env("VARVE_REGISTRY_AUTH", format!("ci:{SECRET}"))
+        .arg("install")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        !mirror_reqs.lock().unwrap().is_empty(),
+        "the mirror must actually have been contacted"
+    );
+    assert!(
+        !any_carries_secret(&mirror_reqs),
+        "{:?}",
+        mirror_reqs.lock().unwrap()
+    );
+    assert!(
+        !any_carries_secret(&token_reqs),
+        "{:?}",
+        token_reqs.lock().unwrap()
+    );
+}
+
+/// Digest CONSENT lifts the machine's own rollback protection, so it cannot be
+/// obtained by failover: the primary's status is unavailable, and a mirror
+/// that would happily consent is never asked.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_mirror_cannot_grant_the_rollback_consent_the_primary_could_not_give() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let primary = serve_layer_signed(&sk, &pk, 1);
+    let mirror = serve_spec(Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: Some("2027-01-01"),
+        published_until: None,
+    });
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    std::fs::write(
+        p.dir.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"rolling\"\nlayer = \"{LAYER}\"\ndigest = \"{}\"\n",
+            primary.digest
+        ),
+    )
+    .unwrap();
+    seed_high_water(&p, 5);
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "consent was obtained from a mirror:\n{stderr}"
+    );
+    assert!(stderr.contains("rollback refused"), "{stderr}");
+    assert!(
+        mirror
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| !r.contains("/blobs/")),
+        "the mirror must not be asked for its status: {:?}",
+        mirror.requests.lock().unwrap()
+    );
+    assert!(!installed_anything(&p));
 }

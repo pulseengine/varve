@@ -323,16 +323,21 @@ pub fn include_window(
     digest: &str,
     realm: &str,
 ) -> Result<IncludeWindow, IncludeWindowError> {
-    window_and_includes(source, verifier, root_pk, digest, realm).map(|(w, _)| w)
+    window_and_includes(source, verifier, root_pk, digest, realm, false).map(|(w, _)| w)
 }
 
 /// One layer's own window, and the layers it includes.
+///
+/// `earlier_source_failed`: a source asked before this one did not answer, so
+/// this one's "no correction published" cannot establish that none exists
+/// anywhere — only a correction actually found settles it.
 fn window_and_includes(
     source: &dyn crate::source::LayerSource,
     verifier: &dyn crate::install::ManifestVerifier,
     root_pk: &[u8],
     digest: &str,
     realm: &str,
+    earlier_source_failed: bool,
 ) -> Result<(IncludeWindow, Vec<crate::compose::Include>), IncludeWindowError> {
     let fail = |reason: String| IncludeWindowError {
         include: digest.to_string(),
@@ -362,7 +367,11 @@ fn window_and_includes(
         &layer_ref,
         manifest.layer.line(),
         root_pk,
-        crate::linestatus::Published::Required,
+        if earlier_source_failed {
+            crate::linestatus::Published::MustBePresent
+        } else {
+            crate::linestatus::Published::Required
+        },
     )
     // Every error `current_line_status` returns here is about THIS source's
     // document (it could not be fetched, did not verify, or covers another
@@ -456,13 +465,29 @@ fn deep_window(
     }
     let view = access.open(realm).map_err(fail)?;
     let (own, nested) = match view.mirrors {
-        None => window_and_includes(view.source, view.verifier, view.root, digest, realm)?,
-        Some(sources) => sources
-            .attempt(
-                |source| window_and_includes(source, view.verifier, view.root, digest, realm),
-                |e| e.retry_elsewhere,
-            )
-            .map_err(|failures| all_sources_failed(digest, realm, failures))?,
+        None => window_and_includes(view.source, view.verifier, view.root, digest, realm, false)?,
+        Some(sources) => {
+            // Once any source has failed to answer, a later source's "no
+            // correction" proves nothing about the one that did not.
+            let mut earlier_failed = false;
+            sources
+                .attempt(
+                    |source| {
+                        let r = window_and_includes(
+                            source,
+                            view.verifier,
+                            view.root,
+                            digest,
+                            realm,
+                            earlier_failed,
+                        );
+                        earlier_failed |= r.is_err();
+                        r
+                    },
+                    |e| e.retry_elsewhere,
+                )
+                .map_err(|failures| all_sources_failed(digest, realm, failures))?
+        }
     };
     let mut best = own;
     for inc in nested {
@@ -1479,11 +1504,11 @@ mod tests {
             }
         }
 
-        fn status_doc(until: &str, sk: &[u8]) -> Vec<u8> {
+        fn status_doc(until: &str, sk: &[u8], counter: u64) -> Vec<u8> {
             LineStatus {
                 min_counter: None,
                 line: "2026.10".into(),
-                counter: 1,
+                counter,
                 issued_at: "2026-09-24T00:00:00Z".into(),
                 support_until: Some(until.into()),
                 yanked: Default::default(),
@@ -1507,10 +1532,13 @@ mod tests {
             let (sk, pk) = generate_root_keypair();
             let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
             let digest = manifest_digest(&bytes);
+            // The mirror carries a baseline AND a published correction, so it
+            // can establish the window on its own after the primary failed.
             let with_status = |until: &str| {
                 MemorySource::new()
                     .with_manifest(&bytes)
-                    .with_line_status(&status_doc(until, &sk))
+                    .with_line_status(&status_doc(until, &sk, 1))
+                    .with_published_line_status(&status_doc(until, &sk, 2))
             };
             let mirrors = Mirrors::new(vec![
                 mirror("primary", with_status("2026-11-01")),
@@ -1530,6 +1558,76 @@ mod tests {
                 "the window comes from the source that verified: {w:?}"
             );
             assert_eq!(mirrors.served_by().as_deref(), Some("mirror"));
+        }
+
+        /// The first source's manifest fails the root; the second carries the
+        /// layer and a baseline status but NO published correction.
+        fn after_a_failed_primary(mirror_has_correction: bool) -> Result<IncludeWindow, String> {
+            let (sk, pk) = generate_root_keypair();
+            let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
+            let digest = manifest_digest(&bytes);
+            let mut second = MemorySource::new()
+                .with_manifest(&bytes)
+                .with_line_status(&status_doc("2026-12-01", &sk, 1));
+            if mirror_has_correction {
+                second = second.with_published_line_status(&status_doc("2026-10-24", &sk, 2));
+            }
+            let mirrors = Mirrors::new(vec![
+                mirror("primary", MemorySource::new().with_manifest(&bytes)),
+                mirror("mirror", second),
+            ]);
+            let verifier = RejectsFirst(Cell::new(false));
+            let realm = Realm {
+                unused: MemorySource::new(),
+                mirrors: &mirrors,
+                verifier: &verifier,
+                pk: &pk,
+            };
+            include_window_deep(&realm, &digest, "acme").map_err(|e| e.to_string())
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn no_correction_on_a_mirror_does_not_establish_absence_after_the_primary_failed() {
+            let err = after_a_failed_primary(false).expect_err("could not be established");
+            assert!(err.contains("could not be established"), "{err}");
+            assert!(err.contains("primary") && err.contains("mirror"), "{err}");
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn a_correction_found_on_the_mirror_settles_it_and_binds() {
+            let w = after_a_failed_primary(true).unwrap();
+            assert_eq!(w.support_until.as_deref(), Some("2026-10-24"), "{w:?}");
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn a_primary_that_answers_no_correction_establishes_absence_for_itself() {
+            let (sk, pk) = generate_root_keypair();
+            let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
+            let digest = manifest_digest(&bytes);
+            let mirrors = Mirrors::new(vec![mirror(
+                "primary",
+                MemorySource::new()
+                    .with_manifest(&bytes)
+                    .with_line_status(&status_doc("2026-11-20", &sk, 1)),
+            )]);
+            let realm = Realm {
+                unused: MemorySource::new(),
+                mirrors: &mirrors,
+                verifier: &RejectsNone,
+                pk: &pk,
+            };
+            let w = include_window_deep(&realm, &digest, "acme").unwrap();
+            assert_eq!(w.support_until.as_deref(), Some("2026-11-20"));
+        }
+
+        struct RejectsNone;
+        impl ManifestVerifier for RejectsNone {
+            fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {
+                Ok(fetched.to_vec())
+            }
         }
 
         // rivet: verifies REQ-MIRROR-002

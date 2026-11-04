@@ -52,15 +52,15 @@ const ALLOWED: &[(&str, &str, &str)] = &[
     ),
     (
         "varve-core/src/mirror.rs",
-        ".map(|r| r.registry)",
-        "reads the HOST out of an already-parsed RegistryRef so mirrors on other \
-         hosts can be credential-restricted; not a Realm, not a fetch",
+        "    crate::RegistrySource::parse(spec)",
+        "`registry_origin`: parses a source string only to read its ORIGIN, so \
+         mirrors on another origin can be credential-restricted; nothing is fetched",
     ),
     (
         "varve-core/src/mirror.rs",
-        "sources.first().and_then(|p| registry_host(p))",
-        "reads only the primary's HOST, to decide which mirrors are on another \
-         host; every source (primary included) is still built from the whole list",
+        "sources.first().and_then(|p| registry_origin(p))",
+        "reads only the primary's ORIGIN, to decide which mirrors are on another \
+         origin; every source (primary included) is still built from the whole list",
     ),
     (
         "varve-core/src/layerspec.rs",

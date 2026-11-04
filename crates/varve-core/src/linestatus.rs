@@ -825,6 +825,10 @@ pub enum Published {
     BestEffort,
     /// Refuse: the reader will sign on the answer.
     Required,
+    /// As `Required`, and ABSENCE is refused too: the reader has already had a
+    /// source fail to answer, so "this source publishes none" cannot stand
+    /// for "none exists". Only a document actually found settles it.
+    MustBePresent,
 }
 
 /// The line-status that currently speaks for `layer`: the baseline deposited
@@ -861,9 +865,16 @@ pub fn current_line_status(
         source.fetch_published_line_status(&line.to_string()),
         published,
     ) {
-        (Ok(doc), _) => doc,
+        (Ok(Some(doc)), _) => Some(doc),
+        (Ok(None), Published::MustBePresent) => {
+            return Err(LineStatusError::Payload(format!(
+                "this source publishes no correction for line {line}, and an earlier source \
+                 could not be asked, so whether a correction exists could not be established"
+            )));
+        }
+        (Ok(None), _) => None,
         (Err(_), Published::BestEffort) => None,
-        (Err(e), Published::Required) => {
+        (Err(e), Published::Required | Published::MustBePresent) => {
             return Err(LineStatusError::Payload(format!(
                 "cannot tell whether a correction was published for line {line}: {e}"
             )));
@@ -2760,5 +2771,62 @@ mod failover_class_tests {
             }
             .fails_over()
         );
+    }
+}
+
+#[cfg(test)]
+mod published_mode_tests {
+    use super::*;
+    use crate::source::{LayerRef, MemorySource};
+
+    fn doc(counter: u64, sk: &[u8]) -> Vec<u8> {
+        LineStatus {
+            min_counter: None,
+            line: "2026.10".into(),
+            counter,
+            issued_at: "2026-09-24T00:00:00Z".into(),
+            support_until: Some("2026-12-01".into()),
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        }
+        .sign(sk, "k")
+        .unwrap()
+        .into_bytes()
+    }
+
+    fn read(source: &MemorySource, pk: &[u8], mode: Published) -> Result<Option<u64>, String> {
+        let line: Line = "2026.10".parse().unwrap();
+        let layer = LayerRef::Digest("sha256:x".into());
+        current_line_status(source, &layer, &line, pk, mode)
+            .map(|found| found.map(|(_, d)| d.counter))
+            .map_err(|e| e.to_string())
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn an_absent_correction_is_accepted_except_when_an_earlier_source_failed() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        // A baseline, and no published correction.
+        let source = MemorySource::new().with_line_status(&doc(1, &sk));
+        assert_eq!(read(&source, &pk, Published::BestEffort), Ok(Some(1)));
+        assert_eq!(read(&source, &pk, Published::Required), Ok(Some(1)));
+        let why = read(&source, &pk, Published::MustBePresent).unwrap_err();
+        assert!(why.contains("could not be established"), "{why}");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_correction_actually_found_settles_it_in_every_mode() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let source = MemorySource::new()
+            .with_line_status(&doc(1, &sk))
+            .with_published_line_status(&doc(2, &sk));
+        for mode in [
+            Published::BestEffort,
+            Published::Required,
+            Published::MustBePresent,
+        ] {
+            assert_eq!(read(&source, &pk, mode), Ok(Some(2)));
+        }
     }
 }
