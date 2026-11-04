@@ -60,6 +60,11 @@ pub fn previous_from_spec(text: &str) -> anyhow::Result<BTreeMap<String, Previou
         #[serde(default)]
         #[allow(dead_code)]
         kind: Option<String>,
+        // Written by `SpecOut` for a `zephyr-module`, so it must be KNOWN here
+        // or the next run cannot read the spec this one wrote.
+        #[serde(rename = "allow-pip", default)]
+        #[allow(dead_code)]
+        allow_pip: Option<Vec<String>>,
         name: String,
         platform: Option<String>,
         source: PrevSource,
@@ -236,6 +241,19 @@ pub fn stage_one<R: CommandRunner>(
         // be. What differs between them is relocation, and that is decided
         // in `check_sdk_prefixes`, not here — a toolchain carries no prefix
         // and is refused if it declares one.
+        // A Zephyr module is a tree stored whole, as published
+        // (REQ-ZMODEXPORT-001). Checked HERE with the code that will export it,
+        // while a missing `zephyr/module.yml` or an unaccepted pip dependency
+        // can still be fixed: the bytes would hash and sign perfectly well.
+        PayloadKind::ZephyrModule => {
+            stage::place(&archive, &dest, false)?;
+            let bytes = std::fs::read(&dest)?;
+            varve_core::zephyrmodule::check_deposit(
+                names.deposited,
+                &bytes,
+                r.plan.allow_pip.as_deref(),
+            )?;
+        }
         PayloadKind::Sdk | PayloadKind::Toolchain => {
             stage::place(&archive, &dest, false)?;
             // Clause 5: shape, not architecture. A tree cannot be
@@ -316,6 +334,7 @@ pub fn stage_one<R: CommandRunner>(
         },
         docs_title: r.plan.title.clone(),
         docs_documents: r.plan.documents.clone(),
+        zephyr_allow_pip: r.plan.allow_pip.clone(),
         libc,
         source: SourceOut {
             repo: r.plan.repo.clone(),
@@ -491,6 +510,7 @@ mod tests {
                 upstream_sums: None,
                 title: None,
                 documents: None,
+                allow_pip: None,
                 contains: None,
                 name: "rivet".into(),
                 repo: "o/r".into(),
@@ -846,6 +866,120 @@ mod tests {
         );
     }
 
+    fn module_tarball(files: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut tar = tar::Builder::new(Vec::new());
+        for (path, body) in files {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            tar.append_data(&mut h, path, body.as_bytes()).unwrap();
+        }
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&tar.into_inner().unwrap()).unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn stage_module(
+        tag: &str,
+        files: &[(&str, &str)],
+        allow_pip: Option<Vec<String>>,
+    ) -> (std::path::PathBuf, anyhow::Result<ToolOut>) {
+        let root = scratch(tag);
+        let dl = root.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        std::fs::write(dl.join("gale.tar.gz"), module_tarball(files)).unwrap();
+        let mut r = resolved(PayloadKind::ZephyrModule, "gale.tar.gz", None);
+        r.plan.name = "gale".into();
+        r.plan.allow_pip = allow_pip;
+        let t = stage_one(
+            &Unpacker,
+            &r,
+            "0.1.0",
+            &root,
+            &dl,
+            &root.join("x"),
+            Names {
+                deposited: "gale",
+                binary: "gale",
+            },
+        );
+        (root, t)
+    }
+
+    /// REQ-ZMODEXPORT-001 clause 1: a module is stored whole, as published, and
+    /// signed as what it is.
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_zephyr_module_is_stored_whole_and_labelled() {
+        let files = [
+            ("zephyr/module.yml", "name: gale\n"),
+            ("CMakeLists.txt", "x"),
+        ];
+        let (root, t) = stage_module("zmodwhole", &files, None);
+        let t = t.expect("a tree with a module.yml stages");
+        assert_eq!(t.kind.as_deref(), Some("zephyr-module"));
+        assert!(t.path.starts_with("zephyr/"), "{}", t.path);
+        assert!(
+            t.path.ends_with(".tar.gz"),
+            "the extension must survive: {}",
+            t.path
+        );
+        assert_eq!(t.platform, None);
+        assert_eq!(t.zephyr_allow_pip, None);
+        assert_eq!(
+            std::fs::read(root.join(&t.path)).unwrap(),
+            std::fs::read(root.join("dl/gale.tar.gz")).unwrap(),
+            "stored exactly as published"
+        );
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_tree_without_a_module_yml_does_not_stage_as_a_zephyr_module() {
+        let (_root, t) = stage_module("zmodnone", &[("CMakeLists.txt", "x")], None);
+        let msg = t.expect_err("must refuse").to_string();
+        assert!(
+            msg.contains("zephyr/module.yml") && msg.contains("gale"),
+            "{msg}"
+        );
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_zephyr_module_with_pip_needs_the_matching_opt_in_to_stage() {
+        let files = [(
+            "zephyr/module.yml",
+            "name: gale\npackage-managers:\n  pip:\n    requirement-files:\n      - scripts/requirements.txt\n",
+        )];
+        let (_r, t) = stage_module("zmodpip0", &files, None);
+        let msg = t.expect_err("pip without opt-in").to_string();
+        assert!(
+            msg.contains("scripts/requirements.txt") && msg.contains("allow-pip"),
+            "{msg}"
+        );
+
+        let (_r, t) = stage_module("zmodpip1", &files, Some(vec!["other.txt".into()]));
+        assert!(
+            t.expect_err("mismatched opt-in")
+                .to_string()
+                .contains("EXACTLY")
+        );
+
+        let (_r, t) = stage_module(
+            "zmodpip2",
+            &files,
+            Some(vec!["scripts/requirements.txt".into()]),
+        );
+        let t = t.expect("matching opt-in stages");
+        assert_eq!(
+            t.zephyr_allow_pip,
+            Some(vec!["scripts/requirements.txt".to_string()]),
+            "the opt-in travels into the spec varve deposit signs"
+        );
+    }
+
     /// `contains` may name a FILE, not only a directory prefix. Matching only
     /// by prefix would accept a payload where the named file is absent but
     /// something happens to share its leading path.
@@ -1023,6 +1157,7 @@ mod tests {
             docs_entry: None,
             docs_title: None,
             docs_documents: None,
+            zephyr_allow_pip: None,
             libc: None,
             source: src(asset, sha),
         };
@@ -1095,6 +1230,7 @@ mod tests {
             docs_entry: None,
             docs_title: None,
             docs_documents: None,
+            zephyr_allow_pip: None,
             libc: None,
             source: SourceOut {
                 repo: "pulseengine/rivet".into(),
@@ -1112,6 +1248,45 @@ mod tests {
         let text = spec.render().expect("renders");
         let prev = previous_from_spec(&text).expect("deny_unknown_fields must not trip on these");
         assert_eq!(prev["rivet"].repo, "pulseengine/rivet");
+    }
+
+    /// A spec this run wrote for a `zephyr-module` carries `allow-pip`, and the
+    /// NEXT run reads it back for carry-forward (REQ-ZMODEXPORT-001).
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_previous_spec_carrying_a_zephyr_opt_in_still_reads_back() {
+        let mut spec = SpecOut::new("2026.11.1", "rolling", 7);
+        spec.tools.push(ToolOut {
+            name: "gale".into(),
+            version: "0.1.0".into(),
+            platform: None,
+            path: "zephyr/gale-0.1.0.tar.gz".into(),
+            kind: Some("zephyr-module".into()),
+            docs_format: None,
+            docs_entry: None,
+            docs_title: None,
+            docs_documents: None,
+            zephyr_allow_pip: Some(vec!["scripts/requirements.txt".into()]),
+            libc: None,
+            source: SourceOut {
+                repo: "pulseengine/gale".into(),
+                release: "v0.1.0".into(),
+                asset: "gale-0.1.0.tar.gz".into(),
+                sha256: "a".repeat(64),
+                proof: Some("cosign-sums".into()),
+                proof_signer: None,
+                proof_asserts: None,
+                license: None,
+                sbom: None,
+                sbom_sha256: None,
+            },
+        });
+        let text = spec
+            .render()
+            .expect("renders and the real parser accepts it");
+        assert!(text.contains("allow-pip"), "{text}");
+        let prev = previous_from_spec(&text).expect("deny_unknown_fields must not trip");
+        assert_eq!(prev["gale"].repo, "pulseengine/gale");
     }
 
     /// One layer carries the same tool for four platforms, so a previous-entry
@@ -1182,6 +1357,7 @@ mod tests {
             upstream_sums: None,
             title: None,
             documents: None,
+            allow_pip: None,
             contains: None,
             name: name.into(),
             repo: "o/r".into(),
@@ -1240,6 +1416,7 @@ mod tests {
             upstream_sums: None,
             title: None,
             documents: None,
+            allow_pip: None,
             contains: None,
             name: name.into(),
             repo: "pulseengine/synth".into(),

@@ -8909,3 +8909,642 @@ fn a_refused_tool_nothing_provides_says_so_and_still_exits_1() {
     assert!(!stderr.contains("Options"), "{stderr}");
     assert!(!marker.exists());
 }
+
+// ---------------------------------------------------------------------------
+// export-zephyr-modules (REQ-ZMODEXPORT-001)
+// ---------------------------------------------------------------------------
+
+/// A gzip-tar of a Zephyr module's files (path, content).
+fn zephyr_module_tarball(files: &[(&str, &str)]) -> Vec<u8> {
+    let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::default(),
+    ));
+    for (path, body) in files {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, path, body.as_bytes()).unwrap();
+    }
+    b.into_inner().unwrap().finish().unwrap()
+}
+
+/// A module whose `module.yml` names it and lists `depends`.
+fn zephyr_module(name: &str, depends: &[&str]) -> Vec<u8> {
+    let mut yml = format!("name: {name}\nbuild:\n  cmake: .\n");
+    if !depends.is_empty() {
+        yml.push_str("  depends:\n");
+        for d in depends {
+            yml.push_str(&format!("    - {d}\n"));
+        }
+    }
+    zephyr_module_tarball(&[
+        ("zephyr/module.yml", &yml),
+        ("CMakeLists.txt", &format!("# {name}\n")),
+        ("src/lib.c", "int lib(void) { return 1; }\n"),
+    ])
+}
+
+/// A layer 2026.07.0 carrying one `zephyr-module` payload per `(name, bytes)`,
+/// plus an ordinary tool, deposited, signed and installed.
+fn zephyr_layer(modules: &[(&str, Vec<u8>)]) -> (Fixture, Root) {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let tool_path = parent.join("rivet-bin");
+    std::fs::write(&tool_path, b"rivet-binary-bytes").unwrap();
+    let mut spec = format!(
+        "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+         [[tool]]\nname = \"rivet\"\nversion = \"0.32.0\"\npath = \"{}\"\n",
+        tool_path.display()
+    );
+    for (name, bytes) in modules {
+        let p = parent.join(format!("{name}.tar.gz"));
+        std::fs::write(&p, bytes).unwrap();
+        spec.push_str(&format!(
+            "\n[[tool]]\nname = \"{name}\"\nversion = \"0.1.0\"\nkind = \"zephyr-module\"\n\
+             path = \"{}\"\n",
+            p.display()
+        ));
+    }
+    deposit_and_install(&fx, &root, &spec, "zephyr");
+    (fx, root)
+}
+
+fn stamp_of(out: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(out.join(".varve-export.json")).unwrap()).unwrap()
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn export_zephyr_modules_writes_the_trees_the_cmake_file_and_the_stamp() {
+    let (fx, root) = zephyr_layer(&[
+        ("gale", zephyr_module("gale", &["hal_x"])),
+        ("hal_x", zephyr_module("hal_x", &[])),
+    ]);
+    let out = fx.project.parent().unwrap().join("zmods");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-zephyr-modules", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gale").and(predicate::str::contains("hal_x")));
+    let out = out.canonicalize().unwrap();
+
+    // The trees, as stored.
+    assert_eq!(
+        std::fs::read_to_string(out.join("gale/zephyr/module.yml")).unwrap(),
+        "name: gale\nbuild:\n  cmake: .\n  depends:\n    - hal_x\n"
+    );
+    assert!(out.join("gale/src/lib.c").is_file());
+    assert!(out.join("hal_x/zephyr/module.yml").is_file());
+
+    // The script appends BOTH, by absolute path, and names the layer + digest.
+    let stamp = stamp_of(&out);
+    assert_eq!(stamp["kind"], "zephyr-module");
+    let digest = stamp["manifest_digest"].as_str().unwrap().to_string();
+    let cmake = std::fs::read_to_string(out.join("zephyr-extra-modules.cmake")).unwrap();
+    for m in ["gale", "hal_x"] {
+        let line = format!(
+            "list(APPEND ZEPHYR_EXTRA_MODULES \"{}\")",
+            out.join(m).display()
+        );
+        assert!(cmake.contains(&line), "missing {line} in:\n{cmake}");
+    }
+    assert!(cmake.contains("2026.07.0"), "{cmake}");
+    assert!(cmake.contains(&digest), "{cmake}");
+
+    // Never touches a west.yml, the team's or a new one.
+    assert!(!out.join("west.yml").exists());
+    assert!(!fx.project.join("west.yml").exists());
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn a_zephyr_export_verifies_and_one_flipped_byte_in_a_module_fails_it() {
+    let (fx, root) = zephyr_layer(&[
+        ("gale", zephyr_module("gale", &["hal_x"])),
+        ("hal_x", zephyr_module("hal_x", &[])),
+    ]);
+    let out = fx.project.parent().unwrap().join("zmods");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-zephyr-modules", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    let ok = verify_export(&fx, &root, &out);
+    assert!(
+        ok.status.success(),
+        "an untouched zephyr export must verify:\n{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    // One byte of one module's source.
+    let victim = out.join("hal_x/src/lib.c");
+    let mut bytes = std::fs::read(&victim).unwrap();
+    bytes[0] ^= 1;
+    std::fs::write(&victim, bytes).unwrap();
+    let bad = verify_export(&fx, &root, &out);
+    let stderr = String::from_utf8_lossy(&bad.stderr).to_string();
+    assert_eq!(
+        bad.status.code(),
+        Some(1),
+        "one flipped byte passed:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("hal_x/src/lib.c") && stderr.contains("modified"),
+        "{stderr}"
+    );
+}
+
+// rivet: verifies REQ-EXPORTCONTENT-001
+#[test]
+fn verify_export_catches_tampering_in_a_zephyr_module_export() {
+    let (fx, root) = zephyr_layer(&[("gale", zephyr_module("gale", &[]))]);
+    export_then_tamper_in(&fx, &root, "export-zephyr-modules", &[]);
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn an_export_with_an_incomplete_depends_closure_is_refused_naming_both() {
+    let (fx, root) = zephyr_layer(&[("app", zephyr_module("app", &["ghost_mod"]))]);
+    let out = fx.project.parent().unwrap().join("zmods");
+    let res = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-zephyr-modules", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+    assert_eq!(res.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("app") && stderr.contains("ghost_mod"),
+        "the refusal must name the module AND the missing dependency: {stderr}"
+    );
+    // Refused BEFORE anything is written or stamped: a half export would pass
+    // `verify --export` while being incomplete.
+    assert!(!out.join(".varve-export.json").exists());
+    assert!(!out.join("zephyr-extra-modules.cmake").exists());
+    assert!(!out.join("app").exists());
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn a_pin_with_no_zephyr_module_says_what_is_missing() {
+    let (fx, root) = layer_for_every_adapter();
+    let out = fx.project.parent().unwrap().join("zmods");
+    let res = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-zephyr-modules", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+    assert_eq!(res.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("zephyr-module") && stderr.contains("2026.07.0"),
+        "must say which kind is missing, and from which layer: {stderr}"
+    );
+    assert!(
+        !out.join(".varve-export.json").exists(),
+        "nothing is stamped"
+    );
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn select_narrows_the_export_and_an_unknown_name_is_refused() {
+    let (fx, root) = zephyr_layer(&[
+        ("alpha", zephyr_module("alpha", &[])),
+        ("beta", zephyr_module("beta", &[])),
+    ]);
+    let parent = fx.project.parent().unwrap();
+    let out = parent.join("one");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args([
+            "export-zephyr-modules",
+            "--layer",
+            "2026.07.0",
+            "--select",
+            "beta",
+            "--out",
+        ])
+        .arg(&out)
+        .assert()
+        .success();
+    assert!(out.join("beta/zephyr/module.yml").is_file());
+    assert!(
+        !out.join("alpha").exists(),
+        "--select exports only the named module"
+    );
+    let cmake = std::fs::read_to_string(out.join("zephyr-extra-modules.cmake")).unwrap();
+    assert!(
+        cmake.contains("beta") && !cmake.contains("alpha"),
+        "{cmake}"
+    );
+
+    let out2 = parent.join("none");
+    let res = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args([
+            "export-zephyr-modules",
+            "--layer",
+            "2026.07.0",
+            "--select",
+            "gamma",
+            "--out",
+        ])
+        .arg(&out2)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+    assert_eq!(res.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("gamma") && stderr.contains("alpha") && stderr.contains("beta"),
+        "name the unknown selection and what IS carried: {stderr}"
+    );
+    assert!(!out2.join(".varve-export.json").exists());
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn a_zephyr_export_can_be_declared_in_varve_toml_and_is_checked_by_verify() {
+    let (fx, root) = zephyr_layer(&[("gale", zephyr_module("gale", &[]))]);
+    write_pin(
+        &fx,
+        "\n[[export]]\nkind = \"zephyr-module\"\nout = \"zmods\"\n",
+    );
+    // Declared and not yet produced: a failure that names the command to run.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "varve export-zephyr-modules --out",
+        ));
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-zephyr-modules", "--out", "zmods"])
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("declared export").and(predicate::str::contains("fresh")));
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn the_deposit_refuses_a_tree_with_no_module_yml_and_writes_nothing() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let p = parent.join("notamodule.tar.gz");
+    std::fs::write(&p, zephyr_module_tarball(&[("CMakeLists.txt", "x")])).unwrap();
+    let spec = parent.join("spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"notamodule\"\nversion = \"0.1.0\"\nkind = \"zephyr-module\"\n\
+             path = \"{}\"\n",
+            p.display()
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&root.key)
+        .args(["--key-id", "varve-root-1", "--out"])
+        .arg(&layout)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("zephyr/module.yml")
+                .and(predicate::str::contains("notamodule")),
+        );
+    assert!(!layout.exists());
+}
+
+/// The spec text for a deposit of one module that declares pip.
+fn pip_spec(parent: &std::path::Path, allow: Option<&str>) -> String {
+    let p = parent.join("py.tar.gz");
+    std::fs::write(
+        &p,
+        zephyr_module_tarball(&[(
+            "zephyr/module.yml",
+            "name: py\npackage-managers:\n  pip:\n    requirement-files:\n      - scripts/requirements.txt\n",
+        )]),
+    )
+    .unwrap();
+    format!(
+        "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+         [[tool]]\nname = \"py\"\nversion = \"0.1.0\"\nkind = \"zephyr-module\"\npath = \"{}\"\n{}",
+        p.display(),
+        allow
+            .map(|a| format!("allow-pip = {a}\n"))
+            .unwrap_or_default()
+    )
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn pip_is_refused_at_deposit_without_an_opt_in_and_with_a_wrong_one() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let deposit = |spec_text: &str, tag: &str| {
+        let spec = parent.join(format!("{tag}.toml"));
+        std::fs::write(&spec, spec_text).unwrap();
+        varve(&fx)
+            .args(["deposit", "--spec"])
+            .arg(&spec)
+            .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+            .arg(&root.key)
+            .args(["--key-id", "varve-root-1", "--out"])
+            .arg(parent.join(format!("{tag}-layout")))
+            .output()
+            .unwrap()
+    };
+    let none = deposit(&pip_spec(parent, None), "nooptin");
+    assert_eq!(none.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&none.stderr);
+    assert!(
+        stderr.contains("scripts/requirements.txt") && stderr.contains("allow-pip"),
+        "{stderr}"
+    );
+    let wrong = deposit(&pip_spec(parent, Some("[\"other.txt\"]")), "wrongoptin");
+    assert_eq!(wrong.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("EXACTLY"));
+    assert!(!parent.join("nooptin-layout").exists());
+    assert!(!parent.join("wrongoptin-layout").exists());
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn inspect_shows_the_pip_opt_in_of_a_zephyr_module() {
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap();
+    let root = root_at(parent);
+    let spec = pip_spec(parent, Some("[\"scripts/requirements.txt\"]"));
+    deposit_and_install(&fx, &root, &spec, "pip-ok");
+
+    let text = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["inspect", "--layer", "2026.07.0"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&text.stdout).to_string();
+    assert!(
+        text.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&text.stderr)
+    );
+    assert!(
+        stdout.contains("allow-pip") && stdout.contains("scripts/requirements.txt"),
+        "inspect must show that the module was accepted WITH a Python dependency:\n{stdout}"
+    );
+
+    let json = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["inspect", "--layer", "2026.07.0", "--json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&json.stdout)));
+    let py = v["payloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "py")
+        .expect("py is listed");
+    assert_eq!(py["kind"], "zephyr-module");
+    assert_eq!(
+        py["zephyr_allow_pip"],
+        serde_json::json!(["scripts/requirements.txt"])
+    );
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn a_module_without_pip_shows_no_opt_in_in_inspect() {
+    let (fx, root) = zephyr_layer(&[("gale", zephyr_module("gale", &[]))]);
+    let out = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["inspect", "--layer", "2026.07.0"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        !stdout.contains("allow-pip"),
+        "no opt-in, so none is shown:\n{stdout}"
+    );
+    let json = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["inspect", "--layer", "2026.07.0", "--json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let g = v["payloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "gale")
+        .unwrap();
+    assert!(g["zephyr_allow_pip"].is_null());
+}
+
+/// Does `cmake` really read the script the CLI wrote? Skipped, with the
+/// reason printed, where no `cmake` is installed.
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn real_cmake_reads_the_exported_script_with_dash_c_and_include() {
+    let Some(cmake) = std::env::var_os("PATH").and_then(|p| {
+        std::env::split_paths(&p)
+            .map(|d| d.join("cmake"))
+            .find(|c| c.is_file())
+    }) else {
+        eprintln!(
+            "SKIPPED real_cmake_reads_the_exported_script_with_dash_c_and_include: no cmake on PATH"
+        );
+        return;
+    };
+    let (fx, root) = zephyr_layer(&[
+        ("gale", zephyr_module("gale", &[])),
+        ("hal_x", zephyr_module("hal_x", &[])),
+    ]);
+    let parent = fx.project.parent().unwrap();
+    // A directory with a space AND a quote in its path: the quoting is the point.
+    let out = parent.join("out dir \"q\"");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-zephyr-modules", "--layer", "2026.07.0", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    let out = out.canonicalize().unwrap();
+    let script = out.join("zephyr-extra-modules.cmake");
+    let project = parent.join("cmake-project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("CMakeLists.txt"),
+        "cmake_minimum_required(VERSION 3.20)\nproject(probe NONE)\n\
+         message(STATUS \"ZEM=[${ZEPHYR_EXTRA_MODULES}]\")\n",
+    )
+    .unwrap();
+    let build = parent.join("cmake-build");
+    let o = std::process::Command::new(cmake)
+        .arg("-S")
+        .arg(&project)
+        .arg("-B")
+        .arg(&build)
+        .arg("-C")
+        .arg(&script)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "cmake failed:\n{text}");
+    let line = text
+        .lines()
+        .find(|l| l.contains("ZEM=["))
+        .expect("probe line");
+    for m in ["gale", "hal_x"] {
+        assert!(
+            line.contains(&out.join(m).display().to_string()),
+            "{m} missing from ZEPHYR_EXTRA_MODULES: {line}"
+        );
+    }
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn a_re_export_replaces_what_varve_wrote_and_refuses_what_it_did_not() {
+    let (fx, root) = zephyr_layer(&[("gale", zephyr_module("gale", &[]))]);
+    let parent = fx.project.parent().unwrap();
+    let export = |out: &std::path::Path| {
+        varve(&fx)
+            .env("VARVE_TRUST_ROOT", &root.trust_root)
+            .args(["export-zephyr-modules", "--layer", "2026.07.0", "--out"])
+            .arg(out)
+            .output()
+            .unwrap()
+    };
+    // A second export over a first replaces cleanly, and still verifies.
+    let out = parent.join("zmods");
+    assert!(export(&out).status.success());
+    std::fs::write(out.join("gale/src/stale.c"), "x").unwrap();
+    assert!(export(&out).status.success());
+    assert!(!out.join("gale/src/stale.c").exists());
+    assert!(verify_export(&fx, &root, &out).status.success());
+
+    // A `gale/` that is the user's own is refused, and survives untouched.
+    let mine = parent.join("my-workspace");
+    std::fs::create_dir_all(mine.join("gale")).unwrap();
+    std::fs::write(mine.join("gale/MARKER"), "my checkout").unwrap();
+    let res = export(&mine);
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+    assert_eq!(res.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("was not written by varve export-zephyr-modules"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(mine.join("gale/MARKER")).unwrap(),
+        "my checkout"
+    );
+    assert!(!mine.join(".varve-export.json").exists());
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn a_stamp_that_swept_up_the_users_directory_does_not_let_a_re_export_delete_it() {
+    // The reviewer's reproduction: the stamp hashes everything under --out.
+    let (fx, root) = zephyr_layer(&[
+        ("gale", zephyr_module("gale", &[])),
+        ("hal", zephyr_module("hal", &[])),
+    ]);
+    let parent = fx.project.parent().unwrap();
+    let out = parent.join("zmods");
+    std::fs::create_dir_all(out.join("hal")).unwrap();
+    std::fs::write(out.join("hal/MARKER"), "my own hal").unwrap();
+    let export = |extra: &[&str]| {
+        varve(&fx)
+            .env("VARVE_TRUST_ROOT", &root.trust_root)
+            .args(["export-zephyr-modules", "--layer", "2026.07.0", "--out"])
+            .arg(&out)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    // `hal/` is the user's, so even the FIRST export of {gale, hal} refuses.
+    assert_eq!(export(&[]).status.code(), Some(1));
+    assert!(export(&["--select", "gale"]).status.success());
+    assert!(
+        stamp_of(&out)["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "hal/MARKER"),
+        "the stamp swept up the user's file, as the review found"
+    );
+    let res = export(&[]);
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+    assert_eq!(res.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("was not written by varve export-zephyr-modules"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("hal/MARKER")).unwrap(),
+        "my own hal"
+    );
+}
+
+// rivet: verifies REQ-ZMODEXPORT-001
+#[test]
+fn a_module_dropped_from_a_re_export_is_removed_and_the_export_still_verifies() {
+    let (fx, root) = zephyr_layer(&[
+        ("alpha", zephyr_module("alpha", &[])),
+        ("beta", zephyr_module("beta", &[])),
+    ]);
+    let parent = fx.project.parent().unwrap();
+    let out = parent.join("zmods");
+    let export = |extra: &[&str]| {
+        varve(&fx)
+            .env("VARVE_TRUST_ROOT", &root.trust_root)
+            .args(["export-zephyr-modules", "--layer", "2026.07.0", "--out"])
+            .arg(&out)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    assert!(export(&[]).status.success());
+    std::fs::create_dir_all(out.join("mine")).unwrap();
+    std::fs::write(out.join("mine/KEEP"), "k").unwrap();
+    let res = export(&["--select", "alpha"]);
+    assert!(
+        res.status.success(),
+        "{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    assert!(String::from_utf8_lossy(&res.stdout).contains("removed beta"));
+    assert!(!out.join("beta").exists(), "a leftover module survived");
+    assert!(out.join("alpha/zephyr/module.yml").is_file());
+    assert!(
+        out.join("mine/KEEP").is_file(),
+        "a user directory was touched"
+    );
+    let v = verify_export(&fx, &root, &out);
+    // `mine/KEEP` was not in the stamp (it was added after the first export,
+    // but the second export re-stamped over it), so this stays consistent.
+    assert!(v.status.success(), "{}", String::from_utf8_lossy(&v.stderr));
+}

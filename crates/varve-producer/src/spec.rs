@@ -67,6 +67,11 @@ pub struct ToolOut {
     pub docs_title: Option<String>,
     #[serde(rename = "docs-documents", skip_serializing_if = "Option::is_none")]
     pub docs_documents: Option<String>,
+    /// The pip requirement files of a `zephyr-module` the operator accepts
+    /// (REQ-ZMODEXPORT-001 clause 5) — signed into the layer by `varve
+    /// deposit`, which refuses the module unless this names exactly them.
+    #[serde(rename = "allow-pip", skip_serializing_if = "Option::is_none")]
+    pub zephyr_allow_pip: Option<Vec<String>>,
     /// What this payload needs from the host's libc, MEASURED from its ELF
     /// (REQ-LIBCSTATED-001). Absent when nothing was measurable, because
     /// absence of evidence is not a portability guarantee.
@@ -155,6 +160,7 @@ mod tests {
             docs_entry: None,
             docs_title: None,
             docs_documents: None,
+            zephyr_allow_pip: None,
             libc: None,
             source: src(),
         }

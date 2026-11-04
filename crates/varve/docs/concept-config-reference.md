@@ -140,6 +140,11 @@ kind     = "tool"              # tool | crate | wit | zephyr-module | sdk | tool
 # docs-title     = "varve-core API"          # the label shown when choosing
 # docs-documents = "varve-core"  # the payload this documents; must name a non-docs
                                # payload of THIS deposit, or the deposit is refused
+# allow-pip = ["scripts/requirements.txt"]   # kind = "zephyr-module" only. The tree must hold
+                               # zephyr/module.yml, or the deposit is refused. A module
+                               # declaring `package-managers: pip` is refused unless this
+                               # names EXACTLY its requirement files (`varve docs
+                               # export-zephyr-modules`)
 
 [tool.source]                  # optional upstream provenance
 repo    = "pulseengine/rivet"

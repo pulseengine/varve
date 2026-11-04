@@ -58,6 +58,10 @@ pub enum Layout {
     /// unpacking and relocating is `varve export-sdk`'s job, on the consumer's
     /// machine, per REQ-SDK-001 clause 3.
     Sdk,
+    /// A Zephyr module TREE (REQ-ZMODEXPORT-001): the archive is the payload,
+    /// as for `Sdk`, and for the same reason it cannot be mined for a binary.
+    /// `varve export-zephyr-modules` lays it out on the consumer's machine.
+    ZephyrModule,
 }
 
 impl Layout {
@@ -66,6 +70,7 @@ impl Layout {
             "tarball" => Some(Layout::Tarball),
             "raw-per-platform" => Some(Layout::RawPerPlatform),
             "sdk" => Some(Layout::Sdk),
+            "zephyr-module" => Some(Layout::ZephyrModule),
             _ => None,
         }
     }
@@ -173,6 +178,17 @@ pub struct ManifestTool {
     /// error page hashes and signs perfectly well.
     #[serde(rename = "contains", default)]
     pub contains: Option<String>,
+    /// The pip requirement files of a `zephyr-module` the operator accepts as
+    /// a Python dependency (REQ-ZMODEXPORT-001 clause 5).
+    ///
+    /// varve distributes the blocks a project adds and needs no Python. A
+    /// module whose `zephyr/module.yml` declares `package-managers: pip` adds
+    /// a Python dependency to every build that uses it, so the deposit refuses
+    /// it unless this names EXACTLY the declared files. It is signed into the
+    /// layer and `varve inspect` shows it. Only a `layout = "zephyr-module"`
+    /// entry may carry it.
+    #[serde(rename = "allow-pip", default)]
+    pub allow_pip: Option<Vec<String>>,
     /// Asset name for one target triple, when no template can derive it.
     ///
     /// Some upstreams ship a musl binary as their only Linux build —
@@ -1038,10 +1054,10 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
         // A layout the encoding cannot carry must stop here, not arrive at the
         // shell as something else. `sdk` is the case: the tree IS the payload,
         // and a tarball entry would have a binary extracted from it.
-        if layout == Layout::Sdk {
+        if layout == Layout::Sdk || layout == Layout::ZephyrModule {
             return Err(LayerSpecError::LayoutNotEncodable {
                 tool: t.name.clone(),
-                layout: "sdk".into(),
+                layout: t.layout.clone().unwrap_or_default(),
             });
         }
         // Same rule, and the reason is stronger: `upstream-sums` is not a name
@@ -2206,6 +2222,56 @@ asset=\"toolchain_gnu_%U_arm-zephyr-eabi.tar.xz\"\n"
         let msg = e.to_string();
         assert!(msg.contains("none for a LAYOUT"), "{msg}");
         assert!(msg.contains("varve-producer deposit"), "{msg}");
+    }
+
+    /// A `zephyr-module` is a tree like an sdk, and for the same reason it
+    /// cannot be flattened into the env encoding: the shell assembler would
+    /// mine the module for a binary. `allow-pip` is the other half of it
+    /// (REQ-ZMODEXPORT-001 clause 5): a field the encoding cannot carry stops
+    /// at the boundary.
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_zephyr_module_entry_refuses_to_translate_into_the_env_encoding() {
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"gale\"\nrepo=\"pulseengine/gale\"\n\
+version=\"v0.1.0\"\nlayout=\"zephyr-module\"\nasset=\"gale-%V.tar.gz\"\n\
+allow-pip=[\"scripts/requirements.txt\"]\n"
+        ))
+        .expect_err("must refuse");
+        assert!(
+            matches!(&e, LayerSpecError::LayoutNotEncodable { layout, .. } if layout == "zephyr-module"),
+            "{e:?}"
+        );
+        // The sdk refusal still names `sdk`.
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"z\"\nrepo=\"o/z\"\nversion=\"v1\"\nlayout=\"sdk\"\nasset=\"z.tar.xz\"\n"
+        ))
+        .expect_err("must refuse");
+        assert!(
+            matches!(&e, LayerSpecError::LayoutNotEncodable { layout, .. } if layout == "sdk"),
+            "{e:?}"
+        );
+    }
+
+    /// `allow-pip` is a manifest field, read as a list of strings.
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn allow_pip_is_a_known_manifest_field() {
+        let m = parse_layer_manifest(&format!(
+            "{HEAD}\n[[tool]]\nname=\"gale\"\nrepo=\"pulseengine/gale\"\n\
+version=\"v0.1.0\"\nlayout=\"zephyr-module\"\nasset=\"gale-%V.tar.gz\"\n\
+allow-pip=[\"a.txt\", \"b/c.txt\"]\n"
+        ))
+        .expect("parses");
+        assert_eq!(
+            m.tools[0].allow_pip.as_deref(),
+            Some(&["a.txt".to_string(), "b/c.txt".to_string()][..])
+        );
+        let none = parse_layer_manifest(&format!(
+            "{HEAD}\n[[tool]]\nname=\"rivet\"\nrepo=\"pulseengine/rivet\"\nversion=\"v1\"\n"
+        ))
+        .unwrap();
+        assert_eq!(none.tools[0].allow_pip, None);
     }
 
     /// A SPLIT OPT-IN joins into exactly the prose a consumer read before.

@@ -477,6 +477,15 @@ jobs:
             files: >-
               -f crates/varve-core/src/witclosure.rs
               -f crates/varve-core/src/witexport.rs
+          # GATED on arrival, in a shard of its own (REQ-ZMODEXPORT-001). It
+          # decides whether a tree is a module at all, whether a module may
+          # bring Python into every build that uses it, and what is safe to
+          # write into a CMake list that Zephyr then trusts to find its source.
+          # Small, with no network, so there is no cost argument for leaving it
+          # out and no reason to grow a shard that was already split.
+          - shard: varve-core (zephyr-module)
+            files: >-
+              -f crates/varve-core/src/zephyrmodule.rs
           # Same reasoning, different stake. This module decides whether an
           # upstream digest list was signed by the key we pinned — a wrong
           # "yes" here admits unvouched bytes into a signed layer.

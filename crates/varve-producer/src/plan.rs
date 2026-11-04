@@ -55,6 +55,11 @@ pub enum PayloadKind {
     /// (REQ-CRATEPAYLOAD-001). HELD, never dispatched; never unpacked, because
     /// its sha256 is the `cksum` a Cargo registry index records for it.
     Crate,
+    /// A Zephyr module TREE (REQ-ZMODEXPORT-001): the archive is the payload,
+    /// stored as published, and must contain `zephyr/module.yml`. HELD, never
+    /// dispatched; platform-independent, because source is the same on every
+    /// machine.
+    ZephyrModule,
 }
 
 impl PayloadKind {
@@ -72,6 +77,7 @@ impl PayloadKind {
             PayloadKind::Toolchain => Some("toolchain"),
             PayloadKind::Docs(_) => Some("docs"),
             PayloadKind::Crate => Some("crate"),
+            PayloadKind::ZephyrModule => Some("zephyr-module"),
         }
     }
 }
@@ -121,6 +127,9 @@ pub struct PayloadPlan {
     /// The payload a document documents, by name. `None` for every kind but
     /// `docs`.
     pub documents: Option<String>,
+    /// The pip requirement files of a `zephyr-module` the operator accepts
+    /// (REQ-ZMODEXPORT-001 clause 5). `None` for every other kind.
+    pub allow_pip: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +146,19 @@ pub enum PlanError {
     CrateIsNotPerPlatform {
         name: String,
         asset: String,
+    },
+    /// A Zephyr module is source: one tree for every platform.
+    ZephyrIsNotPerPlatform {
+        name: String,
+        asset: String,
+    },
+    /// A `zephyr-module` names no asset, and none can be derived.
+    ZephyrNeedsAsset {
+        name: String,
+    },
+    /// `allow-pip` on an entry that is not a `zephyr-module`.
+    AllowPipNotOnZephyrModule {
+        tool: String,
     },
     /// A tool declares a layout this planner does not implement.
     UnknownLayout {
@@ -190,6 +212,26 @@ impl std::fmt::Display for PlanError {
                  placeholder here would deposit several payloads under one \
                  name and version. Name the asset without one."
             ),
+            PlanError::ZephyrIsNotPerPlatform { name, asset } => write!(
+                f,
+                "zephyr-module {name:?} uses a per-platform template {asset:?}. A \
+                 module is source — the same tree on every platform — so a platform \
+                 placeholder here would deposit several payloads under one name and \
+                 version. Name the asset without one."
+            ),
+            PlanError::ZephyrNeedsAsset { name } => write!(
+                f,
+                "zephyr-module {name:?} names no `asset`. The archive's name is the \
+                 upstream's and cannot be derived from the module's name, so the \
+                 manifest states it, e.g. asset = \"{name}-%V.tar.gz\"."
+            ),
+            PlanError::AllowPipNotOnZephyrModule { tool } => write!(
+                f,
+                "tool {tool:?} sets `allow-pip`, and only an entry with \
+                 layout = \"zephyr-module\" has pip requirement files to accept. \
+                 Left in place it would be read by nothing and believed. Drop it, \
+                 or make this entry a zephyr-module."
+            ),
             PlanError::UnknownLayout { tool, layout } => write!(
                 f,
                 "tool {tool:?} declares layout = {layout:?}. Known layouts are \
@@ -240,6 +282,8 @@ fn template_of(t: &ManifestTool, kind: PayloadKind) -> String {
         PayloadKind::Toolchain => unreachable!("a toolchain carries its template"),
         PayloadKind::Docs(_) => unreachable!("a docs entry carries its template"),
         PayloadKind::Crate => unreachable!("a crate is planned by plan_crate"),
+        // The tree's name is the upstream's, like an sdk's: not derivable.
+        PayloadKind::ZephyrModule => unreachable!("a zephyr-module carries its template"),
     }
 }
 
@@ -249,6 +293,7 @@ fn kind_of(t: &ManifestTool) -> Result<PayloadKind, PlanError> {
         Some("raw-per-platform") => Ok(PayloadKind::RawPerPlatform),
         Some("sdk") => Ok(PayloadKind::Sdk),
         Some("toolchain") => Ok(PayloadKind::Toolchain),
+        Some("zephyr-module") => Ok(PayloadKind::ZephyrModule),
         Some(other) => Err(PlanError::UnknownLayout {
             tool: t.name.clone(),
             layout: other.to_string(),
@@ -259,6 +304,31 @@ fn kind_of(t: &ManifestTool) -> Result<PayloadKind, PlanError> {
 /// Expand one tool into one plan item per platform.
 pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan>, PlanError> {
     let kind = kind_of(t)?;
+    // The pip opt-in belongs to a module and to nothing else; on any other
+    // entry it would be dropped or signed, and believed either way.
+    if t.allow_pip.is_some() && kind != PayloadKind::ZephyrModule {
+        return Err(PlanError::AllowPipNotOnZephyrModule {
+            tool: t.name.clone(),
+        });
+    }
+    // A module's archive name is the upstream's and cannot be derived, so it
+    // is stated, and a missing one is a refusal and not a panic.
+    if kind == PayloadKind::ZephyrModule {
+        match &t.asset {
+            None => {
+                return Err(PlanError::ZephyrNeedsAsset {
+                    name: t.name.clone(),
+                });
+            }
+            Some(a) if asset::is_per_platform(a) => {
+                return Err(PlanError::ZephyrIsNotPerPlatform {
+                    name: t.name.clone(),
+                    asset: a.clone(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
     let template = template_of(t, kind);
     let repo = repo_of(&t.repo, &t.name);
     // `binary` names the executable when it differs from the tool (kiln ships
@@ -286,6 +356,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             upstream_sums: t.upstream_sums.clone(),
             title: None,
             documents: None,
+            allow_pip: t.allow_pip.clone(),
         });
         return Ok(out);
     }
@@ -346,6 +417,9 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             upstream_sums: t.upstream_sums.clone(),
             title: None,
             documents: None,
+            // A per-platform entry is never a module (refused above), so it
+            // has no pip opt-in to carry.
+            allow_pip: None,
         });
     }
     Ok(out)
@@ -372,6 +446,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             upstream_sums: None,
             title: None,
             documents: None,
+            allow_pip: None,
         });
         return Ok(out);
     }
@@ -392,6 +467,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             upstream_sums: None,
             title: None,
             documents: None,
+            allow_pip: None,
         });
     }
     Ok(out)
@@ -434,6 +510,7 @@ pub fn plan_docs(d: &ManifestDocs) -> Result<Vec<PayloadPlan>, PlanError> {
         upstream_sums: None,
         title: d.title.clone(),
         documents: d.documents.clone(),
+        allow_pip: None,
     }])
 }
 
@@ -469,6 +546,7 @@ pub fn plan_crate(c: &ManifestCrate) -> Result<Vec<PayloadPlan>, PlanError> {
         upstream_sums: None,
         title: None,
         documents: None,
+        allow_pip: None,
     }])
 }
 
@@ -1016,6 +1094,7 @@ mod tests {
             PayloadKind::Toolchain,
             PayloadKind::Docs(DocsFormat::Pdf),
             PayloadKind::Crate,
+            PayloadKind::ZephyrModule,
         ];
         for k in all {
             let core = match k.deposit_kind() {
@@ -1032,9 +1111,87 @@ mod tests {
                 PayloadKind::Toolchain => varve_core::PayloadKind::Toolchain,
                 PayloadKind::Docs(_) => varve_core::PayloadKind::Docs,
                 PayloadKind::Crate => varve_core::PayloadKind::Crate,
+                PayloadKind::ZephyrModule => varve_core::PayloadKind::ZephyrModule,
             };
             assert_eq!(core, want, "{k:?}");
         }
+    }
+
+    /// REQ-ZMODEXPORT-001. A Zephyr module is a tree: planned once, no
+    /// platform, the archive is the payload, and the operator's pip opt-in
+    /// reaches the plan rather than being parsed and dropped.
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_zephyr_module_is_planned_once_and_carries_its_pip_opt_in() {
+        let m = manifest(
+            "[[tool]]\nname = \"gale\"\nrepo = \"pulseengine/gale\"\nversion = \"v0.1.0\"\n\
+             layout = \"zephyr-module\"\nasset = \"gale-%V-module.tar.gz\"\n\
+             allow-pip = [\"scripts/requirements.txt\"]\n",
+        );
+        let p = plan(&m, PLATFORMS).expect("plans");
+        assert_eq!(p.len(), 1, "a module is one payload, not one per platform");
+        assert_eq!(p[0].kind, PayloadKind::ZephyrModule);
+        assert_eq!(p[0].platform, None);
+        assert_eq!(p[0].asset, "gale-0.1.0-module.tar.gz");
+        assert_eq!(
+            p[0].allow_pip.as_deref(),
+            Some(&["scripts/requirements.txt".to_string()][..]),
+            "`allow-pip` is inert"
+        );
+        assert_eq!(
+            PayloadKind::ZephyrModule.deposit_kind(),
+            Some("zephyr-module")
+        );
+        let bare = manifest(
+            "[[tool]]\nname = \"gale\"\nversion = \"v0.1.0\"\nlayout = \"zephyr-module\"\n\
+             asset = \"gale.tar.gz\"\n",
+        );
+        assert_eq!(plan(&bare, PLATFORMS).unwrap()[0].allow_pip, None);
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_per_platform_zephyr_module_template_is_refused() {
+        let m = manifest(
+            "[[tool]]\nname = \"gale\"\nversion = \"v0.1.0\"\nlayout = \"zephyr-module\"\n\
+             asset = \"gale-%V-%T.tar.gz\"\n",
+        );
+        let e = plan(&m, PLATFORMS).expect_err("must refuse");
+        assert!(
+            matches!(e, PlanError::ZephyrIsNotPerPlatform { .. }),
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("gale"), "{e}");
+    }
+
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn a_zephyr_module_without_an_asset_is_refused_not_a_panic() {
+        let m = manifest(
+            "[[tool]]\nname = \"gale\"\nversion = \"v0.1.0\"\nlayout = \"zephyr-module\"\n",
+        );
+        let e = plan(&m, PLATFORMS).expect_err("must refuse");
+        assert!(
+            matches!(&e, PlanError::ZephyrNeedsAsset { name } if name == "gale"),
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("gale-%V.tar.gz"), "{e}");
+    }
+
+    /// `allow-pip` on anything that is not a module would be signed or
+    /// dropped, and believed either way.
+    // rivet: verifies REQ-ZMODEXPORT-001
+    #[test]
+    fn allow_pip_on_a_tool_that_is_not_a_zephyr_module_is_refused() {
+        let m = manifest(
+            "[[tool]]\nname = \"rivet\"\nversion = \"v0.34.0\"\nallow-pip = [\"a.txt\"]\n",
+        );
+        let e = plan(&m, PLATFORMS).expect_err("must refuse");
+        assert!(
+            matches!(&e, PlanError::AllowPipNotOnZephyrModule { tool } if tool == "rivet"),
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("zephyr-module"), "{e}");
     }
 
     #[test]

@@ -86,6 +86,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Export the layer's verified `wit` packages as a `wkg` local registry tree, for the package named by --package and its dependencies",
     ),
     (
+        "export-zephyr-modules",
+        "Lay the layer's verified `zephyr-module` payloads out for a Zephyr build, and write the CMake script that adds them to `ZEPHYR_EXTRA_MODULES` (REQ-ZMODEXPORT-001)",
+    ),
+    (
         "inspect",
         "What is actually IN a layer: every payload's name, version, kind and platform, whether varve DISPATCHES it or merely HOLDS it, and every layer of the composition it came from (REQ-INSPECT-001)",
     ),
