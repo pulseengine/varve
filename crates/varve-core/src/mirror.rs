@@ -64,13 +64,44 @@ pub struct Mirrors {
     notices: RefCell<Vec<String>>,
 }
 
+/// Whether `spec` starts like a URL (`scheme://`).
+fn url_scheme(spec: &str) -> Option<&str> {
+    let (scheme, _) = spec.split_once("://")?;
+    let mut chars = scheme.chars();
+    let first = chars.next()?;
+    (first.is_ascii_lowercase()
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "+.-".contains(c)))
+    .then_some(scheme)
+}
+
 /// Turn one source string into a source. An `oci://` / `oci+http://`
-/// reference is a registry; anything else is a path to an OCI image layout
-/// (the `varve archive` / `deposit` output) or a plain `manifests/` + `blobs/`
-/// directory. The shape changes availability, never acceptance.
+/// reference is a registry; a path is an OCI image layout (the `varve
+/// archive` / `deposit` output) or a plain `manifests/` + `blobs/` directory.
+/// Any OTHER URL scheme is refused: it would otherwise be read as a relative
+/// directory literally named `https:`, and fail later as "no layer found"
+/// instead of saying what is wrong. The shape changes availability, never
+/// acceptance.
 pub fn source_from_spec(spec: &str, platform: &str) -> Result<Box<dyn LayerSource>, SourceError> {
+    build_source(spec, platform, None)
+}
+
+fn build_source(
+    spec: &str,
+    platform: &str,
+    mirror_of: Option<&str>,
+) -> Result<Box<dyn LayerSource>, SourceError> {
     if spec.starts_with("oci://") || spec.starts_with("oci+http://") {
-        return Ok(Box::new(crate::RegistrySource::parse(spec)?));
+        let mut registry = crate::RegistrySource::parse(spec)?;
+        if let Some(primary_host) = mirror_of {
+            registry = registry.as_mirror_of(primary_host);
+        }
+        return Ok(Box::new(registry));
+    }
+    if let Some(scheme) = url_scheme(spec) {
+        return Err(SourceError::Transport(format!(
+            "'{spec}' uses the '{scheme}://' scheme, which varve cannot read: a source is an \
+             oci:// or oci+http:// registry, or a local directory"
+        )));
     }
     let path = std::path::Path::new(spec);
     if path.join("oci-layout").is_file() {
@@ -82,6 +113,32 @@ pub fn source_from_spec(spec: &str, platform: &str) -> Result<Box<dyn LayerSourc
         ))
     } else {
         Ok(Box::new(crate::DirSource::at(path)))
+    }
+}
+
+/// What a source at position `index` is a mirror OF: the primary's host for
+/// every source after the first, nothing for the primary itself. A mirror is
+/// credential-restricted to its own host (`RegistrySource::as_mirror_of`).
+fn mirror_of(index: usize, primary_host: Option<&str>) -> Option<&str> {
+    if index > 0 { primary_host } else { None }
+}
+
+/// The `host[:port]` of an `oci://` / `oci+http://` source, if it is one.
+fn registry_host(spec: &str) -> Option<String> {
+    crate::registry::RegistryRef::parse(spec)
+        .ok()
+        .map(|r| r.registry)
+}
+
+/// A reason in one short line, for a notice.
+fn short_reason(e: &dyn std::fmt::Display) -> String {
+    let text = e.to_string();
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() > 140 {
+        let cut: String = line.chars().take(140).collect();
+        format!("{cut}...")
+    } else {
+        line.to_string()
     }
 }
 
@@ -108,11 +165,31 @@ impl Mirrors {
         sources: &[String],
         platform: &str,
     ) -> Result<Self, SourceError> {
+        let primary_host = sources.first().and_then(|p| registry_host(p));
         let mut mirrors = Vec::with_capacity(sources.len());
-        for spec in sources {
+        for (i, spec) in sources.iter().enumerate() {
+            let refuse = |why: String| {
+                SourceError::Transport(format!("realm '{realm_name}': source '{spec}': {why}"))
+            };
+            // A relative path would resolve against whatever directory varve
+            // happens to run in, so the same realms file would mean different
+            // sources from different places. Refused rather than guessed.
+            if url_scheme(spec).is_none()
+                && !spec.starts_with("oci://")
+                && !spec.starts_with("oci+http://")
+                && !std::path::Path::new(spec).is_absolute()
+            {
+                return Err(refuse(
+                    "a relative path is ambiguous (it would depend on the working directory); \
+                     write an absolute path or an oci:// registry"
+                        .to_string(),
+                ));
+            }
+            let source = build_source(spec, platform, mirror_of(i, primary_host.as_deref()))
+                .map_err(|e| refuse(e.to_string()))?;
             mirrors.push(Mirror {
                 label: spec.clone(),
-                source: source_from_spec(spec, platform)?,
+                source,
             });
         }
         let mut m = Mirrors::new(mirrors);
@@ -146,7 +223,7 @@ impl Mirrors {
     /// source is asked. Otherwise a stale mirror would get a second chance
     /// against a lower bar than the primary's genuine, refused layer, and
     /// failover itself would be the rollback attack.
-    pub fn attempt<T, E>(
+    pub fn attempt<T, E: std::fmt::Display>(
         &self,
         mut f: impl FnMut(&dyn LayerSource) -> Result<T, E>,
         fails_over: impl Fn(&E) -> bool,
@@ -157,15 +234,7 @@ impl Mirrors {
                 Ok(v) => {
                     *self.served_by.borrow_mut() = Some(m.label.clone());
                     if i > 0 {
-                        let why = failures
-                            .iter()
-                            .map(|(l, _)| l.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        self.announce(
-                            &m.label,
-                            &format!("{why} did not supply a layer that verified"),
-                        );
+                        self.announce(&m.label, &Self::reasons(&failures));
                     }
                     return Ok(v);
                 }
@@ -179,6 +248,64 @@ impl Mirrors {
             }
         }
         Err(failures)
+    }
+
+    /// Each skipped source and why, in one short line apiece. A forged answer
+    /// and an outage must read differently, or an operator cannot tell an
+    /// attack from a bad afternoon.
+    fn reasons<E: std::fmt::Display>(failures: &[(String, E)]) -> String {
+        failures
+            .iter()
+            .map(|(l, e)| format!("{l}: {}", short_reason(e)))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    /// [`attempt`](Self::attempt) for an answer that can legitimately be
+    /// ABSENT: `Ok(None)` from one source is not the end of the search while
+    /// another may carry it. The first `Some` wins; `None` is returned only
+    /// when no source had one, and an error is returned only when no source
+    /// answered at all. A terminal error stops the search at once.
+    pub fn attempt_some<T, E: std::fmt::Display>(
+        &self,
+        mut f: impl FnMut(&dyn LayerSource) -> Result<Option<T>, E>,
+        fails_over: impl Fn(&E) -> bool,
+    ) -> Result<Option<T>, Vec<(String, E)>> {
+        let mut failures: Vec<(String, E)> = Vec::new();
+        let mut absent = false;
+        for (i, m) in self.mirrors.iter().enumerate() {
+            match f(m.source.as_ref()) {
+                Ok(Some(v)) => {
+                    *self.served_by.borrow_mut() = Some(m.label.clone());
+                    if i > 0 {
+                        self.announce(&m.label, &Self::reasons(&failures));
+                    }
+                    return Ok(Some(v));
+                }
+                Ok(None) => absent = true,
+                Err(e) => {
+                    let terminal = !fails_over(&e);
+                    failures.push((m.label.clone(), e));
+                    if terminal {
+                        return Err(failures);
+                    }
+                }
+            }
+        }
+        if absent || self.mirrors.is_empty() {
+            Ok(None)
+        } else {
+            Err(failures)
+        }
+    }
+
+    /// One source by its label, to ask it directly (a diagnosis about the
+    /// source whose bytes produced a verdict). Never announces.
+    pub fn source_for_label(&self, label: &str) -> Option<&dyn LayerSource> {
+        self.mirrors
+            .iter()
+            .find(|m| m.label == label)
+            .map(|m| m.source.as_ref())
     }
 
     /// Say, once per source, that a mirror and not the primary answered.
@@ -356,8 +483,13 @@ impl Mirrors {
                 }
             }
         }
-        if any_answered {
-            // At least one source answered "I do not carry this", which is a
+        let unreachable = self
+            .attempts
+            .borrow()
+            .iter()
+            .any(|(_, e)| e != "carries none");
+        if any_answered && !unreachable {
+            // Every source answered "I do not carry this", which is a
             // legitimate absence rather than a failure to reach anyone.
             return Ok(None);
         }
@@ -975,5 +1107,264 @@ mod tests {
         let labels: Vec<_> = failures.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(labels, ["primary", "mirror"]);
         assert_eq!(failures[1].1, "verdict");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_notice_gives_each_skipped_sources_reason_so_forgery_is_not_an_outage() {
+        let m = realm_mirrors(vec![("primary", ok(b"p")), ("mirror", ok(b"m"))]);
+        let mut n = 0;
+        let _: Result<(), Vec<(String, String)>> = m.attempt(
+            |_s| {
+                n += 1;
+                if n == 1 {
+                    Err("signature does not verify against the trust root".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            |_| true,
+        );
+        let notices = m.notices();
+        assert!(
+            notices[0].contains("signature does not verify"),
+            "the reason must be stated: {}",
+            notices[0]
+        );
+        assert!(
+            !notices[0].contains("did not supply a layer that verified"),
+            "that wording blamed forgery for an outage too: {}",
+            notices[0]
+        );
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn an_unreachable_source_then_a_none_is_not_reported_as_nothing_published() {
+        // The fail-open: with the primary unreachable, a mirror that simply
+        // carries no correction would make "could not ask" read as "there is
+        // none", and a signer would sign a longer horizon than the correction
+        // the primary holds permits.
+        let m = mirrors(vec![
+            ("primary", down("connection refused")),
+            ("mirror", empty()),
+        ]);
+        let r = m.fetch_published_line_status("2026.09");
+        assert!(r.is_err(), "unknown must not become absent: {r:?}");
+        let r = m.fetch_line_status(&LayerRef::Digest("d".into()));
+        assert!(r.is_err(), "{r:?}");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_source_spec_with_an_unknown_url_scheme_is_refused_not_read_as_a_path() {
+        for spec in [
+            "https://mirror.example/x",
+            "ftp://m/x",
+            "s3://bucket/k",
+            "file:///tmp/x",
+        ] {
+            let e = source_from_spec(spec, "p").err().expect(spec).to_string();
+            assert!(e.contains(spec), "{e}");
+        }
+        let e = Mirrors::for_realm(
+            "acme",
+            &["oci://p.example/x".into(), "https://m/x".into()],
+            "p",
+        )
+        .err()
+        .expect("refused")
+        .to_string();
+        assert!(e.contains("acme") && e.contains("https://m/x"), "{e}");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_relative_path_in_a_realm_is_refused_rather_than_resolved_against_the_cwd() {
+        let e = Mirrors::for_realm(
+            "acme",
+            &["oci://p.example/x".into(), "mirror-dir".into()],
+            "p",
+        )
+        .err()
+        .expect("refused")
+        .to_string();
+        assert!(e.contains("acme") && e.contains("mirror-dir"), "{e}");
+        // An absolute path is fine, and an explicit --from keeps its meaning.
+        assert!(Mirrors::for_realm("acme", &["/abs/dir".into()], "p").is_ok());
+        assert!(Mirrors::single("rel/dir", "p").is_ok());
+    }
+
+    // ---- attempt_some: absent is not the end of the search ----
+
+    type SomeResult = Result<Option<u32>, Vec<(String, String)>>;
+
+    fn some_then(
+        answers: Vec<Result<Option<u32>, &'static str>>,
+        fails_over: impl Fn(&String) -> bool,
+    ) -> (SomeResult, usize, Mirrors) {
+        let n = answers.len();
+        let m = realm_mirrors(
+            (0..n)
+                .map(|i| (["a", "b", "c"][i], ok(b"x")))
+                .collect::<Vec<_>>(),
+        );
+        let mut i = 0;
+        let r = m.attempt_some(
+            |_s| {
+                let a = answers[i];
+                i += 1;
+                a.map_err(str::to_string)
+            },
+            fails_over,
+        );
+        (r, i, m)
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn attempt_some_keeps_asking_past_a_source_that_carries_none() {
+        let (r, asked, m) = some_then(vec![Ok(None), Ok(Some(7))], |_| true);
+        assert_eq!(r.unwrap(), Some(7));
+        assert_eq!(asked, 2);
+        assert_eq!(m.served_by().as_deref(), Some("b"));
+        assert_eq!(m.notices().len(), 1, "the mirror answered, so it is said");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn attempt_some_stops_at_the_first_some_and_does_not_announce_the_primary() {
+        let (r, asked, m) = some_then(vec![Ok(Some(1)), Ok(Some(2))], |_| true);
+        assert_eq!(r.unwrap(), Some(1));
+        assert_eq!(asked, 1);
+        assert!(m.notices().is_empty());
+        assert_eq!(m.served_by().as_deref(), Some("a"));
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn attempt_some_reports_none_when_nobody_has_one_even_if_another_was_unreachable() {
+        let (r, asked, m) = some_then(vec![Err("down"), Ok(None)], |_| true);
+        assert_eq!(r.unwrap(), None);
+        assert_eq!(asked, 2);
+        assert_eq!(m.served_by(), None);
+        let (r, _, _) = some_then(vec![Ok(None), Err("down")], |_| true);
+        assert_eq!(r.unwrap(), None);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn attempt_some_errors_only_when_no_source_answered_at_all() {
+        let (r, asked, _) = some_then(vec![Err("down"), Err("503")], |_| true);
+        let failures = r.unwrap_err();
+        assert_eq!(asked, 2);
+        let labels: Vec<_> = failures.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["a", "b"]);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn attempt_some_stops_at_a_terminal_error() {
+        let (r, asked, m) = some_then(vec![Err("verdict"), Ok(Some(9)), Ok(Some(9))], |e| {
+            e != "verdict"
+        });
+        let failures = r.unwrap_err();
+        assert_eq!(asked, 1, "a verdict is never second-guessed by a mirror");
+        assert_eq!(failures.len(), 1);
+        assert!(m.notices().is_empty());
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_source_is_found_by_its_label_and_an_unknown_label_is_none() {
+        let m = mirrors(vec![("primary", ok(b"p")), ("mirror", ok(b"m"))]);
+        let got = m
+            .source_for_label("mirror")
+            .expect("labelled")
+            .fetch_manifest(&LayerRef::Digest("d".into()))
+            .unwrap();
+        assert_eq!(got, b"m".to_vec());
+        let got = m
+            .source_for_label("primary")
+            .unwrap()
+            .fetch_manifest(&LayerRef::Digest("d".into()))
+            .unwrap();
+        assert_eq!(got, b"p".to_vec());
+        assert!(m.source_for_label("nobody").is_none());
+        assert!(
+            m.notices().is_empty(),
+            "asking a source directly announces nothing"
+        );
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_mirror_on_another_host_is_credential_restricted_but_the_primary_and_same_host_are_not() {
+        // Observable through the notice machinery only by construction, so
+        // check the host rule directly.
+        assert_eq!(
+            registry_host("oci://ghcr.io/a/b").as_deref(),
+            Some("ghcr.io")
+        );
+        assert_eq!(
+            registry_host("oci+http://127.0.0.1:5000/a").as_deref(),
+            Some("127.0.0.1:5000")
+        );
+        assert_eq!(registry_host("/some/dir"), None);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn only_sources_after_the_first_are_mirrors_of_the_primary_host() {
+        assert_eq!(mirror_of(0, Some("ghcr.io")), None);
+        assert_eq!(mirror_of(1, Some("ghcr.io")), Some("ghcr.io"));
+        assert_eq!(mirror_of(2, Some("ghcr.io")), Some("ghcr.io"));
+        assert_eq!(mirror_of(1, None), None);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn only_a_lowercase_scheme_before_colon_slash_slash_is_a_url_scheme() {
+        assert_eq!(url_scheme("https://x"), Some("https"));
+        assert_eq!(url_scheme("a+b.c-d://x"), Some("a+b.c-d"));
+        assert_eq!(url_scheme("s3://bucket"), Some("s3"));
+        assert_eq!(url_scheme("Https://x"), None, "uppercase first letter");
+        assert_eq!(url_scheme("1ab://x"), None, "digit first");
+        assert_eq!(url_scheme("/abs://x"), None, "a path that contains ://");
+        assert_eq!(
+            url_scheme("a_b://x"),
+            None,
+            "underscore is not scheme syntax"
+        );
+        assert_eq!(url_scheme("aB://x"), None, "uppercase later");
+        assert_eq!(url_scheme("://x"), None);
+        assert_eq!(url_scheme("/plain/dir"), None);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_refused_source_names_the_realm_and_the_source_whatever_went_wrong() {
+        for spec in ["oci://", "ftp://m/x", "mirror-dir"] {
+            let e = Mirrors::for_realm("acme", &["oci://p.example/x".into(), spec.into()], "p")
+                .err()
+                .expect(spec)
+                .to_string();
+            assert!(
+                e.contains("realm 'acme': source '") && e.contains(spec),
+                "{e}"
+            );
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_reason_is_one_short_line() {
+        assert_eq!(short_reason(&"first\nsecond"), "first");
+        let long = "x".repeat(400);
+        let r = short_reason(&long);
+        assert!(r.ends_with("...") && r.chars().count() == 143, "{r}");
+        assert_eq!(short_reason(&"  padded  "), "padded");
+        let exact = "y".repeat(140);
+        assert_eq!(short_reason(&exact), exact);
     }
 }

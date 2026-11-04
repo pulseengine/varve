@@ -115,18 +115,20 @@ impl IndexError {
     ///
     /// Yes where THIS source's index is unavailable, unauthentic, malformed,
     /// for another line, or hides a layer the signed index names: another
-    /// source may serve it properly. No for a verified counter regression
-    /// against the local cache (`Stale`: a verdict, and a mirror must not get
-    /// a second chance to replay something older) and for local I/O.
-    /// Exhaustive, no `_` arm.
+    /// source may serve it properly. `Stale` also fails over: every source is
+    /// judged against the same persisted local cache, so a later one can
+    /// never pass below it, and ending the search there would only cost
+    /// availability (a primary restored from backup, a stale CDN tag). No for
+    /// local I/O. Exhaustive, no `_` arm.
     pub fn fails_over(&self) -> bool {
         match self {
             IndexError::Verify(_)
             | IndexError::Payload(_)
             | IndexError::WrongLine { .. }
             | IndexError::Omitted { .. }
-            | IndexError::Missing { .. } => true,
-            IndexError::Stale { .. } | IndexError::Io { .. } => false,
+            | IndexError::Missing { .. }
+            | IndexError::Stale { .. } => true,
+            IndexError::Io { .. } => false,
         }
     }
 }
@@ -1250,7 +1252,7 @@ mod failover_class_tests {
             .fails_over()
         );
         assert!(
-            !IndexError::Stale {
+            IndexError::Stale {
                 line: "l".into(),
                 presented: 1,
                 cached: 2

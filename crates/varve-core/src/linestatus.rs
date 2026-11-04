@@ -180,16 +180,18 @@ impl LineStatusError {
     /// May another source be asked after this failure? (REQ-MIRROR-002.)
     ///
     /// Yes where this source's document was unavailable, did not verify,
-    /// was malformed, or covers another line. No for a verified counter
-    /// regression against the local cache (`Stale`) and for everything that
-    /// is local or about producing a document. Exhaustive, no `_` arm.
+    /// was malformed, covers another line, or regresses against the local
+    /// cache (`Stale`: a later source is judged against the same cache, so it
+    /// can never pass below it; stopping would only cost availability). No for
+    /// everything that is local or about producing a document. Exhaustive, no
+    /// `_` arm.
     pub fn fails_over(&self) -> bool {
         match self {
             LineStatusError::Envelope(_)
             | LineStatusError::Payload(_)
-            | LineStatusError::LineMismatch { .. } => true,
+            | LineStatusError::LineMismatch { .. }
+            | LineStatusError::Stale { .. } => true,
             LineStatusError::Sign(_)
-            | LineStatusError::Stale { .. }
             | LineStatusError::DeadReference { .. }
             | LineStatusError::UnknownLayer { .. }
             | LineStatusError::NotALayout { .. }
@@ -2742,7 +2744,7 @@ mod failover_class_tests {
             .fails_over()
         );
         assert!(
-            !LineStatusError::Stale {
+            LineStatusError::Stale {
                 line: "l".into(),
                 presented: 1,
                 cached: 2

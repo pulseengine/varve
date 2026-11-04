@@ -402,12 +402,32 @@ fn lookups_from_paths(paths: &[PathBuf], registry: &str) -> Vec<CredentialLookup
         .collect()
 }
 
-fn resolve_credential(registry: &str) -> CredentialLookup {
+/// `use_env` is false for a source that is not the realm's primary host: the
+/// environment credential names no host, so it belongs to the host the
+/// operator configured it for, never to a mirror (REQ-MIRROR-002). Docker
+/// config entries are keyed by host and stay available to the host they name.
+fn resolve_credential(registry: &str, use_env: bool) -> CredentialLookup {
+    credential_from(
+        registry,
+        use_env,
+        std::env::var(CREDENTIAL_ENV).ok(),
+        &credential_config_paths(),
+    )
+}
+
+/// `resolve_credential` with its inputs given, so the host rule is testable
+/// without touching the process environment.
+fn credential_from(
+    registry: &str,
+    use_env: bool,
+    env_value: Option<String>,
+    config_paths: &[PathBuf],
+) -> CredentialLookup {
     let mut lookups = Vec::new();
-    if let Ok(value) = std::env::var(CREDENTIAL_ENV) {
+    if use_env && let Some(value) = env_value {
         lookups.push(credential_from_env_value(&value));
     }
-    lookups.extend(lookups_from_paths(&credential_config_paths(), registry));
+    lookups.extend(lookups_from_paths(config_paths, registry));
     first_usable(lookups)
 }
 
@@ -762,6 +782,11 @@ pub struct RegistrySource {
     /// Resolved lazily: an anonymous pull from a public registry must not
     /// read the user's docker config at all.
     credential: OnceCell<CredentialLookup>,
+    /// A mirror on a host other than the realm primary's. It may not be sent
+    /// the environment credential, and what credential it does hold goes only
+    /// to a token endpoint on its OWN host: a mirror is chosen by whoever
+    /// edits the realms file, and its challenge can name any token realm.
+    restricted: bool,
 }
 
 impl std::fmt::Debug for RegistrySource {
@@ -788,7 +813,23 @@ impl RegistrySource {
             agent: ureq::Agent::new_with_config(agent_config()),
             token: RefCell::new(None),
             credential: OnceCell::new(),
+            restricted: false,
         }
+    }
+
+    /// Mark this source as a MIRROR of a realm whose primary lives on
+    /// `primary_host` (`host[:port]`). On the same host nothing changes; on
+    /// any other host the source is credential-restricted (see `restricted`).
+    pub fn as_mirror_of(mut self, primary_host: &str) -> Self {
+        if self.reference.registry != primary_host {
+            self.restricted = true;
+        }
+        self
+    }
+
+    /// The `host[:port]` this source talks to.
+    pub fn host(&self) -> &str {
+        &self.reference.registry
     }
 
     pub fn parse(reference: &str) -> Result<Self, SourceError> {
@@ -806,9 +847,16 @@ impl RegistrySource {
         self
     }
 
+    /// Whether the environment credential may be offered to this source: only
+    /// a source on the realm primary's host (never a mirror elsewhere).
+    fn offers_env_credential(&self) -> bool {
+        !self.restricted
+    }
+
     fn credential(&self) -> &CredentialLookup {
-        self.credential
-            .get_or_init(|| resolve_credential(&self.reference.registry))
+        self.credential.get_or_init(|| {
+            resolve_credential(&self.reference.registry, self.offers_env_credential())
+        })
     }
 
     fn base(&self) -> String {
@@ -869,7 +917,13 @@ impl RegistrySource {
             )));
         }
         let mut request = self.agent.get(&url).header("Accept", "application/json");
-        if let CredentialLookup::Found(credential) = self.credential() {
+        // A restricted source sends its credential only to a token endpoint on
+        // the registry's own host; anywhere else it asks anonymously.
+        let own_origin =
+            format!("{}://{}", self.reference.scheme, self.reference.registry).to_ascii_lowercase();
+        let credential_allowed =
+            !self.restricted || origin_of(&url).as_deref() == Some(&own_origin);
+        if credential_allowed && let CredentialLookup::Found(credential) = self.credential() {
             request = request.header("Authorization", &credential.basic_header());
         }
         let mut response = request
@@ -1902,5 +1956,160 @@ mod tests {
         );
         assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e");
         assert_eq!(percent_encode("a b"), "a%20b");
+    }
+
+    // ---- REQ-MIRROR-002: the credential belongs to the primary's host ----
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_environment_credential_is_used_only_by_an_unrestricted_source() {
+        let env = Some("ci:s3cret".to_string());
+        let found = |use_env| {
+            matches!(
+                credential_from("ghcr.io", use_env, env.clone(), &[]),
+                CredentialLookup::Found(_)
+            )
+        };
+        assert!(
+            found(true),
+            "the primary's host uses the environment credential"
+        );
+        assert!(!found(false), "a mirror on another host must never see it");
+        assert!(matches!(
+            credential_from("ghcr.io", true, None, &[]),
+            CredentialLookup::Absent
+        ));
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_source_resolves_its_credential_with_the_environment_only_when_unrestricted() {
+        let primary = RegistrySource::parse("oci://ghcr.io/a/b").unwrap();
+        assert!(primary.offers_env_credential());
+        let mirror = RegistrySource::parse("oci://m.example/a/b")
+            .unwrap()
+            .as_mirror_of("ghcr.io");
+        assert!(!mirror.offers_env_credential());
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn only_a_source_on_another_host_than_the_primary_is_restricted() {
+        let primary = RegistrySource::parse("oci://ghcr.io/acme/layers").unwrap();
+        assert!(!primary.restricted);
+        assert_eq!(primary.host(), "ghcr.io");
+        let same_host = RegistrySource::parse("oci://ghcr.io/acme/other")
+            .unwrap()
+            .as_mirror_of("ghcr.io");
+        assert!(!same_host.restricted, "same host: same credential scope");
+        let other = RegistrySource::parse("oci://mirror.example/acme")
+            .unwrap()
+            .as_mirror_of("ghcr.io");
+        assert!(other.restricted);
+        let other_port = RegistrySource::parse("oci+http://ghcr.io:5000/acme")
+            .unwrap()
+            .as_mirror_of("ghcr.io");
+        assert!(
+            other_port.restricted,
+            "a different port is a different host"
+        );
+    }
+
+    /// A one-shot HTTP server that records the request headers it received.
+    fn token_endpoint() -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut seen = String::new();
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok() && line != "\r\n" && !line.is_empty() {
+                    seen.push_str(&line);
+                    line.clear();
+                }
+                let _ = tx.send(seen);
+                let body = r#"{"token":"t"}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (format!("http://{addr}/token"), rx)
+    }
+
+    /// The recorded request, or a failure: never a hang, so a mutant that
+    /// skips the token request is KILLED rather than timing out.
+    fn recv(rx: &std::sync::mpsc::Receiver<String>) -> String {
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the token endpoint was never asked")
+    }
+
+    fn challenge_for(realm: &str) -> BearerChallenge {
+        BearerChallenge {
+            realm: Some(realm.to_string()),
+            service: None,
+            scope: None,
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_restricted_source_sends_no_credential_to_a_token_realm_on_another_host() {
+        let (realm, rx) = token_endpoint();
+        let mirror = RegistrySource::parse("oci+http://127.0.0.1:1/acme/layers")
+            .unwrap()
+            .as_mirror_of("registry.primary.example")
+            .with_credential("ci", "hunter2-secret");
+        let token = mirror.obtain_token(&challenge_for(&realm)).unwrap();
+        assert_eq!(token, "t");
+        let seen = recv(&rx).to_ascii_lowercase();
+        assert!(
+            !seen.contains("authorization"),
+            "the mirror's token realm was sent a credential:\n{seen}"
+        );
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_primary_and_a_same_origin_realm_still_get_the_credential() {
+        let (realm, rx) = token_endpoint();
+        // The primary: unrestricted, so its established behaviour is unchanged
+        // even when its token realm is on another host.
+        let primary = RegistrySource::parse("oci+http://127.0.0.1:1/acme/layers")
+            .unwrap()
+            .with_credential("ci", "hunter2-secret");
+        primary.obtain_token(&challenge_for(&realm)).unwrap();
+        assert!(
+            recv(&rx)
+                .to_ascii_lowercase()
+                .contains("authorization: basic"),
+            "the primary must keep authenticating"
+        );
+        // A restricted source whose token realm is on ITS OWN host (the
+        // common ghcr/ECR shape) also still authenticates.
+        let authority = realm
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let mirror = RegistrySource::parse(&format!("oci+http://{authority}/acme/layers"))
+            .unwrap()
+            .as_mirror_of("registry.primary.example")
+            .with_credential("ci", "hunter2-secret");
+        assert!(mirror.restricted);
+        mirror.obtain_token(&challenge_for(&realm)).unwrap();
+        assert!(
+            recv(&rx)
+                .to_ascii_lowercase()
+                .contains("authorization: basic"),
+            "a same-host token realm is the mirror's own"
+        );
     }
 }

@@ -138,6 +138,11 @@ pub enum InstallError {
         presented: u64,
         high_water: u64,
         why: String,
+        /// The refusal is about what THIS SOURCE could supply (no
+        /// line-status, one that does not verify) and not about the layer: a
+        /// VERIFIED yank or lapsed window is a verdict and ends the search,
+        /// but another source may carry the status this one lacks.
+        source_fault: bool,
     },
     #[error(
         "layer on line {line} presents counter {presented}, below the floor of {floor} this \
@@ -187,6 +192,7 @@ impl InstallError {
     pub fn fails_over(&self) -> bool {
         match self {
             InstallError::Index(e) => e.fails_over(),
+            InstallError::RollbackConsentRefused { source_fault, .. } => *source_fault,
             InstallError::Source(_)
             | InstallError::Verify(_)
             | InstallError::Manifest(_)
@@ -195,7 +201,6 @@ impl InstallError {
             | InstallError::ChannelMismatch { .. }
             | InstallError::BlobDigestMismatch { .. } => true,
             InstallError::Rollback { .. }
-            | InstallError::RollbackConsentRefused { .. }
             | InstallError::BelowFloor { .. }
             | InstallError::NoPlatformEntry { .. }
             | InstallError::UnnamedEntry { .. }
@@ -428,12 +433,13 @@ fn install_inner(
                             high_water,
                         });
                     }
-                    Some(why) => {
+                    Some(refusal) => {
                         return Err(InstallError::RollbackConsentRefused {
                             line,
                             presented,
                             high_water,
-                            why,
+                            why: refusal.why,
+                            source_fault: refusal.source_fault,
                         });
                     }
                 }
@@ -634,9 +640,15 @@ fn consent_why_not(
     store_root: &std::path::Path,
     verifier: &dyn ManifestVerifier,
     now: &str,
-) -> Option<String> {
+) -> Option<ConsentRefusal> {
+    let local = |why: String| {
+        Some(ConsentRefusal {
+            why,
+            source_fault: false,
+        })
+    };
     let Some(root_pk) = verifier.root_public_key() else {
-        return Some("there is no trust root to verify a line-status against".to_string());
+        return local("there is no trust root to verify a line-status against".to_string());
     };
     let line = manifest.layer.line();
     let served = match crate::linestatus::current_line_status(
@@ -647,7 +659,14 @@ fn consent_why_not(
         crate::linestatus::Published::BestEffort,
     ) {
         Ok(served) => served.map(|(_, doc)| doc),
-        Err(e) => return Some(format!("the one served does not verify: {e}")),
+        // This source's document was unavailable or did not verify: its gap,
+        // and another source may carry a good one.
+        Err(e) => {
+            return Some(ConsentRefusal {
+                why: format!("the one served does not verify: {e}"),
+                source_fault: e.fails_over(),
+            });
+        }
     };
     // The registry is the party anti-rollback constrains, so what it serves
     // cannot outrank what this machine already holds: a validly-signed status
@@ -655,7 +674,7 @@ fn consent_why_not(
     // layer. The newer signed word decides, whichever side it came from.
     let cached = match crate::linestatus::StatusCache::at_root(store_root).load(line, root_pk) {
         Ok(cached) => cached,
-        Err(e) => return Some(format!("the cached one does not verify: {e}")),
+        Err(e) => return local(format!("the cached one does not verify: {e}")),
     };
     // One counter names one signed document, so which side wins a tie does
     // not matter; the greatest counter is the line's latest word.
@@ -664,12 +683,26 @@ fn consent_why_not(
         .flatten()
         .max_by_key(|d| d.counter)
     {
-        Some(newest) => consent_from_status(manifest, &newest, now),
-        None => Some(format!(
-            "none is available for line {line}: the source carries none and none was cached by \
-             an earlier install"
-        )),
+        // A VERIFIED document's word: a verdict about the layer.
+        Some(newest) => consent_from_status(manifest, &newest, now).map(|why| ConsentRefusal {
+            why,
+            source_fault: false,
+        }),
+        // This source carries none and none is cached: another may.
+        None => Some(ConsentRefusal {
+            why: format!(
+                "none is available for line {line}: the source carries none and none was \
+                 cached by an earlier install"
+            ),
+            source_fault: true,
+        }),
     }
+}
+
+/// Why consent was refused, and whether that is this source's gap.
+struct ConsentRefusal {
+    why: String,
+    source_fault: bool,
 }
 
 /// The same judgment from the line-status an earlier install cached, with no
@@ -755,6 +788,7 @@ mod failover_class_tests {
                 presented: 1,
                 high_water: 2,
                 why: "w".into(),
+                source_fault: false,
             },
             InstallError::BelowFloor {
                 line: "l".into(),
@@ -804,14 +838,24 @@ mod failover_class_tests {
         for e in &over {
             assert!(e.fails_over(), "{e} must fail over");
         }
+        assert!(
+            InstallError::RollbackConsentRefused {
+                line: "l".into(),
+                presented: 1,
+                high_water: 2,
+                why: "w".into(),
+                source_fault: true,
+            }
+            .fails_over()
+        );
         let stale = InstallError::Index(crate::lineindex::IndexError::Stale {
             line: "l".into(),
             presented: 1,
             cached: 2,
         });
         assert!(
-            !stale.fails_over(),
-            "a verified index regression is terminal"
+            stale.fails_over(),
+            "a later source is judged against the same local cache, so it can never pass below it"
         );
     }
 }
@@ -2204,6 +2248,105 @@ mod tests {
             "{msg}"
         );
         assert!(f.store.get(&manifest_digest(&f.older)).unwrap().is_none());
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn consent_refused_for_want_of_a_verifiable_status_fails_over_but_a_yank_does_not() {
+        // No status carried by this source: ANOTHER source may carry one.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &f.source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("no status");
+        assert!(
+            matches!(err, InstallError::RollbackConsentRefused { .. }),
+            "{err}"
+        );
+        assert!(
+            err.fails_over(),
+            "an absent status is this source's gap: {err}"
+        );
+
+        // A status signed by another root did not verify: this source's bytes.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let (other_sk, _) = crate::verify::generate_root_keypair();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for("2026.07", None, &[], &other_sk));
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("forged status");
+        assert!(
+            err.fails_over(),
+            "an unverifiable status is this source's: {err}"
+        );
+
+        // A VERIFIED yank is a verdict about the layer: terminal.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for(
+            "2026.07",
+            None,
+            &[("2026.07.0", "regression")],
+            &f.sk,
+        ));
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("yank");
+        assert!(!err.fails_over(), "a verified yank is terminal: {err}");
+
+        // A verified lapsed window likewise.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source =
+            source.with_line_status(&status_for("2026.07", Some("2026-08-06"), &[], &f.sk));
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("expired");
+        assert!(!err.fails_over(), "a verified expiry is terminal: {err}");
+
+        // No trust root is local: no source can help.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for("2026.07", None, &[], &f.sk));
+        let err = install(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            &source,
+            &AcceptAll,
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .expect_err("no root");
+        assert!(!err.fails_over(), "no root is local: {err}");
     }
 
     // rivet: verifies REQ-ROLLBACK-002

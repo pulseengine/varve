@@ -2116,33 +2116,43 @@ fn composition_for_export(
 /// The realms this checkout's varve-realms.toml defines, each with its source
 /// and verifier, for walking a composition across realms.
 struct DefinedRealms {
-    realms: std::collections::BTreeMap<
-        String,
-        (
-            varve_core::mirror::Mirrors,
-            varve_core::PinnedKeyVerifier,
-            Vec<u8>,
-        ),
-    >,
+    /// Per realm: its sources, verifier and root, or why THIS realm cannot be
+    /// used. A bad mirror spec, an unreadable root, an unresolvable entry
+    /// breaks the realm it belongs to and says so when that realm is walked;
+    /// it does not stop `support-horizon` for every other realm.
+    realms: std::collections::BTreeMap<String, Result<DefinedRealm, String>>,
 }
+
+/// One usable realm: its sources, what verifies its manifests, its root.
+type DefinedRealm = (
+    varve_core::mirror::Mirrors,
+    varve_core::PinnedKeyVerifier,
+    Vec<u8>,
+);
 
 impl DefinedRealms {
     fn open(cwd: &std::path::Path) -> anyhow::Result<Self> {
         let mut realms = std::collections::BTreeMap::new();
         if let Ok(names) = varve_core::realm::realm_names(cwd) {
             for name in names {
-                let realm = varve_core::resolve_realm(cwd, &name)?;
-                // Primary then mirrors (REQ-MIRROR-002): a down primary must
-                // not fail a realm that declares working mirrors.
-                let source = varve_core::mirror::Mirrors::for_realm(
-                    &realm.name,
-                    &realm.sources,
-                    &varve_core::host_platform(),
-                )?;
-                let verifier =
-                    varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                realms.insert(name, (source, verifier, realm.trust_root.clone()));
+                let built = (|| -> anyhow::Result<_> {
+                    let realm = varve_core::resolve_realm(cwd, &name)?;
+                    // Primary then mirrors (REQ-MIRROR-002): a down primary must
+                    // not fail a realm that declares working mirrors.
+                    let source = varve_core::mirror::Mirrors::for_realm(
+                        &realm.name,
+                        &realm.sources,
+                        &varve_core::host_platform(),
+                    )?;
+                    let verifier =
+                        varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
+                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    Ok((source, verifier, realm.trust_root.clone()))
+                })();
+                realms.insert(
+                    name.clone(),
+                    built.map_err(|e| format!("realm '{name}' cannot be used: {e:#}")),
+                );
             }
         }
         Ok(DefinedRealms { realms })
@@ -2151,14 +2161,16 @@ impl DefinedRealms {
 
 impl varve_core::support::RealmAccess for DefinedRealms {
     fn open(&self, realm: &str) -> Result<varve_core::support::RealmView<'_>, String> {
-        let (source, verifier, root) = self.realms.get(realm).ok_or_else(|| {
+        let entry = self.realms.get(realm).ok_or_else(|| {
             format!(
                 "names realm '{realm}', which is not defined in this checkout's \
                  varve-realms.toml, so no root here can vouch for its support window"
             )
         })?;
+        let (sources, verifier, root) = entry.as_ref().map_err(Clone::clone)?;
         Ok(varve_core::support::RealmView {
-            source,
+            source: sources,
+            mirrors: Some(sources),
             verifier,
             root,
         })
@@ -3885,7 +3897,7 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
     // root did not sign is refused and the next source is asked
     // (REQ-MIRROR-002 clause 2).
     let verified = sources
-        .attempt(
+        .attempt_some(
             |source| -> Result<_, varve_core::InstallError> {
                 let envelope = source.fetch_line_index(&line)?;
                 let served = source.served_layers(&line)?;
@@ -4038,6 +4050,10 @@ fn install(
         Ok(outcome) => outcome,
         Err(failures) => {
             let realm = ctx.realm.as_ref().map_or("-", |r| r.name.as_str());
+            // The source that produced the failing verdict (the last one
+            // asked), not whichever answers a fresh fetch: the diagnosis must
+            // be about the bytes that failed.
+            let failing_source = failures.last().map(|(label, _)| label.clone());
             let e: anyhow::Error = sources_failed(realm, failures);
             // REQ-ROTATE-002 clause 3. "No valid signatures" is
             // indistinguishable from a forgery by a stranger, and the one
@@ -4052,10 +4068,11 @@ fn install(
             // one.
             if let Some(realm) = ctx.realm.as_ref()
                 && !realm.retired_roots.is_empty()
-                && let Ok(bytes) = varve_core::LayerSource::fetch_manifest(
-                    &sources,
-                    &varve_core::source::LayerRef::Name(pin.layer.clone()),
-                )
+                && let Some(failing) = failing_source
+                    .as_deref()
+                    .and_then(|label| sources.source_for_label(label))
+                && let Ok(bytes) =
+                    failing.fetch_manifest(&varve_core::source::LayerRef::Name(pin.layer.clone()))
                 && let Some(why) =
                     realm.explain_retired_signature(&bytes, varve_core::verify::LAYER_PAYLOAD_TYPE)
             {
@@ -4272,7 +4289,7 @@ fn install(
     // Only a failure of THAT source's document is a reason to ask the next. A
     // verified verdict (a counter regression against the cache) or a local
     // error stops here, as a note, rather than caching an older mirror copy.
-    match sources.attempt(
+    match sources.attempt_some(
         |source| {
             varve_core::cache_baseline_line_status(
                 source,

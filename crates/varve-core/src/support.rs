@@ -288,6 +288,10 @@ pub struct IncludeWindowError {
     pub include: String,
     pub realm: String,
     pub reason: String,
+    /// Whether ANOTHER source of the realm may be asked after this failure
+    /// (REQ-MIRROR-002): true where this source's bytes were unavailable or
+    /// did not verify, false for a verdict or a local failure.
+    pub retry_elsewhere: bool,
 }
 
 impl fmt::Display for IncludeWindowError {
@@ -334,6 +338,7 @@ fn window_and_includes(
         include: digest.to_string(),
         realm: realm.to_string(),
         reason,
+        retry_elsewhere: true,
     };
     let layer_ref = crate::source::LayerRef::Digest(digest.to_string());
     let fetched = source
@@ -359,6 +364,9 @@ fn window_and_includes(
         root_pk,
         crate::linestatus::Published::Required,
     )
+    // Every error `current_line_status` returns here is about THIS source's
+    // document (it could not be fetched, did not verify, or covers another
+    // line), so another source may be asked: `fail` retries elsewhere.
     .map_err(|e| fail(format!("layer {}: its line-status: {e}", manifest.layer)))?;
     Ok((
         IncludeWindow {
@@ -375,6 +383,13 @@ fn window_and_includes(
 /// served from, what verifies them, and the root its line-status is signed by.
 pub struct RealmView<'a> {
     pub source: &'a dyn crate::source::LayerSource,
+    /// The realm's sources, primary then mirrors. When present the walk reads
+    /// each layer from ONE source at a time, verifying everything it needs
+    /// from that source, and moves to the next only when this one could not
+    /// supply a verifiable answer (REQ-MIRROR-002). One source serving a
+    /// coherent set is what keeps "this source has no correction" from being
+    /// confused with "an unreachable source might have had one".
+    pub mirrors: Option<&'a crate::mirror::Mirrors>,
     pub verifier: &'a dyn crate::install::ManifestVerifier,
     pub root: &'a [u8],
 }
@@ -424,6 +439,7 @@ fn deep_window(
         include: digest.to_string(),
         realm: realm.to_string(),
         reason,
+        retry_elsewhere: false,
     };
     if depth > MAX_INCLUDE_DEPTH {
         return Err(fail(format!(
@@ -439,7 +455,15 @@ fn deep_window(
         )));
     }
     let view = access.open(realm).map_err(fail)?;
-    let (own, nested) = window_and_includes(view.source, view.verifier, view.root, digest, realm)?;
+    let (own, nested) = match view.mirrors {
+        None => window_and_includes(view.source, view.verifier, view.root, digest, realm)?,
+        Some(sources) => sources
+            .attempt(
+                |source| window_and_includes(source, view.verifier, view.root, digest, realm),
+                |e| e.retry_elsewhere,
+            )
+            .map_err(|failures| all_sources_failed(digest, realm, failures))?,
+    };
     let mut best = own;
     for inc in nested {
         // An include naming no realm is in the including layer's realm.
@@ -449,6 +473,34 @@ fn deep_window(
     }
     seen.insert(key, best.clone());
     Ok(best)
+}
+
+/// The error for an include no source of its realm could supply a verifiable
+/// window for. A terminal failure stands alone; one source keeps its own
+/// error; several are listed in the order tried.
+fn all_sources_failed(
+    digest: &str,
+    realm: &str,
+    mut failures: Vec<(String, IncludeWindowError)>,
+) -> IncludeWindowError {
+    let terminal = failures.last().is_some_and(|(_, e)| !e.retry_elsewhere);
+    if terminal || failures.len() == 1 {
+        return failures.pop().expect("a failed attempt has a failure").1;
+    }
+    let listing = failures
+        .iter()
+        .map(|(label, e)| format!("\n  {label}: {}", e.reason))
+        .collect::<String>();
+    IncludeWindowError {
+        include: digest.to_string(),
+        realm: realm.to_string(),
+        reason: format!(
+            "no source of the realm supplied a verifiable window. Tried {} source(s) in \
+             order:{listing}",
+            failures.len()
+        ),
+        retry_elsewhere: false,
+    }
 }
 
 /// The earlier of two windows, compared as DATES. A window that is not
@@ -978,6 +1030,7 @@ mod tests {
                 };
                 Ok(RealmView {
                     source,
+                    mirrors: None,
                     verifier: &AcceptAll,
                     root: &self.pk,
                 })
@@ -1034,6 +1087,7 @@ mod tests {
             fn open(&self, _: &str) -> Result<RealmView<'_>, String> {
                 Ok(RealmView {
                     source: &self.source,
+                    mirrors: None,
                     verifier: &AcceptAll,
                     root: &self.pk,
                 })
@@ -1378,6 +1432,178 @@ mod tests {
             assert!(
                 include_window(&source, &RejectAll, &pk, &manifest_digest(&bytes), "wasm").is_err()
             );
+        }
+    }
+
+    /// REQ-MIRROR-002: the walk reads each layer from ONE source at a time.
+    mod mirrored {
+        use super::super::*;
+        use crate::install::{ManifestVerifier, VerifyError};
+        use crate::linestatus::LineStatus;
+        use crate::manifest::fixtures::manifest_with_tools;
+        use crate::mirror::{Mirror, Mirrors};
+        use crate::source::MemorySource;
+        use crate::store::manifest_digest;
+        use crate::verify::generate_root_keypair;
+        use std::cell::Cell;
+
+        /// Rejects the first manifest it is shown, accepts every later one: the
+        /// first source (the primary) served bytes that fail the root.
+        struct RejectsFirst(Cell<bool>);
+        impl ManifestVerifier for RejectsFirst {
+            fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {
+                if self.0.replace(true) {
+                    Ok(fetched.to_vec())
+                } else {
+                    Err(VerifyError("No valid signatures (test)".into()))
+                }
+            }
+        }
+
+        struct Realm<'a> {
+            unused: MemorySource,
+            mirrors: &'a Mirrors,
+            verifier: &'a dyn ManifestVerifier,
+            pk: &'a [u8],
+        }
+        impl RealmAccess for Realm<'_> {
+            fn open(&self, _: &str) -> Result<RealmView<'_>, String> {
+                Ok(RealmView {
+                    // Never used when `mirrors` is set; a source that would
+                    // fail every fetch makes that a test, not a convention.
+                    source: &self.unused,
+                    mirrors: Some(self.mirrors),
+                    verifier: self.verifier,
+                    root: self.pk,
+                })
+            }
+        }
+
+        fn status_doc(until: &str, sk: &[u8]) -> Vec<u8> {
+            LineStatus {
+                min_counter: None,
+                line: "2026.10".into(),
+                counter: 1,
+                issued_at: "2026-09-24T00:00:00Z".into(),
+                support_until: Some(until.into()),
+                yanked: Default::default(),
+                known_problems: Vec::new(),
+            }
+            .sign(sk, "k")
+            .unwrap()
+            .into_bytes()
+        }
+
+        fn mirror(label: &str, source: MemorySource) -> Mirror {
+            Mirror {
+                label: label.into(),
+                source: Box::new(source),
+            }
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn a_source_whose_manifest_fails_the_root_is_skipped_for_the_next() {
+            let (sk, pk) = generate_root_keypair();
+            let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
+            let digest = manifest_digest(&bytes);
+            let with_status = |until: &str| {
+                MemorySource::new()
+                    .with_manifest(&bytes)
+                    .with_line_status(&status_doc(until, &sk))
+            };
+            let mirrors = Mirrors::new(vec![
+                mirror("primary", with_status("2026-11-01")),
+                mirror("mirror", with_status("2026-12-01")),
+            ]);
+            let verifier = RejectsFirst(Cell::new(false));
+            let realm = Realm {
+                unused: MemorySource::new(),
+                mirrors: &mirrors,
+                verifier: &verifier,
+                pk: &pk,
+            };
+            let w = include_window_deep(&realm, &digest, "acme").unwrap();
+            assert_eq!(
+                w.support_until.as_deref(),
+                Some("2026-12-01"),
+                "the window comes from the source that verified: {w:?}"
+            );
+            assert_eq!(mirrors.served_by().as_deref(), Some("mirror"));
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn when_every_source_fails_the_error_lists_each_in_order() {
+            let (_sk, pk) = generate_root_keypair();
+            let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
+            let digest = manifest_digest(&bytes);
+            let mirrors = Mirrors::new(vec![
+                mirror("primary", MemorySource::new().with_manifest(&bytes)),
+                mirror("mirror", MemorySource::new().with_manifest(&bytes)),
+            ]);
+            struct RejectAll;
+            impl ManifestVerifier for RejectAll {
+                fn verify(&self, _: &[u8]) -> Result<Vec<u8>, VerifyError> {
+                    Err(VerifyError("forged (test)".into()))
+                }
+            }
+            let realm = Realm {
+                unused: MemorySource::new(),
+                mirrors: &mirrors,
+                verifier: &RejectAll,
+                pk: &pk,
+            };
+            let err = include_window_deep(&realm, &digest, "acme").unwrap_err();
+            let text = err.to_string();
+            let (p, m) = (text.find("primary"), text.find("mirror"));
+            assert!(p.is_some() && m.is_some() && p < m, "{text}");
+            assert!(text.contains("forged (test)"), "{text}");
+        }
+
+        fn failure(reason: &str, retry: bool) -> IncludeWindowError {
+            IncludeWindowError {
+                include: "sha256:x".into(),
+                realm: "acme".into(),
+                reason: reason.into(),
+                retry_elsewhere: retry,
+            }
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn a_terminal_failure_stands_alone_and_one_source_keeps_its_own_error() {
+            let terminal = all_sources_failed(
+                "sha256:x",
+                "acme",
+                vec![
+                    ("a".into(), failure("down", true)),
+                    ("b".into(), failure("verdict", false)),
+                ],
+            );
+            assert_eq!(terminal.reason, "verdict");
+            let single = all_sources_failed(
+                "sha256:x",
+                "acme",
+                vec![("a".into(), failure("down", true))],
+            );
+            assert_eq!(single.reason, "down");
+            let many = all_sources_failed(
+                "sha256:x",
+                "acme",
+                vec![
+                    ("a".into(), failure("down", true)),
+                    ("b".into(), failure("also down", true)),
+                ],
+            );
+            assert!(
+                many.reason.contains("a: down")
+                    && many.reason.contains("b: also down")
+                    && many.reason.contains("2 source(s)"),
+                "{}",
+                many.reason
+            );
+            assert!(!many.retry_elsewhere);
         }
     }
 }
