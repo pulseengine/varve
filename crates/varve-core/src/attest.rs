@@ -178,6 +178,16 @@ pub fn sign(
         .map_err(|e| AttestError::Signature(e.to_string()))
 }
 
+/// [`sign`] with any [`crate::verify::RealmSigner`].
+pub fn sign_with(
+    st: &AttestationStatement,
+    signer: &dyn crate::verify::RealmSigner,
+) -> Result<String, AttestError> {
+    let payload = serde_json::to_vec(st).map_err(|e| AttestError::Payload(e.to_string()))?;
+    crate::verify::dsse_sign_with(&payload, PAYLOAD_TYPE, signer)
+        .map_err(|e| AttestError::Signature(e.to_string()))
+}
+
 /// Verify an envelope against the trust root and return the statement inside.
 /// The payload TYPE is checked, so a signed line-status or layer manifest can
 /// never be accepted here as an attestation statement.

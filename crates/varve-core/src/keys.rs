@@ -91,6 +91,12 @@ fn decode_secret(secret_hex: &str, path: &str) -> Result<Vec<u8>, KeyError> {
 /// signing with this key produce something a consumer can verify" — instead of
 /// a proxy for it, and it is the same mechanism `deposit` uses to check the
 /// envelope it just wrote.
+/// The consistency probe on raw secret bytes, for callers that already hold
+/// them (the signer seam's `FileSigner::new`).
+pub fn check_keypair_bytes(bytes: &[u8], path: &str) -> Result<(), KeyError> {
+    check_derived(bytes, path)
+}
+
 fn check_derived(bytes: &[u8], path: &str) -> Result<(), KeyError> {
     let mismatched = || KeyError::Mismatched {
         path: path.to_string(),

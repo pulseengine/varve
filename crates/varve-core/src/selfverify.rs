@@ -79,6 +79,14 @@ pub fn sign_release_sums(
     dsse_sign_typed(sums, RELEASE_SUMS_PAYLOAD_TYPE, secret_key, key_id)
 }
 
+/// [`sign_release_sums`] with any [`crate::verify::RealmSigner`].
+pub fn sign_release_sums_with(
+    sums: &[u8],
+    signer: &dyn crate::verify::RealmSigner,
+) -> Result<String, VerifyError> {
+    crate::verify::dsse_sign_with(sums, RELEASE_SUMS_PAYLOAD_TYPE, signer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
