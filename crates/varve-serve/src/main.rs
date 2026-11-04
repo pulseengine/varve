@@ -59,9 +59,10 @@ fn main() -> anyhow::Result<()> {
         // it on disk, which is what the other command is for.
         bail!(
             "{label} is a {} — a single file, not a site, so there is nothing to serve. \
-             Write it out instead:\n\n  varve export-docs --out ./doc --select {}\n",
+             Write it out instead:\n\n  varve export-docs --out ./doc --select={}{}\n",
             chosen.format.as_str(),
-            chosen.name
+            context::shell_word(&chosen.name),
+            context::layer_arg(layer)
         );
     }
 
@@ -255,7 +256,7 @@ fn orient(layer: Option<&str>) -> anyhow::Result<context::Context> {
         );
     }
     let pinned = layers::pinned(&layers, &host)?;
-    Ok(context::orient(pinned, &Sandbox::default()))
+    Ok(context::orient(pinned, &Sandbox::default()).with_layer_override(layer))
 }
 
 fn run_context(layer: Option<&str>, format: Format) -> anyhow::Result<()> {

@@ -30,7 +30,7 @@
 
 use serde_json::{Value, json};
 
-use crate::context::{Context, get_command, shell_word};
+use crate::context::{Context, get_command, layer_arg, shell_word};
 use crate::docpages;
 
 /// Words that carry no question. Matching them turns every sentence into noise.
@@ -342,9 +342,11 @@ pub fn search(units: &[Unit], query: &str, limit: usize) -> Vec<Hit> {
 /// every docs payload.
 pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
     let layer = ctx.facts.layer.clone();
+    let l = layer_arg(ctx.layer_override.as_deref());
     let mut units = Vec::new();
     for t in &ctx.tools {
         let tool = Some(t.name.clone());
+        let tw = shell_word(&t.name);
         let mut about = t
             .summary
             .as_ref()
@@ -357,7 +359,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
         units.push(Unit {
             kind: Kind::ToolOverview,
             id: format!("tool:{}:overview", t.name),
-            title: format!("`{}` — {}", t.name, about.trim()),
+            title: format!("`{tw}` — {}", about.trim()),
             name: t.name.clone(),
             desc: about,
             body: String::new(),
@@ -365,13 +367,13 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
             item: None,
             layer: t.layer.clone(),
             digest: Some(t.digest.clone()),
-            read: format!("{} --help", t.name),
+            read: format!("{tw} --help"),
         });
         for s in &t.subs {
             units.push(Unit {
                 kind: Kind::ToolSubcommand,
                 id: format!("tool:{}:sub:{}", t.name, s.name),
-                title: format!("`{} {}` — {}", t.name, s.name, s.desc),
+                title: format!("`{tw} {}` — {}", shell_word(&s.name), s.desc),
                 name: s.name.clone(),
                 desc: s.desc.clone(),
                 body: String::new(),
@@ -379,18 +381,18 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 item: None,
                 layer: t.layer.clone(),
                 digest: Some(t.digest.clone()),
-                read: format!("{} {} --help", t.name, s.name),
+                read: format!("{tw} {} --help", shell_word(&s.name)),
             });
         }
         let docs = t
             .docs_command
             .clone()
-            .unwrap_or_else(|| format!("{} docs", t.name));
+            .unwrap_or_else(|| format!("{tw} docs"));
         for topic in &t.topic_texts {
             units.push(Unit {
                 kind: Kind::Topic,
                 id: format!("topic:{}:{}", t.name, topic.name),
-                title: format!("`{docs} {}` — {}", topic.name, topic.desc),
+                title: format!("`{docs} {}` — {}", shell_word(&topic.name), topic.desc),
                 name: topic.name.clone(),
                 desc: topic.desc.clone(),
                 body: topic.body.clone(),
@@ -398,7 +400,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 item: None,
                 layer: t.layer.clone(),
                 digest: Some(t.digest.clone()),
-                read: format!("{docs} {}", topic.name),
+                read: format!("{docs} {}", shell_word(&topic.name)),
             });
         }
     }
@@ -418,7 +420,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
         });
     }
     for h in &ctx.held {
-        let get = get_command(h);
+        let get = get_command(h, ctx.layer_override.as_deref());
         units.push(Unit {
             kind: Kind::Held,
             id: format!("held:{}:{}", h.kind, h.name),
@@ -451,7 +453,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
             item: None,
             layer: layer.clone(),
             digest: None,
-            read: "varve inspect".into(),
+            read: format!("varve inspect{l}"),
         });
     }
     for d in &ctx.docs {
@@ -469,7 +471,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 layer: d.layer.clone(),
                 digest: Some(d.digest.clone()),
                 read: format!(
-                    "varve export-docs --out ./doc --select={}",
+                    "varve export-docs --out ./doc --select={}{l}",
                     shell_word(&p.name)
                 ),
             });
@@ -495,7 +497,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 read: format!(
                     // `--` ends the options: a name a producer chose can
                     // never be read as a flag, quoted or not.
-                    "varve-serve page -- {} {}",
+                    "varve-serve page{l} -- {} {}",
                     shell_word(&p.name),
                     shell_word(&page.path)
                 ),
@@ -1251,5 +1253,101 @@ mod tests {
         // a hit without a digest says none
         let held = search(&units, "rivet sdlc", 1);
         assert!(!render_md("x", &ctx, &held).contains("digest"));
+    }
+
+    /// Every `read` an index builds is inert for hostile layer-supplied words,
+    /// and carries `--layer` when one is in effect (REQ-SERVELAYER-001).
+    // rivet: verifies REQ-AGENTDOCS-002
+    // rivet: verifies REQ-SERVELAYER-001
+    #[test]
+    fn no_read_command_carries_an_unquoted_layer_word() {
+        use crate::context::tests::{HOSTILE, assert_inert};
+        for bad in HOSTILE {
+            let help = format!(
+                "About\n\nCommands:\n  {} Sub\n  docs  Docs\n",
+                bad.replace(' ', "_")
+            );
+            let sub = bad.replace(' ', "_");
+            let mut ctx = ctx_with(vec![
+                tool_input(bad, &help, &[(bad, "body")]),
+                tool_input(&sub, &help, &[(&sub, "body")]),
+            ]);
+            ctx.held.push(crate::layers::Held {
+                kind: "wit".into(),
+                name: format!("a:{bad}"),
+                version: "1".into(),
+                platforms: vec!["any".into()],
+            });
+            ctx.docs = vec![crate::layers::DocsSource {
+                payload: varve_core::docsexport::DocsPayload {
+                    name: bad.to_string(),
+                    version: "1".into(),
+                    format: varve_core::layerspec::DocsFormat::Pdf,
+                    entry: None,
+                    title: None,
+                    documents: None,
+                    bytes: vec![1],
+                },
+                digest: "sha256:x".into(),
+                layer: "2026.10.1".into(),
+                realm: "r".into(),
+            }];
+            for layer in [None, Some("2026.10.2")] {
+                let c = Context {
+                    layer_override: layer.map(str::to_string),
+                    ..ctx.clone()
+                };
+                let units = index(&c).unwrap();
+                assert!(units.len() > 8);
+                for u in &units {
+                    assert_inert(&u.read);
+                    if matches!(
+                        u.kind,
+                        Kind::ToolOverview | Kind::ToolSubcommand | Kind::Topic
+                    ) {
+                        assert_inert(&u.title.split(" — ").next().unwrap().replace('`', ""));
+                    }
+                    let has = u.read.contains("--layer 2026.10.2");
+                    let applies = u.read.starts_with("varve export-")
+                        && !u.read.ends_with("--help")
+                        || u.read == "varve inspect --layer 2026.10.2";
+                    if layer.is_some() && applies {
+                        assert!(has, "{}", u.read);
+                    }
+                    if layer.is_none() {
+                        assert!(!u.read.contains("--layer"), "{}", u.read);
+                    }
+                }
+            }
+        }
+        let ctx = ctx_with(vec![tool_input(
+            "t$(touch PWNED)",
+            "About\n\nCommands:\n  fuse  Sub\n",
+            &[("-t", "body")],
+        )]);
+        let units = index(&ctx).unwrap();
+        let read = |id: &str| units.iter().find(|u| u.id == id).unwrap().read.clone();
+        assert_eq!(
+            read("tool:t$(touch PWNED):overview"),
+            "'t$(touch PWNED)' --help"
+        );
+        assert_eq!(
+            read("tool:t$(touch PWNED):sub:fuse"),
+            "'t$(touch PWNED)' fuse --help"
+        );
+        assert_eq!(
+            read("topic:t$(touch PWNED):-t"),
+            "'t$(touch PWNED)' docs '-t'"
+        );
+        let ctx = Context {
+            layer_override: Some("2026.10.2".into()),
+            ..ctx_with(vec![])
+        };
+        let units = index(&ctx).unwrap();
+        let read = |id: &str| units.iter().find(|u| u.id == id).unwrap().read.clone();
+        assert_eq!(
+            read("held:vsix:rivet-sdlc"),
+            "varve export-vsix --out ./vsix --layer 2026.10.2"
+        );
     }
 }

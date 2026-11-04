@@ -19,6 +19,12 @@ use varve_core::{KnownProblem, LayerId, Line, LineStatus};
 /// One advisory and the layers of THIS line it affects, as the watcher found
 /// it — not yet a [`KnownProblem`], because an alias match may fold it into
 /// one that already exists.
+/// The prefix of a qualified finding's `detection` text (REQ-ADVISORYWATCH-002
+/// clause 5). Only text that starts with it was written by the watch, so only
+/// that text is ever replaced when the finding turns out to be certain; an
+/// operator's own detection note is left alone.
+pub const QUALIFIED_PREFIX: &str = "qualified: ";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposed {
     pub id: String,
@@ -163,6 +169,18 @@ pub fn next_document(
                 // operator may have hand-edited title/workaround, which must
                 // survive untouched.
                 if merge_affected(&mut problems[idx].affected, &finding.affected) {
+                    changed = true;
+                }
+                // A certain finding UPGRADES a qualifier an earlier run wrote,
+                // whether it arrives under the entry's id or an alias. Without
+                // this, a sandbox escape first seen as a sibling-crate match
+                // stays "qualified" forever after the SBOM proves it embedded.
+                let ours = problems[idx]
+                    .detection
+                    .as_deref()
+                    .is_some_and(|d| d.starts_with(QUALIFIED_PREFIX));
+                if finding.detection.is_none() && ours {
+                    problems[idx].detection = None;
                     changed = true;
                 }
             }
@@ -382,6 +400,57 @@ mod tests {
             merged.affected,
             vec!["2026.09.2", "2026.09.17", "2026.09.18"],
             "affected gains the new layer, sorted by layer NUMBER, de-duplicated"
+        );
+    }
+
+    /// A qualifier an earlier run wrote is UPGRADED when a certain finding
+    /// for the same problem arrives later, under its id or an alias. An
+    /// operator's own detection text is never touched.
+    // rivet: verifies REQ-ADVISORYWATCH-002
+    #[test]
+    fn a_certain_finding_upgrades_an_earlier_qualifier_but_not_operator_text() {
+        let mut current = baseline();
+        current.known_problems[0].detection = Some(format!(
+            "{QUALIFIED_PREFIX}names wasmtime-wasi from the same repository (o/r); affects this binary if it embeds that crate"
+        ));
+        let certain = Proposed {
+            id: "RUSTSEC-2026-9999".into(),
+            aliases: vec!["GHSA-xfxf-qxr3-435x".into()],
+            title: "t".into(),
+            severity: "high".into(),
+            affected: vec!["2026.09.2".into()],
+            workaround: None,
+            detection: None,
+        };
+        let next = next_document(
+            &current,
+            std::slice::from_ref(&certain),
+            "2026-10-15T00:00:00Z",
+        )
+        .unwrap()
+        .expect("clearing the qualifier is a change, even with affected unchanged");
+        assert_eq!(next.known_problems[0].detection, None);
+
+        // An operator-written detection survives a certain finding.
+        let mut hand = baseline();
+        hand.known_problems[0].detection = Some("run `ordeal --list` and look for skipped".into());
+        let next = next_document(
+            &hand,
+            std::slice::from_ref(&certain),
+            "2026-10-15T00:00:00Z",
+        )
+        .unwrap();
+        assert!(
+            next.is_none(),
+            "nothing changed: affected already lists it, operator text kept"
+        );
+        // A further QUALIFIED finding never downgrades a certain entry.
+        let mut q = certain.clone();
+        q.detection = Some(format!("{QUALIFIED_PREFIX}x"));
+        assert!(
+            next_document(&baseline(), &[q], "2026-10-15T00:00:00Z")
+                .unwrap()
+                .is_none()
         );
     }
 
