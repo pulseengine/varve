@@ -36,6 +36,7 @@ pub mod elf;
 pub mod exportstamp;
 pub mod ingest;
 pub mod install;
+pub mod keyroles;
 pub mod keys;
 pub mod kind;
 pub mod layer;

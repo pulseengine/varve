@@ -63,12 +63,11 @@ pub fn dsse_verify_typed(
     expected_payload_type: &str,
     root_public_key: &[u8],
 ) -> Result<Vec<u8>, VerifyError> {
-    let verifier = Ed25519DsseVerifier::from_bytes(root_public_key)
-        .map_err(|e| VerifyError(format!("invalid trust-root public key: {e}")))?;
-    verify_with(&verifier, envelope, expected_payload_type)
+    crate::keyroles::RealmTrust::root_only(root_public_key)?
+        .verify_bytes(envelope, expected_payload_type)
 }
 
-fn verify_with(
+pub(crate) fn verify_with(
     verifier: &Ed25519DsseVerifier,
     envelope: &[u8],
     expected_payload_type: &str,
