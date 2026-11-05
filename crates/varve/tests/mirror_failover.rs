@@ -297,7 +297,9 @@ fn installed_anything(p: &Project) -> bool {
 // rivet: verifies REQ-MIRROR-002
 #[test]
 fn install_succeeds_through_a_mirror_when_the_primary_is_down_and_names_it() {
-    let mirror = serve_layer();
+    // A first contact through a mirror needs the signed status that states the
+    // realm's floor, so the mirror carries one.
+    let mirror = serve_with_status(Some("2027-01-01"), None);
     let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
     let out = varve(&p).arg("install").output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -400,7 +402,7 @@ fn support_horizon_reads_an_include_through_a_mirror() {
 #[test]
 fn bytes_that_fail_the_root_are_refused_and_the_next_source_is_tried() {
     let forged = serve_layer();
-    let real = serve_layer();
+    let real = serve_with_status(Some("2027-01-01"), None);
     let p = project(&forged.registry, &[&real.registry], &real.root_hex);
     let out = varve(&p).arg("install").output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -485,7 +487,7 @@ fn serve_with_tool(sk: &[u8], pk: &[u8], served: Vec<u8>, drop_blob: bool) -> Se
         counter: 1,
         tool: Some((probe_bytes(), served)),
         drop_tool_blob: drop_blob,
-        baseline_until: None,
+        baseline_until: Some("2027-01-01"),
         published_until: None,
         forge_published: false,
     })
@@ -1012,4 +1014,193 @@ fn an_unverifiable_published_correction_on_a_mirror_does_not_establish_the_windo
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
     assert!(stderr.contains("could not be established"), "{stderr}");
+}
+
+/// A registry that answers EVERY request with `status` (e.g. "503 Service
+/// Unavailable", "404 Not Found"): a primary that is up but cannot help.
+fn error_server(status: &'static str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok() && line != "\r\n" && !line.is_empty() {
+                line.clear();
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        }
+    });
+    format!("oci+http://{addr}/inc/layers")
+}
+
+/// Rollback CONSENT is only ever taken from the realm's primary. The primary
+/// no longer serves the layer (garbage-collected after a yank); a lagging
+/// mirror still has it and an older status that SUPPORTS it. Asking the mirror
+/// would install a layer the realm has since yanked.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn rollback_consent_is_never_granted_by_a_mirror_after_the_primary_failed() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let primary = error_server("404 Not Found");
+    let mirror = serve_spec(Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: Some("2027-01-01"),
+        published_until: None,
+        forge_published: false,
+    });
+    let p = project(&primary, &[&mirror.registry], &mirror.root_hex);
+    std::fs::write(
+        p.dir.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"rolling\"\nlayer = \"{LAYER}\"\ndigest = \"{}\"\n",
+            mirror.digest
+        ),
+    )
+    .unwrap();
+    seed_high_water(&p, 5);
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a mirror granted rollback consent:\n{stderr}"
+    );
+    assert!(stderr.contains("primary"), "{stderr}");
+    assert!(!installed_anything(&p), "nothing may be installed");
+}
+
+/// First contact: with no local history for the line, the realm's FLOOR can
+/// only come from a signed line-status. The primary failed to answer, and the
+/// mirror carries no status, so the floor is UNKNOWN — not zero.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_mirror_without_a_status_cannot_stand_in_for_a_floor_the_primary_could_not_state() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let primary = error_server("503 Service Unavailable");
+    let mirror = serve_layer_signed(&sk, &pk, 1);
+    let p = project(&primary, &[&mirror.registry], &mirror.root_hex);
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a layer was installed with the realm's floor unknown:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("first-contact floor") && stderr.contains("could not be established"),
+        "{stderr}"
+    );
+    assert!(!installed_anything(&p));
+}
+
+/// The same mirror WITH a signed status establishes the floor (and installs).
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_mirror_that_carries_a_status_establishes_the_floor_for_a_first_contact() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let primary = error_server("503 Service Unavailable");
+    let mirror = serve_spec(Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: Some("2027-01-01"),
+        published_until: None,
+        forge_published: false,
+    });
+    let p = project(&primary, &[&mirror.registry], &mirror.root_hex);
+    let out = varve(&p).arg("install").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(installed_anything(&p));
+}
+
+/// A registry that answers every request 401, naming ITS OWN `/token` as the
+/// realm (the common ghcr/ECR shape), recording what it was sent.
+fn self_challenge_server() -> (
+    String,
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let realm = format!("http://{addr}/token");
+    let challenge = realm.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut seen = String::new();
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok() && line != "\r\n" && !line.is_empty() {
+                seen.push_str(&line);
+                line.clear();
+            }
+            recorded.lock().unwrap().push(seen);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"{challenge}\",service=\"s\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        }
+    });
+    (
+        format!("oci+http://{addr}/inc/layers"),
+        addr.to_string(),
+        requests,
+    )
+}
+
+/// A docker-config `auths` entry is keyed by host and ignores the scheme, so
+/// it matches a CLEARTEXT mirror on that host. A restricted cleartext source
+/// sends no credential at all, from any source: env or docker config.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_cleartext_mirror_never_receives_a_docker_config_credential() {
+    let (mirror, authority, mirror_reqs) = self_challenge_server();
+    let (_, pk) = varve_core::generate_root_keypair();
+    let empty = tempfile::tempdir().unwrap();
+    let p = project(
+        empty.path().to_str().unwrap(),
+        &[&mirror],
+        &hex::encode(&pk),
+    );
+    let docker = p.dir.join("docker");
+    std::fs::create_dir_all(&docker).unwrap();
+    std::fs::write(
+        docker.join("config.json"),
+        format!(
+            r#"{{"auths":{{"{authority}":{{"auth":"{}"}}}}}}"#,
+            basic(&format!("ci:{SECRET}"))
+        ),
+    )
+    .unwrap();
+    let out = varve(&p)
+        .env("DOCKER_CONFIG", &docker)
+        .env_remove("VARVE_REGISTRY_AUTH")
+        .arg("install")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        !mirror_reqs.lock().unwrap().is_empty(),
+        "the mirror must actually have been contacted"
+    );
+    assert!(
+        !any_carries_secret(&mirror_reqs),
+        "a cleartext mirror was sent a credential:\n{:?}",
+        mirror_reqs.lock().unwrap()
+    );
 }

@@ -388,17 +388,23 @@ fn window_and_includes(
     ))
 }
 
+/// Where a realm's layers come from.
+pub enum RealmSource<'a> {
+    /// One source, taken as it is.
+    Single(&'a dyn crate::source::LayerSource),
+    /// The realm's sources, primary then mirrors. The walk reads each layer
+    /// from ONE source at a time, verifying everything it needs from that
+    /// source, and moves to the next only when this one could not supply a
+    /// verifiable answer (REQ-MIRROR-002). One source serving a coherent set
+    /// is what keeps "this source has no correction" from being confused with
+    /// "an unreachable source might have had one".
+    Failover(&'a crate::mirror::Mirrors),
+}
+
 /// One realm, as the transitive window walk needs it: where its layers are
 /// served from, what verifies them, and the root its line-status is signed by.
 pub struct RealmView<'a> {
-    pub source: &'a dyn crate::source::LayerSource,
-    /// The realm's sources, primary then mirrors. When present the walk reads
-    /// each layer from ONE source at a time, verifying everything it needs
-    /// from that source, and moves to the next only when this one could not
-    /// supply a verifiable answer (REQ-MIRROR-002). One source serving a
-    /// coherent set is what keeps "this source has no correction" from being
-    /// confused with "an unreachable source might have had one".
-    pub mirrors: Option<&'a crate::mirror::Mirrors>,
+    pub source: RealmSource<'a>,
     pub verifier: &'a dyn crate::install::ManifestVerifier,
     pub root: &'a [u8],
 }
@@ -464,15 +470,17 @@ fn deep_window(
         )));
     }
     let view = access.open(realm).map_err(fail)?;
-    let (own, nested) = match view.mirrors {
-        None => window_and_includes(view.source, view.verifier, view.root, digest, realm, false)?,
-        Some(sources) => {
+    let (own, nested) = match view.source {
+        RealmSource::Single(source) => {
+            window_and_includes(source, view.verifier, view.root, digest, realm, false)?
+        }
+        RealmSource::Failover(sources) => {
             // Once any source has failed to answer, a later source's "no
             // correction" proves nothing about the one that did not.
             let mut earlier_failed = false;
             sources
                 .attempt(
-                    |source| {
+                    |source, _is_primary| {
                         let r = window_and_includes(
                             source,
                             view.verifier,
@@ -1054,8 +1062,7 @@ mod tests {
                     other => return Err(format!("realm '{other}' is not defined here")),
                 };
                 Ok(RealmView {
-                    source,
-                    mirrors: None,
+                    source: RealmSource::Single(source),
                     verifier: &AcceptAll,
                     root: &self.pk,
                 })
@@ -1111,8 +1118,7 @@ mod tests {
         impl RealmAccess for OneRealm {
             fn open(&self, _: &str) -> Result<RealmView<'_>, String> {
                 Ok(RealmView {
-                    source: &self.source,
-                    mirrors: None,
+                    source: RealmSource::Single(&self.source),
                     verifier: &AcceptAll,
                     root: &self.pk,
                 })
@@ -1486,7 +1492,6 @@ mod tests {
         }
 
         struct Realm<'a> {
-            unused: MemorySource,
             mirrors: &'a Mirrors,
             verifier: &'a dyn ManifestVerifier,
             pk: &'a [u8],
@@ -1494,10 +1499,7 @@ mod tests {
         impl RealmAccess for Realm<'_> {
             fn open(&self, _: &str) -> Result<RealmView<'_>, String> {
                 Ok(RealmView {
-                    // Never used when `mirrors` is set; a source that would
-                    // fail every fetch makes that a test, not a convention.
-                    source: &self.unused,
-                    mirrors: Some(self.mirrors),
+                    source: RealmSource::Failover(self.mirrors),
                     verifier: self.verifier,
                     root: self.pk,
                 })
@@ -1546,7 +1548,6 @@ mod tests {
             ]);
             let verifier = RejectsFirst(Cell::new(false));
             let realm = Realm {
-                unused: MemorySource::new(),
                 mirrors: &mirrors,
                 verifier: &verifier,
                 pk: &pk,
@@ -1578,7 +1579,6 @@ mod tests {
             ]);
             let verifier = RejectsFirst(Cell::new(false));
             let realm = Realm {
-                unused: MemorySource::new(),
                 mirrors: &mirrors,
                 verifier: &verifier,
                 pk: &pk,
@@ -1614,7 +1614,6 @@ mod tests {
                     .with_line_status(&status_doc("2026-11-20", &sk, 1)),
             )]);
             let realm = Realm {
-                unused: MemorySource::new(),
                 mirrors: &mirrors,
                 verifier: &RejectsNone,
                 pk: &pk,
@@ -1647,7 +1646,6 @@ mod tests {
                 }
             }
             let realm = Realm {
-                unused: MemorySource::new(),
                 mirrors: &mirrors,
                 verifier: &RejectAll,
                 pk: &pk,

@@ -33,7 +33,9 @@
 //! there is deliberately no such variant. A future refactor that tried to make
 //! one would have to change `source.rs`'s contract to do it.
 
-use crate::source::{LayerRef, LayerSource, SourceError};
+#[cfg(test)]
+use crate::source::LayerRef;
+use crate::source::{LayerSource, SourceError};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
@@ -239,16 +241,16 @@ impl Mirrors {
     /// failover itself would be the rollback attack.
     pub fn attempt<T, E: std::fmt::Display>(
         &self,
-        mut f: impl FnMut(&dyn LayerSource) -> Result<T, E>,
+        mut f: impl FnMut(&dyn LayerSource, bool) -> Result<T, E>,
         fails_over: impl Fn(&E) -> bool,
     ) -> Result<T, Vec<(String, E)>> {
         let mut failures: Vec<(String, E)> = Vec::new();
         for (i, m) in self.mirrors.iter().enumerate() {
-            match f(m.source.as_ref()) {
+            match f(m.source.as_ref(), i == 0) {
                 Ok(v) => {
                     *self.served_by.borrow_mut() = Some(m.label.clone());
                     if i > 0 {
-                        self.announce(&m.label, &Self::reasons(&failures));
+                        self.announce(&m.label, &Self::reasons(&failures, false));
                     }
                     return Ok(v);
                 }
@@ -266,33 +268,39 @@ impl Mirrors {
 
     /// Each skipped source and why, in one short line apiece. A forged answer
     /// and an outage must read differently, or an operator cannot tell an
-    /// attack from a bad afternoon.
-    fn reasons<E: std::fmt::Display>(failures: &[(String, E)]) -> String {
-        failures
+    /// attack from a bad afternoon. `absent`: an earlier source ANSWERED that
+    /// it carries none, which is not a failure and is said as such.
+    fn reasons<E: std::fmt::Display>(failures: &[(String, E)], absent: bool) -> String {
+        let mut parts: Vec<String> = failures
             .iter()
             .map(|(l, e)| format!("{l}: {}", short_reason(e)))
-            .collect::<Vec<_>>()
-            .join("; ")
+            .collect();
+        if absent {
+            parts.push("an earlier source answered that it carries none".to_string());
+        }
+        parts.join("; ")
     }
 
     /// [`attempt`](Self::attempt) for an answer that can legitimately be
     /// ABSENT: `Ok(None)` from one source is not the end of the search while
-    /// another may carry it. The first `Some` wins; `None` is returned only
-    /// when no source had one, and an error is returned only when no source
-    /// answered at all. A terminal error stops the search at once.
+    /// another may carry it. The first `Some` wins. `None` is returned ONLY
+    /// when every source ANSWERED that it has none: if any source failed to
+    /// answer, absence is UNKNOWN (an unreachable source might hold it, and a
+    /// mirror's silence cannot stand for it) and that is an error. A terminal
+    /// error stops the search at once.
     pub fn attempt_some<T, E: std::fmt::Display>(
         &self,
-        mut f: impl FnMut(&dyn LayerSource) -> Result<Option<T>, E>,
+        mut f: impl FnMut(&dyn LayerSource, bool) -> Result<Option<T>, E>,
         fails_over: impl Fn(&E) -> bool,
     ) -> Result<Option<T>, Vec<(String, E)>> {
         let mut failures: Vec<(String, E)> = Vec::new();
         let mut absent = false;
         for (i, m) in self.mirrors.iter().enumerate() {
-            match f(m.source.as_ref()) {
+            match f(m.source.as_ref(), i == 0) {
                 Ok(Some(v)) => {
                     *self.served_by.borrow_mut() = Some(m.label.clone());
                     if i > 0 {
-                        self.announce(&m.label, &Self::reasons(&failures));
+                        self.announce(&m.label, &Self::reasons(&failures, absent));
                     }
                     return Ok(Some(v));
                 }
@@ -306,7 +314,7 @@ impl Mirrors {
                 }
             }
         }
-        if absent || self.mirrors.is_empty() {
+        if failures.is_empty() {
             Ok(None)
         } else {
             Err(failures)
@@ -332,8 +340,8 @@ impl Mirrors {
         }
         let primary = self.mirrors.first().map_or("", |m| m.label.as_str());
         let notice = format!(
-            "note: realm '{realm}': primary {primary} was not used ({why}); answered by mirror \
-             {label}. A mirror is transport only: its bytes are accepted only if they verify \
+            "note: realm '{realm}': answered by mirror {label}, not the primary {primary} \
+             ({why}). A mirror is transport only: its bytes are accepted only if they verify \
              against the realm's trust root."
         );
         eprintln!("{notice}");
@@ -346,6 +354,7 @@ impl Mirrors {
         self.notices.borrow().clone()
     }
 
+    #[cfg(test)]
     fn note_served(&self, index: usize) {
         if index > 0 {
             let why = self
@@ -383,6 +392,7 @@ impl Mirrors {
     /// this layer yet is as unhelpful as one that is unreachable, and neither
     /// says anything about the bytes. Nothing else can arrive here —
     /// `SourceError` has no variant meaning "did not verify", by design.
+    #[cfg(test)]
     fn try_each<T>(
         &self,
         what: &str,
@@ -421,6 +431,13 @@ impl Mirrors {
     }
 }
 
+// Per-fetch failover is TEST-ONLY. It combines answers across sources (a
+// manifest from one, a blob from another, an absence from a third), which is
+// exactly what a verified realm fetch must not do; production reads go through
+// `attempt` / `attempt_some`, where ONE source serves a coherent, fully
+// verified set. Keeping this out of release builds means a new fetch site
+// cannot adopt cross-source combination by passing `&Mirrors` as a source.
+#[cfg(test)]
 impl LayerSource for Mirrors {
     fn fetch_manifest(&self, layer: &LayerRef) -> Result<Vec<u8>, SourceError> {
         self.try_each("the layer manifest", |s| s.fetch_manifest(layer))
@@ -466,6 +483,7 @@ impl LayerSource for Mirrors {
     }
 }
 
+#[cfg(test)]
 impl Mirrors {
     /// For the `Option`-returning fetches: a source that returns `None` has
     /// answered honestly, but another source may still carry the document, so
@@ -914,7 +932,7 @@ mod tests {
         let m = realm_mirrors(vec![("primary", ok(b"p")), ("mirror", ok(b"m"))]);
         let mut asked = 0;
         let v: Result<u32, Vec<(String, String)>> = m.attempt(
-            |_s| {
+            |_s, _| {
                 asked += 1;
                 Ok(7)
             },
@@ -932,7 +950,7 @@ mod tests {
         let m = realm_mirrors(vec![("primary", ok(b"p")), ("mirror", ok(b"m"))]);
         let mut n = 0;
         let v: Result<&str, Vec<(String, String)>> = m.attempt(
-            |_s| {
+            |_s, _| {
                 n += 1;
                 if n == 1 {
                     Err("signature does not verify".to_string())
@@ -955,7 +973,8 @@ mod tests {
     #[test]
     fn attempt_reports_every_source_failure_in_order_when_none_succeeds() {
         let m = realm_mirrors(vec![("a", ok(b"p")), ("b", ok(b"m")), ("c", ok(b"c"))]);
-        let r: Result<(), Vec<(String, String)>> = m.attempt(|_s| Err("no".to_string()), |_| true);
+        let r: Result<(), Vec<(String, String)>> =
+            m.attempt(|_s, _| Err("no".to_string()), |_| true);
         let failures = r.unwrap_err();
         let labels: Vec<_> = failures.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(labels, ["a", "b", "c"]);
@@ -1083,7 +1102,7 @@ mod tests {
         ]);
         let mut asked = 0;
         let r: Result<(), Vec<(String, String)>> = m.attempt(
-            |_s| {
+            |_s, _| {
                 asked += 1;
                 Err("rollback refused".to_string())
             },
@@ -1110,7 +1129,7 @@ mod tests {
         ]);
         let mut n = 0;
         let r: Result<(), Vec<(String, String)>> = m.attempt(
-            |_s| {
+            |_s, _| {
                 n += 1;
                 Err(if n == 1 { "down" } else { "verdict" }.to_string())
             },
@@ -1129,7 +1148,7 @@ mod tests {
         let m = realm_mirrors(vec![("primary", ok(b"p")), ("mirror", ok(b"m"))]);
         let mut n = 0;
         let _: Result<(), Vec<(String, String)>> = m.attempt(
-            |_s| {
+            |_s, _| {
                 n += 1;
                 if n == 1 {
                     Err("signature does not verify against the trust root".to_string())
@@ -1225,7 +1244,7 @@ mod tests {
         );
         let mut i = 0;
         let r = m.attempt_some(
-            |_s| {
+            |_s, _| {
                 let a = answers[i];
                 i += 1;
                 a.map_err(str::to_string)
@@ -1257,13 +1276,74 @@ mod tests {
 
     // rivet: verifies REQ-MIRROR-002
     #[test]
-    fn attempt_some_reports_none_when_nobody_has_one_even_if_another_was_unreachable() {
-        let (r, asked, m) = some_then(vec![Err("down"), Ok(None)], |_| true);
+    fn attempt_some_reports_none_only_when_every_source_answered_none() {
+        let (r, asked, m) = some_then(vec![Ok(None), Ok(None)], |_| true);
         assert_eq!(r.unwrap(), None);
         assert_eq!(asked, 2);
         assert_eq!(m.served_by(), None);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn attempt_some_treats_a_none_after_a_failed_source_as_unknown_not_absent() {
+        // Absence on a mirror cannot prove absence after the primary failed to
+        // answer: an unreachable source might hold the document.
+        let (r, asked, _) = some_then(vec![Err("down"), Ok(None)], |_| true);
+        let failures = r.expect_err("unknown, not none");
+        assert_eq!(asked, 2);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "a");
+        // And the other order: a source that answered none, then one that failed.
         let (r, _, _) = some_then(vec![Ok(None), Err("down")], |_| true);
-        assert_eq!(r.unwrap(), None);
+        assert!(r.is_err());
+        // A Some after a failure still wins.
+        let (r, _, _) = some_then(vec![Err("down"), Ok(Some(3))], |_| true);
+        assert_eq!(r.unwrap(), Some(3));
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn only_the_first_source_is_told_it_is_the_primary() {
+        let m = realm_mirrors(vec![("a", ok(b"x")), ("b", ok(b"x")), ("c", ok(b"x"))]);
+        let mut seen = Vec::new();
+        let _: Result<(), Vec<(String, String)>> = m.attempt(
+            |_s, primary| {
+                seen.push(primary);
+                Err("no".to_string())
+            },
+            |_| true,
+        );
+        assert_eq!(seen, [true, false, false]);
+        let m = realm_mirrors(vec![("a", ok(b"x")), ("b", ok(b"x"))]);
+        let mut seen = Vec::new();
+        let _: Result<Option<()>, Vec<(String, String)>> = m.attempt_some(
+            |_s, primary| {
+                seen.push(primary);
+                Ok(None)
+            },
+            |_| true,
+        );
+        assert_eq!(seen, [true, false]);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_mirror_answering_after_a_none_says_so_without_an_empty_reason() {
+        let (_, _, m) = some_then(vec![Ok(None), Ok(Some(1))], |_| true);
+        let notice = m.notices().remove(0);
+        assert!(
+            !notice.contains("()"),
+            "an empty reason was printed: {notice}"
+        );
+        assert!(notice.contains("carries none"), "{notice}");
+        assert!(notice.contains("answered by mirror b"), "{notice}");
+        // With a failure AND an absence, both are said.
+        let (_, _, m) = some_then(vec![Err("503"), Ok(None), Ok(Some(1))], |_| true);
+        let notice = m.notices().remove(0);
+        assert!(
+            notice.contains("a: 503") && notice.contains("carries none"),
+            "{notice}"
+        );
     }
 
     // rivet: verifies REQ-MIRROR-002

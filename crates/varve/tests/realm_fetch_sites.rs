@@ -28,6 +28,8 @@ const FORBIDDEN: &[&str] = &[
     "RegistrySource::new(",
     "DirSource::at(",
     "OciLayoutSource::at(",
+    "Mirrors::single(",
+    "Mirrors::new(",
 ];
 
 /// (file suffix, a substring of the allowed line, why it is not a realm fetch).
@@ -61,6 +63,25 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "sources.first().and_then(|p| registry_origin(p))",
         "reads only the primary's ORIGIN, to decide which mirrors are on another \
          origin; every source (primary included) is still built from the whole list",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "let mut m = Mirrors::new(mirrors);",
+        "`Mirrors::for_realm` itself: wraps the sources it just built, in the \
+         order `realm.sources` states them",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "Ok(Mirrors::new(vec![Mirror {",
+        "`Mirrors::single`: the one explicit `--from` source, which overrides a \
+         realm's list by the operator's own choice",
+    ),
+    (
+        "varve/src/main.rs",
+        "(Some(explicit), _) => varve_core::mirror::Mirrors::single(explicit, &platform)?,",
+        "an explicit `--from` is ONE source the operator chose, overriding the \
+         realm's list; a realm's own sources go through `Mirrors::for_realm` on \
+         the next line",
     ),
     (
         "varve-core/src/layerspec.rs",
@@ -196,25 +217,36 @@ impl Lex {
 /// kept). An item ends at the `}` that closes its first `{`, or at a `;`
 /// reached before any `{` (a gated `use`).
 fn production_lines(text: &str) -> Vec<String> {
+    const ATTR: &str = "#[cfg(test)]";
     let mut out = Vec::new();
     let mut lex = Lex::default();
     let mut gated = false; // saw #[cfg(test)], item not finished
     let mut depth = 0i32;
     let mut opened = false;
     for line in text.lines() {
-        if !gated && line.trim_start().starts_with("#[cfg(test)]") {
+        // The part of this line that belongs to a gated item, if any. The
+        // item may start on the attribute's own line (`#[cfg(test)] use x;`).
+        let mut item: Option<&str> = None;
+        let trimmed = line.trim_start();
+        if !gated && trimmed.starts_with(ATTR) {
             gated = true;
             depth = 0;
             opened = false;
-            out.push(String::new());
-            continue;
+            let rest = trimmed[ATTR.len()..].trim();
+            if !rest.is_empty() {
+                item = Some(rest);
+            }
+        } else if gated {
+            item = Some(line);
         }
         if gated {
-            let (o, c) = lex.braces(line);
-            depth += o - c;
-            opened |= o > 0;
-            if (opened && depth <= 0) || (!opened && line.trim_end().ends_with(';')) {
-                gated = false;
+            if let Some(text) = item {
+                let (o, c) = lex.braces(text);
+                depth += o - c;
+                opened |= o > 0;
+                if (opened && depth <= 0) || (!opened && text.trim_end().ends_with(';')) {
+                    gated = false;
+                }
             }
             out.push(String::new());
             continue;
@@ -248,7 +280,8 @@ fn violations(crates_dir: &Path) -> Vec<String> {
             if line.trim_start().starts_with("//") {
                 continue;
             }
-            if !FORBIDDEN.iter().any(|p| line.contains(p)) {
+            let destructures_registry = line.contains("Realm {") && line.contains("registry");
+            if !destructures_registry && !FORBIDDEN.iter().any(|p| line.contains(p)) {
                 continue;
             }
             let allowed = ALLOWED
@@ -330,6 +363,44 @@ fn the_scan_recognises_each_way_of_deciding_on_the_primary_alone() {
         assert_eq!(bad.len(), 1, "{shape} must be refused: {bad:?}");
     }
     assert!(scan("fn f() { let a = realm.sources.clone(); }\n").is_empty());
+}
+
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_gated_item_on_the_attributes_own_line_does_not_blank_the_next_production_line() {
+    let bad = scan(
+        "#[cfg(test)] use x::DirSource;\nfn real() { let _ = DirSource::at(p); }\n\
+         #[cfg(test)] fn t() { let _ = OciLayoutSource::at(p); }\nfn also() { let _ = DirSource::at(q); }\n",
+    );
+    assert_eq!(bad.len(), 2, "{bad:?}");
+    assert!(bad[0].contains("lib.rs:2:"), "{bad:?}");
+    assert!(bad[1].contains("lib.rs:4:"), "{bad:?}");
+}
+
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn braces_inside_literals_do_not_end_a_gated_block_early() {
+    let bad = scan(
+        "#[cfg(test)]\nmod t {\n    const A: &str = \"}\";\n    const B: char = '}';\n    \
+         const C: &str = r#\"} }\"#;\n    fn x() { let _ = DirSource::at(p); }\n}\n\
+         fn real() { let _ = DirSource::at(p); }\n",
+    );
+    assert_eq!(bad.len(), 1, "{bad:?}");
+    assert!(bad[0].contains("lib.rs:8:"), "{bad:?}");
+}
+
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn destructuring_a_realm_for_its_registry_and_hand_built_mirrors_are_refused() {
+    for shape in [
+        "let Realm { registry, .. } = realm;",
+        "let m = Mirrors::single(\"x\", p);",
+        "let m = Mirrors::new(vec![]);",
+    ] {
+        let bad = scan(&format!("fn f() {{ {shape} }}\n"));
+        assert_eq!(bad.len(), 1, "{shape} must be refused: {bad:?}");
+    }
+    assert!(scan("fn f() { let m = Mirrors::for_realm(n, s, p); }\n").is_empty());
 }
 
 // rivet: verifies REQ-MIRROR-002

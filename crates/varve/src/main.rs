@@ -2169,8 +2169,7 @@ impl varve_core::support::RealmAccess for DefinedRealms {
         })?;
         let (sources, verifier, root) = entry.as_ref().map_err(Clone::clone)?;
         Ok(varve_core::support::RealmView {
-            source: sources,
-            mirrors: Some(sources),
+            source: varve_core::support::RealmSource::Failover(sources),
             verifier,
             root,
         })
@@ -2190,8 +2189,18 @@ fn sources_failed(
 ) -> anyhow::Error {
     let terminal = failures.last().is_some_and(|(_, e)| !e.fails_over());
     if terminal || failures.len() == 1 {
-        let (_, e) = failures.pop().expect("a failed attempt has a failure");
-        return anyhow::Error::new(e);
+        let several = failures.len() > 1;
+        let (label, e) = failures.pop().expect("a failed attempt has a failure");
+        let e = anyhow::Error::new(e);
+        // A verdict reached on a LATER source says which one produced it, so
+        // it is not mistaken for the primary's.
+        return if several {
+            e.context(format!(
+                "(the verdict of {label}, after earlier sources failed)"
+            ))
+        } else {
+            e
+        };
     }
     let listing = failures
         .iter()
@@ -3818,9 +3827,9 @@ fn fetch_included_layer(
     };
     let outcome = sources
         .attempt(
-            |source| {
-                varve_core::install_by_digest(
-                    digest, source, &verifier, &store, &mut marks, &policy,
+            |source, is_primary| {
+                varve_core::install_by_digest_from(
+                    digest, source, &verifier, &store, &mut marks, &policy, is_primary,
                 )
             },
             varve_core::InstallError::fails_over,
@@ -3898,7 +3907,7 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
     // (REQ-MIRROR-002 clause 2).
     let verified = sources
         .attempt_some(
-            |source| -> Result<_, varve_core::InstallError> {
+            |source, _is_primary| -> Result<_, varve_core::InstallError> {
                 let envelope = source.fetch_line_index(&line)?;
                 let served = source.served_layers(&line)?;
                 Ok(varve_core::lineindex::check(
@@ -3911,7 +3920,15 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
             },
             varve_core::InstallError::fails_over,
         )
-        .map_err(|failures| sources_failed(&realm.name, failures))?;
+        .map_err(|failures| {
+            // `attempt_some` errors when a source failed to answer, including
+            // when others answered "none": absence is then UNKNOWN, and is
+            // said so rather than reported as "publishes no index".
+            sources_failed(&realm.name, failures).context(format!(
+                "whether realm '{}' has a newer layer for line {line} could not be established",
+                realm.name
+            ))
+        })?;
 
     let Some(index) = verified else {
         let msg = format!(
@@ -4043,7 +4060,11 @@ fn install(
     // mirror's say-so (REQ-MIRROR-002 clause 2). With one source this is the
     // plain install and its error is returned unchanged.
     let installed = sources.attempt(
-        |source| varve_core::install(pin, source, &verifier, store, &mut marks, &policy),
+        |source, is_primary| {
+            varve_core::install_from(
+                pin, source, &verifier, store, &mut marks, &policy, is_primary,
+            )
+        },
         varve_core::InstallError::fails_over,
     );
     let outcome = match installed {
@@ -4290,7 +4311,7 @@ fn install(
     // verified verdict (a counter regression against the cache) or a local
     // error stops here, as a note, rather than caching an older mirror copy.
     match sources.attempt_some(
-        |source| {
+        |source, _is_primary| {
             varve_core::cache_baseline_line_status(
                 source,
                 &layer_ref,
@@ -4311,7 +4332,10 @@ fn install(
                 .map(|(label, e)| format!("{label}: {e}"))
                 .collect::<Vec<_>>()
                 .join("; ");
-            eprintln!("note: layer carried a line-status but it was not cached: {why}");
+            eprintln!(
+                "note: the line's baseline line-status could not be established from the \
+                 realm's sources, so none was cached: {why}"
+            );
         }
     }
     Ok(())

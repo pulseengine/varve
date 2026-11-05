@@ -879,9 +879,23 @@ impl RegistrySource {
         !self.restricted
     }
 
+    /// A restricted source over CLEARTEXT (`oci+http://`) sends no credential
+    /// of any kind. A docker-config `auths` entry is keyed by host and ignores
+    /// the scheme, so it would otherwise match an http mirror on the host of
+    /// an https primary, and an http token realm is permitted for an http
+    /// registry: the secret would cross the network in the clear to a host the
+    /// realms file merely named. The primary keeps its established behaviour.
+    fn withholds_all_credentials(&self) -> bool {
+        self.restricted && self.reference.scheme == "http"
+    }
+
     fn credential(&self) -> &CredentialLookup {
         self.credential.get_or_init(|| {
-            resolve_credential(&self.reference.registry, self.offers_env_credential())
+            if self.withholds_all_credentials() {
+                CredentialLookup::Absent
+            } else {
+                resolve_credential(&self.reference.registry, self.offers_env_credential())
+            }
         })
     }
 
@@ -2162,6 +2176,45 @@ mod tests {
                 .contains("authorization: basic"),
             "a same-host token realm is the mirror's own"
         );
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn only_a_restricted_cleartext_source_withholds_every_credential() {
+        let http = || RegistrySource::parse("oci+http://ghcr.io/a/b").unwrap();
+        let https = || RegistrySource::parse("oci://ghcr.io/a/b").unwrap();
+        assert!(
+            !http().withholds_all_credentials(),
+            "the primary, as before"
+        );
+        assert!(!https().withholds_all_credentials());
+        assert!(
+            http()
+                .as_mirror_of(Some("https://ghcr.io"))
+                .withholds_all_credentials(),
+            "a cleartext mirror gets nothing"
+        );
+        assert!(
+            !https()
+                .as_mirror_of(Some("https://elsewhere.example"))
+                .withholds_all_credentials(),
+            "an https mirror is restricted, not blinded: it may use its own host's config"
+        );
+        // And it really resolves to no credential, even with a docker-config
+        // entry for its host.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"auths":{"ghcr.io":{"auth":"Y2k6c2VjcmV0"}}}"#).unwrap();
+        let cleartext_mirror = http().as_mirror_of(Some("https://ghcr.io"));
+        assert!(matches!(
+            cleartext_mirror.credential(),
+            CredentialLookup::Absent
+        ));
+        // (The https lookup against the same file does find it.)
+        assert!(matches!(
+            credential_from("ghcr.io", false, None, std::slice::from_ref(&config)),
+            CredentialLookup::Found(_)
+        ));
     }
 
     // rivet: verifies REQ-MIRROR-002
