@@ -1462,14 +1462,14 @@ fn status(
 ) -> anyhow::Result<Outcome> {
     let ctx = project_ctx(store)?;
     let pin = &ctx.pin;
-    let root_pk = ctx_root_bytes(&ctx)?;
+    let trust = ctx_trust(&ctx)?;
     let line = pin.layer.line().clone();
     let cache = varve_core::StatusCache::at_root(ctx.store.root());
 
     if let Some(path) = from_file {
         let envelope = std::fs::read(path)
             .with_context(|| format!("cannot read status envelope {}", path.display()))?;
-        let doc = varve_core::LineStatus::verify_and_parse(&envelope, &root_pk)?;
+        let doc = varve_core::LineStatus::verify_and_parse(&envelope, &trust)?;
         if doc.line != line.to_string() {
             bail!(
                 "status document covers line {} but this project pins line {line}",
@@ -1479,7 +1479,7 @@ fn status(
         cache.update(&line, &envelope, &doc)?;
     }
 
-    let Some(doc) = cache.load(&line, &root_pk)? else {
+    let Some(doc) = cache.load(&line, &trust)? else {
         bail!(
             "no line-status document cached for line {line}.\n\
              \n\
@@ -1745,7 +1745,10 @@ fn sign_status(
         Some(path) => {
             let env = std::fs::read(path)
                 .with_context(|| format!("cannot read line-index envelope {}", path.display()))?;
-            varve_core::known_layers_from_index(&env, &signer.public_key())?
+            varve_core::known_layers_from_index(
+                &env,
+                &varve_core::keyroles::RealmTrust::root_only(&signer.public_key())?,
+            )?
         }
         // The producer's own layouts: no network, no published index. This is
         // the path that actually runs for most realms (DD-023 clause 5).
@@ -1807,17 +1810,12 @@ fn self_update(store: &Store, check: bool, to: Option<&std::path::Path>) -> anyh
         println!("varve {current} is current");
         return Ok(());
     }
-    let root_pk = root_bytes_here(store).context(
+    let trust = trust_here(store).context(
         "self-update needs the trust root to confirm a verified update — set VARVE_TRUST_ROOT \
          or pin a realm",
     )?;
-    match varve_core::update::resolve_update(
-        &api,
-        current,
-        &platform,
-        on_disk.as_deref(),
-        &root_pk,
-    )? {
+    match varve_core::update::resolve_update(&api, current, &platform, on_disk.as_deref(), &trust)?
+    {
         varve_core::update::UpdateDecision::UpToDate => {
             println!("varve {current} is current");
         }
@@ -2002,7 +2000,7 @@ fn self_verify(
     archive: &std::path::Path,
     envelope: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let root_pk = root_bytes_here(store)?;
+    let trust = trust_here(store)?;
     let name = archive
         .file_name()
         .context("archive path has no file name")?
@@ -2011,7 +2009,7 @@ fn self_verify(
         std::fs::read(archive).with_context(|| format!("cannot read {}", archive.display()))?;
     let env_bytes =
         std::fs::read(envelope).with_context(|| format!("cannot read {}", envelope.display()))?;
-    let digest = varve_core::verify_release_file(&name, &bytes, &env_bytes, &root_pk)?;
+    let digest = varve_core::verify_release_file(&name, &bytes, &env_bytes, &trust)?;
     println!("{name} verified against the signed release sums ({digest})");
     Ok(())
 }
@@ -2296,13 +2294,13 @@ fn composition_for_export(
         &target.entry,
         &target.verifier,
         &target.realm,
-        &realm_roots(&cwd)?,
+        &realm_trusts(&cwd)?,
         &varve_core::host_platform(),
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-/// Every realm this project can name, mapped to its trust root — what the
+/// Every realm this project can name, mapped to its trust — what the
 /// composition walk verifies each included layer against. varve-core does not
 /// read varve-realms.toml, deliberately: the crate that verifies should have no
 /// opinion about where trust material lives.
@@ -2320,7 +2318,7 @@ struct DefinedRealms {
 type DefinedRealm = (
     varve_core::mirror::Mirrors,
     varve_core::PinnedKeyVerifier,
-    Vec<u8>,
+    varve_core::keyroles::RealmTrust,
 );
 
 impl DefinedRealms {
@@ -2337,10 +2335,9 @@ impl DefinedRealms {
                         &realm.sources,
                         &varve_core::host_platform(),
                     )?;
-                    let verifier =
-                        varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                    Ok((source, verifier, realm.trust_root.clone()))
+                    let trust = realm_trust(&realm)?;
+                    let verifier = varve_core::PinnedKeyVerifier::from_trust(trust.clone());
+                    Ok((source, verifier, trust))
                 })();
                 realms.insert(
                     name.clone(),
@@ -2360,11 +2357,11 @@ impl varve_core::support::RealmAccess for DefinedRealms {
                  varve-realms.toml, so no root here can vouch for its support window"
             )
         })?;
-        let (sources, verifier, root) = entry.as_ref().map_err(Clone::clone)?;
+        let (sources, verifier, trust) = entry.as_ref().map_err(Clone::clone)?;
         Ok(varve_core::support::RealmView {
             source: varve_core::support::RealmSource::Failover(sources),
             verifier,
-            root,
+            trust,
         })
     }
 }
@@ -2444,16 +2441,21 @@ fn sources_failed(
     )
 }
 
-fn realm_roots(
+fn realm_trusts(
     cwd: &std::path::Path,
-) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+) -> anyhow::Result<std::collections::BTreeMap<String, varve_core::keyroles::RealmTrust>> {
     let mut out = std::collections::BTreeMap::new();
     let Ok(names) = varve_core::realm::realm_names(cwd) else {
         return Ok(out);
     };
     for name in names {
-        if let Ok(realm) = varve_core::resolve_realm(cwd, &name) {
-            out.insert(name, realm.trust_root.clone());
+        // A realm whose trust cannot be built (a roles realm with no usable
+        // delegation) is left out, and the walk then names it as undefined:
+        // closed, never a quiet fall back to its root.
+        if let Ok(realm) = varve_core::resolve_realm(cwd, &name)
+            && let Ok(trust) = realm.trust()
+        {
+            out.insert(name, trust);
         }
     }
     Ok(out)
@@ -2904,7 +2906,7 @@ fn check_attestation(
     file: &std::path::Path,
 ) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
-    let root = ctx_root_bytes(&ctx)?;
+    let trust = ctx_trust(&ctx)?;
     // VERIFY THE LAYER, not just the statement. Clean-room review found this
     // reporting "attestation OK" over a tampered tool binary and a forged
     // layer.json — states `varve verify` rejects. Both values this command
@@ -2919,7 +2921,7 @@ fn check_attestation(
     let bytes = std::fs::read(file)
         .with_context(|| format!("cannot read attestation {}", file.display()))?;
     // 1. The statement must verify against the pinned root — offline.
-    let st = varve_core::attest::verify_statement(&envelope, &root)?;
+    let st = varve_core::attest::verify_statement(&envelope, &trust)?;
     // 2. …and it must actually describe THESE bytes and THIS layer.
     varve_core::attest::check(&st, &bytes, &entry.digest, &entry.layer.to_string())?;
     println!(
@@ -3807,14 +3809,24 @@ fn vouch_for_dispatch(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> a
     })
 }
 
-fn ctx_root_bytes(ctx: &ProjectCtx) -> anyhow::Result<Vec<u8>> {
+/// How this project's signatures are judged (REQ-KEYROLES-001): the realm's
+/// own trust — its delegation when it declares roles — and, with no realm, the
+/// environment's root as a realm that declares none.
+fn ctx_trust(ctx: &ProjectCtx) -> anyhow::Result<varve_core::keyroles::RealmTrust> {
     match &ctx.realm {
-        Some(realm) => Ok(realm.trust_root.clone()),
-        None => trust_root_bytes(),
+        Some(realm) => realm_trust(realm),
+        None => varve_core::keyroles::RealmTrust::root_only(&trust_root_bytes()?)
+            .map_err(|e| anyhow::anyhow!("{e}")),
     }
 }
 
-/// The trust root for THIS working directory, for code that holds no
+/// A realm's trust. A roles realm whose delegation is missing or refused is an
+/// error, never a quiet fallback to the root.
+fn realm_trust(realm: &varve_core::Realm) -> anyhow::Result<varve_core::keyroles::RealmTrust> {
+    realm.trust().map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// The trust for THIS working directory, for code that holds no
 /// `ProjectCtx`: the realm's root when a project pins one, the environment's
 /// only when it does not.
 ///
@@ -3824,16 +3836,16 @@ fn ctx_root_bytes(ctx: &ProjectCtx) -> anyhow::Result<Vec<u8>> {
 /// happens to say — a malformed realms file is an error, not an invitation to
 /// trust the ambient environment. Only the absence of a pin reaches the
 /// environment at all.
-fn root_bytes_here(base: &Store) -> anyhow::Result<Vec<u8>> {
+fn trust_here(base: &Store) -> anyhow::Result<varve_core::keyroles::RealmTrust> {
     match load_pin() {
-        Ok(_) => ctx_root_bytes(&project_ctx(base)?),
-        Err(_) => trust_root_bytes(),
+        Ok(_) => ctx_trust(&project_ctx(base)?),
+        Err(_) => varve_core::keyroles::RealmTrust::root_only(&trust_root_bytes()?)
+            .map_err(|e| anyhow::anyhow!("{e}")),
     }
 }
 
 fn ctx_verifier(ctx: &ProjectCtx) -> anyhow::Result<varve_core::PinnedKeyVerifier> {
-    varve_core::PinnedKeyVerifier::from_public_key_bytes(&ctx_root_bytes(ctx)?)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    Ok(varve_core::PinnedKeyVerifier::from_trust(ctx_trust(ctx)?))
 }
 
 /// Load the PulseEngine trust root: `$VARVE_TRUST_ROOT` names a file holding
@@ -4034,8 +4046,8 @@ fn fetch_included_layer(
             "this layer composes a layer from realm '{realm_name}', which is not defined              here — add it to varve-realms.toml so its registry says where the bytes come              from and its trust root says whether they are acceptable"
         )
     })?;
-    let verifier = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let trust = realm_trust(&realm)?;
+    let verifier = varve_core::PinnedKeyVerifier::from_trust(trust.clone());
     // That realm's partition, as a SIBLING of this project's.
     //
     // `effective_root` maps a BASE root to `<base>/realms/<fingerprint>`, so it
@@ -4062,7 +4074,7 @@ fn fetch_included_layer(
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let index = Some(varve_core::IndexPolicy {
         realm: &realm.name,
-        root_public_key: &realm.trust_root,
+        trust: &trust,
         required: realm.signed_index,
     });
     let policy = varve_core::InstallPolicy {
@@ -4157,9 +4169,10 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
         &varve_core::host_platform(),
     )?;
     let cached = varve_core::IndexCache::at_root(ctx.store.root()).load(&line)?;
+    let trust = realm_trust(realm)?;
     let policy = varve_core::IndexPolicy {
         realm: &realm.name,
-        root_public_key: &realm.trust_root,
+        trust: &trust,
         required: realm.signed_index,
     };
     // The same `check` the install path runs, so the two cannot disagree about
@@ -4316,11 +4329,16 @@ fn install(
     // absence is fatal (clause 5). A realmless pin gets `None` — there is then
     // no root that could have signed an index, so there is nothing to check
     // and nothing that could be hidden from a check that cannot exist.
-    let index = ctx.realm.as_ref().map(|realm| varve_core::IndexPolicy {
-        realm: &realm.name,
-        root_public_key: &realm.trust_root,
-        required: realm.signed_index,
-    });
+    let realm_trust_here = ctx.realm.as_ref().map(realm_trust).transpose()?;
+    let index = ctx
+        .realm
+        .as_ref()
+        .zip(realm_trust_here.as_ref())
+        .map(|(realm, trust)| varve_core::IndexPolicy {
+            realm: &realm.name,
+            trust,
+            required: realm.signed_index,
+        });
     let policy = varve_core::InstallPolicy {
         index,
         now: &now,
@@ -4591,7 +4609,7 @@ fn install(
         Some(digest) => varve_core::LayerRef::Digest(digest.clone()),
         None => varve_core::LayerRef::Name(pin.layer.clone()),
     };
-    let root_pk = ctx_root_bytes(&ctx)?;
+    let trust = ctx_trust(&ctx)?;
     // ONLY the realm's PRIMARY may supply the status that is cached
     // (REQ-MIRROR-002). The cache is what a later digest-pinned install reads
     // as rollback CONSENT, so a status taken from a mirror (which may lag a
@@ -4606,13 +4624,7 @@ fn install(
             if !is_primary {
                 return Ok(None);
             }
-            varve_core::cache_baseline_line_status(
-                source,
-                &layer_ref,
-                &line,
-                &root_pk,
-                store.root(),
-            )
+            varve_core::cache_baseline_line_status(source, &layer_ref, &line, &trust, store.root())
         },
         varve_core::LineStatusError::fails_over,
     ) {
@@ -4763,8 +4775,9 @@ fn verify_every_partition(ctx: &ProjectCtx, timing: bool) -> anyhow::Result<()> 
         std::collections::BTreeMap::new();
     for name in varve_core::realm::realm_names(&cwd).unwrap_or_default() {
         if let Ok(realm) = varve_core::resolve_realm(&cwd, &name)
-            && let Ok(v) = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
+            && let Ok(trust) = realm.trust()
         {
+            let v = varve_core::PinnedKeyVerifier::from_trust(trust);
             by_fp.insert(realm.fingerprint(), (name, v));
         }
     }
@@ -4878,11 +4891,11 @@ fn verify_no_rollback(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
         // its own CI gate.
         let consent = match &ctx.pin.digest {
             Some(pinned) if *pinned == varve_core::manifest_digest(&payload) => {
-                let root_pk = ctx_root_bytes(ctx)?;
+                let trust = ctx_trust(ctx)?;
                 match varve_core::cached_consent_why_not(
                     &manifest,
                     store.root(),
-                    &root_pk,
+                    &trust,
                     &today_rfc3339(),
                 ) {
                     None => Ok(()),
@@ -4935,12 +4948,12 @@ fn verify_no_rollback(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
 /// attestation onto unverified labels is the defect clean-room review already
 /// found in `check-attestation`.
 fn report_attestations(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> anyhow::Result<()> {
-    let root = ctx_root_bytes(ctx)?;
+    let trust = ctx_trust(ctx)?;
     let reports = match varve_core::attestcarry::report_installed(
         &layer.root,
         &layer.layer.to_string(),
         &layer.digest,
-        &root,
+        &trust,
     ) {
         Ok(reports) => reports,
         // A broken attestation store is surfaced, never fatal — same rule as
@@ -5211,8 +5224,7 @@ fn verify_composition_includes(
                         layer.layer
                     )
                 })?;
-                varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?
+                varve_core::PinnedKeyVerifier::from_trust(realm_trust(&realm)?)
             }
             // No realm named: the including layer's own root applies.
             None => ctx_verifier(ctx)?,
@@ -5926,8 +5938,8 @@ mod trust_root_reach_tests {
         const ENV_ONLY: &str = "trust_root_bytes()";
         const ALLOWED: &[&str] = &[
             "fn trust_root(",
-            "fn ctx_root_bytes(",
-            "fn root_bytes_here(",
+            "fn ctx_trust(",
+            "fn trust_here(",
             // its own definition, and this check's own source text
             "fn trust_root_bytes(",
             "fn no_command_resolves_a_trust_root_without_consulting_the_realm(",
@@ -5954,7 +5966,7 @@ mod trust_root_reach_tests {
         assert!(
             offenders.is_empty(),
             "these call the env-only trust root reader directly, so a realm pin \
-             cannot reach them: {offenders:?}. Use `root_bytes_here` (realm \
+             cannot reach them: {offenders:?}. Use `trust_here` (realm \
              first, environment only when no realm is pinned), or add the \
              function to ALLOWED with a reason."
         );

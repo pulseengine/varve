@@ -159,7 +159,7 @@ pub fn extract_tool_from_targz(bytes: &[u8], tool: &str) -> Result<Vec<u8>, Upda
 /// lets the caller decide on artifact identity before touching disk (varve#38).
 pub fn fetch_verified_binary(
     plan: &UpdatePlan,
-    root_public_key: &[u8],
+    trust: &crate::keyroles::RealmTrust,
 ) -> Result<(Vec<u8>, String), UpdateError> {
     let agent = ureq::Agent::new_with_defaults();
     let fetch = |url: &str| -> Result<Vec<u8>, UpdateError> {
@@ -176,7 +176,7 @@ pub fn fetch_verified_binary(
     };
     let envelope = fetch(&plan.envelope_url)?;
     let archive = fetch(&plan.archive_url)?;
-    let digest = verify_release_file(&plan.archive_name, &archive, &envelope, root_public_key)?;
+    let digest = verify_release_file(&plan.archive_name, &archive, &envelope, trust)?;
     let binary = extract_tool_from_targz(&archive, "varve")?;
     Ok((binary, digest))
 }
@@ -228,12 +228,12 @@ pub fn resolve_update(
     current_version: &str,
     platform: &str,
     on_disk: Option<&[u8]>,
-    root_public_key: &[u8],
+    trust: &crate::keyroles::RealmTrust,
 ) -> Result<UpdateDecision, UpdateError> {
     let Some(plan) = check_latest(api_latest_url, current_version, platform)? else {
         return Ok(UpdateDecision::UpToDate);
     };
-    let (binary, digest) = fetch_verified_binary(&plan, root_public_key)?;
+    let (binary, digest) = fetch_verified_binary(&plan, trust)?;
     if let Some(current) = on_disk
         && already_current(current, &binary)
     {
@@ -252,10 +252,10 @@ pub fn resolve_update(
 /// `dest`. Returns the verified archive digest.
 pub fn perform(
     plan: &UpdatePlan,
-    root_public_key: &[u8],
+    trust: &crate::keyroles::RealmTrust,
     dest: &std::path::Path,
 ) -> Result<String, UpdateError> {
-    let (binary, digest) = fetch_verified_binary(plan, root_public_key)?;
+    let (binary, digest) = fetch_verified_binary(plan, trust)?;
     install_binary(&binary, dest)?;
     Ok(digest)
 }

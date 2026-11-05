@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::install::VerifyError;
 use crate::layer::{LayerId, Line};
-use crate::verify::{dsse_sign_typed, dsse_verify_typed};
+use crate::verify::dsse_sign_typed;
 
 /// The authenticated payload type — a signed something-else cannot be
 /// replayed as a status document.
@@ -263,9 +263,9 @@ pub struct RefCheck {
 /// through. At sign time the producer holds the key, so the check is free.
 pub fn known_layers_from_index(
     envelope: &[u8],
-    root_public_key: &[u8],
+    trust: &crate::keyroles::RealmTrust,
 ) -> Result<KnownLayers, crate::lineindex::IndexError> {
-    let doc = crate::lineindex::LineIndex::verify_and_parse(envelope, root_public_key)?;
+    let doc = crate::lineindex::LineIndex::verify_and_parse(envelope, trust)?;
     Ok(KnownLayers::from_index(&doc))
 }
 
@@ -402,7 +402,7 @@ impl LineStatus {
     /// Verify an envelope against the trust root and parse the payload.
     pub fn verify_and_parse(
         envelope: &[u8],
-        root_public_key: &[u8],
+        trust: &crate::keyroles::RealmTrust,
     ) -> Result<Self, LineStatusError> {
         // Diagnose the not-an-envelope case BEFORE the verifier does: its
         // wrapped parser error prints the cause twice and never names the
@@ -413,7 +413,8 @@ impl LineStatus {
         {
             return Err(not_an_envelope(text));
         }
-        let payload = dsse_verify_typed(envelope, LINE_STATUS_PAYLOAD_TYPE, root_public_key)
+        let payload = trust
+            .verify_bytes(envelope, LINE_STATUS_PAYLOAD_TYPE)
             .map_err(|VerifyError(msg)| {
                 // A wrong-realm signature is indistinguishable from tampering
                 // at this layer; say so, because "No valid signatures" alone
@@ -711,11 +712,11 @@ impl StatusCache {
     pub fn load(
         &self,
         line: &Line,
-        root_public_key: &[u8],
+        trust: &crate::keyroles::RealmTrust,
     ) -> Result<Option<LineStatus>, LineStatusError> {
         let path = self.envelope_path(line);
         match std::fs::read(&path) {
-            Ok(bytes) => Ok(Some(LineStatus::verify_and_parse(&bytes, root_public_key)?)),
+            Ok(bytes) => Ok(Some(LineStatus::verify_and_parse(&bytes, trust)?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(source) => Err(LineStatusError::Io {
                 path: path.display().to_string(),
@@ -818,10 +819,10 @@ pub fn cache_baseline_from_source(
     source: &dyn crate::source::LayerSource,
     layer: &crate::source::LayerRef,
     line: &Line,
-    root_pk: &[u8],
+    trust: &crate::keyroles::RealmTrust,
     store_root: &Path,
 ) -> Result<Option<u64>, LineStatusError> {
-    match current_line_status(source, layer, line, root_pk, Published::BestEffort)? {
+    match current_line_status(source, layer, line, trust, Published::BestEffort)? {
         Some((envelope, doc)) => {
             StatusCache::at_root(store_root).update(line, &envelope, &doc)?;
             Ok(Some(doc.counter))
@@ -858,7 +859,7 @@ pub fn current_line_status(
     source: &dyn crate::source::LayerSource,
     layer: &crate::source::LayerRef,
     line: &Line,
-    root_pk: &[u8],
+    trust: &crate::keyroles::RealmTrust,
     published: Published,
 ) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
     let baseline = source
@@ -881,7 +882,7 @@ pub fn current_line_status(
             )));
         }
     };
-    select_current(baseline, published, line, root_pk)
+    select_current(baseline, published, line, trust)
 }
 
 /// The current status from DOCUMENTS the caller already holds: a baseline and a
@@ -893,9 +894,9 @@ pub fn current_line_status_from_documents(
     baseline: Option<Vec<u8>>,
     correction: Option<Vec<u8>>,
     line: &Line,
-    root_pk: &[u8],
+    trust: &crate::keyroles::RealmTrust,
 ) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
-    select_current(baseline, correction, line, root_pk)
+    select_current(baseline, correction, line, trust)
 }
 
 /// Verify both documents, then choose: the one that VERIFIES and carries the
@@ -904,7 +905,7 @@ fn select_current(
     baseline: Option<Vec<u8>>,
     published: Option<Vec<u8>>,
     line: &Line,
-    root_pk: &[u8],
+    trust: &crate::keyroles::RealmTrust,
 ) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
     // VERIFY FIRST, RANK SECOND. Both documents are untrusted bytes from the
     // party this evidence exists to constrain. Choosing by counter before
@@ -915,7 +916,7 @@ fn select_current(
     let mut best: Option<(u64, Vec<u8>, LineStatus)> = None;
     let mut first_error: Option<LineStatusError> = None;
     for envelope in [baseline, published].into_iter().flatten() {
-        let doc = match LineStatus::verify_and_parse(&envelope, root_pk) {
+        let doc = match LineStatus::verify_and_parse(&envelope, trust) {
             Ok(doc) => doc,
             Err(e) => {
                 first_error.get_or_insert(e);
@@ -1217,7 +1218,11 @@ mod tests {
     fn a_signed_status_document_round_trips() {
         let (sk, pk) = generate_root_keypair();
         let envelope = status(1).sign(&sk, "varve-root-1").unwrap();
-        let parsed = LineStatus::verify_and_parse(envelope.as_bytes(), &pk).unwrap();
+        let parsed = LineStatus::verify_and_parse(
+            envelope.as_bytes(),
+            &crate::keyroles::test_support::rt(&pk),
+        )
+        .unwrap();
         assert_eq!(parsed, status(1));
     }
 
@@ -1233,7 +1238,11 @@ mod tests {
             "2026-08-07T00:00:00Z",
         );
         let envelope = crate::verify::sign_layer_manifest(&manifest, &sk, "varve-root-1").unwrap();
-        let err = LineStatus::verify_and_parse(envelope.as_bytes(), &pk).unwrap_err();
+        let err = LineStatus::verify_and_parse(
+            envelope.as_bytes(),
+            &crate::keyroles::test_support::rt(&pk),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("payload type"), "got: {err}");
     }
 
@@ -1310,7 +1319,9 @@ mod tests {
             assert_eq!(&std::fs::read(blob_dir.join(name)).unwrap(), bytes);
         }
         let carried = read_from_layout(&dest, &line).unwrap().unwrap();
-        let parsed = LineStatus::verify_and_parse(&carried, &pk).unwrap();
+        let parsed =
+            LineStatus::verify_and_parse(&carried, &crate::keyroles::test_support::rt(&pk))
+                .unwrap();
         assert_eq!(parsed.counter, 1);
         let hex = outcome.digest.strip_prefix("sha256:").unwrap();
         assert!(
@@ -1357,7 +1368,10 @@ mod tests {
         ));
 
         // The cached newer document survives and re-verifies.
-        let loaded = cache.load(&line, &pk).unwrap().unwrap();
+        let loaded = cache
+            .load(&line, &crate::keyroles::test_support::rt(&pk))
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.counter, 2);
     }
 
@@ -1385,14 +1399,14 @@ mod tests {
             &source,
             &LayerRef::Name("2026.07.0".parse().unwrap()),
             &line,
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
             tmp.path(),
         )
         .unwrap();
         assert_eq!(cached, Some(7), "the newer of the two is what is kept");
         assert_eq!(
             StatusCache::at_root(tmp.path())
-                .load(&line, &pk)
+                .load(&line, &crate::keyroles::test_support::rt(&pk))
                 .unwrap()
                 .unwrap()
                 .counter,
@@ -1420,7 +1434,7 @@ mod tests {
             &source,
             &LayerRef::Name("2026.07.0".parse().unwrap()),
             &line,
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
             tmp.path(),
         )
         .unwrap();
@@ -1468,13 +1482,13 @@ mod tests {
             &source,
             &LayerRef::Name("2026.07.0".parse().unwrap()),
             &line,
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
             tmp.path(),
         )
         .unwrap();
 
         let kept = StatusCache::at_root(tmp.path())
-            .load(&line, &pk)
+            .load(&line, &crate::keyroles::test_support::rt(&pk))
             .unwrap()
             .unwrap();
         assert!(
@@ -1509,7 +1523,7 @@ mod tests {
             &source,
             &LayerRef::Name("2026.07.0".parse().unwrap()),
             &line,
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
             tmp.path(),
         )
         .unwrap();
@@ -1546,7 +1560,7 @@ mod tests {
             &source,
             &LayerRef::Name("2026.07.0".parse().unwrap()),
             &requested,
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
             tmp.path(),
         )
         .unwrap();
@@ -1586,7 +1600,14 @@ mod tests {
         let source = MemorySource::new().with_line_status(envelope.as_bytes());
         let layer = LayerRef::Name("2026.07.0".parse().unwrap());
 
-        let cached = cache_baseline_from_source(&source, &layer, &line, &pk, store_root).unwrap();
+        let cached = cache_baseline_from_source(
+            &source,
+            &layer,
+            &line,
+            &crate::keyroles::test_support::rt(&pk),
+            store_root,
+        )
+        .unwrap();
         assert_eq!(
             cached,
             Some(5),
@@ -1595,7 +1616,7 @@ mod tests {
 
         // Now `status` works offline: the cache has it, verified.
         let loaded = StatusCache::at_root(store_root)
-            .load(&line, &pk)
+            .load(&line, &crate::keyroles::test_support::rt(&pk))
             .unwrap()
             .unwrap();
         assert_eq!(loaded.counter, 5);
@@ -1629,7 +1650,7 @@ mod tests {
             &source,
             &LayerRef::Name("2026.07.0".parse().unwrap()),
             &requested,
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
             tmp.path(),
         )
         .unwrap_err();
@@ -1639,7 +1660,7 @@ mod tests {
         );
         assert!(
             StatusCache::at_root(tmp.path())
-                .load(&requested, &pk)
+                .load(&requested, &crate::keyroles::test_support::rt(&pk))
                 .unwrap()
                 .is_none(),
             "nothing is cached under the requested line"
@@ -1658,7 +1679,7 @@ mod tests {
             &source,
             &LayerRef::Name("2026.07.0".parse().unwrap()),
             &line,
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
             tmp.path(),
         )
         .unwrap();
@@ -1679,14 +1700,14 @@ mod tests {
             &source,
             &LayerRef::Name("2026.07.0".parse().unwrap()),
             &line,
-            &real_pk,
+            &crate::keyroles::test_support::rt(&real_pk),
             tmp.path(),
         )
         .unwrap_err();
         // The impostor's baseline never reaches the cache.
         assert!(
             StatusCache::at_root(tmp.path())
-                .load(&line, &real_pk)
+                .load(&line, &crate::keyroles::test_support::rt(&real_pk))
                 .unwrap()
                 .is_none(),
             "a baseline that fails verification must not be cached: {err}"
@@ -1738,7 +1759,9 @@ mod tests {
         // The layout now carries it and it re-verifies.
         let carried = read_any_from_layout(&dest).unwrap().unwrap();
         assert_eq!(
-            LineStatus::verify_and_parse(&carried, &pk).unwrap().counter,
+            LineStatus::verify_and_parse(&carried, &crate::keyroles::test_support::rt(&pk))
+                .unwrap()
+                .counter,
             4
         );
     }
@@ -1961,7 +1984,9 @@ mod tests {
         );
         // And verify_and_parse routes through the same diagnosis.
         let (_sk, pk) = generate_root_keypair();
-        let err = LineStatus::verify_and_parse(raw.as_bytes(), &pk).unwrap_err();
+        let err =
+            LineStatus::verify_and_parse(raw.as_bytes(), &crate::keyroles::test_support::rt(&pk))
+                .unwrap_err();
         assert!(err.to_string().contains("UNSIGNED"), "got: {err}");
     }
 
@@ -2009,7 +2034,9 @@ mod tests {
         attach_to_layout(&dest, &line, envelope.as_bytes()).unwrap();
 
         let carried = read_any_from_layout(&dest).unwrap().unwrap();
-        let parsed = LineStatus::verify_and_parse(&carried, &pk).unwrap();
+        let parsed =
+            LineStatus::verify_and_parse(&carried, &crate::keyroles::test_support::rt(&pk))
+                .unwrap();
         assert_eq!(parsed.counter, 3);
     }
 
@@ -2295,7 +2322,11 @@ mod tests {
             .unwrap();
         assert!(check.existence_checked);
         assert_eq!(
-            LineStatus::verify_and_parse(envelope.as_bytes(), &pk).unwrap(),
+            LineStatus::verify_and_parse(
+                envelope.as_bytes(),
+                &crate::keyroles::test_support::rt(&pk)
+            )
+            .unwrap(),
             status(1),
             "the checked path must sign the same document the plain path does"
         );
@@ -2466,7 +2497,12 @@ mod tests {
 
         // Absent — every read path says "nothing here", not an error.
         assert!(cache.envelope_bytes(&line()).unwrap().is_none());
-        assert!(cache.load(&line(), &pk).unwrap().is_none());
+        assert!(
+            cache
+                .load(&line(), &crate::keyroles::test_support::rt(&pk))
+                .unwrap()
+                .is_none()
+        );
         assert!(cache.load_parsed(&line()).unwrap().is_none());
         let empty_layout = root.join("empty-layout");
         std::fs::create_dir_all(&empty_layout).unwrap();
@@ -2487,7 +2523,12 @@ mod tests {
             cache.envelope_bytes(&line()).is_err(),
             "an unreadable cached status read as absent"
         );
-        assert!(cache.load(&line(), &pk).is_err(), "load read it as absent");
+        assert!(
+            cache
+                .load(&line(), &crate::keyroles::test_support::rt(&pk))
+                .is_err(),
+            "load read it as absent"
+        );
         assert!(
             cache.load_parsed(&line()).is_err(),
             "load_parsed read it as absent"
@@ -2824,9 +2865,14 @@ mod correction_tests {
         correction: Option<Vec<u8>>,
     ) -> Result<Option<(u64, Option<String>)>, String> {
         let line: Line = "2026.10".parse().unwrap();
-        current_line_status_from_documents(baseline, correction, &line, pk)
-            .map(|found| found.map(|(_, d)| (d.counter, d.support_until)))
-            .map_err(|e| e.to_string())
+        current_line_status_from_documents(
+            baseline,
+            correction,
+            &line,
+            &crate::keyroles::test_support::rt(pk),
+        )
+        .map(|found| found.map(|(_, d)| (d.counter, d.support_until)))
+        .map_err(|e| e.to_string())
     }
 
     // rivet: verifies REQ-MIRROR-002

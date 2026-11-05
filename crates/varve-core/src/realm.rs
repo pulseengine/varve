@@ -243,10 +243,6 @@ pub enum RealmError {
         path: String,
         reason: String,
     },
-    #[error(
-        "realm '{realm}' declares key-roles, which this varve does not yet enforce at every verification site; refusing rather than verifying it as a root-only realm"
-    )]
-    KeyRolesNotEnforced { realm: String },
     #[error("realm '{realm}': trust material unusable: {reason}")]
     BadTrust { realm: String, reason: String },
     #[error("io error at {path}")]
@@ -343,24 +339,11 @@ pub fn realm_names(start: &Path) -> Result<Vec<String>, RealmError> {
 
 /// Load one realm by name from the realms file discovered from `start`.
 ///
-/// A realm declaring `key-roles = true` is REFUSED here, for now. No
-/// verification site (install, status, index, attestation, compose,
-/// varve-serve) consults `Realm::trust()` yet; each still verifies against
-/// `realm.trust_root` directly, so such a realm would accept root-signed
-/// layers and statuses that its own declaration says must be refused. A
-/// security declaration that is silently not enforced is worse than one that
-/// is rejected, so the load fails instead of degrading to root-only.
-///
-// TODO(REQ-KEYROLES-001 PR 5): remove this refusal when every verification site uses Realm::trust()
+/// A realm declaring `key-roles = true` loads like any other; how its
+/// signatures are JUDGED is [`Realm::trust`], which every verification site
+/// consults (REQ-KEYROLES-001). A site that read `trust_root` directly would
+/// accept root-signed documents a roles realm refuses, so none does.
 pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
-    load_realm(start, name, true)
-}
-
-/// The loader behind `resolve_realm`. `refuse_roles = false` exists so tests
-/// can build a roles `Realm` to exercise `Realm::trust()` directly; production
-/// callers go through `resolve_realm`.
-// TODO(REQ-KEYROLES-001 PR 5): drop `refuse_roles` together with the refusal.
-fn load_realm(start: &Path, name: &str, refuse_roles: bool) -> Result<Realm, RealmError> {
     let Some(path) = find_realms_file(start) else {
         return Err(RealmError::NoRealmsFile {
             start: start.display().to_string(),
@@ -457,11 +440,6 @@ fn load_realm(start: &Path, name: &str, refuse_roles: bool) -> Result<Realm, Rea
         return Err(bad(
             "delegation-file has no effect unless key-roles = true".into()
         ));
-    }
-    if refuse_roles && def.key_roles {
-        return Err(RealmError::KeyRolesNotEnforced {
-            realm: name.to_string(),
-        });
     }
     let delegation_file = def
         .delegation_file
@@ -1120,7 +1098,7 @@ mod key_roles_tests {
         fn a_realm_without_the_new_keys_is_exactly_what_it_was() {
             let k = keys();
             let d = dir(&k, "signed-index = true\n", None);
-            let realm = load_realm(d.path(), "r", false).unwrap();
+            let realm = resolve_realm(d.path(), "r").unwrap();
             assert_eq!(
                 realm,
                 Realm {
@@ -1157,7 +1135,7 @@ mod key_roles_tests {
         fn a_roles_realm_judges_by_role() {
             let k = keys();
             let d = dir(&k, ROLES, Some(&delegation(&k)));
-            let realm = load_realm(d.path(), "r", false).unwrap();
+            let realm = resolve_realm(d.path(), "r").unwrap();
             assert!(realm.key_roles);
             let t = realm.trust().unwrap();
             assert!(matches!(t.mode(), Mode::Roles(_)));
@@ -1178,7 +1156,7 @@ mod key_roles_tests {
             let k = keys();
             // No delegation-file at all.
             let d = dir(&k, "key-roles = true\n", None);
-            let m = load_realm(d.path(), "r", false)
+            let m = resolve_realm(d.path(), "r")
                 .unwrap()
                 .trust()
                 .unwrap_err()
@@ -1187,7 +1165,7 @@ mod key_roles_tests {
 
             // Named but absent.
             let d = dir(&k, ROLES, None);
-            let m = load_realm(d.path(), "r", false)
+            let m = resolve_realm(d.path(), "r")
                 .unwrap()
                 .trust()
                 .unwrap_err()
@@ -1200,7 +1178,7 @@ mod key_roles_tests {
             // Another realm's delegation.
             let other = keys();
             let d = dir(&k, ROLES, Some(&delegation(&other)));
-            let m = load_realm(d.path(), "r", false)
+            let m = resolve_realm(d.path(), "r")
                 .unwrap()
                 .trust()
                 .unwrap_err()
@@ -1209,23 +1187,26 @@ mod key_roles_tests {
 
             // Garbage.
             let d = dir(&k, ROLES, Some("not an envelope"));
-            assert!(load_realm(d.path(), "r", false).unwrap().trust().is_err());
+            assert!(resolve_realm(d.path(), "r").unwrap().trust().is_err());
         }
 
         // rivet: partially-verifies REQ-KEYROLES-001
         #[test]
-        fn loading_a_realm_that_declares_key_roles_is_refused_until_enforced() {
+        fn a_realm_that_declares_key_roles_loads_and_is_judged_by_its_delegation() {
             let k = keys();
             let d = dir(&k, ROLES, Some(&delegation(&k)));
-            let e = resolve_realm(d.path(), "r").unwrap_err().to_string();
-            assert_eq!(
-                e,
-                "realm 'r' declares key-roles, which this varve does not yet enforce at every \
-                 verification site; refusing rather than verifying it as a root-only realm"
-            );
-            // Even with no delegation-file the declaration is not honoured quietly.
+            let realm = resolve_realm(d.path(), "r").unwrap();
+            assert!(realm.key_roles);
+            assert!(matches!(
+                realm.trust().unwrap().mode(),
+                crate::keyroles::Mode::Roles(_)
+            ));
+            // The load no longer refuses a roles realm, and it does not read the
+            // declaration quietly either: with no delegation to judge by, the
+            // trust is an error, never the root alone.
             let d = dir(&k, "key-roles = true\n", None);
-            assert!(resolve_realm(d.path(), "r").is_err());
+            let realm = resolve_realm(d.path(), "r").unwrap();
+            assert!(realm.trust().is_err());
         }
 
         // rivet: partially-verifies REQ-KEYROLES-001

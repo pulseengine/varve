@@ -193,7 +193,8 @@ fn sign_status_with_the_status_key_signs_and_takes_its_key_id_from_the_delegatio
         .success()
         .stdout(predicate::str::contains("\"key_id\": \"status-1\""));
     let env = std::fs::read(&out).unwrap();
-    varve_core::LineStatus::verify_and_parse(&env, &r.status.pk).unwrap();
+    varve_core::LineStatus::verify_and_parse(&env, &RealmTrust::root_only(&r.status.pk).unwrap())
+        .unwrap();
     // An explicit --key-id still wins over the delegation's hint.
     varve(&r.dir)
         .args(["sign-status", "--json", "--key-id", "mine", "--file"])
@@ -419,7 +420,11 @@ fn without_a_delegation_any_key_signs_exactly_as_before() {
             .assert()
             .success()
             .stdout(predicate::str::contains("\"key_id\": \"varve-root-1\""));
-        varve_core::LineStatus::verify_and_parse(&std::fs::read(&out).unwrap(), &k.pk).unwrap();
+        varve_core::LineStatus::verify_and_parse(
+            &std::fs::read(&out).unwrap(),
+            &RealmTrust::root_only(&k.pk).unwrap(),
+        )
+        .unwrap();
         std::fs::remove_file(&out).unwrap();
     }
     let layout = r.dir.join("layout");

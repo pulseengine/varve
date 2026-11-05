@@ -1158,3 +1158,21 @@ mod tests {
         }
     }
 }
+
+/// Test fixtures for the many tests that hold a bare root key and now need the
+/// trust a verifier takes.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::RealmTrust;
+
+    /// A realm that declares no roles, from its root key.
+    pub fn rt(pk: &[u8]) -> RealmTrust {
+        RealmTrust::root_only(pk).unwrap()
+    }
+
+    /// As [`rt`], for a struct that must BORROW a trust past one expression.
+    /// Leaked: test-only, a few dozen bytes each.
+    pub fn leak_rt(pk: &[u8]) -> &'static RealmTrust {
+        Box::leak(Box::new(rt(pk)))
+    }
+}
