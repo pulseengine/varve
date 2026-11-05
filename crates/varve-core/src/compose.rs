@@ -1034,6 +1034,63 @@ pub fn walk_installed(
     roots: &std::collections::BTreeMap<String, Vec<u8>>,
     platform: &str,
 ) -> Result<Vec<ComposedLayer>, ComposeError> {
+    // Root-only: a bare key names a realm that declares no roles.
+    let verifier_for = |name: &str| {
+        roots
+            .get(name)
+            .map(|key| crate::verify::PinnedKeyVerifier::from_public_key_bytes(key))
+    };
+    walk_with(
+        store,
+        entry,
+        own_verifier,
+        own_realm,
+        &verifier_for,
+        platform,
+    )
+}
+
+/// [`walk_installed`] with each named realm's full trust, so an included layer
+/// of a roles realm is judged under that realm's LAYER keys
+/// (REQ-KEYROLES-001) and one of a realm declaring no roles under its root.
+/// The caller resolves each realm's trust (`Realm::trust`); varve-core still
+/// reads no realms file.
+pub fn walk_installed_trusted(
+    store: &crate::store::Store,
+    entry: &crate::store::InstalledLayer,
+    own_verifier: &crate::verify::PinnedKeyVerifier,
+    own_realm: &str,
+    trusts: &std::collections::BTreeMap<String, crate::keyroles::RealmTrust>,
+    platform: &str,
+) -> Result<Vec<ComposedLayer>, ComposeError> {
+    let verifier_for = |name: &str| {
+        trusts
+            .get(name)
+            .map(|t| Ok(crate::verify::PinnedKeyVerifier::from_trust(t.clone())))
+    };
+    walk_with(
+        store,
+        entry,
+        own_verifier,
+        own_realm,
+        &verifier_for,
+        platform,
+    )
+}
+
+/// How a named realm's verifier is found: `None` is an unknown realm, and
+/// `Some(Err)` is trust material that does not build.
+type VerifierFor<'a> = dyn Fn(&str) -> Option<Result<crate::verify::PinnedKeyVerifier, crate::install::VerifyError>>
+    + 'a;
+
+fn walk_with(
+    store: &crate::store::Store,
+    entry: &crate::store::InstalledLayer,
+    own_verifier: &crate::verify::PinnedKeyVerifier,
+    own_realm: &str,
+    verifier_for: &VerifierFor<'_>,
+    platform: &str,
+) -> Result<Vec<ComposedLayer>, ComposeError> {
     let mut out = vec![ComposedLayer {
         store: store.clone(),
         entry: entry.clone(),
@@ -1045,7 +1102,7 @@ pub fn walk_installed(
         entry,
         own_verifier,
         own_realm,
-        roots,
+        verifier_for,
         platform,
         &mut ancestors,
         &mut out,
@@ -1059,7 +1116,7 @@ fn walk_one(
     layer: &crate::store::InstalledLayer,
     own_verifier: &crate::verify::PinnedKeyVerifier,
     own_realm: &str,
-    roots: &std::collections::BTreeMap<String, Vec<u8>>,
+    verifier_for: &VerifierFor<'_>,
     platform: &str,
     ancestors: &mut Vec<String>,
     out: &mut Vec<ComposedLayer>,
@@ -1095,11 +1152,11 @@ fn walk_one(
         // that realm's root is authoritative for it — not ours.
         let named = match &inc.realm {
             Some(name) => {
-                let key = roots.get(name).ok_or_else(|| ComposeError::UnknownRealm {
-                    layer: layer.layer.to_string(),
-                    realm: name.clone(),
-                })?;
-                let v = crate::verify::PinnedKeyVerifier::from_public_key_bytes(key)
+                let v = verifier_for(name)
+                    .ok_or_else(|| ComposeError::UnknownRealm {
+                        layer: layer.layer.to_string(),
+                        realm: name.clone(),
+                    })?
                     .map_err(|e| ComposeError::Io(e.to_string()))?;
                 Some((v, name.clone()))
             }
@@ -1123,7 +1180,14 @@ fn walk_one(
         });
         ancestors.push(entry.digest.clone());
         walk_one(
-            &owner, &entry, verifier, realm, roots, platform, ancestors, out,
+            &owner,
+            &entry,
+            verifier,
+            realm,
+            verifier_for,
+            platform,
+            ancestors,
+            out,
         )?;
         ancestors.pop();
     }

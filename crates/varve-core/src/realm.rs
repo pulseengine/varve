@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::keyroles::{Delegation, RealmTrust};
+
 /// The realms file name, discovered by walking up from the working
 /// directory (it may sit beside the pin or above it).
 pub const REALMS_FILE: &str = "varve-realms.toml";
@@ -58,6 +60,19 @@ pub struct Realm {
     /// one", and no consumer would check such a statement. See
     /// `varve docs threat-model`.
     pub retired_roots: Vec<RetiredRoot>,
+    /// The realm declares key roles (REQ-KEYROLES-001): its root only
+    /// delegates, and role keys sign the rest. Consumer-explicit, like
+    /// `signed_index` — only a realms file that says so turns it on, and a
+    /// realm that does not behaves exactly as before.
+    ///
+    /// An OLDER varve reading a realms file that carries `key-roles` or
+    /// `delegation-file` REFUSES the file (`deny_unknown_fields`), so the
+    /// declaration fails closed on a consumer that cannot honour it.
+    pub key_roles: bool,
+    /// Where the root-signed delegation lives, resolved against the realms
+    /// file's directory exactly as `trust-root-file` is. Only ever `Some` when
+    /// `key_roles` is true.
+    pub delegation_file: Option<PathBuf>,
 }
 
 /// A root a realm used to sign with and has since retired (REQ-ROTATE-002).
@@ -172,6 +187,38 @@ impl Realm {
     pub fn effective_root(&self, varve_root: &Path) -> PathBuf {
         varve_root.join("realms").join(self.fingerprint())
     }
+
+    /// How this realm's signatures are judged (REQ-KEYROLES-001 clause 3).
+    ///
+    /// A realm declaring no roles is `RealmTrust::root_only` and never reads a
+    /// delegation. A realm declaring roles MUST produce a verified delegation:
+    /// a missing, unreadable or refused one is an error, never a silent
+    /// fallback to root-only, because that fallback would let the very key the
+    /// realm meant to confine sign everything again.
+    pub fn trust(&self) -> Result<RealmTrust, RealmError> {
+        let fail = |reason: String| RealmError::BadTrust {
+            realm: self.name.clone(),
+            reason,
+        };
+        if !self.key_roles {
+            return RealmTrust::root_only(&self.trust_root).map_err(|e| fail(e.to_string()));
+        }
+        let Some(file) = &self.delegation_file else {
+            return Err(fail(
+                "key-roles = true but no delegation-file; a roles realm needs its delegation"
+                    .into(),
+            ));
+        };
+        let bytes = std::fs::read(file).map_err(|e| {
+            fail(format!(
+                "cannot read delegation-file {}: {e}",
+                file.display()
+            ))
+        })?;
+        let delegation = Delegation::from_envelope(&bytes, &self.trust_root)
+            .map_err(|e| fail(format!("delegation {} refused: {e}", file.display())))?;
+        RealmTrust::with_roles(&self.trust_root, delegation).map_err(|e| fail(e.to_string()))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -196,6 +243,12 @@ pub enum RealmError {
         path: String,
         reason: String,
     },
+    #[error(
+        "realm '{realm}' declares key-roles, which this varve does not yet enforce at every verification site; refusing rather than verifying it as a root-only realm"
+    )]
+    KeyRolesNotEnforced { realm: String },
+    #[error("realm '{realm}': trust material unusable: {reason}")]
+    BadTrust { realm: String, reason: String },
     #[error("io error at {path}")]
     Io {
         path: String,
@@ -235,6 +288,14 @@ struct RawRealm {
     /// consumers must not accept an unauthenticated listing for it.
     #[serde(rename = "signed-index", default)]
     signed_index: bool,
+    /// `key-roles = true` — the root only delegates; role keys sign the rest
+    /// (REQ-KEYROLES-001). Needs `delegation-file`.
+    #[serde(rename = "key-roles", default)]
+    key_roles: bool,
+    /// The root-signed delegation, relative to the realms file like
+    /// `trust-root-file`. Refused without `key-roles = true`.
+    #[serde(rename = "delegation-file", default)]
+    delegation_file: Option<String>,
     /// Roots this realm has retired (REQ-ROTATE-002). Diagnostic only.
     #[serde(rename = "retired-roots", default)]
     retired_roots: Vec<RawRetiredRoot>,
@@ -281,7 +342,25 @@ pub fn realm_names(start: &Path) -> Result<Vec<String>, RealmError> {
 }
 
 /// Load one realm by name from the realms file discovered from `start`.
+///
+/// A realm declaring `key-roles = true` is REFUSED here, for now. No
+/// verification site (install, status, index, attestation, compose,
+/// varve-serve) consults `Realm::trust()` yet; each still verifies against
+/// `realm.trust_root` directly, so such a realm would accept root-signed
+/// layers and statuses that its own declaration says must be refused. A
+/// security declaration that is silently not enforced is worse than one that
+/// is rejected, so the load fails instead of degrading to root-only.
+///
+// TODO(REQ-KEYROLES-001 PR 5): remove this refusal when every verification site uses Realm::trust()
 pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
+    load_realm(start, name, true)
+}
+
+/// The loader behind `resolve_realm`. `refuse_roles = false` exists so tests
+/// can build a roles `Realm` to exercise `Realm::trust()` directly; production
+/// callers go through `resolve_realm`.
+// TODO(REQ-KEYROLES-001 PR 5): drop `refuse_roles` together with the refusal.
+fn load_realm(start: &Path, name: &str, refuse_roles: bool) -> Result<Realm, RealmError> {
     let Some(path) = find_realms_file(start) else {
         return Err(RealmError::NoRealmsFile {
             start: start.display().to_string(),
@@ -372,6 +451,23 @@ pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
         });
     }
 
+    // A delegation-file with roles off would be silently ignored, and a
+    // maintainer who wrote it believes the realm is confined. Refuse instead.
+    if def.delegation_file.is_some() && !def.key_roles {
+        return Err(bad(
+            "delegation-file has no effect unless key-roles = true".into()
+        ));
+    }
+    if refuse_roles && def.key_roles {
+        return Err(RealmError::KeyRolesNotEnforced {
+            realm: name.to_string(),
+        });
+    }
+    let delegation_file = def
+        .delegation_file
+        .as_ref()
+        .map(|f| path.parent().unwrap_or(Path::new(".")).join(f));
+
     Ok(Realm {
         name: name.to_string(),
         registry: def.registry.clone(),
@@ -381,6 +477,8 @@ pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
         trust_root,
         signed_index: def.signed_index,
         retired_roots,
+        key_roles: def.key_roles,
+        delegation_file,
     })
 }
 
@@ -951,5 +1049,200 @@ mod shipped_realm_agrees_with_shipped_key {
              REJECTED by every consumer that resolves the realm. Rotate both, \
              or neither."
         );
+    }
+}
+
+// ---- REQ-KEYROLES-001 clause 3: a realm's trust material -----------------
+#[cfg(test)]
+mod key_roles_tests {
+    use super::*;
+
+    mod key_roles {
+        use super::*;
+        use crate::keyroles::{DELEGATION_PAYLOAD_TYPE, Mode};
+        use crate::linestatus::LINE_STATUS_PAYLOAD_TYPE;
+        use crate::verify::{LAYER_PAYLOAD_TYPE, dsse_sign_typed, generate_root_keypair};
+
+        fn realms_dir(content: &str) -> tempfile::TempDir {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(tmp.path().join(REALMS_FILE), content).unwrap();
+            tmp
+        }
+
+        struct Keys {
+            root: (Vec<u8>, Vec<u8>),
+            layer: (Vec<u8>, Vec<u8>),
+        }
+
+        fn keys() -> Keys {
+            Keys {
+                root: generate_root_keypair(),
+                layer: generate_root_keypair(),
+            }
+        }
+
+        fn delegation(k: &Keys) -> String {
+            let doc = serde_json::json!({
+                "realm-root": hex::encode(&k.root.1),
+                "counter": 1,
+                "issued-at": "2026-11-05T00:00:00Z",
+                "roles": {"layer": {"threshold": 1,
+                    "keys": [{"key": hex::encode(&k.layer.1), "keyid": "layer-1"}]}},
+            });
+            dsse_sign_typed(
+                doc.to_string().as_bytes(),
+                DELEGATION_PAYLOAD_TYPE,
+                &k.root.0,
+                "root",
+            )
+            .unwrap()
+        }
+
+        /// A realms file for root `k.root`, with `extra` realm lines, and the
+        /// delegation (if any) written at `trust-roots/r.delegation.dsse`.
+        fn dir(k: &Keys, extra: &str, deleg: Option<&str>) -> tempfile::TempDir {
+            let d = realms_dir(&format!(
+                "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{}\"\n{extra}",
+                hex::encode(&k.root.1)
+            ));
+            if let Some(body) = deleg {
+                std::fs::create_dir(d.path().join("trust-roots")).unwrap();
+                std::fs::write(d.path().join("trust-roots/r.delegation.dsse"), body).unwrap();
+            }
+            d
+        }
+
+        const ROLES: &str =
+            "key-roles = true\ndelegation-file = \"trust-roots/r.delegation.dsse\"\n";
+
+        // rivet: partially-verifies REQ-KEYROLES-001
+        #[test]
+        fn a_realm_without_the_new_keys_is_exactly_what_it_was() {
+            let k = keys();
+            let d = dir(&k, "signed-index = true\n", None);
+            let realm = load_realm(d.path(), "r", false).unwrap();
+            assert_eq!(
+                realm,
+                Realm {
+                    name: "r".into(),
+                    registry: "oci://example/x".into(),
+                    sources: vec!["oci://example/x".into()],
+                    trust_root: k.root.1.clone(),
+                    signed_index: true,
+                    retired_roots: vec![],
+                    key_roles: false,
+                    delegation_file: None,
+                }
+            );
+            let t = realm.trust().unwrap();
+            assert_eq!(t.mode(), &Mode::RootOnly);
+            assert_eq!(t.root(), &k.root.1[..]);
+        }
+
+        // rivet: partially-verifies REQ-KEYROLES-001
+        #[test]
+        fn the_committed_realms_file_still_parses_and_stays_root_only() {
+            let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let names = realm_names(&repo_root).unwrap();
+            assert!(!names.is_empty());
+            for n in names {
+                let realm = resolve_realm(&repo_root, &n).unwrap();
+                assert!(!realm.key_roles && realm.delegation_file.is_none(), "{n}");
+                assert_eq!(realm.trust().unwrap().mode(), &Mode::RootOnly, "{n}");
+            }
+        }
+
+        // rivet: partially-verifies REQ-KEYROLES-001
+        #[test]
+        fn a_roles_realm_judges_by_role() {
+            let k = keys();
+            let d = dir(&k, ROLES, Some(&delegation(&k)));
+            let realm = load_realm(d.path(), "r", false).unwrap();
+            assert!(realm.key_roles);
+            let t = realm.trust().unwrap();
+            assert!(matches!(t.mode(), Mode::Roles(_)));
+            let layer = dsse_sign_typed(b"{}", LAYER_PAYLOAD_TYPE, &k.layer.0, "layer-1").unwrap();
+            assert!(t.verify(&layer, LAYER_PAYLOAD_TYPE).is_ok());
+            // The layer key is valid, but not for the status role.
+            let status =
+                dsse_sign_typed(b"{}", LINE_STATUS_PAYLOAD_TYPE, &k.layer.0, "layer-1").unwrap();
+            assert!(t.verify(&status, LINE_STATUS_PAYLOAD_TYPE).is_err());
+            // The root signs only delegations.
+            let by_root = dsse_sign_typed(b"{}", LAYER_PAYLOAD_TYPE, &k.root.0, "root").unwrap();
+            assert!(t.verify(&by_root, LAYER_PAYLOAD_TYPE).is_err());
+        }
+
+        // rivet: partially-verifies REQ-KEYROLES-001
+        #[test]
+        fn a_roles_realm_that_cannot_get_its_delegation_is_an_error_not_root_only() {
+            let k = keys();
+            // No delegation-file at all.
+            let d = dir(&k, "key-roles = true\n", None);
+            let m = load_realm(d.path(), "r", false)
+                .unwrap()
+                .trust()
+                .unwrap_err()
+                .to_string();
+            assert!(m.contains("'r'") && m.contains("delegation-file"), "{m}");
+
+            // Named but absent.
+            let d = dir(&k, ROLES, None);
+            let m = load_realm(d.path(), "r", false)
+                .unwrap()
+                .trust()
+                .unwrap_err()
+                .to_string();
+            assert!(
+                m.contains("'r'") && m.contains("cannot read delegation-file"),
+                "{m}"
+            );
+
+            // Another realm's delegation.
+            let other = keys();
+            let d = dir(&k, ROLES, Some(&delegation(&other)));
+            let m = load_realm(d.path(), "r", false)
+                .unwrap()
+                .trust()
+                .unwrap_err()
+                .to_string();
+            assert!(m.contains("'r'") && m.contains("refused"), "{m}");
+
+            // Garbage.
+            let d = dir(&k, ROLES, Some("not an envelope"));
+            assert!(load_realm(d.path(), "r", false).unwrap().trust().is_err());
+        }
+
+        // rivet: partially-verifies REQ-KEYROLES-001
+        #[test]
+        fn loading_a_realm_that_declares_key_roles_is_refused_until_enforced() {
+            let k = keys();
+            let d = dir(&k, ROLES, Some(&delegation(&k)));
+            let e = resolve_realm(d.path(), "r").unwrap_err().to_string();
+            assert_eq!(
+                e,
+                "realm 'r' declares key-roles, which this varve does not yet enforce at every \
+                 verification site; refusing rather than verifying it as a root-only realm"
+            );
+            // Even with no delegation-file the declaration is not honoured quietly.
+            let d = dir(&k, "key-roles = true\n", None);
+            assert!(resolve_realm(d.path(), "r").is_err());
+        }
+
+        // rivet: partially-verifies REQ-KEYROLES-001
+        #[test]
+        fn a_delegation_file_without_key_roles_is_refused_at_load() {
+            let k = keys();
+            for extra in [
+                "delegation-file = \"trust-roots/r.delegation.dsse\"\n",
+                "key-roles = false\ndelegation-file = \"trust-roots/r.delegation.dsse\"\n",
+            ] {
+                let d = dir(&k, extra, Some(&delegation(&k)));
+                let e = resolve_realm(d.path(), "r").unwrap_err().to_string();
+                assert!(
+                    e.contains("delegation-file has no effect unless key-roles = true"),
+                    "{e}"
+                );
+            }
+        }
     }
 }

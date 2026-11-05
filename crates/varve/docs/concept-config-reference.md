@@ -120,6 +120,8 @@ A mirror on a different origin than the primary is also never sent your registry
 
 ### `retired-roots` — what it is, and emphatically what it is not
 
+`key-roles = true` (default `false`) and `delegation-file = "trust-roots/<realm>.delegation.dsse"` declare that this realm scopes its keys by role (REQ-KEYROLES-001): the root signs only a delegation, and the delegated keys sign layers and statuses. The delegation file is read relative to the realms file, like `trust-root-file`. With `key-roles = true`, a missing, unreadable or refused delegation is an error, never a fallback to root-only. `delegation-file` without `key-roles = true` is refused at load rather than ignored. **This varve refuses a realm that declares `key-roles = true`**: not every verification site (install, status, index, attestation, compose, serve) consults the roles yet, and a realm verified as root-only would accept signatures its own declaration forbids. The refusal is lifted in the later release that enforces roles everywhere. An older varve likewise refuses a realms file that carries either key.
+
 **varve still has no key rotation.** Nothing signs "this new root replaces the old one", and no consumer would check such a statement if you produced it (`varve docs threat-model`). Changing a realm's root still means every consumer edits their own `varve-realms.toml`, and every layer signed by the old root stops verifying. `retired-roots` does not change any of that.
 
 What it changes is the **message**, never the **verdict**. Without it, a consumer whose pin was signed by the previous root sees:
