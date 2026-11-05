@@ -136,6 +136,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "(CI) Sign a statement binding an attestation to a layer: \"this digest, of this kind, from this producer, accompanies this layer\" (REQ-ATTEST-001). varve vouches for the ASSOCIATION and the bytes' integrity — never for what the producer claimed",
     ),
     (
+        "sign-delegation",
+        "(offline) Sign a realm's DELEGATION with the realm ROOT key: the one document the root signs in a realm that declares key roles (REQ-KEYROLES-001)",
+    ),
+    (
         "sign-index",
         "(CI) Validate and sign a line-index document — the realm's statement of which layers a line contains (REQ-INDEXAUTH-001)",
     ),

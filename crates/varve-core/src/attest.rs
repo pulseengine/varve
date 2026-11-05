@@ -193,9 +193,10 @@ pub fn sign_with(
 /// never be accepted here as an attestation statement.
 pub fn verify_statement(
     envelope: &[u8],
-    root_pk: &[u8],
+    trust: &crate::keyroles::RealmTrust,
 ) -> Result<AttestationStatement, AttestError> {
-    let payload = crate::verify::dsse_verify_typed(envelope, PAYLOAD_TYPE, root_pk)
+    let payload = trust
+        .verify_bytes(envelope, PAYLOAD_TYPE)
         .map_err(|e| AttestError::Signature(e.to_string()))?;
     serde_json::from_slice(&payload).map_err(|e| AttestError::Payload(e.to_string()))
 }
@@ -287,7 +288,8 @@ mod tests {
         let (sk, pk) = crate::generate_root_keypair();
         let s = st();
         let env = sign(&s, &sk, "test-root").unwrap();
-        let back = verify_statement(env.as_bytes(), &pk).unwrap();
+        let back =
+            verify_statement(env.as_bytes(), &crate::keyroles::test_support::rt(&pk)).unwrap();
         assert_eq!(back, s);
     }
 
@@ -297,6 +299,12 @@ mod tests {
         let (sk, _) = crate::generate_root_keypair();
         let (_, other_pk) = crate::generate_root_keypair();
         let env = sign(&st(), &sk, "test-root").unwrap();
-        assert!(verify_statement(env.as_bytes(), &other_pk).is_err());
+        assert!(
+            verify_statement(
+                env.as_bytes(),
+                &crate::keyroles::test_support::rt(&other_pk)
+            )
+            .is_err()
+        );
     }
 }

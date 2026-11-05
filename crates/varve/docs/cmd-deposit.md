@@ -22,3 +22,10 @@ The spec schema is in `varve docs config-reference`. Note `kind = "crate"` on a 
 deposit writes a LOCAL oci-layout directory and does not publish; see `varve docs deploy`.
 
 Deposit into a FRESH `--out` every time. Re-running deposit into a layout that already carries a line-status, line-index or attestation is REFUSED (exit 1), because deposit writes the whole `index.json` and would drop every attached referrer. The refusal names what it found and the re-attach sequence, and leaves the layout byte-identical. `--force` overwrites deliberately. Until v0.28.0 this silently succeeded and destroyed them. The ordering of the producer pipeline is `varve docs ci`.
+
+## In a realm that declares key roles
+
+`--delegation FILE` makes this command sign as the LAYER role and refuses, before
+signing, a key that is not delegated to it (including the realm root).
+`--key-id` then defaults to the delegation's entry for the key. See `varve docs
+sign-delegation`. Without it the command behaves exactly as before.

@@ -9,7 +9,7 @@
 
 use crate::install::VerifyError;
 use crate::store::manifest_digest;
-use crate::verify::{dsse_sign_typed, dsse_verify_typed};
+use crate::verify::dsse_sign_typed;
 
 /// The authenticated payload type for release checksum envelopes.
 pub const RELEASE_SUMS_PAYLOAD_TYPE: &str =
@@ -39,9 +39,9 @@ pub fn verify_release_file(
     file_name: &str,
     file_bytes: &[u8],
     sums_envelope: &[u8],
-    root_public_key: &[u8],
+    trust: &crate::keyroles::RealmTrust,
 ) -> Result<String, SelfVerifyError> {
-    let payload = dsse_verify_typed(sums_envelope, RELEASE_SUMS_PAYLOAD_TYPE, root_public_key)?;
+    let payload = trust.verify_bytes(sums_envelope, RELEASE_SUMS_PAYLOAD_TYPE)?;
     let text = std::str::from_utf8(&payload).map_err(|_| SelfVerifyError::NotText)?;
     // sha256sum format: "<hex>  <name>" (name possibly ./-prefixed).
     let expected = text
@@ -113,7 +113,7 @@ mod tests {
             "varve-v9.9.9-aarch64-apple-darwin.tar.gz",
             &archive,
             envelope.as_bytes(),
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
         )
         .unwrap();
         assert!(digest.starts_with("sha256:"));
@@ -128,7 +128,7 @@ mod tests {
             "varve-v9.9.9-aarch64-apple-darwin.tar.gz",
             &archive,
             envelope.as_bytes(),
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
         )
         .unwrap_err();
         assert!(
@@ -141,8 +141,13 @@ mod tests {
     #[test]
     fn a_file_outside_the_signed_sums_is_refused() {
         let (archive, envelope, pk, _) = fixture();
-        let err =
-            verify_release_file("sneaky.tar.gz", &archive, envelope.as_bytes(), &pk).unwrap_err();
+        let err = verify_release_file(
+            "sneaky.tar.gz",
+            &archive,
+            envelope.as_bytes(),
+            &crate::keyroles::test_support::rt(&pk),
+        )
+        .unwrap_err();
         assert!(matches!(err, SelfVerifyError::NoEntry { .. }), "got: {err}");
     }
 
@@ -158,7 +163,13 @@ mod tests {
         let impostor = sign_release_sums(sums.as_bytes(), &other_sk, "evil").unwrap();
         let (_, _, pk, _) = fixture();
         assert!(
-            verify_release_file("x.tar.gz", &archive, impostor.as_bytes(), &pk).is_err(),
+            verify_release_file(
+                "x.tar.gz",
+                &archive,
+                impostor.as_bytes(),
+                &crate::keyroles::test_support::rt(&pk)
+            )
+            .is_err(),
             "impostor sums must not verify"
         );
     }
@@ -171,7 +182,13 @@ mod tests {
         // sign_layer_manifest refuses nothing here — it signs any payload —
         // but its payload TYPE differs, so verification must refuse it.
         let envelope = not_sums.unwrap();
-        let err = verify_release_file("x.tar.gz", &archive, envelope.as_bytes(), &pk).unwrap_err();
+        let err = verify_release_file(
+            "x.tar.gz",
+            &archive,
+            envelope.as_bytes(),
+            &crate::keyroles::test_support::rt(&pk),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("payload type"), "got: {err}");
     }
 }

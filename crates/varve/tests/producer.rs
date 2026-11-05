@@ -266,7 +266,11 @@ fn signing_against_the_realms_index_refuses_the_typo_before_a_signature_exists()
     // Verified against the root that is about to sign: an unverified listing
     // is one an attacker could choose, and one naming the typo would wave the
     // dead advisory through.
-    let known = varve_core::known_layers_from_index(index.as_bytes(), &sk[32..]).unwrap();
+    let known = varve_core::known_layers_from_index(
+        index.as_bytes(),
+        &varve_core::keyroles::RealmTrust::root_only(&sk[32..]).unwrap(),
+    )
+    .unwrap();
 
     let err = status_doc(2, &["2026.08.10"])
         .sign_against(&known, false, &sk, "root-1")

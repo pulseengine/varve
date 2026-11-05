@@ -35,3 +35,11 @@ attach-index`). Signing it and leaving it in CI protects nobody.
 
 Consumers only look for it when their realm declares `signed-index = true`;
 see `varve docs config-reference`.
+
+## In a realm that declares key roles
+
+`--delegation FILE` makes this command sign as the STATUS role and refuses, before
+signing, a key that is not delegated to it (including the realm root, and the
+depositor's LAYER key). `--key-id` then defaults to the delegation's entry for the
+key. See `varve docs sign-delegation`. Without it the command behaves exactly as
+before.

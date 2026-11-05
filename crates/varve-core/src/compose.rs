@@ -1017,45 +1017,17 @@ pub struct VerifiedPayload {
 /// … carries no documentation" for a four-layer composition whose docs were in
 /// one of the other three. One walk, in the crate both binaries depend on.
 ///
-/// `roots` maps a realm name to its trust root's public key: an included layer
-/// is verified against the root of the realm its include NAMES, never the
-/// composing realm's, because that is the boundary realms exist to draw.
-/// Resolving those roots is the caller's job — varve-core does not read
-/// varve-realms.toml.
+/// `trusts` maps a realm name to its trust: an included layer is verified
+/// against the trust of the realm its include NAMES, never the composing
+/// realm's, because that is the boundary realms exist to draw. A roles realm's
+/// layer is judged under its LAYER keys (REQ-KEYROLES-001) and one of a realm
+/// declaring no roles under its root. Resolving those trusts is the caller's
+/// job (`Realm::trust`) — varve-core does not read varve-realms.toml.
 ///
 /// Bounded and cycle-guarded: a digest reappearing on its own path is a cycle,
 /// while a digest reachable by two paths is a DIAMOND — two layers sharing a
 /// base, the most ordinary composition there is — and is walked once.
 pub fn walk_installed(
-    store: &crate::store::Store,
-    entry: &crate::store::InstalledLayer,
-    own_verifier: &crate::verify::PinnedKeyVerifier,
-    own_realm: &str,
-    roots: &std::collections::BTreeMap<String, Vec<u8>>,
-    platform: &str,
-) -> Result<Vec<ComposedLayer>, ComposeError> {
-    // Root-only: a bare key names a realm that declares no roles.
-    let verifier_for = |name: &str| {
-        roots
-            .get(name)
-            .map(|key| crate::verify::PinnedKeyVerifier::from_public_key_bytes(key))
-    };
-    walk_with(
-        store,
-        entry,
-        own_verifier,
-        own_realm,
-        &verifier_for,
-        platform,
-    )
-}
-
-/// [`walk_installed`] with each named realm's full trust, so an included layer
-/// of a roles realm is judged under that realm's LAYER keys
-/// (REQ-KEYROLES-001) and one of a realm declaring no roles under its root.
-/// The caller resolves each realm's trust (`Realm::trust`); varve-core still
-/// reads no realms file.
-pub fn walk_installed_trusted(
     store: &crate::store::Store,
     entry: &crate::store::InstalledLayer,
     own_verifier: &crate::verify::PinnedKeyVerifier,

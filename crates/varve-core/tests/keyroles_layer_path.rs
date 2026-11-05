@@ -201,7 +201,7 @@ fn a_layer_signed_manifest_verifies_under_a_roles_realm() {
     v.verify(&b.envelope)
         .expect("a LAYER-signed layer manifest verifies in a roles realm");
     // The root the verifier names is the realm ROOT: the store partitions on it.
-    assert_eq!(v.root_public_key(), Some(r.root.pk.as_slice()));
+    assert_eq!(v.trust().map(|t| t.root()), Some(r.root.pk.as_slice()));
     assert_eq!(v.public_key(), r.root.pk.as_slice());
 }
 
@@ -312,14 +312,7 @@ fn walk(
 ) -> Result<Vec<varve_core::compose::ComposedLayer>, varve_core::compose::ComposeError> {
     let mut trusts = BTreeMap::new();
     trusts.insert("up".to_string(), trust);
-    varve_core::compose::walk_installed_trusted(
-        &c.store,
-        &c.entry,
-        &c.top,
-        "top",
-        &trusts,
-        "test-platform",
-    )
+    varve_core::compose::walk_installed(&c.store, &c.entry, &c.top, "top", &trusts, "test-platform")
 }
 
 // rivet: partially-verifies REQ-KEYROLES-001
@@ -349,11 +342,6 @@ fn layer_signed_bytes_are_refused_by_compose_under_a_no_roles_realm() {
     let up = roles_realm();
     let c = composition(&up.layer);
     walk(&c, up.flat_trust()).expect_err("root-only does not accept the LAYER key");
-    // The legacy entry point (roots only) is the same thing.
-    let mut roots = BTreeMap::new();
-    roots.insert("up".to_string(), up.root.pk.clone());
-    varve_core::compose::walk_installed(&c.store, &c.entry, &c.top, "top", &roots, "test-platform")
-        .expect_err("walk_installed is root-only");
     // And a root-signed included layer composes there, as it always did.
     let c = composition(&up.root);
     walk(&c, up.flat_trust()).expect("no-roles behaviour unchanged");

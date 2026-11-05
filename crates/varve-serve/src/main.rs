@@ -190,7 +190,7 @@ fn resolve_layers(
     // the same one.
     let trusts = realm_trusts(&cwd)?;
     let own_realm = pin.realm.clone().unwrap_or_else(|| "(this project)".into());
-    let layers = varve_core::compose::walk_installed_trusted(
+    let layers = varve_core::compose::walk_installed(
         &store,
         &entry,
         &verifier,

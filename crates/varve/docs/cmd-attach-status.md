@@ -107,3 +107,9 @@ detail:
 The baseline therefore stays exactly as useful as it was: an offline install and
 `varve install --from` keep working unchanged, and the tag is what makes a layer
 speakable-about afterwards.
+
+## In a realm that declares key roles
+
+A roles realm's deposit publishes NO baseline line-status: the status role is
+not the depositor's. `--delegation FILE` makes this command refuse. See `varve
+docs sign-delegation`.

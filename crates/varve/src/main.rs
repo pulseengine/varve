@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use varve_core::{Pin, Store, discover, resolve};
+use varve_core::{Pin, RealmSigner, Store, discover, resolve};
 
 mod diff;
 mod docs;
@@ -277,9 +277,18 @@ enum Cmd {
         /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
-        /// Key identifier recorded in the signature.
-        #[arg(long, default_value = "varve-root-1")]
-        key_id: String,
+        /// Key identifier recorded in the signature. Defaults to the
+        /// delegation's entry for this key when `--delegation` is given, else
+        /// `varve-root-1`.
+        #[arg(long)]
+        key_id: Option<String>,
+        /// The realm's root-signed delegation (a DSSE envelope, from `varve
+        /// sign-delegation`). Given it, this command signs as the role it
+        /// belongs to and REFUSES, before signing, a key not delegated to
+        /// that role (REQ-KEYROLES-001). Without it the command signs exactly
+        /// as before: the right setting for a realm declaring no roles.
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
         /// Destination directory for the oci-layout.
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
@@ -524,8 +533,18 @@ enum Cmd {
         /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
-        #[arg(long, default_value = "varve-root-1")]
-        key_id: String,
+        /// Key identifier recorded in the signature. Defaults to the
+        /// delegation's entry for this key when `--delegation` is given, else
+        /// `varve-root-1`.
+        #[arg(long)]
+        key_id: Option<String>,
+        /// The realm's root-signed delegation (a DSSE envelope, from `varve
+        /// sign-delegation`). Given it, this command signs as the role it
+        /// belongs to and REFUSES, before signing, a key not delegated to
+        /// that role (REQ-KEYROLES-001). Without it the command signs exactly
+        /// as before: the right setting for a realm declaring no roles.
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
         /// Where to write the signed statement.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
@@ -563,8 +582,18 @@ enum Cmd {
         /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
-        #[arg(long, default_value = "varve-root-1")]
-        key_id: String,
+        /// Key identifier recorded in the signature. Defaults to the
+        /// delegation's entry for this key when `--delegation` is given, else
+        /// `varve-root-1`.
+        #[arg(long)]
+        key_id: Option<String>,
+        /// The realm's root-signed delegation (a DSSE envelope, from `varve
+        /// sign-delegation`). Given it, this command signs as the role it
+        /// belongs to and REFUSES, before signing, a key not delegated to
+        /// that role (REQ-KEYROLES-001). Without it the command signs exactly
+        /// as before: the right setting for a realm declaring no roles.
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         /// Machine-readable result on stdout (REQ-CIGATE-001).
@@ -600,8 +629,18 @@ enum Cmd {
         /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
-        #[arg(long, default_value = "varve-root-1")]
-        key_id: String,
+        /// Key identifier recorded in the signature. Defaults to the
+        /// delegation's entry for this key when `--delegation` is given, else
+        /// `varve-root-1`.
+        #[arg(long)]
+        key_id: Option<String>,
+        /// The realm's root-signed delegation (a DSSE envelope, from `varve
+        /// sign-delegation`). Given it, this command signs as the role it
+        /// belongs to and REFUSES, before signing, a key not delegated to
+        /// that role (REQ-KEYROLES-001). Without it the command signs exactly
+        /// as before: the right setting for a realm declaring no roles.
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         /// Machine-readable result on stdout (REQ-CIGATE-001).
@@ -641,6 +680,11 @@ enum Cmd {
         /// `affected` id names nothing can never fire (REQ-ADVISORY-002).
         #[arg(long)]
         force: bool,
+        /// The realm's delegation. In a realm that declares key roles a deposit
+        /// publishes NO baseline line-status (the status role is not the
+        /// depositor's), so given this the attach is REFUSED (REQ-KEYROLES-001).
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
     },
     /// Shims on PATH: thin dispatchers that resolve the pin from the
     /// invocation's working directory and exec — switching projects is cd.
@@ -656,6 +700,31 @@ enum Cmd {
     },
     /// Emit shell completion scripts (zsh, bash, fish, ...).
     Completions { shell: clap_complete::Shell },
+    /// (offline) Sign a realm's DELEGATION with the realm ROOT key: the one
+    /// document the root signs in a realm that declares key roles
+    /// (REQ-KEYROLES-001). The input names the root and the keys allowed to
+    /// sign for each role; the output is the DSSE envelope a realm's
+    /// `delegation-file` points at. The result is read back through the same
+    /// check a consumer runs, and a delegation it would refuse is not written.
+    SignDelegation {
+        /// The delegation document JSON: `realm-root` (hex), `counter`,
+        /// `issued-at`, and `roles` with `layer` and/or `status`, each
+        /// `{ threshold, keys: [{ key, keyid? }] }`.
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// The realm ROOT signing key file (128 hex characters). Its public
+        /// half must be the document's `realm-root`.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        /// Key identifier recorded in the signature.
+        #[arg(long, default_value = "varve-root-1")]
+        key_id: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// Machine-readable result on stdout (REQ-CIGATE-001).
+        #[arg(long)]
+        json: bool,
+    },
     /// (CI) Sign a release SHA256SUMS.txt into the DSSE envelope
     /// `self-verify` consumes — the producing half of DD-009.
     SignSums {
@@ -665,8 +734,18 @@ enum Cmd {
         /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
-        #[arg(long, default_value = "varve-root-1")]
-        key_id: String,
+        /// Key identifier recorded in the signature. Defaults to the
+        /// delegation's entry for this key when `--delegation` is given, else
+        /// `varve-root-1`.
+        #[arg(long)]
+        key_id: Option<String>,
+        /// The realm's root-signed delegation (a DSSE envelope, from `varve
+        /// sign-delegation`). Given it, this command signs as the role it
+        /// belongs to and REFUSES, before signing, a key not delegated to
+        /// that role (REQ-KEYROLES-001). Without it the command signs exactly
+        /// as before: the right setting for a realm declaring no roles.
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         /// Machine-readable result on stdout (REQ-CIGATE-001).
@@ -842,6 +921,7 @@ fn run() -> anyhow::Result<Outcome> {
             issued_at,
             key,
             key_id,
+            delegation,
             out,
             tools,
             json,
@@ -853,7 +933,8 @@ fn run() -> anyhow::Result<Outcome> {
             counter,
             &issued_at,
             &key,
-            &key_id,
+            key_id.as_deref(),
+            delegation.as_deref(),
             &out,
             &tools,
             json,
@@ -908,6 +989,7 @@ fn run() -> anyhow::Result<Outcome> {
             file,
             key,
             key_id,
+            delegation,
             out,
             json,
             index,
@@ -916,7 +998,8 @@ fn run() -> anyhow::Result<Outcome> {
         } => sign_status(
             &file,
             &key,
-            &key_id,
+            key_id.as_deref(),
+            delegation.as_deref(),
             &out,
             json,
             index.as_deref(),
@@ -946,6 +1029,7 @@ fn run() -> anyhow::Result<Outcome> {
             producer,
             key,
             key_id,
+            delegation,
             out,
             attach_to,
             json,
@@ -956,7 +1040,8 @@ fn run() -> anyhow::Result<Outcome> {
             &file,
             &producer,
             &key,
-            &key_id,
+            key_id.as_deref(),
+            delegation.as_deref(),
             &out,
             attach_to.as_deref(),
             json,
@@ -967,14 +1052,30 @@ fn run() -> anyhow::Result<Outcome> {
             status,
             json,
             force,
-        } => attach_status(&layout, &status, json, force),
+            delegation,
+        } => attach_status(&layout, &status, json, force, delegation.as_deref()),
         Cmd::SignIndex {
+            file,
+            key,
+            key_id,
+            delegation,
+            out,
+            json,
+        } => sign_index(
+            &file,
+            &key,
+            key_id.as_deref(),
+            delegation.as_deref(),
+            &out,
+            json,
+        ),
+        Cmd::SignDelegation {
             file,
             key,
             key_id,
             out,
             json,
-        } => sign_index(&file, &key, &key_id, &out, json),
+        } => sign_delegation(&file, &key, &key_id, &out, json),
         Cmd::AttachIndex {
             layout,
             index,
@@ -991,9 +1092,17 @@ fn run() -> anyhow::Result<Outcome> {
             sums,
             key,
             key_id,
+            delegation,
             out,
             json,
-        } => sign_sums(&sums, &key, &key_id, &out, json),
+        } => sign_sums(
+            &sums,
+            &key,
+            key_id.as_deref(),
+            delegation.as_deref(),
+            &out,
+            json,
+        ),
         Cmd::SelfUpdate { check, to } => self_update(&store, check, to.as_deref()),
         Cmd::SelfVerify { archive, envelope } => self_verify(&store, &archive, &envelope),
         Cmd::Docs {
@@ -1236,21 +1345,92 @@ fn shim_install(store: &Store, extra_tools: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sign_sums(
-    sums: &std::path::Path,
+/// The identity a signing command signs as (REQ-KEYROLES-001).
+///
+/// The COMMAND implies the role (`role`); a delegation, when given, is the
+/// realm's statement of which keys may play it, and a key it does not delegate
+/// to that role is refused here, BEFORE anything is signed or written. The
+/// delegation is checked against the root it names (a producer holds no pinned
+/// root; a consumer's own pin is what authenticates it). Without a delegation
+/// this is exactly today's file-backed key, for a realm declaring no roles.
+fn role_signer(
     key: &std::path::Path,
-    key_id: &str,
-    out: &std::path::Path,
-    json: bool,
-) -> anyhow::Result<()> {
-    let bytes = std::fs::read(sums).with_context(|| format!("cannot read {}", sums.display()))?;
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
+    role: varve_core::keyroles::Role,
+) -> anyhow::Result<varve_core::FileSigner> {
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
     // Refuse a key that cannot produce verifiable signatures BEFORE signing.
     // varve used to accept 64 bytes of entropy here and emit a signed layer no
     // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
     let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
-    let envelope = varve_core::sign_release_sums(&bytes, &sk, key_id)?;
+    let mut hint: Option<String> = None;
+    if let Some(path) = delegation {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("cannot read delegation {}", path.display()))?;
+        let d = varve_core::keyroles::Delegation::from_producer_envelope(&bytes)
+            .map_err(|e| anyhow::anyhow!("delegation {} refused: {e}", path.display()))?;
+        hint = d
+            .authorise_signer(role, &sk[32..])
+            .map_err(|e| anyhow::anyhow!("{} cannot sign here: {e}", key.display()))?;
+    }
+    let key_id = key_id.map(str::to_string).or(hint);
+    varve_core::FileSigner::new_unchecked(&sk, key_id.as_deref().unwrap_or("varve-root-1"))
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// `varve sign-delegation`: the ROOT role's one act.
+fn sign_delegation(
+    file: &std::path::Path,
+    key: &std::path::Path,
+    key_id: &str,
+    out: &std::path::Path,
+    json: bool,
+) -> anyhow::Result<()> {
+    let doc = std::fs::read(file)
+        .with_context(|| format!("cannot read delegation document {}", file.display()))?;
+    let hex_key = std::fs::read_to_string(key)
+        .with_context(|| format!("cannot read signing key {}", key.display()))?;
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
+    let signer =
+        varve_core::FileSigner::new_unchecked(&sk, key_id).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let envelope = varve_core::keyroles::Delegation::sign(&doc, &signer)?;
+    let d = varve_core::keyroles::Delegation::from_producer_envelope(envelope.as_bytes())?;
+    std::fs::write(out, envelope)
+        .with_context(|| format!("cannot write delegation {}", out.display()))?;
+    report(
+        json,
+        &format!(
+            "signed delegation #{} ({}) -> {}",
+            d.counter(),
+            d.issued_at(),
+            out.display()
+        ),
+        serde_json::json!({
+            "command": "sign-delegation",
+            "counter": d.counter(),
+            "issued_at": d.issued_at(),
+            "key_id": key_id,
+            "out": out.display().to_string(),
+        }),
+    );
+    Ok(())
+}
+
+fn sign_sums(
+    sums: &std::path::Path,
+    key: &std::path::Path,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
+    out: &std::path::Path,
+    json: bool,
+) -> anyhow::Result<()> {
+    let bytes = std::fs::read(sums).with_context(|| format!("cannot read {}", sums.display()))?;
+    let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Layer)?;
+    let key_id = signer.realm_key_id();
+    let key_id = key_id.as_str();
+    let envelope = varve_core::selfverify::sign_release_sums_with(&bytes, &signer)?;
     std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
     report(
         json,
@@ -1282,14 +1462,14 @@ fn status(
 ) -> anyhow::Result<Outcome> {
     let ctx = project_ctx(store)?;
     let pin = &ctx.pin;
-    let root_pk = ctx_root_bytes(&ctx)?;
+    let trust = ctx_trust(&ctx)?;
     let line = pin.layer.line().clone();
     let cache = varve_core::StatusCache::at_root(ctx.store.root());
 
     if let Some(path) = from_file {
         let envelope = std::fs::read(path)
             .with_context(|| format!("cannot read status envelope {}", path.display()))?;
-        let doc = varve_core::LineStatus::verify_and_parse(&envelope, &root_pk)?;
+        let doc = varve_core::LineStatus::verify_and_parse(&envelope, &trust)?;
         if doc.line != line.to_string() {
             bail!(
                 "status document covers line {} but this project pins line {line}",
@@ -1299,7 +1479,7 @@ fn status(
         cache.update(&line, &envelope, &doc)?;
     }
 
-    let Some(doc) = cache.load(&line, &root_pk)? else {
+    let Some(doc) = cache.load(&line, &trust)? else {
         bail!(
             "no line-status document cached for line {line}.\n\
              \n\
@@ -1389,7 +1569,23 @@ fn attach_status(
     status: &std::path::Path,
     json: bool,
     force: bool,
+    delegation: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    // REQ-KEYROLES-001 / DD-041 Q1: in a realm that declares roles the deposit
+    // publishes NO baseline line-status — it would have to be signed by the
+    // depositor, and the status role is not the depositor's. Status reaches a
+    // roles realm only through the registry's status tag, from a human merge.
+    if let Some(d) = delegation {
+        let bytes =
+            std::fs::read(d).with_context(|| format!("cannot read delegation {}", d.display()))?;
+        varve_core::keyroles::Delegation::from_producer_envelope(&bytes)
+            .map_err(|e| anyhow::anyhow!("delegation {} refused: {e}", d.display()))?;
+        bail!(
+            "this realm declares key roles ({}): a deposit publishes no baseline line-status,              because the status role is not the depositor's. Publish status with `varve \
+             sign-status` under the STATUS key instead.",
+            d.display()
+        );
+    }
     let envelope = std::fs::read(status)
         .with_context(|| format!("cannot read status envelope {}", status.display()))?;
     // REQ-ADVISORY-002: where the layout carries a line-index, the `affected`
@@ -1445,7 +1641,8 @@ fn attach_index(
 fn sign_index(
     file: &std::path::Path,
     key: &std::path::Path,
-    key_id: &str,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
     out: &std::path::Path,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -1459,12 +1656,10 @@ fn sign_index(
     // The line must be a real line, not merely a string that round-trips —
     // an index for "twenty twenty six" verifies fine and matches nothing.
     doc.line()?;
-    let hex_key = std::fs::read_to_string(key)
-        .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    // Refuse a key that cannot produce verifiable signatures BEFORE signing,
-    // as every other producing path does (REQ-PRODUCER-001).
-    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
-    let envelope = doc.sign(&sk, key_id)?;
+    let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Status)?;
+    let key_id = signer.realm_key_id();
+    let key_id = key_id.as_str();
+    let envelope = doc.sign_with(&signer)?;
     std::fs::write(out, envelope)
         .with_context(|| format!("cannot write envelope {}", out.display()))?;
     report(
@@ -1492,7 +1687,8 @@ fn sign_index(
 fn sign_status(
     file: &std::path::Path,
     key: &std::path::Path,
-    key_id: &str,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
     out: &std::path::Path,
     json: bool,
     index: Option<&std::path::Path>,
@@ -1536,12 +1732,9 @@ fn sign_status(
             })?;
         }
     }
-    let hex_key = std::fs::read_to_string(key)
-        .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
-    // varve used to accept 64 bytes of entropy here and emit a signed layer no
-    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
-    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
+    let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Status)?;
+    let key_id = signer.realm_key_id();
+    let key_id = key_id.as_str();
     // REQ-ADVISORY-002: a typo in an `affected` layer id used to sign cleanly,
     // and the advisory then never fired for anyone — producer sees success,
     // consumer sees nothing, the yank silently does not exist. Shape is always
@@ -1552,7 +1745,10 @@ fn sign_status(
         Some(path) => {
             let env = std::fs::read(path)
                 .with_context(|| format!("cannot read line-index envelope {}", path.display()))?;
-            varve_core::known_layers_from_index(&env, &sk[32..])?
+            varve_core::known_layers_from_index(
+                &env,
+                &varve_core::keyroles::RealmTrust::root_only(&signer.public_key())?,
+            )?
         }
         // The producer's own layouts: no network, no published index. This is
         // the path that actually runs for most realms (DD-023 clause 5).
@@ -1564,7 +1760,7 @@ fn sign_status(
              <envelope>` if this realm publishes a signed line-index",
         ),
     };
-    let (envelope, check) = doc.sign_against(&known, force, &sk, key_id)?;
+    let (envelope, check) = doc.sign_against_with(&known, force, &signer)?;
     std::fs::write(out, envelope)
         .with_context(|| format!("cannot write envelope {}", out.display()))?;
     report(
@@ -1614,17 +1810,12 @@ fn self_update(store: &Store, check: bool, to: Option<&std::path::Path>) -> anyh
         println!("varve {current} is current");
         return Ok(());
     }
-    let root_pk = root_bytes_here(store).context(
+    let trust = trust_here(store).context(
         "self-update needs the trust root to confirm a verified update — set VARVE_TRUST_ROOT \
          or pin a realm",
     )?;
-    match varve_core::update::resolve_update(
-        &api,
-        current,
-        &platform,
-        on_disk.as_deref(),
-        &root_pk,
-    )? {
+    match varve_core::update::resolve_update(&api, current, &platform, on_disk.as_deref(), &trust)?
+    {
         varve_core::update::UpdateDecision::UpToDate => {
             println!("varve {current} is current");
         }
@@ -1809,7 +2000,7 @@ fn self_verify(
     archive: &std::path::Path,
     envelope: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let root_pk = root_bytes_here(store)?;
+    let trust = trust_here(store)?;
     let name = archive
         .file_name()
         .context("archive path has no file name")?
@@ -1818,7 +2009,7 @@ fn self_verify(
         std::fs::read(archive).with_context(|| format!("cannot read {}", archive.display()))?;
     let env_bytes =
         std::fs::read(envelope).with_context(|| format!("cannot read {}", envelope.display()))?;
-    let digest = varve_core::verify_release_file(&name, &bytes, &env_bytes, &root_pk)?;
+    let digest = varve_core::verify_release_file(&name, &bytes, &env_bytes, &trust)?;
     println!("{name} verified against the signed release sums ({digest})");
     Ok(())
 }
@@ -2103,13 +2294,13 @@ fn composition_for_export(
         &target.entry,
         &target.verifier,
         &target.realm,
-        &realm_roots(&cwd)?,
+        &realm_trusts(&cwd)?,
         &varve_core::host_platform(),
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-/// Every realm this project can name, mapped to its trust root — what the
+/// Every realm this project can name, mapped to its trust — what the
 /// composition walk verifies each included layer against. varve-core does not
 /// read varve-realms.toml, deliberately: the crate that verifies should have no
 /// opinion about where trust material lives.
@@ -2127,7 +2318,7 @@ struct DefinedRealms {
 type DefinedRealm = (
     varve_core::mirror::Mirrors,
     varve_core::PinnedKeyVerifier,
-    Vec<u8>,
+    varve_core::keyroles::RealmTrust,
 );
 
 impl DefinedRealms {
@@ -2144,10 +2335,9 @@ impl DefinedRealms {
                         &realm.sources,
                         &varve_core::host_platform(),
                     )?;
-                    let verifier =
-                        varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                    Ok((source, verifier, realm.trust_root.clone()))
+                    let trust = realm_trust(&realm)?;
+                    let verifier = varve_core::PinnedKeyVerifier::from_trust(trust.clone());
+                    Ok((source, verifier, trust))
                 })();
                 realms.insert(
                     name.clone(),
@@ -2167,11 +2357,11 @@ impl varve_core::support::RealmAccess for DefinedRealms {
                  varve-realms.toml, so no root here can vouch for its support window"
             )
         })?;
-        let (sources, verifier, root) = entry.as_ref().map_err(Clone::clone)?;
+        let (sources, verifier, trust) = entry.as_ref().map_err(Clone::clone)?;
         Ok(varve_core::support::RealmView {
             source: varve_core::support::RealmSource::Failover(sources),
             verifier,
-            root,
+            trust,
         })
     }
 }
@@ -2251,16 +2441,21 @@ fn sources_failed(
     )
 }
 
-fn realm_roots(
+fn realm_trusts(
     cwd: &std::path::Path,
-) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+) -> anyhow::Result<std::collections::BTreeMap<String, varve_core::keyroles::RealmTrust>> {
     let mut out = std::collections::BTreeMap::new();
     let Ok(names) = varve_core::realm::realm_names(cwd) else {
         return Ok(out);
     };
     for name in names {
-        if let Ok(realm) = varve_core::resolve_realm(cwd, &name) {
-            out.insert(name, realm.trust_root.clone());
+        // A realm whose trust cannot be built (a roles realm with no usable
+        // delegation) is left out, and the walk then names it as undefined:
+        // closed, never a quiet fall back to its root.
+        if let Ok(realm) = varve_core::resolve_realm(cwd, &name)
+            && let Ok(trust) = realm.trust()
+        {
+            out.insert(name, trust);
         }
     }
     Ok(out)
@@ -2630,7 +2825,8 @@ fn sign_attestation(
     file: &std::path::Path,
     producer: &str,
     key: &std::path::Path,
-    key_id: &str,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
     out: &std::path::Path,
     attach_to: Option<&std::path::Path>,
     json: bool,
@@ -2648,13 +2844,10 @@ fn sign_attestation(
         &bytes,
         producer,
     );
-    let hex_key = std::fs::read_to_string(key)
-        .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
-    // varve used to accept 64 bytes of entropy here and emit a signed layer no
-    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
-    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
-    let envelope = varve_core::attest::sign(&st, &sk, key_id)?;
+    let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Layer)?;
+    let key_id = signer.realm_key_id();
+    let key_id = key_id.as_str();
+    let envelope = varve_core::attest::sign_with(&st, &signer)?;
     std::fs::write(out, &envelope).with_context(|| format!("cannot write {}", out.display()))?;
     // Carriage (REQ-ATTEST-002): both blobs go into the layout as referrer
     // entries — the statement AND the attested bytes verbatim. Carrying only
@@ -2713,7 +2906,7 @@ fn check_attestation(
     file: &std::path::Path,
 ) -> anyhow::Result<()> {
     let ctx = project_ctx(store)?;
-    let root = ctx_root_bytes(&ctx)?;
+    let trust = ctx_trust(&ctx)?;
     // VERIFY THE LAYER, not just the statement. Clean-room review found this
     // reporting "attestation OK" over a tampered tool binary and a forged
     // layer.json — states `varve verify` rejects. Both values this command
@@ -2728,7 +2921,7 @@ fn check_attestation(
     let bytes = std::fs::read(file)
         .with_context(|| format!("cannot read attestation {}", file.display()))?;
     // 1. The statement must verify against the pinned root — offline.
-    let st = varve_core::attest::verify_statement(&envelope, &root)?;
+    let st = varve_core::attest::verify_statement(&envelope, &trust)?;
     // 2. …and it must actually describe THESE bytes and THIS layer.
     varve_core::attest::check(&st, &bytes, &entry.digest, &entry.layer.to_string())?;
     println!(
@@ -3250,7 +3443,8 @@ fn deposit_cmd(
     counter: Option<u64>,
     issued_at: &str,
     key: &std::path::Path,
-    key_id: &str,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
     out: &std::path::Path,
     tools: &[String],
     json: bool,
@@ -3277,6 +3471,7 @@ fn deposit_cmd(
             issued_at,
             key,
             key_id,
+            delegation,
             out,
             deposit_tools,
             includes,
@@ -3334,6 +3529,7 @@ fn deposit_cmd(
         issued_at,
         key,
         key_id,
+        delegation,
         out,
         deposit_tools,
         // Composition is expressed in a spec file's [[include]] tables; the
@@ -3351,7 +3547,8 @@ fn run_deposit(
     counter: u64,
     issued_at: &str,
     key: &std::path::Path,
-    key_id: &str,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
     out: &std::path::Path,
     deposit_tools: Vec<varve_core::DepositTool>,
     includes: Vec<varve_core::deposit::DepositInclude>,
@@ -3370,12 +3567,13 @@ fn run_deposit(
              {out_str}`)."
         );
     }
-    let hex_key = std::fs::read_to_string(key)
-        .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
-    // varve used to accept 64 bytes of entropy here and emit a signed layer no
-    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
-    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
+    // The depositor signs as LAYER (REQ-KEYROLES-001): a delegated key that is
+    // not a LAYER key, and the realm root itself, are refused before the layout
+    // is touched. Deposit writes no baseline line-status (that is
+    // `attach-status`, refused in a roles realm).
+    let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Layer)?;
+    let key_id = signer.realm_key_id();
+    let key_id = key_id.as_str();
     let spec = varve_core::DepositSpec {
         includes,
         layer: layer.parse()?,
@@ -3392,10 +3590,9 @@ fn run_deposit(
     // referrers. `--force` is the deliberate override, and the refusal names
     // it — so the flag has to exist, or the message is telling the operator to
     // run something clap will reject.
-    let outcome = varve_core::deposit_with_options(
+    let outcome = varve_core::deposit::deposit_with_signer(
         &spec,
-        &sk,
-        key_id,
+        &signer,
         out,
         &varve_core::DepositOptions { force },
     )?;
@@ -3612,33 +3809,47 @@ fn vouch_for_dispatch(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> a
     })
 }
 
-fn ctx_root_bytes(ctx: &ProjectCtx) -> anyhow::Result<Vec<u8>> {
+/// How this project's signatures are judged (REQ-KEYROLES-001): the realm's
+/// own trust — its delegation when it declares roles — and, with no realm, the
+/// environment's root as a realm that declares none.
+fn ctx_trust(ctx: &ProjectCtx) -> anyhow::Result<varve_core::keyroles::RealmTrust> {
     match &ctx.realm {
-        Some(realm) => Ok(realm.trust_root.clone()),
-        None => trust_root_bytes(),
+        Some(realm) => realm_trust(realm),
+        None => varve_core::keyroles::RealmTrust::root_only(&trust_root_bytes()?)
+            .map_err(|e| anyhow::anyhow!("{e}")),
     }
 }
 
-/// The trust root for THIS working directory, for code that holds no
+/// A realm's trust. A roles realm whose delegation is missing or refused is an
+/// error, never a quiet fallback to the root.
+fn realm_trust(realm: &varve_core::Realm) -> anyhow::Result<varve_core::keyroles::RealmTrust> {
+    realm.trust().map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// The trust for THIS working directory, for code that holds no
 /// `ProjectCtx`: the realm's root when a project pins one, the environment's
 /// only when it does not.
 ///
 /// The fallback is deliberately narrow. A PINNED project resolves through
 /// `project_ctx` and any failure there propagates, because a realm's root is
 /// authoritative and must not quietly degrade to whatever `VARVE_TRUST_ROOT`
-/// happens to say — a malformed realms file is an error, not an invitation to
-/// trust the ambient environment. Only the absence of a pin reaches the
-/// environment at all.
-fn root_bytes_here(base: &Store) -> anyhow::Result<Vec<u8>> {
-    match load_pin() {
-        Ok(_) => ctx_root_bytes(&project_ctx(base)?),
-        Err(_) => trust_root_bytes(),
+/// happens to say — a malformed realms file, or a varve.toml that exists and
+/// cannot be loaded, is an error, not an invitation to trust the ambient
+/// environment. Only the ABSENCE of a varve.toml reaches the environment at
+/// all.
+fn trust_here(base: &Store) -> anyhow::Result<varve_core::keyroles::RealmTrust> {
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    match discover::find_pin(&cwd) {
+        // A pin that EXISTS decides, and one that cannot be loaded is an error
+        // naming it (`load_pin` does), never the environment's root in its place.
+        Some(_) => ctx_trust(&project_ctx(base)?),
+        None => varve_core::keyroles::RealmTrust::root_only(&trust_root_bytes()?)
+            .map_err(|e| anyhow::anyhow!("{e}")),
     }
 }
 
 fn ctx_verifier(ctx: &ProjectCtx) -> anyhow::Result<varve_core::PinnedKeyVerifier> {
-    varve_core::PinnedKeyVerifier::from_public_key_bytes(&ctx_root_bytes(ctx)?)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    Ok(varve_core::PinnedKeyVerifier::from_trust(ctx_trust(ctx)?))
 }
 
 /// Load the PulseEngine trust root: `$VARVE_TRUST_ROOT` names a file holding
@@ -3839,8 +4050,8 @@ fn fetch_included_layer(
             "this layer composes a layer from realm '{realm_name}', which is not defined              here — add it to varve-realms.toml so its registry says where the bytes come              from and its trust root says whether they are acceptable"
         )
     })?;
-    let verifier = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let trust = realm_trust(&realm)?;
+    let verifier = varve_core::PinnedKeyVerifier::from_trust(trust.clone());
     // That realm's partition, as a SIBLING of this project's.
     //
     // `effective_root` maps a BASE root to `<base>/realms/<fingerprint>`, so it
@@ -3867,7 +4078,7 @@ fn fetch_included_layer(
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let index = Some(varve_core::IndexPolicy {
         realm: &realm.name,
-        root_public_key: &realm.trust_root,
+        trust: &trust,
         required: realm.signed_index,
     });
     let policy = varve_core::InstallPolicy {
@@ -3962,9 +4173,10 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
         &varve_core::host_platform(),
     )?;
     let cached = varve_core::IndexCache::at_root(ctx.store.root()).load(&line)?;
+    let trust = realm_trust(realm)?;
     let policy = varve_core::IndexPolicy {
         realm: &realm.name,
-        root_public_key: &realm.trust_root,
+        trust: &trust,
         required: realm.signed_index,
     };
     // The same `check` the install path runs, so the two cannot disagree about
@@ -4121,11 +4333,16 @@ fn install(
     // absence is fatal (clause 5). A realmless pin gets `None` — there is then
     // no root that could have signed an index, so there is nothing to check
     // and nothing that could be hidden from a check that cannot exist.
-    let index = ctx.realm.as_ref().map(|realm| varve_core::IndexPolicy {
-        realm: &realm.name,
-        root_public_key: &realm.trust_root,
-        required: realm.signed_index,
-    });
+    let realm_trust_here = ctx.realm.as_ref().map(realm_trust).transpose()?;
+    let index = ctx
+        .realm
+        .as_ref()
+        .zip(realm_trust_here.as_ref())
+        .map(|(realm, trust)| varve_core::IndexPolicy {
+            realm: &realm.name,
+            trust,
+            required: realm.signed_index,
+        });
     let policy = varve_core::InstallPolicy {
         index,
         now: &now,
@@ -4396,7 +4613,7 @@ fn install(
         Some(digest) => varve_core::LayerRef::Digest(digest.clone()),
         None => varve_core::LayerRef::Name(pin.layer.clone()),
     };
-    let root_pk = ctx_root_bytes(&ctx)?;
+    let trust = ctx_trust(&ctx)?;
     // ONLY the realm's PRIMARY may supply the status that is cached
     // (REQ-MIRROR-002). The cache is what a later digest-pinned install reads
     // as rollback CONSENT, so a status taken from a mirror (which may lag a
@@ -4411,13 +4628,7 @@ fn install(
             if !is_primary {
                 return Ok(None);
             }
-            varve_core::cache_baseline_line_status(
-                source,
-                &layer_ref,
-                &line,
-                &root_pk,
-                store.root(),
-            )
+            varve_core::cache_baseline_line_status(source, &layer_ref, &line, &trust, store.root())
         },
         varve_core::LineStatusError::fails_over,
     ) {
@@ -4564,13 +4775,21 @@ fn verify_every_partition(ctx: &ProjectCtx, timing: bool) -> anyhow::Result<()> 
     // fingerprint -> (realm name, verifier). A partition whose realm is not
     // defined here cannot be checked, and is REPORTED rather than skipped: an
     // unverifiable layer sitting in the store is what this command is for.
-    let mut by_fp: std::collections::BTreeMap<String, (String, varve_core::PinnedKeyVerifier)> =
+    //
+    // A realm that IS defined but whose trust cannot be built (a roles realm
+    // whose delegation is missing or refused) is kept with the reason: telling
+    // the operator the realm is "not defined" would send them to add what is
+    // already there, and hide the delegation they need to repair.
+    type Judge = Result<varve_core::PinnedKeyVerifier, String>;
+    let mut by_fp: std::collections::BTreeMap<String, (String, Judge)> =
         std::collections::BTreeMap::new();
     for name in varve_core::realm::realm_names(&cwd).unwrap_or_default() {
-        if let Ok(realm) = varve_core::resolve_realm(&cwd, &name)
-            && let Ok(v) = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-        {
-            by_fp.insert(realm.fingerprint(), (name, v));
+        if let Ok(realm) = varve_core::resolve_realm(&cwd, &name) {
+            let judge = realm
+                .trust()
+                .map(varve_core::PinnedKeyVerifier::from_trust)
+                .map_err(|e| e.to_string());
+            by_fp.insert(realm.fingerprint(), (name, judge));
         }
     }
 
@@ -4590,13 +4809,24 @@ fn verify_every_partition(ctx: &ProjectCtx, timing: bool) -> anyhow::Result<()> 
         partitions_seen += 1;
         // Whose root speaks for this partition?
         let chosen = match &fp {
-            Some(fp) => by_fp.get(fp).map(|(n, v)| (n.clone(), v)),
+            Some(fp) => by_fp.get(fp).map(|(n, v)| (n.clone(), v.as_ref())),
             // The top-level core is not realm-scoped: the pin's own root.
-            None => Some(("(no realm)".to_string(), &own)),
+            None => Some(("(no realm)".to_string(), Ok(&own))),
         };
         for layer in layers {
             total_layers += 1;
-            let Some((realm_name, verifier)) = &chosen else {
+            if let Some((realm_name, Err(why))) = &chosen {
+                failures.push(format!(
+                    "layer {} ({}) sits in the partition of realm {realm_name}, which \
+                     varve-realms.toml defines but whose trust cannot be built, so nothing \
+                     can vouch for it: {why}\n    at {}",
+                    layer.layer,
+                    layer.digest,
+                    layer.root.display()
+                ));
+                continue;
+            }
+            let Some((realm_name, Ok(verifier))) = &chosen else {
                 failures.push(format!(
                     "layer {} ({}) sits in realm partition {} which varve-realms.toml does not \
                      define — nothing here can vouch for it. Add that realm, or remove the \
@@ -4683,11 +4913,11 @@ fn verify_no_rollback(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
         // its own CI gate.
         let consent = match &ctx.pin.digest {
             Some(pinned) if *pinned == varve_core::manifest_digest(&payload) => {
-                let root_pk = ctx_root_bytes(ctx)?;
+                let trust = ctx_trust(ctx)?;
                 match varve_core::cached_consent_why_not(
                     &manifest,
                     store.root(),
-                    &root_pk,
+                    &trust,
                     &today_rfc3339(),
                 ) {
                     None => Ok(()),
@@ -4740,12 +4970,12 @@ fn verify_no_rollback(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
 /// attestation onto unverified labels is the defect clean-room review already
 /// found in `check-attestation`.
 fn report_attestations(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> anyhow::Result<()> {
-    let root = ctx_root_bytes(ctx)?;
+    let trust = ctx_trust(ctx)?;
     let reports = match varve_core::attestcarry::report_installed(
         &layer.root,
         &layer.layer.to_string(),
         &layer.digest,
-        &root,
+        &trust,
     ) {
         Ok(reports) => reports,
         // A broken attestation store is surfaced, never fatal — same rule as
@@ -5016,8 +5246,7 @@ fn verify_composition_includes(
                         layer.layer
                     )
                 })?;
-                varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?
+                varve_core::PinnedKeyVerifier::from_trust(realm_trust(&realm)?)
             }
             // No realm named: the including layer's own root applies.
             None => ctx_verifier(ctx)?,
@@ -5257,7 +5486,9 @@ fn load_pin() -> anyhow::Result<(Pin, PathBuf)> {
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    Ok((Pin::load(&path)?, root))
+    let pin =
+        Pin::load(&path).with_context(|| format!("cannot load the pin {}", path.display()))?;
+    Ok((pin, root))
 }
 
 fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
@@ -5731,8 +5962,8 @@ mod trust_root_reach_tests {
         const ENV_ONLY: &str = "trust_root_bytes()";
         const ALLOWED: &[&str] = &[
             "fn trust_root(",
-            "fn ctx_root_bytes(",
-            "fn root_bytes_here(",
+            "fn ctx_trust(",
+            "fn trust_here(",
             // its own definition, and this check's own source text
             "fn trust_root_bytes(",
             "fn no_command_resolves_a_trust_root_without_consulting_the_realm(",
@@ -5759,7 +5990,7 @@ mod trust_root_reach_tests {
         assert!(
             offenders.is_empty(),
             "these call the env-only trust root reader directly, so a realm pin \
-             cannot reach them: {offenders:?}. Use `root_bytes_here` (realm \
+             cannot reach them: {offenders:?}. Use `trust_here` (realm \
              first, environment only when no realm is pinned), or add the \
              function to ALLOWED with a reason."
         );

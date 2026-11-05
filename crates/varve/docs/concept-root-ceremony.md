@@ -198,8 +198,10 @@ states the same list from the consumer's side.
 * **No revocation.** There is no revocation channel, no CRL, no kill switch.
   A leaked key stays valid for every consumer until each of them edits their
   own `varve-realms.toml`.
-* **No expiry, no key roles, no thresholds.** One key, unlimited lifetime,
-  signing everything. varve will not refuse a layer because the root is old.
+* **No expiry.** Unlimited lifetime. varve will not refuse a layer because
+  the root is old. A realm may scope its keys by role (`key-roles = true`):
+  the root then signs only a delegation, and a flat realm has one key signing
+  everything. Delegation rollback protection is not built yet.
 * **No transparency log.** Nothing outside your consumers ever sees what you
   signed, so a compromised signer serving different bytes to different
   consumers is not detectable by varve (signer equivocation).

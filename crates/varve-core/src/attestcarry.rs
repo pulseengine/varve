@@ -276,13 +276,13 @@ pub fn report(
     carried: &[CarriedAttestation],
     layer_manifest_digest: &str,
     layer_name: &str,
-    root_pk: &[u8],
+    trust: &crate::keyroles::RealmTrust,
 ) -> Vec<AttestationReport> {
     carried
         .iter()
         .map(|c| {
             let st: AttestationStatement =
-                match crate::attest::verify_statement(&c.statement, root_pk) {
+                match crate::attest::verify_statement(&c.statement, trust) {
                     Ok(st) => st,
                     Err(e) => {
                         return AttestationReport {
@@ -410,10 +410,10 @@ pub fn report_installed(
     layer_root: &Path,
     layer_name: &str,
     layer_manifest_digest: &str,
-    root_pk: &[u8],
+    trust: &crate::keyroles::RealmTrust,
 ) -> Result<Vec<AttestationReport>, CarryError> {
     let carried = read_persisted(layer_root, layer_name)?;
-    Ok(report(&carried, layer_manifest_digest, layer_name, root_pk))
+    Ok(report(&carried, layer_manifest_digest, layer_name, trust))
 }
 
 #[cfg(test)]
@@ -464,7 +464,12 @@ mod tests {
              judgement, it does not restate it"
         );
 
-        let reports = report(&carried, LAYER_DIGEST, LAYER, &pk);
+        let reports = report(
+            &carried,
+            LAYER_DIGEST,
+            LAYER,
+            &crate::keyroles::test_support::rt(&pk),
+        );
         assert_eq!(reports.len(), 1);
         assert!(reports[0].binds, "reason: {:?}", reports[0].reason);
         assert_eq!(reports[0].producer, "acme-ci");
@@ -521,7 +526,12 @@ mod tests {
         .unwrap();
 
         let carried = read_all(tmp.path(), LAYER).unwrap();
-        let reports = report(&carried, LAYER_DIGEST, LAYER, &pk);
+        let reports = report(
+            &carried,
+            LAYER_DIGEST,
+            LAYER,
+            &crate::keyroles::test_support::rt(&pk),
+        );
         assert!(
             !reports[0].binds,
             "a statement for another layer must not bind"
@@ -558,7 +568,12 @@ mod tests {
         .unwrap();
 
         let carried = read_all(tmp.path(), LAYER).unwrap();
-        let reports = report(&carried, LAYER_DIGEST, LAYER, &realm_pk);
+        let reports = report(
+            &carried,
+            LAYER_DIGEST,
+            LAYER,
+            &crate::keyroles::test_support::rt(&realm_pk),
+        );
         assert!(!reports[0].binds);
         assert_eq!(
             reports[0].kind, "<unverified>",
@@ -621,10 +636,15 @@ mod tests {
         // predicate that evicts the other attestations and re-adds this one
         // twice also counts two, and would silently turn an SBOM+provenance
         // pair into two copies of the SBOM.
-        let mut kinds: Vec<String> = report(&carried, LAYER_DIGEST, LAYER, &pk)
-            .into_iter()
-            .map(|r| r.kind)
-            .collect();
+        let mut kinds: Vec<String> = report(
+            &carried,
+            LAYER_DIGEST,
+            LAYER,
+            &crate::keyroles::test_support::rt(&pk),
+        )
+        .into_iter()
+        .map(|r| r.kind)
+        .collect();
         kinds.sort();
         assert_eq!(
             kinds,
@@ -633,9 +653,14 @@ mod tests {
              deliberate difference from line-status, where attaching REPLACES"
         );
         assert!(
-            report(&carried, LAYER_DIGEST, LAYER, &pk)
-                .iter()
-                .all(|r| r.binds)
+            report(
+                &carried,
+                LAYER_DIGEST,
+                LAYER,
+                &crate::keyroles::test_support::rt(&pk)
+            )
+            .iter()
+            .all(|r| r.binds)
         );
     }
 
@@ -684,9 +709,14 @@ mod tests {
             "the evidence that crossed the gap is the evidence that was signed"
         );
         assert!(
-            report(&round_tripped, LAYER_DIGEST, LAYER, &pk)
-                .iter()
-                .all(|r| r.binds),
+            report(
+                &round_tripped,
+                LAYER_DIGEST,
+                LAYER,
+                &crate::keyroles::test_support::rt(&pk)
+            )
+            .iter()
+            .all(|r| r.binds),
             "every attestation still binds on the far side"
         );
     }
@@ -727,7 +757,13 @@ mod tests {
                 .collect();
         persist(installed.path(), &carried).unwrap();
 
-        let reports = report_installed(installed.path(), LAYER, LAYER_DIGEST, &pk).unwrap();
+        let reports = report_installed(
+            installed.path(),
+            LAYER,
+            LAYER_DIGEST,
+            &crate::keyroles::test_support::rt(&pk),
+        )
+        .unwrap();
         assert_eq!(reports.len(), 2, "verify must report EVERY attestation");
         let sbom = reports.iter().find(|r| r.kind == "sbom").expect("sbom");
         assert!(sbom.binds, "reason: {:?}", sbom.reason);
@@ -752,9 +788,14 @@ mod tests {
         let (_sk, pk) = generate_root_keypair();
         let installed = tempfile::tempdir().unwrap();
         assert!(
-            report_installed(installed.path(), LAYER, LAYER_DIGEST, &pk)
-                .unwrap()
-                .is_empty()
+            report_installed(
+                installed.path(),
+                LAYER,
+                LAYER_DIGEST,
+                &crate::keyroles::test_support::rt(&pk)
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 
@@ -783,7 +824,13 @@ mod tests {
         .unwrap();
         assert_eq!(n, 1, "the evidence is carried, not judged, at fetch time");
 
-        let reports = report_installed(installed.path(), LAYER, LAYER_DIGEST, &realm_pk).unwrap();
+        let reports = report_installed(
+            installed.path(),
+            LAYER,
+            LAYER_DIGEST,
+            &crate::keyroles::test_support::rt(&realm_pk),
+        )
+        .unwrap();
         assert!(
             !reports[0].binds,
             "a statement signed by anyone but the realm's root must not bind"

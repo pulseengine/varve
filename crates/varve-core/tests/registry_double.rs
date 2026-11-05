@@ -752,7 +752,12 @@ fn an_oci_install_carries_the_attestations_the_registry_publishes() {
 
     // …and each still BINDS to this layer once re-verified against the root.
     // The registry is not trusted to have checked anything.
-    let reports = varve_core::attestcarry::report(&carried, &payload_digest, "2026.08.0", &pk);
+    let reports = varve_core::attestcarry::report(
+        &carried,
+        &payload_digest,
+        "2026.08.0",
+        &varve_core::keyroles::RealmTrust::root_only(&pk).unwrap(),
+    );
     assert!(
         reports.iter().all(|r| r.binds),
         "every carried attestation must bind: {reports:?}"
@@ -1174,10 +1179,11 @@ fn install_with_index(
     let store = Store::at(&root);
     let mut marks = HighWaterMarks::load(&root).unwrap();
     let verifier = PinnedKeyVerifier::from_public_key_bytes(pk).unwrap();
+    let trust = varve_core::keyroles::RealmTrust::root_only(pk).unwrap();
     let policy = InstallPolicy {
         index: Some(varve_core::IndexPolicy {
             realm: "acme",
-            root_public_key: pk,
+            trust: &trust,
             required,
         }),
         now: "2026-08-07T00:00:00Z",

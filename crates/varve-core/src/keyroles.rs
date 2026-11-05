@@ -93,9 +93,9 @@ fn doc_name(payload_type: &str) -> &'static str {
 #[serde(deny_unknown_fields)]
 struct RawKey {
     key: String,
-    // An unauthenticated hint for humans; never used to select or trust a key.
+    // An unauthenticated hint; never used to select or trust a key when
+    // VERIFYING. A producer reads it only to default its own `--key-id`.
     #[serde(default)]
-    #[allow(dead_code)]
     keyid: Option<String>,
 }
 
@@ -131,6 +131,8 @@ struct RawDelegation {
 struct RoleKeys {
     threshold: usize,
     keys: Vec<Vec<u8>>,
+    // Parallel to `keys`: the delegation's unauthenticated key-id hints.
+    hints: Vec<Option<String>>,
 }
 
 /// A verified delegation: the root, offline, naming who may sign for which role.
@@ -165,6 +167,7 @@ fn check_role(
         return Err(VerifyError(format!("delegation role {name} has no keys")));
     }
     let mut keys: Vec<Vec<u8>> = Vec::new();
+    let hints: Vec<Option<String>> = raw.keys.iter().map(|k| k.keyid.clone()).collect();
     for k in &raw.keys {
         let key = decode_key(&k.key, &format!("{name} key"))?;
         if key == root {
@@ -195,6 +198,7 @@ fn check_role(
     Ok(RoleKeys {
         threshold: raw.threshold as usize,
         keys,
+        hints,
     })
 }
 
@@ -236,6 +240,88 @@ impl Delegation {
             layer,
             status,
         })
+    }
+
+    /// Verify a delegation envelope against the root IT NAMES, for a PRODUCER
+    /// that holds a delegation file and no pinned root. This proves only that
+    /// the document is internally consistent (signed by the root it claims, no
+    /// other signer); it authenticates nothing a consumer may rely on. Consumers
+    /// pin the root and use [`Delegation::from_envelope`].
+    pub fn from_producer_envelope(envelope: &[u8]) -> Result<Self, VerifyError> {
+        let text = std::str::from_utf8(envelope)
+            .map_err(|_| VerifyError("delegation is not UTF-8 DSSE JSON".into()))?;
+        let env = DsseEnvelope::from_json(text)
+            .map_err(|e| VerifyError(format!("delegation is not a DSSE envelope: {e}")))?;
+        let payload = env
+            .payload_bytes()
+            .map_err(|e| VerifyError(format!("delegation payload is not decodable: {e}")))?;
+        let raw: RawDelegation = serde_json::from_slice(&payload)
+            .map_err(|e| VerifyError(format!("delegation document is invalid: {e}")))?;
+        let root = decode_key(&raw.realm_root, "realm-root")?;
+        Self::from_envelope(envelope, &root)
+    }
+
+    /// Sign a delegation document with the realm root's signer: the ROOT
+    /// role's one act. The document must name this very key as its realm root,
+    /// and the result is read back through [`Delegation::from_envelope`], so a
+    /// delegation that a consumer would refuse is never written.
+    pub fn sign(
+        document: &[u8],
+        root_signer: &dyn crate::verify::RealmSigner,
+    ) -> Result<String, VerifyError> {
+        let raw: RawDelegation = serde_json::from_slice(document)
+            .map_err(|e| VerifyError(format!("delegation document is invalid: {e}")))?;
+        let named = decode_key(&raw.realm_root, "realm-root")?;
+        if named != root_signer.public_key() {
+            return Err(VerifyError(
+                "the delegation names a different realm-root than the signing key; only the \
+                 realm root signs its delegation"
+                    .into(),
+            ));
+        }
+        let envelope =
+            crate::verify::dsse_sign_with(document, DELEGATION_PAYLOAD_TYPE, root_signer)?;
+        Self::from_envelope(envelope.as_bytes(), &named)?;
+        Ok(envelope)
+    }
+
+    /// May the holder of `public` sign as `role`? `Ok` carries the delegation's
+    /// key-id hint for that key, to default a producer's `--key-id`. The
+    /// refusal is for a PRODUCER, before it signs: the verifier would refuse the
+    /// result anyway, but only after a signature nobody can use exists.
+    pub fn authorise_signer(
+        &self,
+        role: Role,
+        public: &[u8],
+    ) -> Result<Option<String>, VerifyError> {
+        if public == self.realm_root.as_slice() {
+            return Err(VerifyError(
+                "this key is the realm root; in a roles realm the root signs only delegations"
+                    .into(),
+            ));
+        }
+        if let Some(rk) = self.keys_for(role)
+            && let Some(i) = rk.keys.iter().position(|k| k == public)
+        {
+            return Ok(rk.hints[i].clone());
+        }
+        for other in [Role::Layer, Role::Status] {
+            if other != role
+                && self
+                    .keys_for(other)
+                    .is_some_and(|rk| rk.keys.iter().any(|k| k == public))
+            {
+                return Err(VerifyError(format!(
+                    "this key is delegated to the {} role, not {}; refusing to sign out of role",
+                    other.name(),
+                    role.name()
+                )));
+            }
+        }
+        Err(VerifyError(format!(
+            "this key is not delegated to the {} role by this delegation",
+            role.name()
+        )))
     }
 
     /// The monotonic counter a later change enforces anti-rollback with. Nothing
@@ -562,6 +648,101 @@ mod tests {
         assert_eq!(doc_name(LINE_STATUS_PAYLOAD_TYPE), "line-status");
         assert_eq!(doc_name(LINE_INDEX_PAYLOAD_TYPE), "line-index");
         assert_eq!(doc_name(DELEGATION_PAYLOAD_TYPE), "delegation");
+    }
+
+    fn signer_of(k: &Key) -> crate::verify::FileSigner {
+        crate::verify::FileSigner::new(&k.sk, "k").unwrap()
+    }
+
+    // rivet: partially-verifies REQ-KEYROLES-001
+    #[test]
+    fn a_producer_signs_a_delegation_that_round_trips() {
+        let r = realm();
+        let doc = delegation_doc(&r).to_string();
+        let env = Delegation::sign(doc.as_bytes(), &signer_of(&r.root)).unwrap();
+        let by_pin = Delegation::from_envelope(env.as_bytes(), &r.root.pk).unwrap();
+        let by_name = Delegation::from_producer_envelope(env.as_bytes()).unwrap();
+        assert_eq!(by_pin, by_name);
+        assert_eq!(by_pin.counter(), 7);
+        // Not the root's key: refused before any envelope exists.
+        let m = Delegation::sign(doc.as_bytes(), &signer_of(&r.layer))
+            .unwrap_err()
+            .0;
+        assert!(m.contains("different realm-root"), "{m}");
+        // A document a consumer would refuse is not signed.
+        let mut bad = delegation_doc(&r);
+        bad["counter"] = json!("seven");
+        assert!(Delegation::sign(bad.to_string().as_bytes(), &signer_of(&r.root)).is_err());
+        let mut empty = delegation_doc(&r);
+        empty["roles"] = json!({});
+        assert!(
+            Delegation::sign(empty.to_string().as_bytes(), &signer_of(&r.root))
+                .unwrap_err()
+                .0
+                .contains("no roles")
+        );
+    }
+
+    // rivet: partially-verifies REQ-KEYROLES-001
+    #[test]
+    fn a_producer_envelope_signed_by_someone_else_is_refused() {
+        let r = realm();
+        let doc = delegation_doc(&r);
+        // Signed by a role key, though it names the root: the claimed root
+        // does not verify it.
+        let e = sign_deleg(&r.layer, &doc);
+        assert!(Delegation::from_producer_envelope(e.as_bytes()).is_err());
+        assert!(Delegation::from_producer_envelope(b"not json").is_err());
+        assert!(Delegation::from_producer_envelope(&[0xff, 0xfe]).is_err());
+    }
+
+    // rivet: partially-verifies REQ-KEYROLES-001
+    #[test]
+    fn a_signer_is_authorised_for_its_own_role_only() {
+        let r = realm();
+        let d = parse(&r, &delegation_doc(&r)).unwrap();
+        // The right role: allowed, and the delegation's key-id hint comes back.
+        assert_eq!(
+            d.authorise_signer(Role::Layer, &r.layer.pk).unwrap(),
+            Some("layer-1".to_string())
+        );
+        assert_eq!(
+            d.authorise_signer(Role::Status, &r.status.pk).unwrap(),
+            Some("status-1".to_string())
+        );
+        // The wrong role is named for what the key IS.
+        let m = d.authorise_signer(Role::Status, &r.layer.pk).unwrap_err().0;
+        assert!(m.contains("delegated to the LAYER role, not STATUS"), "{m}");
+        let m = d.authorise_signer(Role::Layer, &r.status.pk).unwrap_err().0;
+        assert!(m.contains("delegated to the STATUS role, not LAYER"), "{m}");
+        // The root, for any role, and a stranger.
+        for role in [Role::Layer, Role::Status] {
+            let m = d.authorise_signer(role, &r.root.pk).unwrap_err().0;
+            assert!(m.contains("this key is the realm root"), "{m}");
+            let m = d.authorise_signer(role, &key().pk).unwrap_err().0;
+            assert!(m.contains("not delegated to the"), "{m}");
+        }
+        // An entry with no hint gives none.
+        let mut doc = delegation_doc(&r);
+        doc["roles"]["layer"]["keys"][0] = json!({"key": hexk(&r.layer)});
+        let d = parse(&r, &doc).unwrap();
+        assert_eq!(d.authorise_signer(Role::Layer, &r.layer.pk).unwrap(), None);
+    }
+
+    // rivet: partially-verifies REQ-KEYROLES-001
+    #[test]
+    fn a_second_key_hint_is_matched_by_position() {
+        let r = realm();
+        let mut doc = delegation_doc(&r);
+        doc["roles"]["layer"]["keys"] = json!([
+            {"key": hexk(&r.layer), "keyid": "layer-1"},
+            {"key": hexk(&r.layer2), "keyid": "layer-2"},
+        ]);
+        let d = parse(&r, &doc).unwrap();
+        assert_eq!(
+            d.authorise_signer(Role::Layer, &r.layer2.pk).unwrap(),
+            Some("layer-2".to_string())
+        );
     }
 
     // rivet: partially-verifies REQ-KEYROLES-001
@@ -975,5 +1156,23 @@ mod tests {
             let old = old_verify_with(&root.pk, text.as_bytes(), expected);
             prop_assert_eq!(new.map_err(|e| e.0), old);
         }
+    }
+}
+
+/// Test fixtures for the many tests that hold a bare root key and now need the
+/// trust a verifier takes.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::RealmTrust;
+
+    /// A realm that declares no roles, from its root key.
+    pub fn rt(pk: &[u8]) -> RealmTrust {
+        RealmTrust::root_only(pk).unwrap()
+    }
+
+    /// As [`rt`], for a struct that must BORROW a trust past one expression.
+    /// Leaked: test-only, a few dozen bytes each.
+    pub fn leak_rt(pk: &[u8]) -> &'static RealmTrust {
+        Box::leak(Box::new(rt(pk)))
     }
 }

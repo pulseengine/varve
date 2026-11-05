@@ -51,7 +51,7 @@ Shipped inside the binary deliberately: the reviewer who most needs this is ofte
 
 ## What varve does not have yet
 
-- No key rotation, no key roles or thresholds, no revocation channel. One root per realm.
+- No key rotation, no revocation channel, and no rollback protection for a delegation yet. One root per realm. A realm may declare key roles (`key-roles = true`): the root then signs only a delegation, a LAYER key signs layers, attestations and release sums, and a STATUS key signs line-status and line-index, so the unattended depositor's key cannot sign a yank or an index. A realm that declares none is judged by its one flat root, as before.
 - No transparency log and no inclusion proofs, so the counter stops rollback but **not signer equivocation** — a compromised signer serving different bytes to different consumers is not detected.
 - No reproducibility claim. varve signs what its build produced; it does not prove the build was deterministic.
 

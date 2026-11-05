@@ -1346,7 +1346,7 @@ mod tests {
             &entry.root,
             "2026.07.0",
             &manifest_digest(&payload),
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
         )
         .unwrap();
         assert_eq!(reports.len(), 1);
@@ -1418,7 +1418,7 @@ mod tests {
             &source,
             &LayerRef::Name("2026.07.0".parse().unwrap()),
             &line,
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
             store.root(),
         )
         .unwrap();
@@ -1447,7 +1447,7 @@ mod tests {
             &far,
             &LayerRef::Name("2026.07.0".parse().unwrap()),
             &line,
-            &pk,
+            &crate::keyroles::test_support::rt(&pk),
             fresh.root(),
         )
         .unwrap();
@@ -1456,7 +1456,7 @@ mod tests {
         // …and on the far side it is READ BACK as a yank, re-verified against
         // that machine's own trust root — which is what `varve status` prints.
         let there = StatusCache::at_root(fresh.root())
-            .load(&line, &pk)
+            .load(&line, &crate::keyroles::test_support::rt(&pk))
             .unwrap()
             .expect("the far side has a cached status document");
         let report = there.report_for(&"2026.07.0".parse().unwrap());

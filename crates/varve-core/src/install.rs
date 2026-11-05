@@ -32,11 +32,12 @@ use crate::store::{Store, StoreError, manifest_digest};
 pub trait ManifestVerifier {
     fn verify(&self, fetched_bytes: &[u8]) -> Result<Vec<u8>, VerifyError>;
 
-    /// The root this verifier accepts, when it has one to name. A signed
+    /// The trust this verifier judges by, when it has one to name. A signed
     /// document OTHER than the layer (the line-status digest consent rests on,
-    /// REQ-ROLLBACK-002) is verified against this same root and no other.
+    /// REQ-ROLLBACK-002) is verified against this same trust and no other, each
+    /// under the role its payload type belongs to (REQ-KEYROLES-001).
     /// `None` means "cannot say", which consumers must read as "cannot verify".
-    fn root_public_key(&self) -> Option<&[u8]> {
+    fn trust(&self) -> Option<&crate::keyroles::RealmTrust> {
         None
     }
 }
@@ -446,9 +447,9 @@ fn has_local_history(
     marks: &HighWaterMarks,
 ) -> bool {
     marks.mark(line).is_some()
-        || verifier.root_public_key().is_some_and(|root| {
+        || verifier.trust().is_some_and(|trust| {
             matches!(
-                crate::linestatus::StatusCache::at_root(store.root()).load(line, root),
+                crate::linestatus::StatusCache::at_root(store.root()).load(line, trust),
                 Ok(Some(_))
             )
         })
@@ -599,18 +600,14 @@ fn install_inner(
         && let Some(index_policy) = &policy.index
     {
         let cached = crate::linestatus::StatusCache::at_root(store.root())
-            .load(line, index_policy.root_public_key)
+            .load(line, index_policy.trust)
             .ok()
             .flatten()
             .filter(|doc| doc.line == line_str);
         let served = source
             .fetch_line_status(&layer_ref)?
             .and_then(|bytes| {
-                crate::linestatus::LineStatus::verify_and_parse(
-                    &bytes,
-                    index_policy.root_public_key,
-                )
-                .ok()
+                crate::linestatus::LineStatus::verify_and_parse(&bytes, index_policy.trust).ok()
             })
             .filter(|doc| doc.line == line_str);
         first_contact_floor = [cached, served]
@@ -877,7 +874,7 @@ fn consent_why_not(
     verifier: &dyn ManifestVerifier,
     now: &str,
 ) -> Option<String> {
-    let Some(root_pk) = verifier.root_public_key() else {
+    let Some(trust) = verifier.trust() else {
         return Some("there is no trust root to verify a line-status against".to_string());
     };
     let line = manifest.layer.line();
@@ -885,7 +882,7 @@ fn consent_why_not(
         source,
         layer_ref,
         line,
-        root_pk,
+        trust,
         crate::linestatus::Published::BestEffort,
     ) {
         Ok(served) => served.map(|(_, doc)| doc),
@@ -895,7 +892,7 @@ fn consent_why_not(
     // cannot outrank what this machine already holds: a validly-signed status
     // from BEFORE a yank, replayed, would otherwise re-enable the yanked
     // layer. The newer signed word decides, whichever side it came from.
-    let cached = match crate::linestatus::StatusCache::at_root(store_root).load(line, root_pk) {
+    let cached = match crate::linestatus::StatusCache::at_root(store_root).load(line, trust) {
         Ok(cached) => cached,
         Err(e) => return Some(format!("the cached one does not verify: {e}")),
     };
@@ -920,11 +917,11 @@ fn consent_why_not(
 pub fn cached_consent_why_not(
     manifest: &LayerManifest,
     store_root: &std::path::Path,
-    root_public_key: &[u8],
+    trust: &crate::keyroles::RealmTrust,
     now: &str,
 ) -> Option<String> {
     let line = manifest.layer.line();
-    match crate::linestatus::StatusCache::at_root(store_root).load(line, root_public_key) {
+    match crate::linestatus::StatusCache::at_root(store_root).load(line, trust) {
         Ok(Some(doc)) => consent_from_status(manifest, &doc, now),
         Ok(None) => Some(format!(
             "none is available for line {line}: the source carries none and none was cached by \
@@ -1678,7 +1675,12 @@ mod tests {
             "the attested bytes are stored VERBATIM — varve transports another party's \
              judgement, it never restates it"
         );
-        let reports = crate::attestcarry::report(&carried, &layer_digest, "2026.07.0", &pk);
+        let reports = crate::attestcarry::report(
+            &carried,
+            &layer_digest,
+            "2026.07.0",
+            &crate::keyroles::test_support::rt(&pk),
+        );
         assert!(reports[0].binds, "reason: {:?}", reports[0].reason);
         assert_eq!(reports[0].producer, "acme-ci");
     }
@@ -1779,7 +1781,7 @@ mod tests {
         let policy = InstallPolicy {
             index: Some(IndexPolicy {
                 realm: "acme",
-                root_public_key: &pk,
+                trust: crate::keyroles::test_support::leak_rt(&pk),
                 required: true,
             }),
             ..policy()
@@ -1858,7 +1860,7 @@ mod tests {
         let policy = InstallPolicy {
             index: Some(IndexPolicy {
                 realm: "acme",
-                root_public_key: &pk,
+                trust: crate::keyroles::test_support::leak_rt(&pk),
                 required: true,
             }),
             ..policy()
@@ -1920,7 +1922,7 @@ mod tests {
         let policy = InstallPolicy {
             index: Some(IndexPolicy {
                 realm: "acme",
-                root_public_key: &pk,
+                trust: crate::keyroles::test_support::leak_rt(&pk),
                 required: true,
             }),
             ..policy()
@@ -2024,7 +2026,7 @@ mod tests {
         let policy = InstallPolicy {
             index: Some(IndexPolicy {
                 realm: "acme",
-                root_public_key: &pk,
+                trust: crate::keyroles::test_support::leak_rt(&pk),
                 required: true,
             }),
             ..policy()
@@ -2123,7 +2125,7 @@ mod tests {
         let policy = InstallPolicy {
             index: Some(IndexPolicy {
                 realm: "acme",
-                root_public_key: &pk,
+                trust: crate::keyroles::test_support::leak_rt(&pk),
                 required: true,
             }),
             ..policy()
@@ -2239,13 +2241,13 @@ mod tests {
     }
 
     /// Accepts every manifest and names a root, as `PinnedKeyVerifier` does.
-    struct AcceptWithRoot<'a>(&'a [u8]);
-    impl ManifestVerifier for AcceptWithRoot<'_> {
+    struct AcceptWithRoot(crate::keyroles::RealmTrust);
+    impl ManifestVerifier for AcceptWithRoot {
         fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {
             Ok(fetched.to_vec())
         }
-        fn root_public_key(&self) -> Option<&[u8]> {
-            Some(self.0)
+        fn trust(&self) -> Option<&crate::keyroles::RealmTrust> {
+            Some(&self.0)
         }
     }
 
@@ -2254,7 +2256,7 @@ mod tests {
         install(
             &pin("2026.07.1"),
             &f.source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2275,7 +2277,7 @@ mod tests {
         let outcome = install(
             &digest_pin("2026.07.0", &digest),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2310,7 +2312,7 @@ mod tests {
         let outcome = install(
             &digest_pin("2026.07.1", &digest),
             &f.source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2329,7 +2331,7 @@ mod tests {
         let err = install(
             &pin("2026.07.0"),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2364,7 +2366,7 @@ mod tests {
         let err = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2394,7 +2396,7 @@ mod tests {
         let err = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2419,7 +2421,7 @@ mod tests {
         install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2435,7 +2437,7 @@ mod tests {
         let err = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &f.source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2476,7 +2478,11 @@ mod tests {
         see_the_newer(&mut f);
         let source = std::mem::replace(&mut f.source, MemorySource::new());
         let pk = f.pk.clone();
-        let err = refusal(&mut f, source, &AcceptWithRoot(&pk));
+        let err = refusal(
+            &mut f,
+            source,
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
+        );
         assert!(
             matches!(err, InstallError::RollbackConsentRefused { .. }),
             "{err}"
@@ -2493,7 +2499,11 @@ mod tests {
         let source = std::mem::replace(&mut f.source, MemorySource::new())
             .with_line_status(&status_for("2026.07", None, &[], &other_sk));
         let pk = f.pk.clone();
-        let err = refusal(&mut f, source, &AcceptWithRoot(&pk));
+        let err = refusal(
+            &mut f,
+            source,
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
+        );
         assert!(
             !err.fails_over(),
             "an unverifiable status must not send us elsewhere: {err}"
@@ -2506,7 +2516,11 @@ mod tests {
             &status_for("2026.07", None, &[("2026.07.0", "regression")], &f.sk),
         );
         let pk = f.pk.clone();
-        let err = refusal(&mut f, source, &AcceptWithRoot(&pk));
+        let err = refusal(
+            &mut f,
+            source,
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
+        );
         assert!(!err.fails_over(), "a verified yank is terminal: {err}");
 
         let mut f = consent_fixture();
@@ -2514,7 +2528,11 @@ mod tests {
         let source = std::mem::replace(&mut f.source, MemorySource::new())
             .with_line_status(&status_for("2026.07", Some("2026-08-06"), &[], &f.sk));
         let pk = f.pk.clone();
-        let err = refusal(&mut f, source, &AcceptWithRoot(&pk));
+        let err = refusal(
+            &mut f,
+            source,
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
+        );
         assert!(!err.fails_over(), "a verified expiry is terminal: {err}");
 
         let mut f = consent_fixture();
@@ -2538,7 +2556,7 @@ mod tests {
         let ok = install_from(
             &pin,
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2554,7 +2572,7 @@ mod tests {
         let err = install_from(
             &pin,
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2591,7 +2609,7 @@ mod tests {
         let policy = InstallPolicy {
             index: Some(crate::lineindex::IndexPolicy {
                 realm: "acme",
-                root_public_key: &pk,
+                trust: crate::keyroles::test_support::leak_rt(&pk),
                 required: false,
             }),
             ..policy()
@@ -2599,7 +2617,7 @@ mod tests {
         install_from(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             source,
-            &AcceptWithRoot(&pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
             &f.store,
             &mut f.marks,
             &policy,
@@ -2677,7 +2695,7 @@ mod tests {
         let policy = InstallPolicy {
             index: Some(crate::lineindex::IndexPolicy {
                 realm: "acme",
-                root_public_key: &pk,
+                trust: crate::keyroles::test_support::leak_rt(&pk),
                 required: false,
             }),
             ..policy()
@@ -2685,7 +2703,7 @@ mod tests {
         let outcome = install_from(
             &newer,
             &source,
-            &AcceptWithRoot(&pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
             &f.store,
             &mut f.marks,
             &policy,
@@ -2702,7 +2720,11 @@ mod tests {
         let mut f = consent_fixture();
         let line: crate::layer::Line = "2026.07".parse().unwrap();
         let envelope = status_for("2026.07", None, &[], &f.sk);
-        let doc = crate::linestatus::LineStatus::verify_and_parse(&envelope, &f.pk).unwrap();
+        let doc = crate::linestatus::LineStatus::verify_and_parse(
+            &envelope,
+            &crate::keyroles::test_support::rt(&f.pk),
+        )
+        .unwrap();
         crate::linestatus::StatusCache::at_root(f.store.root())
             .update(&line, &envelope, &doc)
             .unwrap();
@@ -2745,14 +2767,18 @@ mod tests {
             source = source.with_line_status(status);
         }
         let line: crate::layer::Line = "2026.07".parse().unwrap();
-        let doc = crate::linestatus::LineStatus::verify_and_parse(&cached, pk).unwrap();
+        let doc = crate::linestatus::LineStatus::verify_and_parse(
+            &cached,
+            &crate::keyroles::test_support::rt(pk),
+        )
+        .unwrap();
         crate::linestatus::StatusCache::at_root(store.root())
             .update(&line, &cached, &doc)
             .unwrap();
         let policy = InstallPolicy {
             index: Some(crate::lineindex::IndexPolicy {
                 realm: "acme",
-                root_public_key: pk,
+                trust: crate::keyroles::test_support::leak_rt(pk),
                 required: false,
             }),
             ..policy()
@@ -2760,7 +2786,7 @@ mod tests {
         install_from(
             &pin("2026.07.2"),
             &source,
-            &AcceptWithRoot(pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(pk)),
             &store,
             &mut marks,
             &policy,
@@ -2860,7 +2886,7 @@ mod tests {
         let policy = InstallPolicy {
             index: Some(crate::lineindex::IndexPolicy {
                 realm: "acme",
-                root_public_key: &pk,
+                trust: crate::keyroles::test_support::leak_rt(&pk),
                 required: false,
             }),
             ..policy()
@@ -2869,7 +2895,7 @@ mod tests {
         let outcome = install_from(
             &newer,
             &source,
-            &AcceptWithRoot(&pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
             &f.store,
             &mut f.marks,
             &policy,
@@ -2889,7 +2915,7 @@ mod tests {
         let outcome = install_from(
             &newer,
             &source,
-            &AcceptWithRoot(&pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
             &f.store,
             &mut f.marks,
             &policy,
@@ -2917,7 +2943,7 @@ mod tests {
         let err = install_by_digest_from(
             &manifest_digest(&f.older),
             &Untouched,
-            &AcceptWithRoot(&pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2941,7 +2967,7 @@ mod tests {
             let err = install_by_digest_from(
                 &manifest_digest(&f.older),
                 &Untouched,
-                &AcceptWithRoot(&pk),
+                &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
                 &f.store,
                 &mut f.marks,
                 &policy(),
@@ -2971,7 +2997,7 @@ mod tests {
         install_by_digest_from(
             &manifest_digest(&f.newer),
             &source,
-            &AcceptWithRoot(&pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -2988,7 +3014,7 @@ mod tests {
         let err = install_by_digest_from(
             &manifest_digest(&f.newer),
             &source,
-            &AcceptWithRoot(&pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3023,7 +3049,7 @@ mod tests {
         let err = install_by_digest_from(
             &manifest_digest(&other_layer),
             &source,
-            &AcceptWithRoot(&pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3085,7 +3111,7 @@ mod tests {
         let err = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3107,7 +3133,7 @@ mod tests {
         let err = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3126,14 +3152,18 @@ mod tests {
         see_the_newer(&mut f);
         let line: crate::layer::Line = "2026.07".parse().unwrap();
         let envelope = status_for("2026.07", None, &[], &f.sk);
-        let doc = crate::linestatus::LineStatus::verify_and_parse(&envelope, &f.pk).unwrap();
+        let doc = crate::linestatus::LineStatus::verify_and_parse(
+            &envelope,
+            &crate::keyroles::test_support::rt(&f.pk),
+        )
+        .unwrap();
         crate::linestatus::StatusCache::at_root(f.store.root())
             .update(&line, &envelope, &doc)
             .unwrap();
         let outcome = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &f.source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3153,7 +3183,11 @@ mod tests {
         see_the_newer(&mut f);
         let line: crate::layer::Line = "2026.07".parse().unwrap();
         let yank = status_numbered(2, "2026.07", None, &[("2026.07.0", "bad")], &f.sk);
-        let doc = crate::linestatus::LineStatus::verify_and_parse(&yank, &f.pk).unwrap();
+        let doc = crate::linestatus::LineStatus::verify_and_parse(
+            &yank,
+            &crate::keyroles::test_support::rt(&f.pk),
+        )
+        .unwrap();
         crate::linestatus::StatusCache::at_root(f.store.root())
             .update(&line, &yank, &doc)
             .unwrap();
@@ -3162,7 +3196,7 @@ mod tests {
         let err = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3182,7 +3216,7 @@ mod tests {
         see_the_newer(&mut f);
         let mut doc = crate::linestatus::LineStatus::verify_and_parse(
             &status_for("2026.07", None, &[], &f.sk),
-            &f.pk,
+            &crate::keyroles::test_support::rt(&f.pk),
         )
         .unwrap();
         doc.min_counter = Some(2);
@@ -3192,7 +3226,7 @@ mod tests {
         let err = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3208,7 +3242,7 @@ mod tests {
         see_the_newer(&mut f);
         let mut doc = crate::linestatus::LineStatus::verify_and_parse(
             &status_for("2026.07", None, &[], &f.sk),
-            &f.pk,
+            &crate::keyroles::test_support::rt(&f.pk),
         )
         .unwrap();
         doc.min_counter = Some(1); // the older layer presents counter 1
@@ -3218,7 +3252,7 @@ mod tests {
         let outcome = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3234,8 +3268,13 @@ mod tests {
         let f = consent_fixture();
         let older = LayerManifest::parse(&f.older).unwrap();
         let now = "2026-08-07T00:00:00Z";
-        let none = cached_consent_why_not(&older, f.store.root(), &f.pk, now)
-            .expect("nothing cached is not consent");
+        let none = cached_consent_why_not(
+            &older,
+            f.store.root(),
+            &crate::keyroles::test_support::rt(&f.pk),
+            now,
+        )
+        .expect("nothing cached is not consent");
         assert!(
             none.contains("none is available for line 2026.07"),
             "{none}"
@@ -3244,18 +3283,36 @@ mod tests {
         let line: crate::layer::Line = "2026.07".parse().unwrap();
         let cache = crate::linestatus::StatusCache::at_root(f.store.root());
         let ok = status_numbered(1, "2026.07", None, &[], &f.sk);
-        let doc = crate::linestatus::LineStatus::verify_and_parse(&ok, &f.pk).unwrap();
+        let doc = crate::linestatus::LineStatus::verify_and_parse(
+            &ok,
+            &crate::keyroles::test_support::rt(&f.pk),
+        )
+        .unwrap();
         cache.update(&line, &ok, &doc).unwrap();
         assert_eq!(
-            cached_consent_why_not(&older, f.store.root(), &f.pk, now),
+            cached_consent_why_not(
+                &older,
+                f.store.root(),
+                &crate::keyroles::test_support::rt(&f.pk),
+                now
+            ),
             None
         );
 
         let yank = status_numbered(2, "2026.07", None, &[("2026.07.0", "bad")], &f.sk);
-        let doc = crate::linestatus::LineStatus::verify_and_parse(&yank, &f.pk).unwrap();
+        let doc = crate::linestatus::LineStatus::verify_and_parse(
+            &yank,
+            &crate::keyroles::test_support::rt(&f.pk),
+        )
+        .unwrap();
         cache.update(&line, &yank, &doc).unwrap();
-        let why = cached_consent_why_not(&older, f.store.root(), &f.pk, now)
-            .expect("a cached yank refuses");
+        let why = cached_consent_why_not(
+            &older,
+            f.store.root(),
+            &crate::keyroles::test_support::rt(&f.pk),
+            now,
+        )
+        .expect("a cached yank refuses");
         assert!(why.contains("YANKED") && why.contains("bad"), "{why}");
     }
 
@@ -3268,7 +3325,11 @@ mod tests {
         see_the_newer(&mut f);
         let line: crate::layer::Line = "2026.07".parse().unwrap();
         let yank = status_numbered(1, "2026.07", None, &[("2026.07.0", "bad")], &f.sk);
-        let doc = crate::linestatus::LineStatus::verify_and_parse(&yank, &f.pk).unwrap();
+        let doc = crate::linestatus::LineStatus::verify_and_parse(
+            &yank,
+            &crate::keyroles::test_support::rt(&f.pk),
+        )
+        .unwrap();
         crate::linestatus::StatusCache::at_root(f.store.root())
             .update(&line, &yank, &doc)
             .unwrap();
@@ -3277,7 +3338,7 @@ mod tests {
         let outcome = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3293,14 +3354,18 @@ mod tests {
         see_the_newer(&mut f);
         let line: crate::layer::Line = "2026.07".parse().unwrap();
         let envelope = status_for("2026.07", None, &[("2026.07.0", "bad")], &f.sk);
-        let doc = crate::linestatus::LineStatus::verify_and_parse(&envelope, &f.pk).unwrap();
+        let doc = crate::linestatus::LineStatus::verify_and_parse(
+            &envelope,
+            &crate::keyroles::test_support::rt(&f.pk),
+        )
+        .unwrap();
         crate::linestatus::StatusCache::at_root(f.store.root())
             .update(&line, &envelope, &doc)
             .unwrap();
         let err = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &f.source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3320,7 +3385,7 @@ mod tests {
         let err = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.newer)),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3333,7 +3398,7 @@ mod tests {
             install(
                 &digest_pin("2026.07.0", &wrong),
                 &source,
-                &AcceptWithRoot(&f.pk),
+                &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
                 &f.store,
                 &mut f.marks,
                 &policy(),
@@ -3353,7 +3418,7 @@ mod tests {
         let err = install_by_digest(
             &manifest_digest(&f.older),
             &source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),
@@ -3370,14 +3435,18 @@ mod tests {
         let line: crate::layer::Line = "2026.07".parse().unwrap();
         // Validly signed, but about line 2026.06 — cached under 2026.07.
         let envelope = status_for("2026.06", None, &[], &f.sk);
-        let doc = crate::linestatus::LineStatus::verify_and_parse(&envelope, &f.pk).unwrap();
+        let doc = crate::linestatus::LineStatus::verify_and_parse(
+            &envelope,
+            &crate::keyroles::test_support::rt(&f.pk),
+        )
+        .unwrap();
         crate::linestatus::StatusCache::at_root(f.store.root())
             .update(&line, &envelope, &doc)
             .unwrap();
         let err = install(
             &digest_pin("2026.07.0", &manifest_digest(&f.older)),
             &f.source,
-            &AcceptWithRoot(&f.pk),
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
             &f.store,
             &mut f.marks,
             &policy(),

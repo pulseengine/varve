@@ -55,8 +55,8 @@ impl ManifestVerifier for PinnedKeyVerifier {
         self.trust.verify_bytes(fetched, LAYER_PAYLOAD_TYPE)
     }
 
-    fn root_public_key(&self) -> Option<&[u8]> {
-        Some(self.trust.root())
+    fn trust(&self) -> Option<&RealmTrust> {
+        Some(&self.trust)
     }
 }
 
@@ -250,7 +250,7 @@ mod tests {
         let (sk, pk) = keys();
         let (_, other) = keys();
         let v = PinnedKeyVerifier::from_public_key_bytes(&pk).unwrap();
-        assert_eq!(v.root_public_key(), Some(pk.as_slice()));
+        assert_eq!(v.trust().map(|t| t.root()), Some(pk.as_slice()));
         // The document digest consent rests on verifies under that root and
         // only that root.
         let status = crate::linestatus::LineStatus {
@@ -265,14 +265,15 @@ mod tests {
         .sign(&sk, "root-1")
         .unwrap();
         assert!(
-            crate::linestatus::LineStatus::verify_and_parse(
-                status.as_bytes(),
-                v.root_public_key().unwrap()
-            )
-            .is_ok()
+            crate::linestatus::LineStatus::verify_and_parse(status.as_bytes(), v.trust().unwrap())
+                .is_ok()
         );
         assert!(
-            crate::linestatus::LineStatus::verify_and_parse(status.as_bytes(), &other).is_err()
+            crate::linestatus::LineStatus::verify_and_parse(
+                status.as_bytes(),
+                &crate::keyroles::test_support::rt(&other)
+            )
+            .is_err()
         );
     }
 
@@ -570,7 +571,11 @@ mod seam_tests {
         let att = crate::attest::sign_with(&statement(), &mock).unwrap();
         assert_eq!(mock.calls(), 2);
         assert_eq!(
-            crate::attest::verify_statement(att.as_bytes(), &public).unwrap(),
+            crate::attest::verify_statement(
+                att.as_bytes(),
+                &crate::keyroles::test_support::rt(&public)
+            )
+            .unwrap(),
             statement()
         );
 

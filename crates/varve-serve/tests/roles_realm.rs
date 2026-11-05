@@ -1,6 +1,6 @@
-//! REQ-KEYROLES-001, PR 3b: `varve-serve` resolves a pinned realm's TRUST, not
-//! just its root, so a layer of a roles realm verifies under the realm's LAYER
-//! keys on the viewer's realm path.
+//! REQ-KEYROLES-001: `varve-serve` resolves a pinned realm's TRUST, not just
+//! its root, so a layer of a roles realm verifies under the realm's LAYER keys
+//! on the viewer's realm path, and one signed by any other key is refused.
 
 #[path = "support/fixture.rs"]
 mod fixture;
@@ -54,16 +54,17 @@ fn project(signer: Which, roles: bool) -> Project {
     .unwrap();
     std::fs::write(project.join("r.delegation.dsse"), env).unwrap();
     let extra = "key-roles = true\ndelegation-file = \"r.delegation.dsse\"\n";
-    // The loader refuses a roles realm (fail-closed until PR 5), so the realm's
-    // store is located through the same realm WITHOUT its roles lines, and the
-    // roles lines are written afterwards.
     let realms = |extra: &str| {
         format!(
             "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{}\"\n{extra}",
             hx(&root_pk)
         )
     };
-    std::fs::write(project.join("varve-realms.toml"), realms("")).unwrap();
+    std::fs::write(
+        project.join("varve-realms.toml"),
+        realms(if roles { extra } else { "" }),
+    )
+    .unwrap();
     let pin_text = "manifest-version = 1\n[toolchain]\nrealm = \"r\"\nchannel = \"rolling\"\n\
                     layer = \"2026.11.0\"\n";
     std::fs::write(project.join("varve.toml"), pin_text).unwrap();
@@ -133,9 +134,6 @@ fn project(signer: Which, roles: bool) -> Project {
         },
     )
     .expect("installs");
-    if roles {
-        std::fs::write(project.join("varve-realms.toml"), realms(extra)).unwrap();
-    }
     Project { tmp, root, project }
 }
 
@@ -159,29 +157,26 @@ fn run(p: &Project) -> std::process::Output {
 }
 
 // rivet: partially-verifies REQ-KEYROLES-001
-// TODO(REQ-KEYROLES-001 PR 5): flip to served/refused-by-role once the loader stops refusing
 #[test]
-fn a_roles_realm_is_refused_fail_closed_even_for_a_layer_signed_layer() {
+fn a_roles_realm_serves_a_layer_signed_layer() {
     let p = project(Which::Layer, true);
     let o = run(&p);
-    assert!(!o.status.success(), "a roles realm was served");
-    let e = String::from_utf8_lossy(&o.stderr);
     assert!(
-        e.contains("does not yet enforce at every verification site"),
-        "{e}"
+        o.status.success(),
+        "a LAYER-signed layer must be served by its roles realm: {}",
+        String::from_utf8_lossy(&o.stderr)
     );
 }
 
 // rivet: partially-verifies REQ-KEYROLES-001
-// TODO(REQ-KEYROLES-001 PR 5): flip to served/refused-by-role once the loader stops refusing
 #[test]
-fn a_roles_realm_is_refused_fail_closed_for_a_status_signed_layer_too() {
+fn a_roles_realm_refuses_a_status_signed_layer_by_role() {
     let p = project(Which::Status, true);
     let o = run(&p);
-    assert!(!o.status.success());
+    assert!(!o.status.success(), "a STATUS-signed layer was served");
     let e = String::from_utf8_lossy(&o.stderr);
     assert!(
-        e.contains("does not yet enforce at every verification site"),
+        e.contains("signed by this realm's STATUS key") && e.contains("LAYER key"),
         "{e}"
     );
 }

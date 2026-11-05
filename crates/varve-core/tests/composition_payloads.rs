@@ -17,6 +17,8 @@
 
 use std::collections::BTreeMap;
 
+use varve_core::keyroles::RealmTrust;
+
 use varve_core::deposit::DepositInclude;
 use varve_core::install::{InstallPolicy, install};
 use varve_core::rollback::HighWaterMarks;
@@ -219,8 +221,11 @@ fn documentation_in_an_included_layer_is_found_from_the_composing_pin() {
 
     let entry = store.get(&composing).unwrap().unwrap();
     let verifier = PinnedKeyVerifier::from_public_key_bytes(&top.pk).unwrap();
-    let mut roots: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    roots.insert(upstream.name.clone(), upstream.pk.clone());
+    let mut roots: BTreeMap<String, RealmTrust> = BTreeMap::new();
+    roots.insert(
+        upstream.name.clone(),
+        RealmTrust::root_only(&upstream.pk).unwrap(),
+    );
 
     let layers = varve_core::compose::walk_installed(
         &store,
@@ -284,8 +289,11 @@ fn the_composition_offers_every_layers_tools_once() {
 
     let entry = store.get(&composing).unwrap().unwrap();
     let verifier = PinnedKeyVerifier::from_public_key_bytes(&top.pk).unwrap();
-    let mut roots: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    roots.insert(upstream.name.clone(), upstream.pk.clone());
+    let mut roots: BTreeMap<String, RealmTrust> = BTreeMap::new();
+    roots.insert(
+        upstream.name.clone(),
+        RealmTrust::root_only(&upstream.pk).unwrap(),
+    );
     let layers = varve_core::compose::walk_installed(
         &store,
         &entry,
@@ -355,9 +363,12 @@ fn a_composition_of_a_composition_is_walked_to_the_leaf() {
 
     let entry = store.get(&top).unwrap().unwrap();
     let verifier = PinnedKeyVerifier::from_public_key_bytes(&topr.pk).unwrap();
-    let mut roots: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    roots.insert(midr.name.clone(), midr.pk.clone());
-    roots.insert(leafr.name.clone(), leafr.pk.clone());
+    let mut roots: BTreeMap<String, RealmTrust> = BTreeMap::new();
+    roots.insert(midr.name.clone(), RealmTrust::root_only(&midr.pk).unwrap());
+    roots.insert(
+        leafr.name.clone(),
+        RealmTrust::root_only(&leafr.pk).unwrap(),
+    );
 
     let layers = varve_core::compose::walk_installed(
         &store,
@@ -448,9 +459,9 @@ fn a_diamond_visits_the_shared_base_once_and_is_not_a_cycle() {
 
     let entry = store.get(&top).unwrap().unwrap();
     let verifier = PinnedKeyVerifier::from_public_key_bytes(&topr.pk).unwrap();
-    let mut roots: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut roots: BTreeMap<String, RealmTrust> = BTreeMap::new();
     for r in [&baser, &leftr, &rightr] {
-        roots.insert(r.name.clone(), r.pk.clone());
+        roots.insert(r.name.clone(), RealmTrust::root_only(&r.pk).unwrap());
     }
     let layers = varve_core::compose::walk_installed(
         &store,
@@ -527,7 +538,10 @@ fn a_composition_exactly_max_depth_deep_walks_and_one_deeper_is_refused() {
     }
 
     let verifier = PinnedKeyVerifier::from_public_key_bytes(&r.pk).unwrap();
-    let roots: BTreeMap<String, Vec<u8>> = [(r.name.clone(), r.pk.clone())].into_iter().collect();
+    let roots: BTreeMap<String, RealmTrust> =
+        [(r.name.clone(), RealmTrust::root_only(&r.pk).unwrap())]
+            .into_iter()
+            .collect();
     let walk_from = |digest: &str| {
         let entry = store.get(digest).unwrap().unwrap();
         varve_core::compose::walk_installed(

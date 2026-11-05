@@ -308,7 +308,7 @@ impl std::error::Error for IncludeWindowError {}
 
 /// Read one include's stated window from the realm that vouches for it.
 ///
-/// `source`, `verifier` and `root_pk` are THAT realm's — never the composing
+/// `source`, `verifier` and `trust` are THAT realm's — never the composing
 /// realm's. The manifest is verified first, so the layer id the window is
 /// reported against is one the realm signed; the line-status is then chosen by
 /// [`crate::linestatus::current_line_status`], the same rule install uses, so
@@ -319,11 +319,11 @@ impl std::error::Error for IncludeWindowError {}
 pub fn include_window(
     source: &dyn crate::source::LayerSource,
     verifier: &dyn crate::install::ManifestVerifier,
-    root_pk: &[u8],
+    trust: &crate::keyroles::RealmTrust,
     digest: &str,
     realm: &str,
 ) -> Result<IncludeWindow, IncludeWindowError> {
-    window_and_includes(source, source, true, verifier, root_pk, digest, realm).map(|(w, _)| w)
+    window_and_includes(source, source, true, verifier, trust, digest, realm).map(|(w, _)| w)
 }
 
 /// One layer's own window, and the layers it includes.
@@ -340,7 +340,7 @@ fn window_and_includes(
     primary: &dyn crate::source::LayerSource,
     source_is_primary: bool,
     verifier: &dyn crate::install::ManifestVerifier,
-    root_pk: &[u8],
+    trust: &crate::keyroles::RealmTrust,
     digest: &str,
     realm: &str,
 ) -> Result<(IncludeWindow, Vec<crate::compose::Include>), IncludeWindowError> {
@@ -396,7 +396,7 @@ fn window_and_includes(
         .fetch_published_line_status(&line.to_string())
         .map_err(|e| from_primary("a published correction", e))?;
     let status =
-        crate::linestatus::current_line_status_from_documents(baseline, correction, line, root_pk)
+        crate::linestatus::current_line_status_from_documents(baseline, correction, line, trust)
             // A status document the PRIMARY served that does not verify (or
             // covers another line) is the primary's verdict, and TERMINAL:
             // asking a mirror for the layer would only re-read the same primary
@@ -430,11 +430,11 @@ pub enum RealmSource<'a> {
 }
 
 /// One realm, as the transitive window walk needs it: where its layers are
-/// served from, what verifies them, and the root its line-status is signed by.
+/// served from, what verifies them, and the trust its line-status is judged by.
 pub struct RealmView<'a> {
     pub source: RealmSource<'a>,
     pub verifier: &'a dyn crate::install::ManifestVerifier,
-    pub root: &'a [u8],
+    pub trust: &'a crate::keyroles::RealmTrust,
 }
 
 /// How the walk reaches a realm BY NAME. varve-core does not read
@@ -504,7 +504,7 @@ fn deep_window(
             source,
             true,
             view.verifier,
-            view.root,
+            view.trust,
             digest,
             realm,
         )?,
@@ -520,7 +520,7 @@ fn deep_window(
                             primary,
                             is_primary,
                             view.verifier,
-                            view.root,
+                            view.trust,
                             digest,
                             realm,
                         )
@@ -1097,7 +1097,7 @@ mod tests {
                 Ok(RealmView {
                     source: RealmSource::Single(source),
                     verifier: &AcceptAll,
-                    root: &self.pk,
+                    trust: crate::keyroles::test_support::leak_rt(&self.pk),
                 })
             }
         }
@@ -1153,7 +1153,7 @@ mod tests {
                 Ok(RealmView {
                     source: RealmSource::Single(&self.source),
                     verifier: &AcceptAll,
-                    root: &self.pk,
+                    trust: crate::keyroles::test_support::leak_rt(&self.pk),
                 })
             }
         }
@@ -1365,8 +1365,14 @@ mod tests {
                     .unwrap()
                     .as_bytes(),
             );
-            let w =
-                include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm").unwrap();
+            let w = include_window(
+                &source,
+                &AcceptAll,
+                &crate::keyroles::test_support::rt(&pk),
+                &manifest_digest(&bytes),
+                "wasm",
+            )
+            .unwrap();
             assert_eq!(
                 w,
                 IncludeWindow {
@@ -1398,8 +1404,14 @@ mod tests {
                         .unwrap()
                         .as_bytes(),
                 );
-            let w =
-                include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm").unwrap();
+            let w = include_window(
+                &source,
+                &AcceptAll,
+                &crate::keyroles::test_support::rt(&pk),
+                &manifest_digest(&bytes),
+                "wasm",
+            )
+            .unwrap();
             assert_eq!(w.support_until.as_deref(), Some("2026-10-10"));
         }
 
@@ -1416,8 +1428,14 @@ mod tests {
                     .unwrap()
                     .as_bytes(),
             );
-            let err = include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm")
-                .unwrap_err();
+            let err = include_window(
+                &source,
+                &AcceptAll,
+                &crate::keyroles::test_support::rt(&pk),
+                &manifest_digest(&bytes),
+                "wasm",
+            )
+            .unwrap_err();
             assert!(
                 err.to_string().contains("2026.10.0") || err.to_string().contains("sha256:"),
                 "{err}"
@@ -1461,8 +1479,14 @@ mod tests {
                         .as_bytes(),
                 ),
             );
-            let err = include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm")
-                .unwrap_err();
+            let err = include_window(
+                &source,
+                &AcceptAll,
+                &crate::keyroles::test_support::rt(&pk),
+                &manifest_digest(&bytes),
+                "wasm",
+            )
+            .unwrap_err();
             assert!(err.reason.contains("connection reset"), "{err}");
         }
 
@@ -1474,8 +1498,14 @@ mod tests {
             let (_, pk) = generate_root_keypair();
             let bytes = wasm_layer();
             let source = MemorySource::new().with_manifest(&bytes);
-            let w =
-                include_window(&source, &AcceptAll, &pk, &manifest_digest(&bytes), "wasm").unwrap();
+            let w = include_window(
+                &source,
+                &AcceptAll,
+                &crate::keyroles::test_support::rt(&pk),
+                &manifest_digest(&bytes),
+                "wasm",
+            )
+            .unwrap();
             assert_eq!(w.support_until, None);
             assert!(cap_by_includes("2026-11-02", &[w], None, "2026-01-01").is_err());
         }
@@ -1494,7 +1524,14 @@ mod tests {
                     .as_bytes(),
             );
             assert!(
-                include_window(&source, &RejectAll, &pk, &manifest_digest(&bytes), "wasm").is_err()
+                include_window(
+                    &source,
+                    &RejectAll,
+                    &crate::keyroles::test_support::rt(&pk),
+                    &manifest_digest(&bytes),
+                    "wasm"
+                )
+                .is_err()
             );
         }
     }
@@ -1534,7 +1571,7 @@ mod tests {
                 Ok(RealmView {
                     source: RealmSource::Failover(self.mirrors),
                     verifier: self.verifier,
-                    root: self.pk,
+                    trust: crate::keyroles::test_support::leak_rt(self.pk),
                 })
             }
         }

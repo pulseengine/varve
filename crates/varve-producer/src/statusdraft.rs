@@ -597,7 +597,11 @@ mod tests {
 
         let (sk, pk) = generate_root_keypair();
         let envelope = next.sign(&sk, "varve-root-1").unwrap();
-        let parsed = LineStatus::verify_and_parse(envelope.as_bytes(), &pk).unwrap();
+        let parsed = LineStatus::verify_and_parse(
+            envelope.as_bytes(),
+            &varve_core::keyroles::RealmTrust::root_only(&pk).unwrap(),
+        )
+        .unwrap();
         assert_eq!(parsed, next);
     }
 

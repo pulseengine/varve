@@ -321,6 +321,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "cmd-sign-index.md"
     ),
     topic!(
+        "sign-delegation",
+        "sign-delegation — sign a realm's key-role delegation (offline)",
+        "cmd-sign-delegation.md"
+    ),
+    topic!(
         "attach-index",
         "attach-index — publish the signed line index (CI)",
         "cmd-attach-index.md"
@@ -506,6 +511,8 @@ pub const TOPICS_NEEDING_EXAMPLES: &[&str] = &[
     "sign-status",
     "attach-status",
     "sign-sums",
+    // REQ-KEYROLES-001: the root's one act, a document to be copied.
+    "sign-delegation",
     // REQ-CIGATE-001 / REQ-INSPECT-001. Both topics exist to be COPIED — a
     // pipeline snippet and an invocation. Prose versions teach nothing.
     "exit-codes",

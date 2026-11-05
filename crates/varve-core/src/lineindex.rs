@@ -24,7 +24,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::install::VerifyError;
 use crate::layer::Line;
-use crate::verify::{dsse_sign_typed, dsse_verify_typed};
 
 /// The authenticated payload type — a signed something-else (a layer manifest,
 /// a line-status) cannot be replayed as an index.
@@ -135,19 +134,27 @@ impl IndexError {
 
 impl LineIndex {
     /// Verify an envelope against the realm's trust root and parse it.
-    pub fn verify_and_parse(envelope: &[u8], root_public_key: &[u8]) -> Result<Self, IndexError> {
-        let payload = dsse_verify_typed(envelope, LINE_INDEX_PAYLOAD_TYPE, root_public_key)?;
+    pub fn verify_and_parse(
+        envelope: &[u8],
+        trust: &crate::keyroles::RealmTrust,
+    ) -> Result<Self, IndexError> {
+        let payload = trust.verify_bytes(envelope, LINE_INDEX_PAYLOAD_TYPE)?;
         serde_json::from_slice(&payload).map_err(|e| IndexError::Payload(e.to_string()))
     }
 
     /// Sign an index (the producing side — CI, beside deposit).
     pub fn sign(&self, secret_key: &[u8], key_id: &str) -> Result<String, IndexError> {
+        let signer = crate::verify::FileSigner::new_unchecked(secret_key, key_id)?;
+        self.sign_with(&signer)
+    }
+
+    /// [`LineIndex::sign`] with any [`crate::verify::RealmSigner`].
+    pub fn sign_with(&self, signer: &dyn crate::verify::RealmSigner) -> Result<String, IndexError> {
         let payload = serde_json::to_vec_pretty(self).expect("index serializes");
-        Ok(dsse_sign_typed(
+        Ok(crate::verify::dsse_sign_with(
             &payload,
             LINE_INDEX_PAYLOAD_TYPE,
-            secret_key,
-            key_id,
+            signer,
         )?)
     }
 
@@ -257,10 +264,10 @@ impl LineIndex {
 pub struct IndexPolicy<'a> {
     /// The realm's name, for error messages.
     pub realm: &'a str,
-    /// The realm's trust root — the index verifies against this and nothing
-    /// else. The SOURCE is the party being constrained, so it is never asked
-    /// whether the index is good.
-    pub root_public_key: &'a [u8],
+    /// The realm's trust — the index verifies against this and nothing else,
+    /// under the STATUS role where the realm declares roles. The SOURCE is the
+    /// party being constrained, so it is never asked whether the index is good.
+    pub trust: &'a crate::keyroles::RealmTrust,
     /// The realm declared `signed-index = true` (clause 5).
     pub required: bool,
 }
@@ -291,7 +298,7 @@ pub fn check(
         return Ok(None);
     };
 
-    let index = LineIndex::verify_and_parse(bytes, policy.root_public_key)?;
+    let index = LineIndex::verify_and_parse(bytes, policy.trust)?;
     // The document must be about the line we asked about. Without this, a
     // valid index for a QUIET line would satisfy the check for a busy one
     // while naming none of its layers — omission detection that always passes.
@@ -558,12 +565,22 @@ mod tests {
         let envelope = doc.sign(&sk, "root-1").unwrap();
 
         assert_eq!(
-            LineIndex::verify_and_parse(envelope.as_bytes(), &pk).unwrap(),
+            LineIndex::verify_and_parse(
+                envelope.as_bytes(),
+                &crate::keyroles::test_support::rt(&pk)
+            )
+            .unwrap(),
             doc
         );
         // Another realm's root must not accept it — an index is an assertion
         // BY a realm, so it carries that realm's authority and no other's.
-        assert!(LineIndex::verify_and_parse(envelope.as_bytes(), &other_pk).is_err());
+        assert!(
+            LineIndex::verify_and_parse(
+                envelope.as_bytes(),
+                &crate::keyroles::test_support::rt(&other_pk)
+            )
+            .is_err()
+        );
     }
 
     // rivet: verifies REQ-INDEXAUTH-001
@@ -591,7 +608,10 @@ mod tests {
         // proved schema divergence while claiming to prove the type check. If
         // the schemas ever converged, replay would open and nothing would
         // notice.
-        match LineIndex::verify_and_parse(envelope.as_bytes(), &pk) {
+        match LineIndex::verify_and_parse(
+            envelope.as_bytes(),
+            &crate::keyroles::test_support::rt(&pk),
+        ) {
             Err(IndexError::Verify(_)) => {}
             Err(IndexError::Payload(p)) => panic!(
                 "rejected by the SCHEMA ({p}), not by the payload type — the type is the \
@@ -606,7 +626,11 @@ mod tests {
         let idx = index(1, &[("2026.08.0", "sha256:aa")]);
         let idx_env = idx.sign(&sk, "root-1").unwrap();
         assert!(
-            crate::linestatus::LineStatus::verify_and_parse(idx_env.as_bytes(), &pk).is_err(),
+            crate::linestatus::LineStatus::verify_and_parse(
+                idx_env.as_bytes(),
+                &crate::keyroles::test_support::rt(&pk)
+            )
+            .is_err(),
             "a line-index must not verify as a line-status"
         );
     }
@@ -728,7 +752,7 @@ mod tests {
         let (_sk, pk) = generate_root_keypair();
         let declaring = IndexPolicy {
             realm: "acme",
-            root_public_key: &pk,
+            trust: crate::keyroles::test_support::leak_rt(&pk),
             required: true,
         };
         let silent = IndexPolicy {
@@ -765,7 +789,7 @@ mod tests {
         let (sk, pk) = generate_root_keypair();
         let policy = IndexPolicy {
             realm: "acme",
-            root_public_key: &pk,
+            trust: crate::keyroles::test_support::leak_rt(&pk),
             required: true,
         };
         let quiet = LineIndex {
@@ -799,7 +823,7 @@ mod tests {
         let (sk, pk) = generate_root_keypair();
         let policy = IndexPolicy {
             realm: "acme",
-            root_public_key: &pk,
+            trust: crate::keyroles::test_support::leak_rt(&pk),
             required: true,
         };
         let doc = index(1, &[("2026.08.0", "sha256:aa")]);
@@ -834,7 +858,7 @@ mod tests {
         let (sk, pk) = generate_root_keypair();
         let policy = IndexPolicy {
             realm: "acme",
-            root_public_key: &pk,
+            trust: crate::keyroles::test_support::leak_rt(&pk),
             required: true,
         };
         let cached = index(7, &[("2026.08.1", "sha256:bb")]);
@@ -1128,7 +1152,7 @@ mod tests {
         let (impostor_sk, _impostor_pk) = generate_root_keypair();
         let policy = IndexPolicy {
             realm: "acme",
-            root_public_key: &realm_pk,
+            trust: crate::keyroles::test_support::leak_rt(&realm_pk),
             required: true,
         };
         let forged = index(99, &[("2026.08.0", "sha256:aa")])
