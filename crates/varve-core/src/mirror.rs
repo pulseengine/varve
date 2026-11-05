@@ -283,11 +283,12 @@ impl Mirrors {
 
     /// [`attempt`](Self::attempt) for an answer that can legitimately be
     /// ABSENT: `Ok(None)` from one source is not the end of the search while
-    /// another may carry it. The first `Some` wins. `None` is returned ONLY
-    /// when every source ANSWERED that it has none: if any source failed to
-    /// answer, absence is UNKNOWN (an unreachable source might hold it, and a
-    /// mirror's silence cannot stand for it) and that is an error. A terminal
-    /// error stops the search at once.
+    /// another may carry it. The first `Some` wins. A `None` is AUTHORITATIVE
+    /// only if no source failed to answer BEFORE it: an unreachable primary
+    /// might hold the document, and a mirror's silence cannot stand for it, so
+    /// absence is then UNKNOWN and that is an error. Once a source has
+    /// answered none authoritatively, a LATER source's failure does not undo
+    /// it. A terminal error stops the search at once.
     pub fn attempt_some<T, E: std::fmt::Display>(
         &self,
         mut f: impl FnMut(&dyn LayerSource, bool) -> Result<Option<T>, E>,
@@ -295,6 +296,8 @@ impl Mirrors {
     ) -> Result<Option<T>, Vec<(String, E)>> {
         let mut failures: Vec<(String, E)> = Vec::new();
         let mut absent = false;
+        // A failure before the first answered-none makes absence unknown.
+        let mut failed_before_none = false;
         for (i, m) in self.mirrors.iter().enumerate() {
             match f(m.source.as_ref(), i == 0) {
                 Ok(Some(v)) => {
@@ -307,6 +310,7 @@ impl Mirrors {
                 Ok(None) => absent = true,
                 Err(e) => {
                     let terminal = !fails_over(&e);
+                    failed_before_none |= !absent;
                     failures.push((m.label.clone(), e));
                     if terminal {
                         return Err(failures);
@@ -314,11 +318,17 @@ impl Mirrors {
                 }
             }
         }
-        if failures.is_empty() {
-            Ok(None)
-        } else {
+        if failed_before_none {
             Err(failures)
+        } else {
+            Ok(None)
         }
+    }
+
+    /// The realm's PRIMARY source (the first), for the one thing only it may
+    /// answer: a published correction.
+    pub fn primary(&self) -> Option<&dyn LayerSource> {
+        self.mirrors.first().map(|m| m.source.as_ref())
     }
 
     /// One source by its label, to ask it directly (a diagnosis about the
@@ -1293,9 +1303,11 @@ mod tests {
         assert_eq!(asked, 2);
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].0, "a");
-        // And the other order: a source that answered none, then one that failed.
+        // The other order: the first source ANSWERED none authoritatively, and a
+        // LATER one failed. Only failures BEFORE the first none make absence
+        // unknown, so this is none.
         let (r, _, _) = some_then(vec![Ok(None), Err("down")], |_| true);
-        assert!(r.is_err());
+        assert_eq!(r.unwrap(), None);
         // A Some after a failure still wins.
         let (r, _, _) = some_then(vec![Err("down"), Ok(Some(3))], |_| true);
         assert_eq!(r.unwrap(), Some(3));

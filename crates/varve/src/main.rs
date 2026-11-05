@@ -2176,6 +2176,38 @@ impl varve_core::support::RealmAccess for DefinedRealms {
     }
 }
 
+/// Say, when a MIRROR (not the primary) answered an install, what bounded its
+/// answer and what could not be checked against it. A mirror is accepted only
+/// because this machine has history for the line: its state may lag the
+/// primary's, but it is not older than what was already recorded.
+/// `recorded` names that history ("high-water mark #3", "its cached
+/// line-status").
+fn note_mirror_acceptance(
+    sources: &varve_core::mirror::Mirrors,
+    line: &varve_core::Line,
+    recorded: &str,
+    omission_check_skipped: bool,
+) {
+    let (Some(served), Some(primary)) = (sources.served_by(), sources.labels().first().copied())
+    else {
+        return;
+    };
+    if served == primary {
+        return;
+    }
+    eprintln!(
+        "note: a mirror's state may lag the primary's; {served} was accepted because it is not \
+         older than what this machine has already recorded for line {line} ({recorded})."
+    );
+    if omission_check_skipped {
+        eprintln!(
+            "note: the omission check could not run against the mirror {served}: it carries no \
+             line index, so a layer the realm's signed index names could be hidden from this \
+             answer."
+        );
+    }
+}
+
 /// The error for a realm whose sources did not produce an answer.
 ///
 /// A TERMINAL failure (a verified verdict such as a rollback refusal, or a
@@ -3835,6 +3867,12 @@ fn fetch_included_layer(
             varve_core::InstallError::fails_over,
         )
         .map_err(|failures| sources_failed(&realm.name, failures))?;
+    note_mirror_acceptance(
+        &sources,
+        outcome.layer.line(),
+        "this machine's local history for the line",
+        outcome.omission_check_skipped,
+    );
     store
         .get(&outcome.digest)?
         .context("the fetched layer is not in the store it was installed into")
@@ -4059,6 +4097,7 @@ fn install(
     // root are refused and the next source is asked, never accepted on a
     // mirror's say-so (REQ-MIRROR-002 clause 2). With one source this is the
     // plain install and its error is returned unchanged.
+    let prior_mark = marks.mark(pin.layer.line());
     let installed = sources.attempt(
         |source, is_primary| {
             varve_core::install_from(
@@ -4102,6 +4141,15 @@ fn install(
             return Err(e);
         }
     };
+    note_mirror_acceptance(
+        &sources,
+        pin.layer.line(),
+        &match prior_mark {
+            Some(mark) => format!("high-water mark #{mark}"),
+            None => "its cached line-status".to_string(),
+        },
+        outcome.omission_check_skipped,
+    );
     // Clause 4: REPORT what the realm asserts the line contains, beside what
     // this install accepted. Reported and NOT enforced, deliberately — raising
     // the anti-rollback mark to the newest counter that merely EXISTS would

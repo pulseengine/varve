@@ -71,6 +71,11 @@ pub struct InstallOutcome {
     /// either — silence is the exact bandersnatch/Verdaccio failure this
     /// requirement exists to surface.
     pub attestation_note: Option<String>,
+    /// The source was a MIRROR and carried no line index, so the omission
+    /// check (a layer the signed index names but the source hides) could not
+    /// run against it. Reported, never silent: the install proceeds only
+    /// because this machine has local history bounding what a mirror says.
+    pub omission_check_skipped: bool,
     /// Set when this install went ahead of the machine's anti-rollback
     /// high-water mark on the strength of a digest in the project's pin
     /// (REQ-ROLLBACK-002). Carries what the caller must say out loud.
@@ -140,11 +145,11 @@ pub enum InstallError {
         why: String,
     },
     #[error(
-        "the realm's first-contact floor for line {line} could not be established: {why}. This \
-         machine has no history for the line, the realm's floor can only come from its signed \
-         line-status, and a mirror's silence cannot stand in for a primary that did not answer"
+        "first contact with line {line} needs the realm's primary: a mirror cannot prove it is \
+         current, and this machine has no history (no high-water mark, no cached line-status) to \
+         bound it"
     )]
-    FloorNotEstablished { line: String, why: String },
+    FirstContactNeedsPrimary { line: String },
     #[error(
         "layer on line {line} presents counter {presented}, below the floor of {floor} this \
          realm signs for the line — refusing.\n\n\
@@ -202,7 +207,7 @@ impl InstallError {
             InstallError::Rollback { .. }
             | InstallError::RollbackConsentRefused { .. }
             | InstallError::BelowFloor { .. }
-            | InstallError::FloorNotEstablished { .. }
+            | InstallError::FirstContactNeedsPrimary { .. }
             | InstallError::ChannelMismatch { .. }
             | InstallError::NoPlatformEntry { .. }
             | InstallError::UnnamedEntry { .. }
@@ -363,6 +368,23 @@ struct Via {
     source_is_primary: bool,
 }
 
+/// Whether this machine has ANY record of `line`: a high-water mark, or a
+/// cached line-status that verifies against the realm's root.
+fn has_local_history(
+    line: &crate::layer::Line,
+    store: &Store,
+    verifier: &dyn ManifestVerifier,
+    marks: &HighWaterMarks,
+) -> bool {
+    marks.mark(line).is_some()
+        || verifier.root_public_key().is_some_and(|root| {
+            matches!(
+                crate::linestatus::StatusCache::at_root(store.root()).load(line, root),
+                Ok(Some(_))
+            )
+        })
+}
+
 fn install_inner(
     pin: &Pin,
     source: &dyn LayerSource,
@@ -376,6 +398,23 @@ fn install_inner(
         digest_is_consent,
         source_is_primary,
     } = via;
+    // 0. FIRST CONTACT is answered only by the realm's primary. With no local
+    // history for the line (no high-water mark and no cached line-status) a
+    // mirror's answer is bounded by nothing: a lagging mirror can serve a
+    // genuine but OLD layer with a genuine but OLD status (no raised floor, a
+    // pre-demotion channel, no omission check), and this machine has nothing to
+    // notice that it is old. Asked before anything is fetched from it.
+    //
+    // WITH history a mirror's answer is accepted, bounded by the marks and the
+    // cached status below as for any source. The residual is the documented
+    // one: a machine that has installed before can be served a state no older
+    // than it last recorded — including a pre-demotion manifest whose channel
+    // still matches — but not a state older than that.
+    if !source_is_primary && !has_local_history(pin.layer.line(), store, verifier, marks) {
+        return Err(InstallError::FirstContactNeedsPrimary {
+            line: pin.layer.line().to_string(),
+        });
+    }
     // 1. Fetch.
     let layer_ref = match &pin.digest {
         Some(digest) => LayerRef::Digest(digest.clone()),
@@ -425,12 +464,16 @@ fn install_inner(
     let line_str = line.to_string();
     let index_cache = crate::lineindex::IndexCache::at_root(store.root());
     let mut index_high_water: Option<u64> = None;
+    let mut omission_check_skipped = false;
     // The verified index and the bytes it came from, held until the install
     // lands: a refused install must not leave a raised index behind, for the
     // same reason it must not burn the high-water mark.
     let mut accepted_index: Option<(crate::lineindex::LineIndex, Vec<u8>)> = None;
     if let Some(index_policy) = &policy.index {
         let envelope = source.fetch_line_index(&line_str)?;
+        // A mirror with no index leaves the omission check unable to run: that
+        // is UNKNOWN, not "nothing hidden", and it is reported (D4).
+        omission_check_skipped = !source_is_primary && envelope.is_none();
         let served = source.served_layers(&line_str)?;
         // Clause 2 needs something to compare AGAINST, and it is the cache
         // that supplies it. Passing `None` here left the whole
@@ -468,32 +511,12 @@ fn install_inner(
     let mut first_contact_floor: Option<u64> = None;
     if marks.mark(line).is_none()
         && let Some(index_policy) = &policy.index
+        && let Some(bytes) = source.fetch_line_status(&layer_ref)?
+        && let Ok(doc) =
+            crate::linestatus::LineStatus::verify_and_parse(&bytes, index_policy.root_public_key)
+        && doc.line == line_str
     {
-        let verified = source
-            .fetch_line_status(&layer_ref)?
-            .and_then(|bytes| {
-                crate::linestatus::LineStatus::verify_and_parse(
-                    &bytes,
-                    index_policy.root_public_key,
-                )
-                .ok()
-            })
-            .filter(|doc| doc.line == line_str);
-        match verified {
-            Some(doc) => first_contact_floor = doc.min_counter,
-            // The primary may omit the status (the residual stated above). A
-            // MIRROR may not: the primary did not answer, so a mirror that
-            // carries no verifiable status leaves the floor UNKNOWN.
-            None if !source_is_primary => {
-                return Err(InstallError::FloorNotEstablished {
-                    line: line_str.clone(),
-                    why: "the primary did not answer and this mirror carries no verifiable \
-                          line-status for the line"
-                        .to_string(),
-                });
-            }
-            None => {}
-        }
+        first_contact_floor = doc.min_counter;
     }
 
     // 4. Anti-rollback, before any blob moves.
@@ -722,6 +745,7 @@ fn install_inner(
         index_high_water,
         attestations_carried,
         attestation_note,
+        omission_check_skipped,
         digest_consent,
     })
 }
@@ -873,10 +897,7 @@ mod failover_class_tests {
                 pinned: "a".into(),
                 got: "b".into(),
             },
-            InstallError::FloorNotEstablished {
-                line: "l".into(),
-                why: "w".into(),
-            },
+            InstallError::FirstContactNeedsPrimary { line: "l".into() },
             InstallError::RollbackConsentRefused {
                 line: "l".into(),
                 presented: 1,
@@ -2455,6 +2476,14 @@ mod tests {
         source: &MemorySource,
         primary: bool,
     ) -> Result<InstallOutcome, InstallError> {
+        first_contact_from(f, source, primary)
+    }
+
+    fn first_contact_from(
+        f: &mut Consent,
+        source: &dyn LayerSource,
+        primary: bool,
+    ) -> Result<InstallOutcome, InstallError> {
         let pk = f.pk.clone();
         let policy = InstallPolicy {
             index: Some(crate::lineindex::IndexPolicy {
@@ -2477,59 +2506,66 @@ mod tests {
 
     // rivet: verifies REQ-MIRROR-002
     #[test]
-    fn a_mirror_with_no_status_cannot_state_the_floor_on_a_first_contact() {
-        // No mark for the line: first contact. Nothing came from the primary.
-        let mut f = consent_fixture();
-        let source = std::mem::replace(&mut f.source, MemorySource::new());
-        let err = first_contact(&mut f, &source, false).expect_err("floor unknown");
-        assert!(
-            matches!(err, InstallError::FloorNotEstablished { .. }),
-            "{err}"
-        );
-        assert!(err.to_string().contains("floor"), "{err}");
-        assert!(!err.fails_over());
-        assert!(f.store.get(&manifest_digest(&f.older)).unwrap().is_none());
-
-        // A status that does not verify is no better than none.
-        let mut f = consent_fixture();
-        let (other_sk, _) = crate::verify::generate_root_keypair();
-        let source = std::mem::replace(&mut f.source, MemorySource::new())
-            .with_line_status(&status_for("2026.07", None, &[], &other_sk));
-        let err = first_contact(&mut f, &source, false).expect_err("forged status");
-        assert!(
-            matches!(err, InstallError::FloorNotEstablished { .. }),
-            "{err}"
-        );
-
-        // Nor is a verified status for ANOTHER line.
-        let mut f = consent_fixture();
-        let source = std::mem::replace(&mut f.source, MemorySource::new())
-            .with_line_status(&status_for("2026.06", None, &[], &f.sk));
-        let err = first_contact(&mut f, &source, false).expect_err("other line");
-        assert!(
-            matches!(err, InstallError::FloorNotEstablished { .. }),
-            "{err}"
-        );
+    fn a_first_contact_is_refused_to_a_mirror_whatever_status_it_carries() {
+        // No mark and no cached status for the line: nothing bounds a mirror.
+        // Not even a genuine status that VERIFIES helps: an old one states no
+        // raised floor, and the machine cannot tell it is old.
+        for status in [
+            None,
+            Some(("2026.07", false)), // genuine, same line, states no floor
+            Some(("2026.07", true)),  // forged
+            Some(("2026.06", false)), // another line
+        ] {
+            let mut f = consent_fixture();
+            let (other_sk, _) = crate::verify::generate_root_keypair();
+            let mut source = std::mem::replace(&mut f.source, MemorySource::new());
+            if let Some((line, forged)) = status {
+                let sk = if forged { &other_sk } else { &f.sk };
+                source = source.with_line_status(&status_for(line, None, &[], sk));
+            }
+            let err = first_contact(&mut f, &source, false)
+                .expect_err("a mirror must not answer a first contact");
+            assert!(
+                matches!(err, InstallError::FirstContactNeedsPrimary { .. }),
+                "{err}"
+            );
+            assert!(
+                err.to_string()
+                    .contains("first contact with line 2026.07 needs the realm's primary"),
+                "{err}"
+            );
+            assert!(!err.fails_over(), "no other mirror can do better");
+            assert!(f.store.get(&manifest_digest(&f.older)).unwrap().is_none());
+        }
     }
 
     // rivet: verifies REQ-MIRROR-002
     #[test]
-    fn a_mirror_that_carries_a_verified_status_establishes_the_floor() {
+    fn a_mirror_is_asked_nothing_before_a_first_contact_is_refused() {
+        // The refusal comes before any fetch: a source that panics if touched.
+        struct Untouched;
+        impl LayerSource for Untouched {
+            fn fetch_manifest(&self, _: &LayerRef) -> Result<Vec<u8>, SourceError> {
+                panic!("a mirror was asked about a first contact");
+            }
+            fn fetch_blob(&self, _: &str) -> Result<Vec<u8>, SourceError> {
+                panic!("a mirror was asked about a first contact");
+            }
+        }
         let mut f = consent_fixture();
-        let source = std::mem::replace(&mut f.source, MemorySource::new())
-            .with_line_status(&status_for("2026.07", None, &[], &f.sk));
-        first_contact(&mut f, &source, false).expect("the status states the floor");
+        let err = first_contact_from(&mut f, &Untouched, false).expect_err("refused");
+        assert!(matches!(err, InstallError::FirstContactNeedsPrimary { .. }));
     }
 
     // rivet: verifies REQ-MIRROR-002
     #[test]
-    fn the_primary_keeps_the_best_effort_floor_and_a_known_line_needs_no_status() {
+    fn the_primary_answers_a_first_contact_and_history_of_either_kind_admits_a_mirror() {
         // The primary may omit the status (a stated, pre-existing residual).
         let mut f = consent_fixture();
         let source = std::mem::replace(&mut f.source, MemorySource::new());
-        first_contact(&mut f, &source, true).expect("the primary's silence is as before");
-        // A line this machine already has a mark for is not a first contact,
-        // so a mirror need not state a floor.
+        first_contact(&mut f, &source, true).expect("the primary answers a first contact");
+
+        // History as a high-water MARK admits a mirror.
         let mut f = consent_fixture();
         see_the_newer(&mut f);
         let source = std::mem::replace(&mut f.source, MemorySource::new());
@@ -2543,7 +2579,7 @@ mod tests {
             }),
             ..policy()
         };
-        install_from(
+        let outcome = install_from(
             &newer,
             &source,
             &AcceptWithRoot(&pk),
@@ -2552,7 +2588,31 @@ mod tests {
             &policy,
             false,
         )
-        .expect("not a first contact");
+        .expect("a mark is history");
+        assert!(
+            outcome.omission_check_skipped,
+            "a mirror with no index could not run the omission check"
+        );
+
+        // History as a cached LINE-STATUS alone (no mark) also admits one.
+        let mut f = consent_fixture();
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let envelope = status_for("2026.07", None, &[], &f.sk);
+        let doc = crate::linestatus::LineStatus::verify_and_parse(&envelope, &f.pk).unwrap();
+        crate::linestatus::StatusCache::at_root(f.store.root())
+            .update(&line, &envelope, &doc)
+            .unwrap();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        first_contact(&mut f, &source, false).expect("a cached status is history");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_primary_install_never_reports_a_skipped_omission_check() {
+        let mut f = consent_fixture();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let outcome = first_contact(&mut f, &source, true).unwrap();
+        assert!(!outcome.omission_check_skipped);
     }
 
     // rivet: verifies REQ-ROLLBACK-002

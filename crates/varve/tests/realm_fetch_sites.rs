@@ -30,6 +30,19 @@ const FORBIDDEN: &[&str] = &[
     "OciLayoutSource::at(",
     "Mirrors::single(",
     "Mirrors::new(",
+    // The public wrappers hard-code `source_is_primary = true`, so a realm
+    // fetch that called them would take consent and first-contact answers
+    // from a mirror. A realm fetch uses `install_from` /
+    // `install_by_digest_from` with the role `Mirrors::attempt` supplies.
+    "varve_core::install(",
+    "varve_core::install_by_digest(",
+    "install::install(",
+    "install::install_by_digest(",
+    // Turning a source STRING into a source bypasses the realm's role rules
+    // (which source is primary, which mirrors are credential-restricted).
+    "source_from_spec(",
+    // Taking "the primary" by position, by hand.
+    "sources.iter().next()",
 ];
 
 /// (file suffix, a substring of the allowed line, why it is not a realm fetch).
@@ -63,6 +76,17 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "sources.first().and_then(|p| registry_origin(p))",
         "reads only the primary's ORIGIN, to decide which mirrors are on another \
          origin; every source (primary included) is still built from the whole list",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "pub fn source_from_spec(",
+        "the definition of the one string-to-source function; callers outside \
+         this module are refused by this scan",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "source: source_from_spec(spec, platform)?,",
+        "`Mirrors::single`: the one explicit `--from` source",
     ),
     (
         "varve-core/src/mirror.rs",
@@ -358,6 +382,11 @@ fn the_scan_recognises_each_way_of_deciding_on_the_primary_alone() {
         "let a = RegistrySource::new(r);",
         "let a = OciLayoutSource::at(p);",
         "let a = DirSource::at(p);",
+        "let a = varve_core::install(&pin, s, v, st, m, p);",
+        "let a = varve_core::install_by_digest(d, s, v, st, m, p);",
+        "let a = varve_core::install::install(&pin, s, v, st, m, p);",
+        "let a = source_from_spec(spec, platform);",
+        "let a = realm.sources.iter().next();",
     ] {
         let bad = scan(&format!("fn f() {{ {shape} }}\n"));
         assert_eq!(bad.len(), 1, "{shape} must be refused: {bad:?}");

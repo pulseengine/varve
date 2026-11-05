@@ -79,6 +79,7 @@ trust-root      = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da
 # or, instead of an inline key:
 # trust-root-file = "./roots/pulseengine.pub"
 signed-index    = false                                      # default
+# mirrors       = ["oci://mirror.example/layers"]   # see "mirrors" below
 # Roots this realm used to sign with. DIAGNOSTIC ONLY — see below.
 retired-roots   = [
   { key = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973", retired = "2026-09-07", last-layer = "2026.09.1" },
@@ -88,6 +89,27 @@ retired-roots   = [
 `registry` is required even when you never contact it — an air-gapped realm still needs the field; a placeholder is legitimate. `trust-root` is what `varve pubkey` prints.
 
 `signed-index = true` declares that this realm publishes a signed line index (`varve sign-index`). Where it is set, `varve install` refuses to fall back to a source's unauthenticated listing: a missing index is an error naming the realm, and a source that hides a layer the index names is refused. Leave it `false` — the default — until the realm actually publishes one, or every install of it fails closed. Only turn it on once the index is on the registry AND in the layouts you hand out: a bare `manifests/`+`blobs/` directory cannot carry one at all.
+
+### `mirrors` — what a mirror may and may not answer
+
+```toml
+[realm.acme]
+registry = "oci://registry.example/acme/layers"   # the PRIMARY
+mirrors  = ["oci://mirror.example/acme/layers", "/srv/varve/acme-archive"]
+trust-root = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"   # ONE root, for every source
+```
+
+`mirrors` are extra places to fetch the realm's bytes from, tried in the order written after `registry` when it cannot answer. A mirror is **transport, not authority**: every manifest, blob, index and status it serves must still verify against the realm's ONE `trust-root`, so a mirror can make an install unavailable but cannot make a forged layer acceptable. A source is an `oci://` or `oci+http://` registry or an absolute directory path; any other URL scheme, and a relative path, is refused.
+
+What verification cannot show is that a mirror's copy is *current*. A lagging mirror can serve a genuine layer with a genuine but older line-status, and nothing in the bytes says it is old. So varve limits what a mirror may answer:
+
+* **A machine with no history for a line cannot install from a mirror at all.** "First contact" means no high-water mark and no cached line-status for the line; it is answered only by the realm's primary, and refused otherwise. A fresh checkout or CI runner needs the primary at least once per line.
+* **A machine that has installed from the line before** (it has a mark or a cached status) can be served by a mirror, and varve says so on stderr. What it can be served is *a state no older than what this machine last recorded*: anti-rollback and the cached status still bound it. It is **not** a promise that the state is the newest. A realm that demoted a layer's channel, raised a first-contact floor, or yanked a layer after this machine last looked can still be served stale by a lagging mirror, until the primary is reachable.
+* **Rollback consent is never taken from a mirror.** A digest pin below the mark needs the realm's line-status to say the layer is still supported; only the primary may give that, and a status taken from a mirror is never cached for it.
+* **Published corrections come only from the primary.** `varve support-horizon` refuses ("could not be established") when the primary cannot say whether a correction exists, because an older correction on a mirror could lengthen a support window. A mirror may still supply the layer bytes and baseline once the primary has answered the correction question.
+* **A mirror without a line index** cannot run the omission check (a layer the signed index names but the source hides); where history lets the install proceed, varve says the check could not run.
+
+A mirror on a different origin than the primary is also never sent your registry credential (`VARVE_REGISTRY_AUTH`), and a cleartext `oci+http://` mirror is never sent any credential.
 
 ### `retired-roots` — what it is, and emphatically what it is not
 

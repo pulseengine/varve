@@ -402,21 +402,13 @@ fn lookups_from_paths(paths: &[PathBuf], registry: &str) -> Vec<CredentialLookup
         .collect()
 }
 
-/// `use_env` is false for a source that is not the realm's primary host: the
-/// environment credential names no host, so it belongs to the host the
-/// operator configured it for, never to a mirror (REQ-MIRROR-002). Docker
-/// config entries are keyed by host and stay available to the host they name.
-fn resolve_credential(registry: &str, use_env: bool) -> CredentialLookup {
-    credential_from(
-        registry,
-        use_env,
-        std::env::var(CREDENTIAL_ENV).ok(),
-        &credential_config_paths(),
-    )
-}
-
-/// `resolve_credential` with its inputs given, so the host rule is testable
-/// without touching the process environment.
+/// The credential a registry host may use: the docker-config entry for the
+/// host, and the environment credential only if `use_env`. `use_env` is false
+/// for a source that is not the realm's primary origin: the environment
+/// credential names no host, so it belongs to the host the operator configured
+/// it for, never to a mirror (REQ-MIRROR-002). Docker config entries are keyed
+/// by host and stay available to the host they name. Inputs are arguments so
+/// the host rule is testable without touching the process environment.
 fn credential_from(
     registry: &str,
     use_env: bool,
@@ -891,12 +883,27 @@ impl RegistrySource {
 
     fn credential(&self) -> &CredentialLookup {
         self.credential.get_or_init(|| {
-            if self.withholds_all_credentials() {
-                CredentialLookup::Absent
-            } else {
-                resolve_credential(&self.reference.registry, self.offers_env_credential())
-            }
+            self.resolve(
+                std::env::var(CREDENTIAL_ENV).ok(),
+                &credential_config_paths(),
+            )
         })
+    }
+
+    /// What this source may use, given the environment credential and the
+    /// docker-config paths. Taking them as arguments keeps the host rules
+    /// testable without reading the real environment.
+    fn resolve(&self, env_value: Option<String>, config_paths: &[PathBuf]) -> CredentialLookup {
+        if self.withholds_all_credentials() {
+            CredentialLookup::Absent
+        } else {
+            credential_from(
+                &self.reference.registry,
+                self.offers_env_credential(),
+                env_value,
+                config_paths,
+            )
+        }
     }
 
     fn base(&self) -> String {
@@ -2200,21 +2207,39 @@ mod tests {
                 .withholds_all_credentials(),
             "an https mirror is restricted, not blinded: it may use its own host's config"
         );
-        // And it really resolves to no credential, even with a docker-config
-        // entry for its host.
+        // And it really resolves to no credential even with a docker-config
+        // entry for its host AND an environment credential, in a config the
+        // test controls (not the machine's).
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.json");
         std::fs::write(&config, r#"{"auths":{"ghcr.io":{"auth":"Y2k6c2VjcmV0"}}}"#).unwrap();
+        let paths = std::slice::from_ref(&config);
+        let env = || Some("ci:s3cret".to_string());
         let cleartext_mirror = http().as_mirror_of(Some("https://ghcr.io"));
+        assert!(
+            matches!(
+                cleartext_mirror.resolve(env(), paths),
+                CredentialLookup::Absent
+            ),
+            "a restricted cleartext source must hold nothing"
+        );
+        // The same lookups find a credential for a source that is allowed one,
+        // so the assertion above is not satisfied by an empty fixture.
         assert!(matches!(
-            cleartext_mirror.credential(),
-            CredentialLookup::Absent
-        ));
-        // (The https lookup against the same file does find it.)
-        assert!(matches!(
-            credential_from("ghcr.io", false, None, std::slice::from_ref(&config)),
+            https().resolve(None, paths),
             CredentialLookup::Found(_)
         ));
+        assert!(matches!(
+            http().resolve(env(), &[]),
+            CredentialLookup::Found(_)
+        ));
+        // An https mirror elsewhere has no env credential, and no config entry
+        // for ITS host.
+        let elsewhere = https().as_mirror_of(Some("https://elsewhere.example"));
+        assert!(
+            matches!(elsewhere.resolve(env(), paths), CredentialLookup::Found(_)),
+            "a restricted https source may still use its OWN host's config entry"
+        );
     }
 
     // rivet: verifies REQ-MIRROR-002

@@ -825,10 +825,6 @@ pub enum Published {
     BestEffort,
     /// Refuse: the reader will sign on the answer.
     Required,
-    /// As `Required`, and ABSENCE is refused too: the reader has already had a
-    /// source fail to answer, so "this source publishes none" cannot stand
-    /// for "none exists". Only a document actually found settles it.
-    MustBePresent,
 }
 
 /// The line-status that currently speaks for `layer`: the baseline deposited
@@ -853,8 +849,6 @@ pub fn current_line_status(
     root_pk: &[u8],
     published: Published,
 ) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
-    // `published` is shadowed below by the document itself.
-    let mode = published;
     let baseline = source
         .fetch_line_status(layer)
         .map_err(|e| LineStatusError::Payload(format!("fetching baseline line-status: {e}")))?;
@@ -867,22 +861,43 @@ pub fn current_line_status(
         source.fetch_published_line_status(&line.to_string()),
         published,
     ) {
-        (Ok(Some(doc)), _) => Some(doc),
-        (Ok(None), Published::MustBePresent) => {
-            return Err(LineStatusError::Payload(format!(
-                "this source publishes no correction for line {line}, and an earlier source \
-                 could not be asked, so whether a correction exists could not be established"
-            )));
-        }
-        (Ok(None), _) => None,
+        (Ok(doc), _) => doc,
         (Err(_), Published::BestEffort) => None,
-        (Err(e), Published::Required | Published::MustBePresent) => {
+        (Err(e), Published::Required) => {
             return Err(LineStatusError::Payload(format!(
                 "cannot tell whether a correction was published for line {line}: {e}"
             )));
         }
     };
+    select_current(baseline, published, line, root_pk)
+}
 
+/// [`current_line_status`] with the published CORRECTION supplied by the
+/// caller instead of fetched from `source`: the baseline comes from `source`,
+/// the correction from wherever the caller was entitled to take it. The
+/// support walk uses this so a correction is taken only from the realm's
+/// primary while the layer bytes and baseline may come from a mirror.
+pub fn current_line_status_with_correction(
+    source: &dyn crate::source::LayerSource,
+    layer: &crate::source::LayerRef,
+    line: &Line,
+    root_pk: &[u8],
+    correction: Option<Vec<u8>>,
+) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
+    let baseline = source
+        .fetch_line_status(layer)
+        .map_err(|e| LineStatusError::Payload(format!("fetching baseline line-status: {e}")))?;
+    select_current(baseline, correction, line, root_pk)
+}
+
+/// Verify both documents, then choose: the one that VERIFIES and carries the
+/// higher counter.
+fn select_current(
+    baseline: Option<Vec<u8>>,
+    published: Option<Vec<u8>>,
+    line: &Line,
+    root_pk: &[u8],
+) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
     // VERIFY FIRST, RANK SECOND. Both documents are untrusted bytes from the
     // party this evidence exists to constrain. Choosing by counter before
     // checking the signature would hand the choice to whoever serves the tag:
@@ -891,13 +906,7 @@ pub fn current_line_status(
     // consumer the good baseline it already had.
     let mut best: Option<(u64, Vec<u8>, LineStatus)> = None;
     let mut first_error: Option<LineStatusError> = None;
-    // Whether the PUBLISHED document is the one selected below.
-    let had_published = published.is_some();
-    let mut published_selected = false;
-    for (from_published, envelope) in [(false, baseline), (true, published)]
-        .into_iter()
-        .filter_map(|(from_published, e)| e.map(|e| (from_published, e)))
-    {
+    for envelope in [baseline, published].into_iter().flatten() {
         let doc = match LineStatus::verify_and_parse(&envelope, root_pk) {
             Ok(doc) => doc,
             Err(e) => {
@@ -918,25 +927,7 @@ pub fn current_line_status(
         }
         if best.as_ref().is_none_or(|(c, _, _)| doc.counter > *c) {
             best = Some((doc.counter, envelope, doc));
-            published_selected = from_published;
         }
-    }
-
-    // When a correction MUST be found (an earlier source could not be asked),
-    // a published envelope that is present but did not verify, covers another
-    // line, or was not the document selected has settled nothing: the
-    // baseline's window would be signed as if the correction had been read and
-    // found harmless. Refuse; only the published document itself answers.
-    if matches!(mode, Published::MustBePresent) && had_published && !published_selected {
-        let detail = first_error
-            .as_ref()
-            .map_or("it was not the newest verified document".to_string(), |e| {
-                e.to_string()
-            });
-        return Err(LineStatusError::Payload(format!(
-            "the correction published for line {line} did not verify as the line's current \
-             word ({detail}), so whether a correction exists could not be established"
-        )));
     }
 
     match best {
@@ -2801,52 +2792,17 @@ mod failover_class_tests {
 }
 
 #[cfg(test)]
-mod published_mode_tests {
+mod correction_tests {
     use super::*;
     use crate::source::{LayerRef, MemorySource};
 
-    fn doc(counter: u64, sk: &[u8]) -> Vec<u8> {
-        LineStatus {
-            min_counter: None,
-            line: "2026.10".into(),
-            counter,
-            issued_at: "2026-09-24T00:00:00Z".into(),
-            support_until: Some("2026-12-01".into()),
-            yanked: Default::default(),
-            known_problems: Vec::new(),
-        }
-        .sign(sk, "k")
-        .unwrap()
-        .into_bytes()
-    }
-
-    fn read(source: &MemorySource, pk: &[u8], mode: Published) -> Result<Option<u64>, String> {
-        let line: Line = "2026.10".parse().unwrap();
-        let layer = LayerRef::Digest("sha256:x".into());
-        current_line_status(source, &layer, &line, pk, mode)
-            .map(|found| found.map(|(_, d)| d.counter))
-            .map_err(|e| e.to_string())
-    }
-
-    // rivet: verifies REQ-MIRROR-002
-    #[test]
-    fn an_absent_correction_is_accepted_except_when_an_earlier_source_failed() {
-        let (sk, pk) = crate::verify::generate_root_keypair();
-        // A baseline, and no published correction.
-        let source = MemorySource::new().with_line_status(&doc(1, &sk));
-        assert_eq!(read(&source, &pk, Published::BestEffort), Ok(Some(1)));
-        assert_eq!(read(&source, &pk, Published::Required), Ok(Some(1)));
-        let why = read(&source, &pk, Published::MustBePresent).unwrap_err();
-        assert!(why.contains("could not be established"), "{why}");
-    }
-
-    fn doc_for(line: &str, counter: u64, sk: &[u8]) -> Vec<u8> {
+    fn doc_for(line: &str, counter: u64, until: &str, sk: &[u8]) -> Vec<u8> {
         LineStatus {
             min_counter: None,
             line: line.into(),
             counter,
             issued_at: "2026-09-24T00:00:00Z".into(),
-            support_until: Some("2026-10-24".into()),
+            support_until: Some(until.into()),
             yanked: Default::default(),
             known_problems: Vec::new(),
         }
@@ -2855,66 +2811,73 @@ mod published_mode_tests {
         .into_bytes()
     }
 
+    fn with_correction(
+        source: &MemorySource,
+        pk: &[u8],
+        correction: Option<Vec<u8>>,
+    ) -> Result<Option<(u64, Option<String>)>, String> {
+        let line: Line = "2026.10".parse().unwrap();
+        let layer = LayerRef::Digest("sha256:x".into());
+        current_line_status_with_correction(source, &layer, &line, pk, correction)
+            .map(|found| found.map(|(_, d)| (d.counter, d.support_until)))
+            .map_err(|e| e.to_string())
+    }
+
     // rivet: verifies REQ-MIRROR-002
     #[test]
-    fn a_published_envelope_that_does_not_verify_is_no_answer_when_one_must_be_found() {
+    fn the_baseline_comes_from_the_source_and_the_correction_from_the_caller() {
         let (sk, pk) = crate::verify::generate_root_keypair();
-        let (other_sk, _) = crate::verify::generate_root_keypair();
-        // Present, but signed by a key that is not the realm's.
-        let forged = MemorySource::new()
-            .with_line_status(&doc(1, &sk))
-            .with_published_line_status(&doc_for("2026.10", 2, &other_sk));
-        // The baseline still answers in the weaker modes (as before) ...
-        assert_eq!(read(&forged, &pk, Published::Required), Ok(Some(1)));
-        // ... but a present-and-unverifiable correction cannot settle absence.
-        let why = read(&forged, &pk, Published::MustBePresent).unwrap_err();
-        assert!(why.contains("could not be established"), "{why}");
-        assert!(
-            why.contains("did not verify") || why.contains("No valid"),
-            "{why}"
+        // The SOURCE also carries a published document; it is NOT consulted.
+        let source = MemorySource::new()
+            .with_line_status(&doc_for("2026.10", 1, "2026-12-01", &sk))
+            .with_published_line_status(&doc_for("2026.10", 9, "2030-01-01", &sk));
+        // No correction supplied: the baseline stands.
+        assert_eq!(
+            with_correction(&source, &pk, None),
+            Ok(Some((1, Some("2026-12-01".into()))))
+        );
+        // A verified, higher-counter correction supplied by the caller binds.
+        let c = doc_for("2026.10", 2, "2026-10-24", &sk);
+        assert_eq!(
+            with_correction(&source, &pk, Some(c)),
+            Ok(Some((2, Some("2026-10-24".into()))))
         );
     }
 
     // rivet: verifies REQ-MIRROR-002
     #[test]
-    fn a_published_envelope_for_another_line_is_no_answer_when_one_must_be_found() {
+    fn an_unverifiable_or_misdirected_correction_cannot_displace_the_baseline() {
         let (sk, pk) = crate::verify::generate_root_keypair();
-        let other_line = MemorySource::new()
-            .with_line_status(&doc(1, &sk))
-            .with_published_line_status(&doc_for("2026.09", 2, &sk));
-        assert_eq!(read(&other_line, &pk, Published::Required), Ok(Some(1)));
-        let why = read(&other_line, &pk, Published::MustBePresent).unwrap_err();
-        assert!(why.contains("could not be established"), "{why}");
-        assert!(why.contains("2026.09"), "{why}");
-    }
-
-    // rivet: verifies REQ-MIRROR-002
-    #[test]
-    fn only_the_published_document_itself_settles_it_not_a_baseline_that_outranks_it() {
-        let (sk, pk) = crate::verify::generate_root_keypair();
-        // A verified correction that the baseline outranks is not the document
-        // selected, so it is not what settled the question.
-        let outranked = MemorySource::new()
-            .with_line_status(&doc(5, &sk))
-            .with_published_line_status(&doc_for("2026.10", 2, &sk));
-        assert_eq!(read(&outranked, &pk, Published::Required), Ok(Some(5)));
-        let why = read(&outranked, &pk, Published::MustBePresent).unwrap_err();
-        assert!(why.contains("could not be established"), "{why}");
-    }
-
-    // rivet: verifies REQ-MIRROR-002
-    #[test]
-    fn a_correction_actually_found_settles_it_in_every_mode() {
-        let (sk, pk) = crate::verify::generate_root_keypair();
-        let source = MemorySource::new()
-            .with_line_status(&doc(1, &sk))
-            .with_published_line_status(&doc(2, &sk));
-        for mode in [
-            Published::BestEffort,
-            Published::Required,
-            Published::MustBePresent,
+        let (other_sk, _) = crate::verify::generate_root_keypair();
+        let source =
+            MemorySource::new().with_line_status(&doc_for("2026.10", 1, "2026-12-01", &sk));
+        // Verify first, rank second: neither a forged nor an other-line
+        // correction is chosen, however high its counter.
+        for forged in [
+            doc_for("2026.10", 99, "2026-01-01", &other_sk),
+            doc_for("2026.09", 99, "2026-01-01", &sk),
         ] {
-            assert_eq!(read(&source, &pk, mode), Ok(Some(2)));
+            assert_eq!(
+                with_correction(&source, &pk, Some(forged)),
+                Ok(Some((1, Some("2026-12-01".into()))))
+            );
         }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn nothing_at_all_is_none_and_a_bad_lone_document_is_an_error() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let (other_sk, _) = crate::verify::generate_root_keypair();
+        assert_eq!(with_correction(&MemorySource::new(), &pk, None), Ok(None));
+        let lone = doc_for("2026.10", 1, "2026-12-01", &other_sk);
+        let err = with_correction(&MemorySource::new(), &pk, Some(lone)).unwrap_err();
+        assert!(!err.is_empty(), "present but bad is a finding");
+        // A correction alone (no baseline) is usable when it verifies.
+        let c = doc_for("2026.10", 3, "2026-11-11", &sk);
+        assert_eq!(
+            with_correction(&MemorySource::new(), &pk, Some(c)),
+            Ok(Some((3, Some("2026-11-11".into()))))
+        );
     }
 }
