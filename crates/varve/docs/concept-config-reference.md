@@ -91,6 +91,8 @@ retired-roots   = [
 
 ### `retired-roots` — what it is, and emphatically what it is not
 
+`key-roles = true` (default `false`) and `delegation-file = "trust-roots/<realm>.delegation.dsse"` declare that this realm scopes its keys by role (REQ-KEYROLES-001): the root signs only a delegation, and the delegated keys sign layers and statuses. The delegation file is read relative to the realms file, like `trust-root-file`. With `key-roles = true`, a missing, unreadable or refused delegation is an error, never a fallback to root-only. `delegation-file` without `key-roles = true` is refused at load rather than ignored. These keys are recorded and checked now, but they take effect for consumers (install, status, index) in a later release step; an older varve refuses a realms file that carries them.
+
 **varve still has no key rotation.** Nothing signs "this new root replaces the old one", and no consumer would check such a statement if you produced it (`varve docs threat-model`). Changing a realm's root still means every consumer edits their own `varve-realms.toml`, and every layer signed by the old root stops verifying. `retired-roots` does not change any of that.
 
 What it changes is the **message**, never the **verdict**. Without it, a consumer whose pin was signed by the previous root sees:
