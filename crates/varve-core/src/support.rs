@@ -288,6 +288,10 @@ pub struct IncludeWindowError {
     pub include: String,
     pub realm: String,
     pub reason: String,
+    /// Whether ANOTHER source of the realm may be asked after this failure
+    /// (REQ-MIRROR-002): true where this source's bytes were unavailable or
+    /// did not verify, false for a verdict or a local failure.
+    pub retry_elsewhere: bool,
 }
 
 impl fmt::Display for IncludeWindowError {
@@ -319,12 +323,22 @@ pub fn include_window(
     digest: &str,
     realm: &str,
 ) -> Result<IncludeWindow, IncludeWindowError> {
-    window_and_includes(source, verifier, root_pk, digest, realm).map(|(w, _)| w)
+    window_and_includes(source, source, true, verifier, root_pk, digest, realm).map(|(w, _)| w)
 }
 
 /// One layer's own window, and the layers it includes.
+///
+/// The layer bytes (manifest, includes) come from `source`, which may be a
+/// mirror. The STATUS documents that decide the window, the baseline AND any
+/// published correction, come ONLY from `primary` (the realm's first source):
+/// an older document on a mirror (a lower counter, a later `support-until`)
+/// could LENGTHEN the window, and a mirror's silence proves nothing about what
+/// the primary holds. When `source` is not the primary, both are asked of the
+/// primary, and if it cannot answer the window could not be established.
 fn window_and_includes(
     source: &dyn crate::source::LayerSource,
+    primary: &dyn crate::source::LayerSource,
+    source_is_primary: bool,
     verifier: &dyn crate::install::ManifestVerifier,
     root_pk: &[u8],
     digest: &str,
@@ -334,6 +348,7 @@ fn window_and_includes(
         include: digest.to_string(),
         realm: realm.to_string(),
         reason,
+        retry_elsewhere: true,
     };
     let layer_ref = crate::source::LayerRef::Digest(digest.to_string());
     let fetched = source
@@ -352,14 +367,44 @@ fn window_and_includes(
     let includes = crate::compose::view(&payload)
         .map_err(|e| fail(format!("its includes do not read: {e}")))?
         .includes;
-    let status = crate::linestatus::current_line_status(
-        source,
-        &layer_ref,
-        manifest.layer.line(),
-        root_pk,
-        crate::linestatus::Published::Required,
-    )
-    .map_err(|e| fail(format!("layer {}: its line-status: {e}", manifest.layer)))?;
+    let line = manifest.layer.line();
+    // Every status document comes from the PRIMARY, whichever source served
+    // the layer.
+    let from_primary = |what: &str, e: crate::source::SourceError| {
+        if source_is_primary {
+            fail(format!(
+                "layer {}: cannot read {what} for line {line}: {e}",
+                manifest.layer
+            ))
+        } else {
+            // Terminal: no other mirror could answer what only the primary may.
+            IncludeWindowError {
+                retry_elsewhere: false,
+                ..fail(format!(
+                    "layer {}: the support window could not be established: status documents \
+                     (the baseline and any correction) are only taken from the realm's primary, \
+                     and it could not supply {what} for line {line} ({e})",
+                    manifest.layer
+                ))
+            }
+        }
+    };
+    let baseline = primary
+        .fetch_line_status(&layer_ref)
+        .map_err(|e| from_primary("the layer's baseline status", e))?;
+    let correction = primary
+        .fetch_published_line_status(&line.to_string())
+        .map_err(|e| from_primary("a published correction", e))?;
+    let status =
+        crate::linestatus::current_line_status_from_documents(baseline, correction, line, root_pk)
+            // A status document the PRIMARY served that does not verify (or
+            // covers another line) is the primary's verdict, and TERMINAL:
+            // asking a mirror for the layer would only re-read the same primary
+            // documents and reach the same refusal.
+            .map_err(|e| IncludeWindowError {
+                retry_elsewhere: false,
+                ..fail(format!("layer {}: its line-status: {e}", manifest.layer))
+            })?;
     Ok((
         IncludeWindow {
             layer: manifest.layer.to_string(),
@@ -371,10 +416,23 @@ fn window_and_includes(
     ))
 }
 
+/// Where a realm's layers come from.
+pub enum RealmSource<'a> {
+    /// One source, taken as it is.
+    Single(&'a dyn crate::source::LayerSource),
+    /// The realm's sources, primary then mirrors. The walk reads each layer
+    /// from ONE source at a time, verifying everything it needs from that
+    /// source, and moves to the next only when this one could not supply a
+    /// verifiable answer (REQ-MIRROR-002). One source serving a coherent set
+    /// is what keeps "this source has no correction" from being confused with
+    /// "an unreachable source might have had one".
+    Failover(&'a crate::mirror::Mirrors),
+}
+
 /// One realm, as the transitive window walk needs it: where its layers are
 /// served from, what verifies them, and the root its line-status is signed by.
 pub struct RealmView<'a> {
-    pub source: &'a dyn crate::source::LayerSource,
+    pub source: RealmSource<'a>,
     pub verifier: &'a dyn crate::install::ManifestVerifier,
     pub root: &'a [u8],
 }
@@ -424,6 +482,7 @@ fn deep_window(
         include: digest.to_string(),
         realm: realm.to_string(),
         reason,
+        retry_elsewhere: false,
     };
     if depth > MAX_INCLUDE_DEPTH {
         return Err(fail(format!(
@@ -439,7 +498,38 @@ fn deep_window(
         )));
     }
     let view = access.open(realm).map_err(fail)?;
-    let (own, nested) = window_and_includes(view.source, view.verifier, view.root, digest, realm)?;
+    let (own, nested) = match view.source {
+        RealmSource::Single(source) => window_and_includes(
+            source,
+            source,
+            true,
+            view.verifier,
+            view.root,
+            digest,
+            realm,
+        )?,
+        RealmSource::Failover(sources) => {
+            let primary = sources
+                .primary()
+                .ok_or_else(|| fail("this realm declares no sources at all".to_string()))?;
+            sources
+                .attempt(
+                    |source, is_primary| {
+                        window_and_includes(
+                            source,
+                            primary,
+                            is_primary,
+                            view.verifier,
+                            view.root,
+                            digest,
+                            realm,
+                        )
+                    },
+                    |e| e.retry_elsewhere,
+                )
+                .map_err(|failures| all_sources_failed(digest, realm, failures))?
+        }
+    };
     let mut best = own;
     for inc in nested {
         // An include naming no realm is in the including layer's realm.
@@ -449,6 +539,34 @@ fn deep_window(
     }
     seen.insert(key, best.clone());
     Ok(best)
+}
+
+/// The error for an include no source of its realm could supply a verifiable
+/// window for. A terminal failure stands alone; one source keeps its own
+/// error; several are listed in the order tried.
+fn all_sources_failed(
+    digest: &str,
+    realm: &str,
+    mut failures: Vec<(String, IncludeWindowError)>,
+) -> IncludeWindowError {
+    let terminal = failures.last().is_some_and(|(_, e)| !e.retry_elsewhere);
+    if terminal || failures.len() == 1 {
+        return failures.pop().expect("a failed attempt has a failure").1;
+    }
+    let listing = failures
+        .iter()
+        .map(|(label, e)| format!("\n  {label}: {}", e.reason))
+        .collect::<String>();
+    IncludeWindowError {
+        include: digest.to_string(),
+        realm: realm.to_string(),
+        reason: format!(
+            "no source of the realm supplied a verifiable window. Tried {} source(s) in \
+             order:{listing}",
+            failures.len()
+        ),
+        retry_elsewhere: false,
+    }
 }
 
 /// The earlier of two windows, compared as DATES. A window that is not
@@ -977,7 +1095,7 @@ mod tests {
                     other => return Err(format!("realm '{other}' is not defined here")),
                 };
                 Ok(RealmView {
-                    source,
+                    source: RealmSource::Single(source),
                     verifier: &AcceptAll,
                     root: &self.pk,
                 })
@@ -1033,7 +1151,7 @@ mod tests {
         impl RealmAccess for OneRealm {
             fn open(&self, _: &str) -> Result<RealmView<'_>, String> {
                 Ok(RealmView {
-                    source: &self.source,
+                    source: RealmSource::Single(&self.source),
                     verifier: &AcceptAll,
                     root: &self.pk,
                 })
@@ -1378,6 +1496,344 @@ mod tests {
             assert!(
                 include_window(&source, &RejectAll, &pk, &manifest_digest(&bytes), "wasm").is_err()
             );
+        }
+    }
+
+    /// REQ-MIRROR-002: the walk reads each layer from ONE source at a time.
+    mod mirrored {
+        use super::super::*;
+        use crate::install::{ManifestVerifier, VerifyError};
+        use crate::linestatus::LineStatus;
+        use crate::manifest::fixtures::manifest_with_tools;
+        use crate::mirror::{Mirror, Mirrors};
+        use crate::source::MemorySource;
+        use crate::store::manifest_digest;
+        use crate::verify::generate_root_keypair;
+        use std::cell::Cell;
+
+        /// Rejects the first manifest it is shown, accepts every later one: the
+        /// first source (the primary) served bytes that fail the root.
+        struct RejectsFirst(Cell<bool>);
+        impl ManifestVerifier for RejectsFirst {
+            fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {
+                if self.0.replace(true) {
+                    Ok(fetched.to_vec())
+                } else {
+                    Err(VerifyError("No valid signatures (test)".into()))
+                }
+            }
+        }
+
+        struct Realm<'a> {
+            mirrors: &'a Mirrors,
+            verifier: &'a dyn ManifestVerifier,
+            pk: &'a [u8],
+        }
+        impl RealmAccess for Realm<'_> {
+            fn open(&self, _: &str) -> Result<RealmView<'_>, String> {
+                Ok(RealmView {
+                    source: RealmSource::Failover(self.mirrors),
+                    verifier: self.verifier,
+                    root: self.pk,
+                })
+            }
+        }
+
+        fn status_doc(until: &str, sk: &[u8], counter: u64) -> Vec<u8> {
+            LineStatus {
+                min_counter: None,
+                line: "2026.10".into(),
+                counter,
+                issued_at: "2026-09-24T00:00:00Z".into(),
+                support_until: Some(until.into()),
+                yanked: Default::default(),
+                known_problems: Vec::new(),
+            }
+            .sign(sk, "k")
+            .unwrap()
+            .into_bytes()
+        }
+
+        fn mirror(label: &str, source: MemorySource) -> Mirror {
+            Mirror {
+                label: label.into(),
+                source: Box::new(source),
+            }
+        }
+
+        /// The primary's manifest fails the root (it is asked FIRST and
+        /// rejected) but its STATUS documents are good; the mirror carries the
+        /// layer and a baseline of its own. Every status document that decides
+        /// the window must be the PRIMARY's, whatever the mirror carries.
+        fn window_with(
+            primary_baseline: Option<(&str, u64)>,
+            primary_correction: Option<(&str, u64)>,
+            mirror_baseline: Option<(&str, u64)>,
+            mirror_correction: Option<(&str, u64)>,
+        ) -> (Result<IncludeWindow, String>, Mirrors) {
+            let (sk, pk) = generate_root_keypair();
+            let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
+            let digest = manifest_digest(&bytes);
+            let carry = |mut source: MemorySource,
+                         baseline: Option<(&str, u64)>,
+                         correction: Option<(&str, u64)>| {
+                if let Some((until, counter)) = baseline {
+                    source = source.with_line_status(&status_doc(until, &sk, counter));
+                }
+                if let Some((until, counter)) = correction {
+                    source = source.with_published_line_status(&status_doc(until, &sk, counter));
+                }
+                source
+            };
+            let primary = carry(
+                MemorySource::new().with_manifest(&bytes),
+                primary_baseline,
+                primary_correction,
+            );
+            let second = carry(
+                MemorySource::new().with_manifest(&bytes),
+                mirror_baseline,
+                mirror_correction,
+            );
+            let mirrors = Mirrors::new(vec![mirror("primary", primary), mirror("mirror", second)]);
+            let verifier = RejectsFirst(Cell::new(false));
+            let r = {
+                let realm = Realm {
+                    mirrors: &mirrors,
+                    verifier: &verifier,
+                    pk: &pk,
+                };
+                include_window_deep(&realm, &digest, "acme").map_err(|e| e.to_string())
+            };
+            (r, mirrors)
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn the_layer_may_come_from_a_mirror_but_the_window_is_the_primarys() {
+            // The mirror's baseline (#1, the LATER date) must not outrank the
+            // primary's (#5, earlier): an older mirror baseline would lengthen
+            // the window signed.
+            let (w, mirrors) =
+                window_with(Some(("2026-11-20", 5)), None, Some(("2026-12-01", 1)), None);
+            assert_eq!(
+                w.unwrap().support_until.as_deref(),
+                Some("2026-11-20"),
+                "the primary's baseline decides"
+            );
+            assert_eq!(mirrors.served_by().as_deref(), Some("mirror"));
+            // The primary's correction (a higher counter) binds, too.
+            let (w, _) = window_with(
+                Some(("2026-11-20", 5)),
+                Some(("2026-11-15", 6)),
+                Some(("2026-12-01", 1)),
+                None,
+            );
+            assert_eq!(w.unwrap().support_until.as_deref(), Some("2026-11-15"));
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn nothing_a_mirror_holds_about_status_is_ever_used() {
+            // A mirror's correction (older, later date) and baseline are both
+            // ignored; the primary's baseline stands.
+            let (w, _) = window_with(
+                Some(("2026-11-20", 5)),
+                None,
+                Some(("2027-06-01", 9)),
+                Some(("2027-06-01", 9)),
+            );
+            assert_eq!(w.unwrap().support_until.as_deref(), Some("2026-11-20"));
+            // And a primary that states NO baseline leaves the window unstated
+            // (the include is then refused downstream), however much the
+            // mirror would be willing to state.
+            let (w, _) = window_with(None, None, Some(("2027-06-01", 9)), None);
+            assert_eq!(w.unwrap().support_until, None);
+        }
+
+        /// A primary that cannot be reached at all.
+        struct Down;
+        impl crate::source::LayerSource for Down {
+            fn fetch_manifest(
+                &self,
+                _: &crate::source::LayerRef,
+            ) -> Result<Vec<u8>, crate::source::SourceError> {
+                Err(crate::source::SourceError::Transport("down".into()))
+            }
+            fn fetch_blob(&self, _: &str) -> Result<Vec<u8>, crate::source::SourceError> {
+                Err(crate::source::SourceError::Transport("down".into()))
+            }
+            fn fetch_published_line_status(
+                &self,
+                _: &str,
+            ) -> Result<Option<Vec<u8>>, crate::source::SourceError> {
+                Err(crate::source::SourceError::Transport("down".into()))
+            }
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn a_primary_status_that_does_not_verify_is_terminal_not_retried_on_a_mirror() {
+            let (sk, pk) = generate_root_keypair();
+            let (other_sk, _) = generate_root_keypair();
+            let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
+            let digest = manifest_digest(&bytes);
+            // The primary's manifest is rejected FIRST (so the walk reaches the
+            // mirror) and its baseline is signed by the wrong key.
+            let primary = MemorySource::new()
+                .with_manifest(&bytes)
+                .with_line_status(&status_doc("2026-11-20", &other_sk, 5));
+            let second = MemorySource::new()
+                .with_manifest(&bytes)
+                .with_line_status(&status_doc("2026-12-01", &sk, 1));
+            let mirrors = Mirrors::new(vec![mirror("primary", primary), mirror("mirror", second)]);
+            let verifier = RejectsFirst(Cell::new(false));
+            let realm = Realm {
+                mirrors: &mirrors,
+                verifier: &verifier,
+                pk: &pk,
+            };
+            let err = include_window_deep(&realm, &digest, "acme")
+                .expect_err("the primary's status is unverifiable");
+            assert!(!err.retry_elsewhere);
+            assert!(!err.to_string().contains("Tried"), "{err}");
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn when_the_primary_cannot_answer_for_corrections_the_window_is_not_established() {
+            let (sk, pk) = generate_root_keypair();
+            let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
+            let digest = manifest_digest(&bytes);
+            // The mirror carries the layer, a baseline AND a correction.
+            let second = MemorySource::new()
+                .with_manifest(&bytes)
+                .with_line_status(&status_doc("2026-12-01", &sk, 1))
+                .with_published_line_status(&status_doc("2026-10-24", &sk, 2));
+            let mirrors = Mirrors::new(vec![
+                Mirror {
+                    label: "primary".into(),
+                    source: Box::new(Down),
+                },
+                mirror("mirror", second),
+            ]);
+            let realm = Realm {
+                mirrors: &mirrors,
+                verifier: &RejectsNone,
+                pk: &pk,
+            };
+            let err = include_window_deep(&realm, &digest, "acme")
+                .expect_err("a mirror cannot stand in for the primary's corrections");
+            let text = err.to_string();
+            assert!(text.contains("could not be established"), "{text}");
+            assert!(
+                text.contains("only taken from the realm's primary"),
+                "{text}"
+            );
+            assert!(!err.retry_elsewhere);
+            // Terminal: it stands ALONE, not folded into a list of attempts.
+            assert!(!text.contains("Tried"), "{text}");
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn a_primary_that_answers_no_correction_establishes_absence_for_itself() {
+            let (sk, pk) = generate_root_keypair();
+            let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
+            let digest = manifest_digest(&bytes);
+            let mirrors = Mirrors::new(vec![mirror(
+                "primary",
+                MemorySource::new()
+                    .with_manifest(&bytes)
+                    .with_line_status(&status_doc("2026-11-20", &sk, 1)),
+            )]);
+            let realm = Realm {
+                mirrors: &mirrors,
+                verifier: &RejectsNone,
+                pk: &pk,
+            };
+            let w = include_window_deep(&realm, &digest, "acme").unwrap();
+            assert_eq!(w.support_until.as_deref(), Some("2026-11-20"));
+        }
+
+        struct RejectsNone;
+        impl ManifestVerifier for RejectsNone {
+            fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {
+                Ok(fetched.to_vec())
+            }
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn when_every_source_fails_the_error_lists_each_in_order() {
+            let (_sk, pk) = generate_root_keypair();
+            let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
+            let digest = manifest_digest(&bytes);
+            let mirrors = Mirrors::new(vec![
+                mirror("primary", MemorySource::new().with_manifest(&bytes)),
+                mirror("mirror", MemorySource::new().with_manifest(&bytes)),
+            ]);
+            struct RejectAll;
+            impl ManifestVerifier for RejectAll {
+                fn verify(&self, _: &[u8]) -> Result<Vec<u8>, VerifyError> {
+                    Err(VerifyError("forged (test)".into()))
+                }
+            }
+            let realm = Realm {
+                mirrors: &mirrors,
+                verifier: &RejectAll,
+                pk: &pk,
+            };
+            let err = include_window_deep(&realm, &digest, "acme").unwrap_err();
+            let text = err.to_string();
+            let (p, m) = (text.find("primary"), text.find("mirror"));
+            assert!(p.is_some() && m.is_some() && p < m, "{text}");
+            assert!(text.contains("forged (test)"), "{text}");
+        }
+
+        fn failure(reason: &str, retry: bool) -> IncludeWindowError {
+            IncludeWindowError {
+                include: "sha256:x".into(),
+                realm: "acme".into(),
+                reason: reason.into(),
+                retry_elsewhere: retry,
+            }
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn a_terminal_failure_stands_alone_and_one_source_keeps_its_own_error() {
+            let terminal = all_sources_failed(
+                "sha256:x",
+                "acme",
+                vec![
+                    ("a".into(), failure("down", true)),
+                    ("b".into(), failure("verdict", false)),
+                ],
+            );
+            assert_eq!(terminal.reason, "verdict");
+            let single = all_sources_failed(
+                "sha256:x",
+                "acme",
+                vec![("a".into(), failure("down", true))],
+            );
+            assert_eq!(single.reason, "down");
+            let many = all_sources_failed(
+                "sha256:x",
+                "acme",
+                vec![
+                    ("a".into(), failure("down", true)),
+                    ("b".into(), failure("also down", true)),
+                ],
+            );
+            assert!(
+                many.reason.contains("a: down")
+                    && many.reason.contains("b: also down")
+                    && many.reason.contains("2 source(s)"),
+                "{}",
+                many.reason
+            );
+            assert!(!many.retry_elsewhere);
         }
     }
 }

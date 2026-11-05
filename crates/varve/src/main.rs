@@ -2116,27 +2116,43 @@ fn composition_for_export(
 /// The realms this checkout's varve-realms.toml defines, each with its source
 /// and verifier, for walking a composition across realms.
 struct DefinedRealms {
-    realms: std::collections::BTreeMap<
-        String,
-        (
-            varve_core::RegistrySource,
-            varve_core::PinnedKeyVerifier,
-            Vec<u8>,
-        ),
-    >,
+    /// Per realm: its sources, verifier and root, or why THIS realm cannot be
+    /// used. A bad mirror spec, an unreadable root, an unresolvable entry
+    /// breaks the realm it belongs to and says so when that realm is walked;
+    /// it does not stop `support-horizon` for every other realm.
+    realms: std::collections::BTreeMap<String, Result<DefinedRealm, String>>,
 }
+
+/// One usable realm: its sources, what verifies its manifests, its root.
+type DefinedRealm = (
+    varve_core::mirror::Mirrors,
+    varve_core::PinnedKeyVerifier,
+    Vec<u8>,
+);
 
 impl DefinedRealms {
     fn open(cwd: &std::path::Path) -> anyhow::Result<Self> {
         let mut realms = std::collections::BTreeMap::new();
         if let Ok(names) = varve_core::realm::realm_names(cwd) {
             for name in names {
-                let realm = varve_core::resolve_realm(cwd, &name)?;
-                let source = varve_core::RegistrySource::parse(&realm.registry)?;
-                let verifier =
-                    varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                realms.insert(name, (source, verifier, realm.trust_root.clone()));
+                let built = (|| -> anyhow::Result<_> {
+                    let realm = varve_core::resolve_realm(cwd, &name)?;
+                    // Primary then mirrors (REQ-MIRROR-002): a down primary must
+                    // not fail a realm that declares working mirrors.
+                    let source = varve_core::mirror::Mirrors::for_realm(
+                        &realm.name,
+                        &realm.sources,
+                        &varve_core::host_platform(),
+                    )?;
+                    let verifier =
+                        varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
+                            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    Ok((source, verifier, realm.trust_root.clone()))
+                })();
+                realms.insert(
+                    name.clone(),
+                    built.map_err(|e| format!("realm '{name}' cannot be used: {e:#}")),
+                );
             }
         }
         Ok(DefinedRealms { realms })
@@ -2145,18 +2161,94 @@ impl DefinedRealms {
 
 impl varve_core::support::RealmAccess for DefinedRealms {
     fn open(&self, realm: &str) -> Result<varve_core::support::RealmView<'_>, String> {
-        let (source, verifier, root) = self.realms.get(realm).ok_or_else(|| {
+        let entry = self.realms.get(realm).ok_or_else(|| {
             format!(
                 "names realm '{realm}', which is not defined in this checkout's \
                  varve-realms.toml, so no root here can vouch for its support window"
             )
         })?;
+        let (sources, verifier, root) = entry.as_ref().map_err(Clone::clone)?;
         Ok(varve_core::support::RealmView {
-            source,
+            source: varve_core::support::RealmSource::Failover(sources),
             verifier,
             root,
         })
     }
+}
+
+/// Say, when a MIRROR (not the primary) answered an install, what bounded its
+/// answer and what could not be checked against it. A mirror is accepted only
+/// because this machine has history for the line: its state may lag the
+/// primary's, but it is not older than what was already recorded.
+/// `recorded` names that history ("high-water mark #3", "its cached
+/// line-status").
+fn note_mirror_acceptance(
+    sources: &varve_core::mirror::Mirrors,
+    line: &varve_core::Line,
+    recorded: &str,
+    omission_check_skipped: Option<varve_core::OmissionSkipped>,
+) {
+    let (Some(served), Some(primary)) = (sources.served_by(), sources.labels().first().copied())
+    else {
+        return;
+    };
+    if served == primary {
+        return;
+    }
+    eprintln!(
+        "note: a mirror's state may lag the primary's; {served} was accepted because it is not \
+         older than what this machine has already recorded for line {line} ({recorded})."
+    );
+    if let Some(why) = omission_check_skipped {
+        let because = match why {
+            varve_core::OmissionSkipped::NoIndex => "it carries no line index",
+            varve_core::OmissionSkipped::CannotEnumerate => {
+                "it carries an index but cannot list the layers it serves, so there is nothing \
+                 to compare the index with"
+            }
+        };
+        eprintln!(
+            "note: the omission check could not run against the mirror {served}: {because}, so a \
+             layer the realm's signed index names could be hidden from this answer."
+        );
+    }
+}
+
+/// The error for a realm whose sources did not produce an answer.
+///
+/// A TERMINAL failure (a verified verdict such as a rollback refusal, or a
+/// local error) is returned on its own, unchanged: it is the answer, and the
+/// sources that came before it merely did not answer. Otherwise a single
+/// source keeps its own error, and several are listed in the order tried so
+/// an operator sees that the mirror was asked and what it said.
+fn sources_failed(
+    realm: &str,
+    mut failures: Vec<(String, varve_core::InstallError)>,
+) -> anyhow::Error {
+    let terminal = failures.last().is_some_and(|(_, e)| !e.fails_over());
+    if terminal || failures.len() == 1 {
+        let several = failures.len() > 1;
+        let (label, e) = failures.pop().expect("a failed attempt has a failure");
+        let e = anyhow::Error::new(e);
+        // A verdict reached on a LATER source says which one produced it, so
+        // it is not mistaken for the primary's.
+        return if several {
+            e.context(format!(
+                "(the verdict of {label}, after earlier sources failed)"
+            ))
+        } else {
+            e
+        };
+    }
+    let listing = failures
+        .iter()
+        .map(|(label, e)| format!("\n  {label}: {e}"))
+        .collect::<String>();
+    anyhow::anyhow!(
+        "no source of realm '{realm}' supplied a layer that verifies against the realm's trust \
+         root. Tried {} source(s) in order:{listing}",
+        failures.len()
+    )
 }
 
 fn realm_roots(
@@ -3736,6 +3828,7 @@ fn support_horizon(
 fn fetch_included_layer(
     ctx: &ProjectCtx,
     digest: &str,
+    layer: Option<&str>,
     realm_name: &str,
     platform: &str,
     now: &str,
@@ -3758,7 +3851,19 @@ fn fetch_included_layer(
     // realm 'pulseengine'" and succeeded, and the very next command said the
     // layer was not installed, because the composition walk looks for siblings.
     let store = Store::at(realm.effective_root(&ctx.base_root));
-    let source = varve_core::RegistrySource::parse(&realm.registry)?;
+    let sources = varve_core::mirror::Mirrors::for_realm(&realm.name, &realm.sources, platform)?;
+    // The line this digest should turn out to be, from the include that named
+    // it: a mirror is refused a first contact BEFORE it is contacted, and a
+    // digest alone names no line.
+    let expected_line: Result<varve_core::Line, String> = match layer {
+        None => Err("the include names no layer".to_string()),
+        Some(name) => name
+            .parse::<varve_core::LayerId>()
+            .map(|id| id.line().clone())
+            .map_err(|e| {
+                format!("the include's layer name {name:?} is not a valid layer id ({e})")
+            }),
+    };
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let index = Some(varve_core::IndexPolicy {
         realm: &realm.name,
@@ -3771,8 +3876,34 @@ fn fetch_included_layer(
         staleness_threshold_days: 90,
         platform,
     };
-    let outcome =
-        varve_core::install_by_digest(digest, &source, &verifier, &store, &mut marks, &policy)?;
+    let outcome = sources
+        .attempt(
+            |source, is_primary| {
+                varve_core::install_by_digest_from(
+                    digest,
+                    source,
+                    &verifier,
+                    &store,
+                    &mut marks,
+                    &policy,
+                    if is_primary {
+                        varve_core::DigestRole::Primary
+                    } else {
+                        varve_core::DigestRole::Mirror {
+                            expected_line: expected_line.as_ref().map_err(String::clone),
+                        }
+                    },
+                )
+            },
+            varve_core::InstallError::fails_over,
+        )
+        .map_err(|failures| sources_failed(&realm.name, failures))?;
+    note_mirror_acceptance(
+        &sources,
+        outcome.layer.line(),
+        "this machine's local history for the line",
+        outcome.omission_check_skipped,
+    );
     store
         .get(&outcome.digest)?
         .context("the fetched layer is not in the store it was installed into")
@@ -3796,8 +3927,6 @@ fn fetch_included_layer(
 /// Nothing is written: not the pin, not the store, not the high-water mark.
 /// Asking what would change must never be what changes it (clause 4).
 fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
-    // The fetch methods are on the source TRAIT, not the concrete registry.
-    use varve_core::LayerSource;
     let ctx = project_ctx(store)?;
     let pinned = &ctx.pin.layer;
     let line = pinned.line().to_string();
@@ -3827,9 +3956,11 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let source = varve_core::RegistrySource::parse(&realm.registry)?;
-    let envelope = source.fetch_line_index(&line)?;
-    let served = source.served_layers(&line)?;
+    let sources = varve_core::mirror::Mirrors::for_realm(
+        &realm.name,
+        &realm.sources,
+        &varve_core::host_platform(),
+    )?;
     let cached = varve_core::IndexCache::at_root(ctx.store.root()).load(&line)?;
     let policy = varve_core::IndexPolicy {
         realm: &realm.name,
@@ -3839,13 +3970,42 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
     // The same `check` the install path runs, so the two cannot disagree about
     // what a valid index is. It verifies against the realm root, refuses a
     // counter regression, and reports a layer the source declines to serve.
-    let verified = varve_core::lineindex::check(
-        &line,
-        envelope.as_deref(),
-        served.as_deref(),
-        cached.as_ref(),
-        &policy,
-    )?;
+    //
+    // Per source, fetch AND check: an index a mirror serves that the realm's
+    // root did not sign is refused and the next source is asked
+    // (REQ-MIRROR-002 clause 2).
+    let verified = sources
+        .attempt_some(
+            |source, is_primary| -> Result<_, varve_core::InstallError> {
+                // With no cached index this machine has nothing to bound a
+                // mirror's answer by: "nothing newer" from a mirror could be
+                // an old index, and is not an answer.
+                if !is_primary && cached.is_none() {
+                    return Err(varve_core::InstallError::IndexFirstContactNeedsPrimary {
+                        line: line.clone(),
+                    });
+                }
+                let envelope = source.fetch_line_index(&line)?;
+                let served = source.served_layers(&line)?;
+                Ok(varve_core::lineindex::check(
+                    &line,
+                    envelope.as_deref(),
+                    served.as_deref(),
+                    cached.as_ref(),
+                    &policy,
+                )?)
+            },
+            varve_core::InstallError::fails_over,
+        )
+        .map_err(|failures| {
+            // `attempt_some` errors when a source failed to answer, including
+            // when others answered "none": absence is then UNKNOWN, and is
+            // said so rather than reported as "publishes no index".
+            sources_failed(&realm.name, failures).context(format!(
+                "whether realm '{}' has a newer layer for line {line} could not be established",
+                realm.name
+            ))
+        })?;
 
     let Some(index) = verified else {
         let msg = format!(
@@ -3937,37 +4097,21 @@ fn install(
 ) -> anyhow::Result<()> {
     let platform = platform.unwrap_or_else(varve_core::host_platform);
     let ctx = project_ctx(store)?;
-    let from = match (from, &ctx.realm) {
-        (Some(explicit), _) => explicit.to_string(),
-        (None, Some(realm)) => realm.registry.clone(),
+    // The sources: an explicit `--from` is one source the operator chose, which
+    // overrides the realm's list; otherwise the realm's own, primary first and
+    // then its mirrors in the order written (REQ-MIRROR-002 clause 1).
+    let sources = match (from, &ctx.realm) {
+        (Some(explicit), _) => varve_core::mirror::Mirrors::single(explicit, &platform)?,
+        (None, Some(realm)) => {
+            varve_core::mirror::Mirrors::for_realm(&realm.name, &realm.sources, &platform)?
+        }
         (None, None) => {
             bail!("no source: pass --from, or name a realm in the pin so its registry applies")
         }
     };
-    let from = from.as_str();
     let pin = &ctx.pin;
     let verifier = ctx_verifier(&ctx)?;
     let store = &ctx.store;
-    // Auto-detect the source shape: an oci:// registry reference, a standard
-    // OCI image layout (the `varve archive`/`deposit` output), or the plain
-    // manifests/+blobs/ directory. Either way the same pipeline and the same
-    // trust root decide — the source shape changes availability, never
-    // acceptance.
-    let source: Box<dyn varve_core::LayerSource> =
-        if from.starts_with("oci://") || from.starts_with("oci+http://") {
-            Box::new(varve_core::RegistrySource::parse(from)?)
-        } else {
-            let path = std::path::Path::new(from);
-            if path.join("oci-layout").is_file() {
-                // Tell the layout which platform we want, so a payload it does
-                // not carry is reported as the single-platform archive it is
-                // rather than as a bare missing digest (varve#80).
-                Box::new(varve_core::OciLayoutSource::at(path).for_platform(&platform))
-            } else {
-                Box::new(varve_core::DirSource::at(path))
-            }
-        };
-    let source = &*source;
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let now = today_rfc3339();
     // The realm's line-index obligation (REQ-INDEXAUTH-001). The realm is
@@ -3988,9 +4132,28 @@ fn install(
         staleness_threshold_days: 90,
         platform: &platform,
     };
-    let outcome = match varve_core::install(pin, source, &verifier, store, &mut marks, &policy) {
+    // Fetch AND verify against each source in turn: bytes that fail the realm's
+    // root are refused and the next source is asked, never accepted on a
+    // mirror's say-so (REQ-MIRROR-002 clause 2). With one source this is the
+    // plain install and its error is returned unchanged.
+    let prior_mark = marks.mark(pin.layer.line());
+    let installed = sources.attempt(
+        |source, is_primary| {
+            varve_core::install_from(
+                pin, source, &verifier, store, &mut marks, &policy, is_primary,
+            )
+        },
+        varve_core::InstallError::fails_over,
+    );
+    let outcome = match installed {
         Ok(outcome) => outcome,
-        Err(e) => {
+        Err(failures) => {
+            let realm = ctx.realm.as_ref().map_or("-", |r| r.name.as_str());
+            // The source that produced the failing verdict (the last one
+            // asked), not whichever answers a fresh fetch: the diagnosis must
+            // be about the bytes that failed.
+            let failing_source = failures.last().map(|(label, _)| label.clone());
+            let e: anyhow::Error = sources_failed(realm, failures);
             // REQ-ROTATE-002 clause 3. "No valid signatures" is
             // indistinguishable from a forgery by a stranger, and the one
             // thing the consumer cannot deduce is which they are looking at.
@@ -4004,16 +4167,28 @@ fn install(
             // one.
             if let Some(realm) = ctx.realm.as_ref()
                 && !realm.retired_roots.is_empty()
+                && let Some(failing) = failing_source
+                    .as_deref()
+                    .and_then(|label| sources.source_for_label(label))
                 && let Ok(bytes) =
-                    source.fetch_manifest(&varve_core::source::LayerRef::Name(pin.layer.clone()))
+                    failing.fetch_manifest(&varve_core::source::LayerRef::Name(pin.layer.clone()))
                 && let Some(why) =
                     realm.explain_retired_signature(&bytes, varve_core::verify::LAYER_PAYLOAD_TYPE)
             {
-                return Err(anyhow::Error::new(e).context(why));
+                return Err(e.context(why));
             }
-            return Err(e.into());
+            return Err(e);
         }
     };
+    note_mirror_acceptance(
+        &sources,
+        pin.layer.line(),
+        &match prior_mark {
+            Some(mark) => format!("high-water mark #{mark}"),
+            None => "its cached line-status".to_string(),
+        },
+        outcome.omission_check_skipped,
+    );
     // Clause 4: REPORT what the realm asserts the line contains, beside what
     // this install accepted. Reported and NOT enforced, deliberately — raising
     // the anti-rollback mark to the newest counter that merely EXISTS would
@@ -4144,7 +4319,14 @@ fn install(
                         continue;
                     }
                 };
-                match fetch_included_layer(&ctx, &inc.digest, &realm_name, &platform, &now) {
+                match fetch_included_layer(
+                    &ctx,
+                    &inc.digest,
+                    inc.layer.as_deref(),
+                    &realm_name,
+                    &platform,
+                    &now,
+                ) {
                     Ok(entry) => {
                         println!(
                             "  fetched composed layer {} from realm '{realm_name}'",
@@ -4215,13 +4397,46 @@ fn install(
         None => varve_core::LayerRef::Name(pin.layer.clone()),
     };
     let root_pk = ctx_root_bytes(&ctx)?;
-    match varve_core::cache_baseline_line_status(source, &layer_ref, &line, &root_pk, store.root())
-    {
+    // ONLY the realm's PRIMARY may supply the status that is cached
+    // (REQ-MIRROR-002). The cache is what a later digest-pinned install reads
+    // as rollback CONSENT, so a status taken from a mirror (which may lag a
+    // yank) would launder the mirror's word into a consent it could not give
+    // directly. A mirror is asked for nothing here; if the primary could not
+    // be reached, no baseline is cached and that is said.
+    //
+    // Only a failure of THAT source's document is a note. A verified verdict
+    // (a counter regression against the cache) or a local error stops here.
+    match sources.attempt_some(
+        |source, is_primary| {
+            if !is_primary {
+                return Ok(None);
+            }
+            varve_core::cache_baseline_line_status(
+                source,
+                &layer_ref,
+                &line,
+                &root_pk,
+                store.root(),
+            )
+        },
+        varve_core::LineStatusError::fails_over,
+    ) {
         Ok(Some(counter)) => {
             println!("cached baseline line-status #{counter} for line {line}");
         }
         Ok(None) => {}
-        Err(e) => eprintln!("note: layer carried a line-status but it was not cached: {e}"),
+        Err(failures) => {
+            let why = failures
+                .iter()
+                .map(|(label, e)| format!("{label}: {e}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            eprintln!(
+                "note: no baseline line-status was cached: only the realm's primary may \
+                 supply one (a mirror's could grant rollback consent it cannot give), and \
+                 it could not: {why}"
+            );
+        }
     }
     Ok(())
 }

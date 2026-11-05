@@ -79,6 +79,7 @@ trust-root      = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da
 # or, instead of an inline key:
 # trust-root-file = "./roots/pulseengine.pub"
 signed-index    = false                                      # default
+# mirrors       = ["oci://mirror.example/layers"]   # see "mirrors" below
 # Roots this realm used to sign with. DIAGNOSTIC ONLY — see below.
 retired-roots   = [
   { key = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973", retired = "2026-09-07", last-layer = "2026.09.1" },
@@ -88,6 +89,34 @@ retired-roots   = [
 `registry` is required even when you never contact it — an air-gapped realm still needs the field; a placeholder is legitimate. `trust-root` is what `varve pubkey` prints.
 
 `signed-index = true` declares that this realm publishes a signed line index (`varve sign-index`). Where it is set, `varve install` refuses to fall back to a source's unauthenticated listing: a missing index is an error naming the realm, and a source that hides a layer the index names is refused. Leave it `false` — the default — until the realm actually publishes one, or every install of it fails closed. Only turn it on once the index is on the registry AND in the layouts you hand out: a bare `manifests/`+`blobs/` directory cannot carry one at all.
+
+### `mirrors` — what a mirror may and may not answer
+
+```toml
+[realm.acme]
+registry = "oci://registry.example/acme/layers"   # the PRIMARY
+mirrors  = ["oci://mirror.example/acme/layers", "/srv/varve/acme-archive"]
+trust-root = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"   # ONE root, for every source
+```
+
+`mirrors` are extra places to fetch the realm's bytes from, tried in the order written after `registry` when it cannot answer. A mirror is **transport, not authority**: every manifest, blob, index and status it serves must still verify against the realm's ONE `trust-root`, so a mirror can make an install unavailable but cannot make a forged layer acceptable. A source is an `oci://` or `oci+http://` registry or an absolute directory path; any other URL scheme, and a relative path, is refused.
+
+What verification cannot show is that a mirror's copy is *current*. A lagging mirror can serve a genuine layer with a genuine but older line-status, and nothing in the bytes says it is old. So varve limits what a mirror may answer:
+
+* **A machine with no history for a line cannot install from a mirror at all.** "First contact" means no high-water mark and no cached line-status for the line; it is answered only by the realm's primary, and refused otherwise. A fresh checkout or CI runner needs the primary at least once per line.
+* **A machine that has installed from the line before** (it has a mark or a cached status) can be served by a mirror, and varve says so on stderr. What it can be served is *a state no older than what this machine last recorded*, bounded as follows. With a **high-water mark**, anything below the mark is refused as a rollback, and anything at or above it is accepted: the cached status's floor (`min-counter`) is NOT consulted. With **no mark but a cached status**, the floor is the `min-counter` of the higher-counter verified status among the cached one and the one the source serves, so a source can only raise it. A **yank** recorded in a cached status binds only on the rollback-consent path (a digest pin below the mark), not on an ordinary install. It is **not** a promise that the state is the newest. A realm that demoted a layer's channel, raised a first-contact floor, or yanked a layer after this machine last looked can still be served stale by a lagging mirror, until the primary is reachable.
+* **Rollback consent is never taken from a mirror.** A digest pin below the mark needs the realm's line-status to say the layer is still supported; only the primary may give that, and a status taken from a mirror is never cached for it.
+* **Status documents for `varve support-horizon` come only from the primary.** Both the layer's baseline status and any published correction are the primary's: an older document on a mirror (a lower counter, a later `support-until`) could lengthen a support window, and a mirror's silence proves nothing about what the primary holds. If the primary cannot supply them, `support-horizon` refuses ("could not be established"). A mirror may still supply the layer bytes (the manifest and its includes) for the walk.
+* **`varve outdated`** with no cached line index treats an answer from a mirror as "could not be established", not as "nothing newer". With a cached index it behaves as for an install.
+* **An `[[include]]`** is fetched from a mirror only if this machine already has history for the included layer's line, decided before the mirror is contacted; an include that names no layer cannot be taken from a mirror.
+* **A mirror without a line index** cannot run the omission check (a layer the signed index names but the source hides); where history lets the install proceed, varve says the check could not run.
+
+Two things are operator acts that change what counts as "primary" and "history", and are deliberate:
+
+* **`varve install --from <url-or-path>` makes that one source the primary for that run.** It skips the first-contact refusal and may grant rollback consent, because you named the source yourself. Use it only for a source you trust as you would the realm's registry.
+* **`varve status --from-file <envelope>` caches a verified line-status**, and a cached status counts as history for its line: it lets a mirror answer later. For a line with no high-water mark, its floor then bounds what a mirror may serve (a mirror cannot lower it); once the line has a mark, the mark is what bounds a mirror, and the cached status matters only to rollback consent. Cache only a status you obtained from the realm.
+
+A mirror on a different origin than the primary is also never sent your registry credential (`VARVE_REGISTRY_AUTH`), and a cleartext `oci+http://` mirror is never sent any credential.
 
 ### `retired-roots` — what it is, and emphatically what it is not
 

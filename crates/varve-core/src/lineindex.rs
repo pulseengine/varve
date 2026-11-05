@@ -110,6 +110,29 @@ pub enum IndexError {
     },
 }
 
+impl IndexError {
+    /// May another source be asked after this failure? (REQ-MIRROR-002.)
+    ///
+    /// Yes where THIS source's index is unavailable, unauthentic, malformed,
+    /// for another line, or hides a layer the signed index names: another
+    /// source may serve it properly. `Stale` also fails over: every source is
+    /// judged against the same persisted local cache, so a later one can
+    /// never pass below it, and ending the search there would only cost
+    /// availability (a primary restored from backup, a stale CDN tag). No for
+    /// local I/O. Exhaustive, no `_` arm.
+    pub fn fails_over(&self) -> bool {
+        match self {
+            IndexError::Verify(_)
+            | IndexError::Payload(_)
+            | IndexError::WrongLine { .. }
+            | IndexError::Omitted { .. }
+            | IndexError::Missing { .. }
+            | IndexError::Stale { .. } => true,
+            IndexError::Io { .. } => false,
+        }
+    }
+}
+
 impl LineIndex {
     /// Verify an envelope against the realm's trust root and parse it.
     pub fn verify_and_parse(envelope: &[u8], root_public_key: &[u8]) -> Result<Self, IndexError> {
@@ -1195,5 +1218,53 @@ mod newer_than_tests {
             vec!["2026.09.13"]
         );
         assert_eq!(unparseable, vec!["next"], "the unorderable entry vanished");
+    }
+}
+
+#[cfg(test)]
+mod failover_class_tests {
+    use super::*;
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_sources_bad_index_fails_over_but_a_verified_regression_or_local_io_does_not() {
+        assert!(IndexError::Payload("x".into()).fails_over());
+        assert!(
+            IndexError::WrongLine {
+                document: "a".into(),
+                expected: "b".into()
+            }
+            .fails_over()
+        );
+        assert!(
+            IndexError::Omitted {
+                line: "l".into(),
+                layer: "x".into(),
+                digest: "d".into()
+            }
+            .fails_over()
+        );
+        assert!(
+            IndexError::Missing {
+                realm: "r".into(),
+                line: "l".into()
+            }
+            .fails_over()
+        );
+        assert!(
+            IndexError::Stale {
+                line: "l".into(),
+                presented: 1,
+                cached: 2
+            }
+            .fails_over()
+        );
+        assert!(
+            !IndexError::Io {
+                path: "p".into(),
+                source: std::io::Error::other("x")
+            }
+            .fails_over()
+        );
     }
 }

@@ -45,6 +45,17 @@ pub trait ManifestVerifier {
 #[error("manifest signature verification failed: {0}")]
 pub struct VerifyError(pub String);
 
+/// Why the omission check could not run against a MIRROR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OmissionSkipped {
+    /// The mirror carries no line index at all.
+    NoIndex,
+    /// The mirror carries an index but cannot enumerate the layers it serves
+    /// (a directory or OCI layout), so the index has nothing to be compared
+    /// with.
+    CannotEnumerate,
+}
+
 /// A successful install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallOutcome {
@@ -71,6 +82,11 @@ pub struct InstallOutcome {
     /// either — silence is the exact bandersnatch/Verdaccio failure this
     /// requirement exists to surface.
     pub attestation_note: Option<String>,
+    /// The source was a MIRROR and carried no line index, so the omission
+    /// check (a layer the signed index names but the source hides) could not
+    /// run against it. Reported, never silent: the install proceeds only
+    /// because this machine has local history bounding what a mirror says.
+    pub omission_check_skipped: Option<OmissionSkipped>,
     /// Set when this install went ahead of the machine's anti-rollback
     /// high-water mark on the strength of a digest in the project's pin
     /// (REQ-ROLLBACK-002). Carries what the caller must say out loud.
@@ -140,13 +156,30 @@ pub enum InstallError {
         why: String,
     },
     #[error(
+        "first contact with line {line} needs the realm's primary: a mirror cannot prove it is \
+         current, and this machine has no history (no high-water mark, no cached line-status) to \
+         bound it"
+    )]
+    FirstContactNeedsPrimary { line: String },
+    #[error(
+        "first contact with line {line}'s index needs the realm's primary: this machine has no \
+         cached line index for it, so nothing bounds what a mirror says is newest"
+    )]
+    IndexFirstContactNeedsPrimary { line: String },
+    #[error(
+        "an install by digest from a mirror must know the layer's line before the mirror is \
+         contacted, and it cannot: {why}. Take it from the realm's primary"
+    )]
+    LineUnknownForMirror { why: String },
+    #[error(
         "layer on line {line} presents counter {presented}, below the floor of {floor} this \
          realm signs for the line — refusing.\n\n\
-         This machine has never installed from {line}, so it has no history to compare against. \
-         That is the one moment anti-rollback protects nobody, and the moment it is worth \
+         This machine has no high-water mark for {line} (it has never installed from it, or its \
+         marks were reset), so it has no installed history to compare against. That is the one \
+         moment anti-rollback protects nobody, and the moment it is worth \
          attacking: a fresh checkout, a new CI runner, a new laptop are all first contacts. The \
-         realm states a floor in its signed line-status so a consumer with no history still has \
-         one.\n\n\
+         realm states a floor in its signed line-status, served or cached by an earlier install, \
+         so a consumer with no mark still has one.\n\n\
          Either the pin names a layer the realm has withdrawn from first-contact use, or \
          something served an old signed layer to a new machine. Both are worth knowing before \
          installing."
@@ -169,6 +202,43 @@ pub enum InstallError {
     Store(#[from] StoreError),
     #[error(transparent)]
     State(#[from] RollbackError),
+}
+
+impl InstallError {
+    /// May ANOTHER source of the same realm be asked after this failure?
+    /// (REQ-MIRROR-002 clause 2.)
+    ///
+    /// Only when this source's BYTES are the problem: unavailable, not
+    /// authentic, malformed, or substituted. A verified verdict about genuine
+    /// bytes (rollback, floor, no platform entry) or a local failure is
+    /// TERMINAL: asking a lagging mirror afterwards would hand the same
+    /// machine a second chance against a lower bar, and failover itself would
+    /// become the freeze/rollback attack.
+    ///
+    /// An exhaustive `match` with no `_` arm, so a new variant cannot be added
+    /// without deciding which side of that line it is on.
+    pub fn fails_over(&self) -> bool {
+        match self {
+            InstallError::Index(e) => e.fails_over(),
+            InstallError::Source(_)
+            | InstallError::Verify(_)
+            | InstallError::Manifest(_)
+            | InstallError::DigestMismatch { .. }
+            | InstallError::LayerMismatch { .. }
+            | InstallError::BlobDigestMismatch { .. } => true,
+            InstallError::Rollback { .. }
+            | InstallError::RollbackConsentRefused { .. }
+            | InstallError::BelowFloor { .. }
+            | InstallError::FirstContactNeedsPrimary { .. }
+            | InstallError::IndexFirstContactNeedsPrimary { .. }
+            | InstallError::LineUnknownForMirror { .. }
+            | InstallError::ChannelMismatch { .. }
+            | InstallError::NoPlatformEntry { .. }
+            | InstallError::UnnamedEntry { .. }
+            | InstallError::Store(_)
+            | InstallError::State(_) => false,
+        }
+    }
 }
 
 /// Policy inputs the caller supplies; time is data, not something the
@@ -214,6 +284,64 @@ pub fn install_by_digest(
     marks: &mut HighWaterMarks,
     policy: &InstallPolicy<'_>,
 ) -> Result<InstallOutcome, InstallError> {
+    install_by_digest_from(
+        digest,
+        source,
+        verifier,
+        store,
+        marks,
+        policy,
+        DigestRole::Primary,
+    )
+}
+
+/// Which source an install-by-digest is reading from. A digest names no line,
+/// so a MIRROR carries the line the caller expects (from the include that
+/// named the digest) and the first-contact refusal is decided on it BEFORE the
+/// mirror is asked anything.
+#[derive(Debug, Clone)]
+pub enum DigestRole<'a> {
+    /// The realm's primary (or its only source).
+    Primary,
+    /// A mirror. `expected_line` is the line of the layer the digest should
+    /// turn out to be, if the caller knows it. `Err(why)` says why the line
+    /// cannot be known before fetching (the include names no layer, or names
+    /// one that is not a valid layer id); a mirror is then refused, because no
+    /// history can be shown for an unknown line.
+    Mirror {
+        expected_line: Result<&'a crate::layer::Line, String>,
+    },
+}
+
+/// [`install_by_digest`] from a source that is, or is not, the realm's
+/// PRIMARY. A non-primary source (a mirror, asked after the primary failed)
+/// may not relax a protection: see [`install_from`].
+pub fn install_by_digest_from(
+    digest: &str,
+    source: &dyn LayerSource,
+    verifier: &dyn ManifestVerifier,
+    store: &Store,
+    marks: &mut HighWaterMarks,
+    policy: &InstallPolicy<'_>,
+    role: DigestRole<'_>,
+) -> Result<InstallOutcome, InstallError> {
+    // First contact is decided BEFORE a mirror is contacted: reading the
+    // manifest here would otherwise be a fetch from a source that may not be
+    // allowed to answer. The line comes from the caller (the include that
+    // named this digest); `install_inner` re-checks it against the real
+    // manifest's line afterwards.
+    let source_is_primary = matches!(role, DigestRole::Primary);
+    if let DigestRole::Mirror { expected_line } = &role {
+        match expected_line {
+            Err(why) => return Err(InstallError::LineUnknownForMirror { why: why.clone() }),
+            Ok(line) if !has_local_history(line, store, verifier, marks) => {
+                return Err(InstallError::FirstContactNeedsPrimary {
+                    line: line.to_string(),
+                });
+            }
+            Ok(_) => {}
+        }
+    }
     let fetched = source.fetch_manifest(&LayerRef::Digest(digest.to_string()))?;
     let bytes = verifier.verify(&fetched)?;
     let manifest = LayerManifest::parse(&bytes)?;
@@ -239,7 +367,18 @@ pub fn install_by_digest(
     // so it is NOT consent to go below the mark (REQ-ROLLBACK-002 speaks of
     // the project's pin): a layer's include list is the signer's choice, and
     // what this machine accepts is still the machine's.
-    install_inner(&pin, source, verifier, store, marks, policy, false)
+    install_inner(
+        &pin,
+        source,
+        verifier,
+        store,
+        marks,
+        policy,
+        Via {
+            digest_is_consent: false,
+            source_is_primary,
+        },
+    )
 }
 
 /// Install the layer a project's pin selects. A pin that names the layer by
@@ -253,7 +392,66 @@ pub fn install(
     marks: &mut HighWaterMarks,
     policy: &InstallPolicy<'_>,
 ) -> Result<InstallOutcome, InstallError> {
-    install_inner(pin, source, verifier, store, marks, policy, true)
+    install_from(pin, source, verifier, store, marks, policy, true)
+}
+
+/// [`install`] from a source that is, or is not, the realm's PRIMARY.
+///
+/// Once the primary has failed in an attempt, a MIRROR's answer may not RELAX
+/// a protection: absence or an older document on a mirror is "unknown", not
+/// "none". So from a non-primary source (a) digest CONSENT to go below the
+/// mark is refused, because it lifts a protection and the mirror may be
+/// lagging a yank, and (b) a FIRST CONTACT (no local history for the line: no
+/// high-water mark and no cached line-status) is refused outright with
+/// [`InstallError::FirstContactNeedsPrimary`], before anything is fetched,
+/// because a mirror cannot prove it is current and nothing bounds it. With
+/// history a mirror answers, bounded by the marks and the cached status.
+pub fn install_from(
+    pin: &Pin,
+    source: &dyn LayerSource,
+    verifier: &dyn ManifestVerifier,
+    store: &Store,
+    marks: &mut HighWaterMarks,
+    policy: &InstallPolicy<'_>,
+    source_is_primary: bool,
+) -> Result<InstallOutcome, InstallError> {
+    install_inner(
+        pin,
+        source,
+        verifier,
+        store,
+        marks,
+        policy,
+        Via {
+            digest_is_consent: true,
+            source_is_primary,
+        },
+    )
+}
+
+/// How an install reached its source: whether a digest in the pin is consent
+/// to go below the mark, and whether the source is the realm's primary.
+#[derive(Clone, Copy)]
+struct Via {
+    digest_is_consent: bool,
+    source_is_primary: bool,
+}
+
+/// Whether this machine has ANY record of `line`: a high-water mark, or a
+/// cached line-status that verifies against the realm's root.
+fn has_local_history(
+    line: &crate::layer::Line,
+    store: &Store,
+    verifier: &dyn ManifestVerifier,
+    marks: &HighWaterMarks,
+) -> bool {
+    marks.mark(line).is_some()
+        || verifier.root_public_key().is_some_and(|root| {
+            matches!(
+                crate::linestatus::StatusCache::at_root(store.root()).load(line, root),
+                Ok(Some(_))
+            )
+        })
 }
 
 fn install_inner(
@@ -263,8 +461,29 @@ fn install_inner(
     store: &Store,
     marks: &mut HighWaterMarks,
     policy: &InstallPolicy<'_>,
-    digest_is_consent: bool,
+    via: Via,
 ) -> Result<InstallOutcome, InstallError> {
+    let Via {
+        digest_is_consent,
+        source_is_primary,
+    } = via;
+    // 0. FIRST CONTACT is answered only by the realm's primary. With no local
+    // history for the line (no high-water mark and no cached line-status) a
+    // mirror's answer is bounded by nothing: a lagging mirror can serve a
+    // genuine but OLD layer with a genuine but OLD status (no raised floor, a
+    // pre-demotion channel, no omission check), and this machine has nothing to
+    // notice that it is old. Asked before anything is fetched from it.
+    //
+    // WITH history a mirror's answer is accepted, bounded by the marks and the
+    // cached status below as for any source. The residual is the documented
+    // one: a machine that has installed before can be served a state no older
+    // than it last recorded — including a pre-demotion manifest whose channel
+    // still matches — but not a state older than that.
+    if !source_is_primary && !has_local_history(pin.layer.line(), store, verifier, marks) {
+        return Err(InstallError::FirstContactNeedsPrimary {
+            line: pin.layer.line().to_string(),
+        });
+    }
     // 1. Fetch.
     let layer_ref = match &pin.digest {
         Some(digest) => LayerRef::Digest(digest.clone()),
@@ -314,13 +533,27 @@ fn install_inner(
     let line_str = line.to_string();
     let index_cache = crate::lineindex::IndexCache::at_root(store.root());
     let mut index_high_water: Option<u64> = None;
+    let mut omission_check_skipped: Option<OmissionSkipped> = None;
     // The verified index and the bytes it came from, held until the install
     // lands: a refused install must not leave a raised index behind, for the
     // same reason it must not burn the high-water mark.
     let mut accepted_index: Option<(crate::lineindex::LineIndex, Vec<u8>)> = None;
     if let Some(index_policy) = &policy.index {
         let envelope = source.fetch_line_index(&line_str)?;
+        // A mirror with no index leaves the omission check unable to run: that
+        // is UNKNOWN, not "nothing hidden", and it is reported (D4).
         let served = source.served_layers(&line_str)?;
+        // ... and so is a mirror whose index cannot be compared with a listing
+        // (it cannot enumerate what it serves): the check cannot run either.
+        if !source_is_primary {
+            omission_check_skipped = if envelope.is_none() {
+                Some(OmissionSkipped::NoIndex)
+            } else if served.is_none() {
+                Some(OmissionSkipped::CannotEnumerate)
+            } else {
+                None
+            };
+        }
         // Clause 2 needs something to compare AGAINST, and it is the cache
         // that supplies it. Passing `None` here left the whole
         // presented-older-than-held rule unreachable from the pipeline: it
@@ -354,15 +587,37 @@ fn install_inner(
     // protection either — closing it needs the realm to REQUIRE a status the
     // way `signed-index` requires an index, which is a realm-policy change and
     // not this requirement.
+    //
+    // With NO mark the floor is the one stated by the HIGHER-counter verified
+    // status among the one this machine already CACHED and the one the source
+    // serves. A source can therefore only raise the bar: an older status (a
+    // lower or absent `min_counter`), no status, or an unverifiable one leaves
+    // the recorded floor in force. That is what bounds a mirror's answer by
+    // what this machine has already recorded, primary or not.
     let mut first_contact_floor: Option<u64> = None;
     if marks.mark(line).is_none()
         && let Some(index_policy) = &policy.index
-        && let Some(bytes) = source.fetch_line_status(&layer_ref)?
-        && let Ok(doc) =
-            crate::linestatus::LineStatus::verify_and_parse(&bytes, index_policy.root_public_key)
-        && doc.line == line_str
     {
-        first_contact_floor = doc.min_counter;
+        let cached = crate::linestatus::StatusCache::at_root(store.root())
+            .load(line, index_policy.root_public_key)
+            .ok()
+            .flatten()
+            .filter(|doc| doc.line == line_str);
+        let served = source
+            .fetch_line_status(&layer_ref)?
+            .and_then(|bytes| {
+                crate::linestatus::LineStatus::verify_and_parse(
+                    &bytes,
+                    index_policy.root_public_key,
+                )
+                .ok()
+            })
+            .filter(|doc| doc.line == line_str);
+        first_contact_floor = [cached, served]
+            .into_iter()
+            .flatten()
+            .max_by_key(|doc| doc.counter)
+            .and_then(|doc| doc.min_counter);
     }
 
     // 4. Anti-rollback, before any blob moves.
@@ -377,6 +632,18 @@ fn install_inner(
             // reviewer saw; resolution by name is the replay REQ-ROLLBACK-001
             // exists for. The digest was already matched against the
             // verified manifest in step 3.
+            (Some(_), true) if !source_is_primary => {
+                // Consent LIFTS the mark. A mirror asked after the primary
+                // failed may be lagging a yank, so it cannot grant it.
+                return Err(InstallError::RollbackConsentRefused {
+                    line,
+                    presented,
+                    high_water,
+                    why: "digest consent is only taken from the realm's primary source, and this \
+                          one is a mirror (a mirror may be lagging a yank the primary has made)"
+                        .to_string(),
+                });
+            }
             (Some(pinned), true) => {
                 match consent_why_not(
                     &manifest,
@@ -579,6 +846,7 @@ fn install_inner(
         index_high_water,
         attestations_carried,
         attestation_note,
+        omission_check_skipped,
         digest_consent,
     })
 }
@@ -593,6 +861,14 @@ fn install_inner(
 /// fetched from the source when it carries one, else the copy cached by an
 /// earlier install. A yank is never overridden, and neither is an expired
 /// support window; no verifiable document means no consent.
+///
+/// EVERY refusal here is terminal for failover (`InstallError::fails_over`),
+/// including "this source carries no line-status". Consent LIFTS a protection
+/// (the machine's own rollback mark), so it must not be obtainable by asking
+/// another source: a lagging mirror's older line-status, from before a yank,
+/// could grant consent the primary would have refused. The cost is chosen:
+/// a digest-pinned rollback install is unavailable while the primary's status
+/// cannot be had.
 fn consent_why_not(
     manifest: &LayerManifest,
     layer_ref: &LayerRef,
@@ -701,6 +977,90 @@ fn consent_from_status(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod failover_class_tests {
+    use super::*;
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn verdicts_about_genuine_bytes_and_local_failures_never_fail_over() {
+        let terminal = [
+            InstallError::Rollback {
+                line: "l".into(),
+                presented: 1,
+                high_water: 2,
+            },
+            // A realm-signed verdict about the requested layer (a demotion),
+            // not a fault of the source that served it.
+            InstallError::ChannelMismatch {
+                pinned: "a".into(),
+                got: "b".into(),
+            },
+            InstallError::FirstContactNeedsPrimary { line: "l".into() },
+            InstallError::IndexFirstContactNeedsPrimary { line: "l".into() },
+            InstallError::LineUnknownForMirror { why: "w".into() },
+            InstallError::RollbackConsentRefused {
+                line: "l".into(),
+                presented: 1,
+                high_water: 2,
+                why: "w".into(),
+            },
+            InstallError::BelowFloor {
+                line: "l".into(),
+                presented: 1,
+                floor: 2,
+            },
+            InstallError::NoPlatformEntry {
+                layer: "l".into(),
+                platform: "p".into(),
+            },
+            InstallError::UnnamedEntry { digest: "d".into() },
+            InstallError::State(RollbackError::Io {
+                path: "p".into(),
+                source: std::io::Error::other("x"),
+            }),
+        ];
+        for e in &terminal {
+            assert!(!e.fails_over(), "{e} must be terminal");
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn unavailable_unauthentic_or_substituted_bytes_fail_over() {
+        let over = [
+            InstallError::Source(SourceError::Transport("down".into())),
+            InstallError::Source(SourceError::NotFound("x".into())),
+            InstallError::DigestMismatch {
+                pinned: "a".into(),
+                got: "b".into(),
+            },
+            InstallError::LayerMismatch {
+                pinned: "a".into(),
+                got: "b".into(),
+            },
+            InstallError::BlobDigestMismatch {
+                tool: "t".into(),
+                digest: "d".into(),
+            },
+            InstallError::Manifest(ManifestError::Json("x".into())),
+            InstallError::Index(crate::lineindex::IndexError::Payload("x".into())),
+        ];
+        for e in &over {
+            assert!(e.fails_over(), "{e} must fail over");
+        }
+        let stale = InstallError::Index(crate::lineindex::IndexError::Stale {
+            line: "l".into(),
+            presented: 1,
+            cached: 2,
+        });
+        assert!(
+            stale.fails_over(),
+            "a later source is judged against the same local cache, so it can never pass below it"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2091,6 +2451,608 @@ mod tests {
             "{msg}"
         );
         assert!(f.store.get(&manifest_digest(&f.older)).unwrap().is_none());
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn every_refusal_of_digest_consent_is_terminal_so_no_mirror_can_grant_it() {
+        // Consent LIFTS a protection (the machine's own rollback mark), so it
+        // must not be obtainable by asking another source: a lagging mirror's
+        // older line-status, from before a yank, could grant what the primary
+        // would refuse. Availability is the price, and it is chosen.
+        let refusal = |f: &mut Consent, source: MemorySource, v: &dyn ManifestVerifier| {
+            install(
+                &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+                &source,
+                v,
+                &f.store,
+                &mut f.marks,
+                &policy(),
+            )
+            .expect_err("refused")
+        };
+        // No status carried by this source.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let pk = f.pk.clone();
+        let err = refusal(&mut f, source, &AcceptWithRoot(&pk));
+        assert!(
+            matches!(err, InstallError::RollbackConsentRefused { .. }),
+            "{err}"
+        );
+        assert!(
+            !err.fails_over(),
+            "an absent status must not send us elsewhere: {err}"
+        );
+
+        // A status that does not verify.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let (other_sk, _) = crate::verify::generate_root_keypair();
+        let source = std::mem::replace(&mut f.source, MemorySource::new())
+            .with_line_status(&status_for("2026.07", None, &[], &other_sk));
+        let pk = f.pk.clone();
+        let err = refusal(&mut f, source, &AcceptWithRoot(&pk));
+        assert!(
+            !err.fails_over(),
+            "an unverifiable status must not send us elsewhere: {err}"
+        );
+
+        // A verified yank, a verified lapsed window, and no trust root.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new()).with_line_status(
+            &status_for("2026.07", None, &[("2026.07.0", "regression")], &f.sk),
+        );
+        let pk = f.pk.clone();
+        let err = refusal(&mut f, source, &AcceptWithRoot(&pk));
+        assert!(!err.fails_over(), "a verified yank is terminal: {err}");
+
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new())
+            .with_line_status(&status_for("2026.07", Some("2026-08-06"), &[], &f.sk));
+        let pk = f.pk.clone();
+        let err = refusal(&mut f, source, &AcceptWithRoot(&pk));
+        assert!(!err.fails_over(), "a verified expiry is terminal: {err}");
+
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new())
+            .with_line_status(&status_for("2026.07", None, &[], &f.sk));
+        let err = refusal(&mut f, source, &AcceptAll);
+        assert!(!err.fails_over(), "no root is local: {err}");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_mirror_is_never_asked_to_consent_even_when_its_status_would() {
+        // The status SUPPORTS the layer, so from the primary this installs
+        // (see `a_cached_line_status_consents...` and `the_last_supported_day`).
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for("2026.07", None, &[], &f.sk));
+        let pin = digest_pin("2026.07.0", &manifest_digest(&f.older));
+        let ok = install_from(
+            &pin,
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            true,
+        );
+        assert!(ok.is_ok(), "the primary may grant consent: {ok:?}");
+
+        // The same pin, same status, from a MIRROR: refused, and terminal.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let source = source.with_line_status(&status_for("2026.07", None, &[], &f.sk));
+        let err = install_from(
+            &pin,
+            &source,
+            &AcceptWithRoot(&f.pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            false,
+        )
+        .expect_err("a mirror cannot grant consent");
+        assert!(
+            matches!(err, InstallError::RollbackConsentRefused { .. }),
+            "{err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("only taken from the realm's primary"),
+            "{err}"
+        );
+        assert!(!err.fails_over());
+        assert!(f.store.get(&manifest_digest(&f.older)).unwrap().is_none());
+    }
+
+    fn first_contact(
+        f: &mut Consent,
+        source: &MemorySource,
+        primary: bool,
+    ) -> Result<InstallOutcome, InstallError> {
+        first_contact_from(f, source, primary)
+    }
+
+    fn first_contact_from(
+        f: &mut Consent,
+        source: &dyn LayerSource,
+        primary: bool,
+    ) -> Result<InstallOutcome, InstallError> {
+        let pk = f.pk.clone();
+        let policy = InstallPolicy {
+            index: Some(crate::lineindex::IndexPolicy {
+                realm: "acme",
+                root_public_key: &pk,
+                required: false,
+            }),
+            ..policy()
+        };
+        install_from(
+            &digest_pin("2026.07.0", &manifest_digest(&f.older)),
+            source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy,
+            primary,
+        )
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_first_contact_is_refused_to_a_mirror_whatever_status_it_carries() {
+        // No mark and no cached status for the line: nothing bounds a mirror.
+        // Not even a genuine status that VERIFIES helps: an old one states no
+        // raised floor, and the machine cannot tell it is old.
+        for status in [
+            None,
+            Some(("2026.07", false)), // genuine, same line, states no floor
+            Some(("2026.07", true)),  // forged
+            Some(("2026.06", false)), // another line
+        ] {
+            let mut f = consent_fixture();
+            let (other_sk, _) = crate::verify::generate_root_keypair();
+            let mut source = std::mem::replace(&mut f.source, MemorySource::new());
+            if let Some((line, forged)) = status {
+                let sk = if forged { &other_sk } else { &f.sk };
+                source = source.with_line_status(&status_for(line, None, &[], sk));
+            }
+            let err = first_contact(&mut f, &source, false)
+                .expect_err("a mirror must not answer a first contact");
+            assert!(
+                matches!(err, InstallError::FirstContactNeedsPrimary { .. }),
+                "{err}"
+            );
+            assert!(
+                err.to_string()
+                    .contains("first contact with line 2026.07 needs the realm's primary"),
+                "{err}"
+            );
+            assert!(!err.fails_over(), "no other mirror can do better");
+            assert!(f.store.get(&manifest_digest(&f.older)).unwrap().is_none());
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_mirror_is_asked_nothing_before_a_first_contact_is_refused() {
+        // The refusal comes before any fetch: a source that panics if touched.
+        struct Untouched;
+        impl LayerSource for Untouched {
+            fn fetch_manifest(&self, _: &LayerRef) -> Result<Vec<u8>, SourceError> {
+                panic!("a mirror was asked about a first contact");
+            }
+            fn fetch_blob(&self, _: &str) -> Result<Vec<u8>, SourceError> {
+                panic!("a mirror was asked about a first contact");
+            }
+        }
+        let mut f = consent_fixture();
+        let err = first_contact_from(&mut f, &Untouched, false).expect_err("refused");
+        assert!(matches!(err, InstallError::FirstContactNeedsPrimary { .. }));
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_primary_answers_a_first_contact_and_history_of_either_kind_admits_a_mirror() {
+        // The primary may omit the status (a stated, pre-existing residual).
+        let mut f = consent_fixture();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        first_contact(&mut f, &source, true).expect("the primary answers a first contact");
+
+        // History as a high-water MARK admits a mirror.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let newer = digest_pin("2026.07.1", &manifest_digest(&f.newer));
+        let pk = f.pk.clone();
+        let policy = InstallPolicy {
+            index: Some(crate::lineindex::IndexPolicy {
+                realm: "acme",
+                root_public_key: &pk,
+                required: false,
+            }),
+            ..policy()
+        };
+        let outcome = install_from(
+            &newer,
+            &source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy,
+            false,
+        )
+        .expect("a mark is history");
+        assert_eq!(
+            outcome.omission_check_skipped,
+            Some(OmissionSkipped::NoIndex),
+            "a mirror with no index could not run the omission check"
+        );
+
+        // History as a cached LINE-STATUS alone (no mark) also admits one.
+        let mut f = consent_fixture();
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let envelope = status_for("2026.07", None, &[], &f.sk);
+        let doc = crate::linestatus::LineStatus::verify_and_parse(&envelope, &f.pk).unwrap();
+        crate::linestatus::StatusCache::at_root(f.store.root())
+            .update(&line, &envelope, &doc)
+            .unwrap();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        first_contact(&mut f, &source, false).expect("a cached status is history");
+    }
+
+    /// A status document with a stated `min_counter`, signed by `sk`.
+    fn status_with_floor(counter: u64, min_counter: Option<u64>, sk: &[u8]) -> Vec<u8> {
+        crate::linestatus::LineStatus {
+            line: "2026.07".into(),
+            counter,
+            issued_at: "2026-08-01T00:00:00Z".into(),
+            support_until: None,
+            min_counter,
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        }
+        .sign(sk, "root-1")
+        .unwrap()
+        .into_bytes()
+    }
+
+    /// No MARK for the line, but a verified status #3 cached with a raised
+    /// floor of 5. Installing layer counter 4 from `source` as the primary or a
+    /// mirror: the outcome.
+    fn install_four_against_a_cached_floor(
+        source_status: Option<Vec<u8>>,
+        cached: Vec<u8>,
+        pk: &[u8],
+        primary: bool,
+    ) -> Result<InstallOutcome, InstallError> {
+        let (_tmp, store, mut marks) = setup();
+        let (bytes, blobs) = layer_of("2026.07.2", 4, "four");
+        let mut source = MemorySource::new().with_manifest(&bytes);
+        for (d, b) in &blobs {
+            source = source.with_blob(d, b);
+        }
+        if let Some(status) = &source_status {
+            source = source.with_line_status(status);
+        }
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let doc = crate::linestatus::LineStatus::verify_and_parse(&cached, pk).unwrap();
+        crate::linestatus::StatusCache::at_root(store.root())
+            .update(&line, &cached, &doc)
+            .unwrap();
+        let policy = InstallPolicy {
+            index: Some(crate::lineindex::IndexPolicy {
+                realm: "acme",
+                root_public_key: pk,
+                required: false,
+            }),
+            ..policy()
+        };
+        install_from(
+            &pin("2026.07.2"),
+            &source,
+            &AcceptWithRoot(pk),
+            &store,
+            &mut marks,
+            &policy,
+            primary,
+        )
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_floor_this_machine_already_recorded_is_not_lowered_by_what_a_source_serves() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let cached = || status_with_floor(3, Some(5), &sk);
+        for primary in [false, true] {
+            // The source serves an OLDER status that states no floor.
+            let err = install_four_against_a_cached_floor(
+                Some(status_with_floor(1, None, &sk)),
+                cached(),
+                &pk,
+                primary,
+            )
+            .expect_err("counter 4 is below the recorded floor of 5");
+            assert!(
+                matches!(err, InstallError::BelowFloor { floor: 5, .. }),
+                "primary={primary}: {err}"
+            );
+            // The source serves no status at all.
+            let err = install_four_against_a_cached_floor(None, cached(), &pk, primary)
+                .expect_err("silence does not lower a recorded floor");
+            assert!(
+                matches!(err, InstallError::BelowFloor { floor: 5, .. }),
+                "primary={primary}: {err}"
+            );
+            // The source serves a status that does not verify.
+            let (other_sk, _) = crate::verify::generate_root_keypair();
+            let err = install_four_against_a_cached_floor(
+                Some(status_with_floor(9, None, &other_sk)),
+                cached(),
+                &pk,
+                primary,
+            )
+            .expect_err("a forged status does not lower it either");
+            assert!(matches!(err, InstallError::BelowFloor { .. }), "{err}");
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_newer_verified_status_decides_the_floor_whichever_side_holds_it() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        // The source serves a NEWER status (#4) with a higher floor: it binds.
+        let err = install_four_against_a_cached_floor(
+            Some(status_with_floor(4, Some(7), &sk)),
+            status_with_floor(3, Some(2), &sk),
+            &pk,
+            false,
+        )
+        .expect_err("the newer status raised the floor to 7");
+        assert!(
+            matches!(err, InstallError::BelowFloor { floor: 7, .. }),
+            "{err}"
+        );
+        // A newer status that LOWERS the floor is the realm's later word, and
+        // the cached one is outranked by it (counter 4 clears a floor of 2).
+        install_four_against_a_cached_floor(
+            Some(status_with_floor(4, Some(2), &sk)),
+            status_with_floor(3, Some(5), &sk),
+            &pk,
+            false,
+        )
+        .expect("the newer word lowered the floor");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_mirror_that_carries_an_index_but_cannot_enumerate_leaves_the_omission_check_unrun() {
+        // History as a MARK, so a mirror may answer.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let pk = f.pk.clone();
+        let index = crate::lineindex::LineIndex {
+            line: "2026.07".into(),
+            counter: 1,
+            issued_at: "2026-08-07T00:00:00Z".into(),
+            layers: vec![crate::lineindex::IndexedLayer {
+                layer: "2026.07.1".into(),
+                digest: manifest_digest(&f.newer),
+                channel: "qualified".into(),
+                counter: 2,
+            }],
+        }
+        .sign(&f.sk, "root-1")
+        .unwrap();
+        // The source carries the index but, like a directory or OCI layout,
+        // cannot ENUMERATE what it serves (`served_layers` is None).
+        let source =
+            std::mem::replace(&mut f.source, MemorySource::new()).with_line_index(index.as_bytes());
+        let policy = InstallPolicy {
+            index: Some(crate::lineindex::IndexPolicy {
+                realm: "acme",
+                root_public_key: &pk,
+                required: false,
+            }),
+            ..policy()
+        };
+        let newer = digest_pin("2026.07.1", &manifest_digest(&f.newer));
+        let outcome = install_from(
+            &newer,
+            &source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy,
+            false,
+        )
+        .expect("history lets a mirror answer");
+        assert_eq!(
+            outcome.omission_check_skipped,
+            Some(OmissionSkipped::CannotEnumerate),
+            "an index it cannot compare with a listing is a check that could not run"
+        );
+        // The same source as the PRIMARY reports nothing skipped.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source =
+            std::mem::replace(&mut f.source, MemorySource::new()).with_line_index(index.as_bytes());
+        let outcome = install_from(
+            &newer,
+            &source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy,
+            true,
+        )
+        .unwrap();
+        assert_eq!(outcome.omission_check_skipped, None);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_digest_install_refuses_a_mirror_before_contacting_it_when_there_is_no_history() {
+        struct Untouched;
+        impl LayerSource for Untouched {
+            fn fetch_manifest(&self, _: &LayerRef) -> Result<Vec<u8>, SourceError> {
+                panic!("a mirror was contacted for a first contact");
+            }
+            fn fetch_blob(&self, _: &str) -> Result<Vec<u8>, SourceError> {
+                panic!("a mirror was contacted for a first contact");
+            }
+        }
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let mut f = consent_fixture();
+        let pk = f.pk.clone();
+        let err = install_by_digest_from(
+            &manifest_digest(&f.older),
+            &Untouched,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Mirror {
+                expected_line: Ok(&line),
+            },
+        )
+        .expect_err("no history, no mirror");
+        assert!(
+            matches!(err, InstallError::FirstContactNeedsPrimary { .. }),
+            "{err}"
+        );
+        assert!(!err.fails_over());
+        // An include whose line CANNOT be known: refused in words that say so,
+        // not as a missing history. Absent and unparseable read differently.
+        for why in [
+            "the include names no layer",
+            "the include's layer name \"x\" is not a valid layer id",
+        ] {
+            let mut f = consent_fixture();
+            let err = install_by_digest_from(
+                &manifest_digest(&f.older),
+                &Untouched,
+                &AcceptWithRoot(&pk),
+                &f.store,
+                &mut f.marks,
+                &policy(),
+                DigestRole::Mirror {
+                    expected_line: Err(why.to_string()),
+                },
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, InstallError::LineUnknownForMirror { why: w } if w == why),
+                "{err}"
+            );
+            assert!(err.to_string().contains(why), "{err}");
+            assert!(!err.to_string().contains("no history"), "{err}");
+            assert!(!err.fails_over());
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_digest_install_from_a_mirror_proceeds_when_the_expected_line_has_history() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let pk = f.pk.clone();
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        install_by_digest_from(
+            &manifest_digest(&f.newer),
+            &source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Mirror {
+                expected_line: Ok(&line),
+            },
+        )
+        .expect("history for the line admits a mirror");
+        // History for ANOTHER line does not.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let other: crate::layer::Line = "2026.06".parse().unwrap();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let err = install_by_digest_from(
+            &manifest_digest(&f.newer),
+            &source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Mirror {
+                expected_line: Ok(&other),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, InstallError::FirstContactNeedsPrimary { .. }),
+            "{err}"
+        );
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn an_include_that_names_one_line_but_digests_another_is_refused_terminally() {
+        // The include NAMES a layer of line 2026.07 (which this machine has
+        // history for) but the DIGEST is a layer of line 2026.06 (which it does
+        // not). The early check passes on the named line; install_inner then
+        // checks the REAL manifest's line and refuses.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let (other_layer, other_blobs) = layer_of("2026.06.0", 1, "elsewhere");
+        let mut source =
+            std::mem::replace(&mut f.source, MemorySource::new()).with_manifest(&other_layer);
+        for (d, b) in &other_blobs {
+            source = source.with_blob(d, b);
+        }
+        let named: crate::layer::Line = "2026.07".parse().unwrap();
+        let pk = f.pk.clone();
+        let err = install_by_digest_from(
+            &manifest_digest(&other_layer),
+            &source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Mirror {
+                expected_line: Ok(&named),
+            },
+        )
+        .expect_err("a mislabelled include");
+        assert!(
+            matches!(&err, InstallError::FirstContactNeedsPrimary { line } if line == "2026.06"),
+            "{err}"
+        );
+        assert!(!err.fails_over());
+        assert!(
+            f.store
+                .get(&manifest_digest(&other_layer))
+                .unwrap()
+                .is_none(),
+            "nothing may be installed"
+        );
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_primary_install_never_reports_a_skipped_omission_check() {
+        let mut f = consent_fixture();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let outcome = first_contact(&mut f, &source, true).unwrap();
+        assert_eq!(outcome.omission_check_skipped, None);
     }
 
     // rivet: verifies REQ-ROLLBACK-002

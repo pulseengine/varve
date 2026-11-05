@@ -361,10 +361,19 @@ jobs:
               -f crates/varve-core/src/resolve.rs
               -f crates/varve-core/src/consumer.rs
               -f crates/varve-core/src/mutationscope.rs
+              -f crates/varve-core/src/shellquote.rs
+          # SPLIT AGAIN at v0.45.0, the fourth time. REQ-MIRROR-002 grew
+          # install.rs (failover, first-contact floor) and REQ-KEYROLES-001
+          # added keyroles.rs here; the shard was CANCELLED at 90:00 on PR #315
+          # with no summary, after 70 minutes on #314. Same response as every
+          # time above: split, never drop a file, never raise the cap. The
+          # install path — what is admitted onto this machine and re-checked
+          # later — becomes its own shard.
+          - shard: varve-core (install)
+            files: >-
               -f crates/varve-core/src/install.rs
               -f crates/varve-core/src/selfverify.rs
               -f crates/varve-core/src/reverify.rs
-              -f crates/varve-core/src/shellquote.rs
           # SPLIT AGAIN at v0.35.0, and the third time this job has said the
           # same thing. REQ-LAYERDOCS-001 added four files to `varve-core
           # (trust)` — manifestversions, docsexport, and the viewer's two — and
@@ -413,9 +422,16 @@ jobs:
             files: >-
               -f crates/varve-core/src/layerspec.rs
               -f crates/varve-core/src/rollback.rs
+              -f crates/varve-core/src/layer.rs
+          # SPLIT at v0.45.0 with `varve-core (install)` above: this shard took
+          # 81 minutes on #314 and was CANCELLED at 90:00 on #315 once
+          # REQ-MIRROR-002 grew mirror.rs and support.rs. Mirrors and the
+          # support horizon both decide what a non-primary source may and may
+          # not stand in for, so they move together.
+          - shard: varve-core (mirror)
+            files: >-
               -f crates/varve-core/src/mirror.rs
               -f crates/varve-core/src/support.rs
-              -f crates/varve-core/src/layer.rs
           # GATED at v0.40.0 (varve#126). It carries two security-relevant
           # SIGNED fields — yanks and advisories — and sat in `not-yet` with
           # 18 survivors measured. All 18 are dead; the file is in the gate

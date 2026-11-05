@@ -1,0 +1,470 @@
+//! REQ-MIRROR-002 clause 5: no realm fetch site may build its source from the
+//! realm's primary alone.
+//!
+//! `Realm::sources` is the primary followed by its mirrors. A fetch that reads
+//! `realm.registry` (or builds a `RegistrySource` / `DirSource` /
+//! `OciLayoutSource` by hand) decides on the primary alone, so a down primary
+//! fails a realm that declares working mirrors — which is exactly how
+//! `mirrors` came to be parsed and never used.
+//!
+//! The scan is over production code in `crates/*/src`: every item gated by
+//! `#[cfg(test)]` is blanked by brace matching (so a test module early in a
+//! file does not hide the production code after it), and comments are skipped.
+//! A hit is allowed only if it matches an entry below, and every entry states
+//! why that site is not a realm fetch.
+
+use std::path::{Path, PathBuf};
+
+/// What a fetch site must not contain outside the allowlist.
+///
+/// `realm.registry` also matches `m.realm.registry` and `ctx.realm.registry`;
+/// `r.registry` is the shape a short binding of a `Realm` takes.
+const FORBIDDEN: &[&str] = &[
+    "realm.registry",
+    "r.registry",
+    "sources[0]",
+    "sources.first()",
+    "RegistrySource::parse(",
+    "RegistrySource::new(",
+    "DirSource::at(",
+    "OciLayoutSource::at(",
+    "Mirrors::single(",
+    "Mirrors::new(",
+    // The public wrappers hard-code `source_is_primary = true`, so a realm
+    // fetch that called them would take consent and first-contact answers
+    // from a mirror. A realm fetch uses `install_from` /
+    // `install_by_digest_from` with the role `Mirrors::attempt` supplies.
+    "varve_core::install(",
+    "varve_core::install_by_digest(",
+    "install::install(",
+    "install::install_by_digest(",
+    // Turning a source STRING into a source bypasses the realm's role rules
+    // (which source is primary, which mirrors are credential-restricted).
+    "source_from_spec(",
+    // Taking "the primary" by position, by hand.
+    "sources.iter().next()",
+];
+
+/// (file suffix, a substring of the allowed line, why it is not a realm fetch).
+/// Each entry names the specific line it allows, so an unrelated new use in
+/// the same file is still refused.
+const ALLOWED: &[(&str, &str, &str)] = &[
+    (
+        "varve-core/src/mirror.rs",
+        "let mut registry = crate::RegistrySource::parse(spec)?;",
+        "`build_source`, the one place that turns a realm's source STRINGS into \
+         sources, called once per entry of `realm.sources` in order",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "crate::OciLayoutSource::at(path).for_platform(platform)",
+        "`build_source`: the local OCI-layout shape of one entry of `realm.sources`",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "Ok(Box::new(crate::DirSource::at(path)))",
+        "`build_source`: the local directory shape of one entry of `realm.sources`",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "    crate::RegistrySource::parse(spec)",
+        "`registry_origin`: parses a source string only to read its ORIGIN, so \
+         mirrors on another origin can be credential-restricted; nothing is fetched",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "sources.first().and_then(|p| registry_origin(p))",
+        "reads only the primary's ORIGIN, to decide which mirrors are on another \
+         origin; every source (primary included) is still built from the whole list",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "pub fn source_from_spec(",
+        "the definition of the one string-to-source function; callers outside \
+         this module are refused by this scan",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "source: source_from_spec(spec, platform)?,",
+        "`Mirrors::single`: the one explicit `--from` source",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "let mut m = Mirrors::new(mirrors);",
+        "`Mirrors::for_realm` itself: wraps the sources it just built, in the \
+         order `realm.sources` states them",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "Ok(Mirrors::new(vec![Mirror {",
+        "`Mirrors::single`: the one explicit `--from` source, which overrides a \
+         realm's list by the operator's own choice",
+    ),
+    (
+        "varve/src/main.rs",
+        "(Some(explicit), _) => varve_core::mirror::Mirrors::single(explicit, &platform)?,",
+        "an explicit `--from` is ONE source the operator chose, overriding the \
+         realm's list; a realm's own sources go through `Mirrors::for_realm` on \
+         the next line",
+    ),
+    (
+        "varve-core/src/layerspec.rs",
+        "registry: m.realm.registry.clone()",
+        "PUBLISHING side: copies the producer manifest's registry into the \
+         assembler's VARVE_REGISTRY, the place a deposit is pushed to. Pushing \
+         goes to the primary; a mirror is a read-only copy",
+    ),
+    (
+        "varve-producer/src/main.rs",
+        "m.realm.registry.trim_start_matches",
+        "PUBLISHING side: carry-forward reuse pulls blobs the producer itself \
+         previously pushed to its primary (via oras, digest-checked) so it can \
+         republish them; the primary is the producer's own write target and a \
+         lagging mirror would only cause needless re-downloads",
+    ),
+    (
+        "varve-producer/src/main.rs",
+        "RegistrySource::parse(&m.realm.registry)",
+        "PUBLISHING side: `advisories` reads back what the producer itself \
+         published to its primary to decide what to draft; every result is \
+         re-verified there, and the draft is pushed to the primary",
+    ),
+];
+
+fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap().filter_map(Result::ok) {
+        let p = entry.path();
+        if p.is_dir() {
+            rust_files(&p, out);
+        } else if p.extension().is_some_and(|e| e == "rs") {
+            out.push(p);
+        }
+    }
+}
+
+/// Lexer state that survives a line break.
+#[derive(Default)]
+struct Lex {
+    /// Inside a `"..."` string.
+    in_str: bool,
+    /// Inside a raw string closed by `"` plus this many `#`.
+    raw: Option<usize>,
+    /// Block-comment nesting depth.
+    block: usize,
+}
+
+impl Lex {
+    /// Net `{`/`}` on this line, ignoring braces in strings, chars, comments.
+    fn braces(&mut self, line: &str) -> (i32, i32) {
+        let b: Vec<char> = line.chars().collect();
+        let (mut open, mut close) = (0, 0);
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            if self.block > 0 {
+                if c == '*' && b.get(i + 1) == Some(&'/') {
+                    self.block -= 1;
+                    i += 2;
+                } else if c == '/' && b.get(i + 1) == Some(&'*') {
+                    self.block += 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            if let Some(h) = self.raw {
+                if c == '"' && b[i + 1..].iter().take(h).filter(|x| **x == '#').count() == h {
+                    self.raw = None;
+                    i += 1 + h;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            if self.in_str {
+                if c == '\\' {
+                    i += 2;
+                } else {
+                    if c == '"' {
+                        self.in_str = false;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            match c {
+                '/' if b.get(i + 1) == Some(&'/') => break,
+                '/' if b.get(i + 1) == Some(&'*') => {
+                    self.block = 1;
+                    i += 2;
+                }
+                'r' if matches!(b.get(i + 1), Some('"' | '#')) => {
+                    let hashes = b[i + 1..].iter().take_while(|x| **x == '#').count();
+                    if b.get(i + 1 + hashes) == Some(&'"') {
+                        self.raw = Some(hashes);
+                        i += 2 + hashes;
+                    } else {
+                        i += 1;
+                    }
+                }
+                '"' => {
+                    self.in_str = true;
+                    i += 1;
+                }
+                '\'' => {
+                    // A char literal ('{', '\n', '\'') or a lifetime ('a).
+                    if b.get(i + 1) == Some(&'\\') && b.get(i + 3) == Some(&'\'') {
+                        i += 4;
+                    } else if b.get(i + 2) == Some(&'\'') {
+                        i += 3;
+                    } else {
+                        i += 1;
+                    }
+                }
+                '{' => {
+                    open += 1;
+                    i += 1;
+                }
+                '}' => {
+                    close += 1;
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+        (open, close)
+    }
+}
+
+/// The file's lines with every `#[cfg(test)]` item blanked (line numbers are
+/// kept). An item ends at the `}` that closes its first `{`, or at a `;`
+/// reached before any `{` (a gated `use`).
+fn production_lines(text: &str) -> Vec<String> {
+    const ATTR: &str = "#[cfg(test)]";
+    let mut out = Vec::new();
+    let mut lex = Lex::default();
+    let mut gated = false; // saw #[cfg(test)], item not finished
+    let mut depth = 0i32;
+    let mut opened = false;
+    for line in text.lines() {
+        // The part of this line that belongs to a gated item, if any. The
+        // item may start on the attribute's own line (`#[cfg(test)] use x;`).
+        let mut item: Option<&str> = None;
+        let trimmed = line.trim_start();
+        if !gated && trimmed.starts_with(ATTR) {
+            gated = true;
+            depth = 0;
+            opened = false;
+            let rest = trimmed[ATTR.len()..].trim();
+            if !rest.is_empty() {
+                item = Some(rest);
+            }
+        } else if gated {
+            item = Some(line);
+        }
+        if gated {
+            if let Some(text) = item {
+                let (o, c) = lex.braces(text);
+                depth += o - c;
+                opened |= o > 0;
+                if (opened && depth <= 0) || (!opened && text.trim_end().ends_with(';')) {
+                    gated = false;
+                }
+            }
+            out.push(String::new());
+            continue;
+        }
+        // Keep the lexer state honest across production lines too (a raw
+        // string that spans lines must not be mistaken for code).
+        lex.braces(line);
+        out.push(line.to_string());
+    }
+    out
+}
+
+/// Every offending line in `crates/*/src`, as "file:line: text".
+fn violations(crates_dir: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    for c in std::fs::read_dir(crates_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+    {
+        let src = c.path().join("src");
+        if src.is_dir() {
+            rust_files(&src, &mut files);
+        }
+    }
+    files.sort();
+    let mut bad = Vec::new();
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap();
+        let name = f.to_string_lossy().replace('\\', "/");
+        for (i, line) in production_lines(&text).iter().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            let destructures_registry = line.contains("Realm {") && line.contains("registry");
+            if !destructures_registry && !FORBIDDEN.iter().any(|p| line.contains(p)) {
+                continue;
+            }
+            let allowed = ALLOWED
+                .iter()
+                .any(|(suffix, frag, _)| name.ends_with(suffix) && line.contains(frag));
+            if !allowed {
+                bad.push(format!("{name}:{}: {}", i + 1, line.trim()));
+            }
+        }
+    }
+    bad
+}
+
+fn workspace_crates() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn no_realm_fetch_site_builds_its_source_from_the_primary_alone() {
+    let bad = violations(&workspace_crates());
+    assert!(
+        bad.is_empty(),
+        "these sites build a source from `realm.registry` or by hand, so a down primary \
+         fails a realm that declares mirrors. Build the source with \
+         `varve_core::mirror::Mirrors::for_realm` (realm.sources), or add the site to \
+         ALLOWED with the reason it is not a realm fetch:\n{}",
+        bad.join("\n")
+    );
+}
+
+fn scan(src: &str) -> Vec<String> {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("demo/src");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("lib.rs"), src).unwrap();
+    violations(tmp.path())
+}
+
+/// The scan must be able to fail, and must see production code that follows an
+/// EARLY test module (compose.rs has one) — the old first-`#[cfg(test)]` cut
+/// stopped there and left the rest unscanned.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn the_scan_reports_violations_after_an_early_test_module_and_skips_test_code() {
+    let bad = scan(
+        "fn f(realm: &R) { let s = RegistrySource::parse(&realm.registry); }\n\
+         // realm.registry in a comment is not a fetch\n\
+         #[cfg(test)]\nmod t {\n    fn g(realm: &R) { let _ = realm.registry; }\n    \
+         fn h() { let s = \"}\"; let c = '}'; let r = r#\"}\"#; let _ = realm.registry; }\n}\n\
+         fn after() { let _ = DirSource::at(p); }\n",
+    );
+    assert_eq!(bad.len(), 2, "{bad:?}");
+    assert!(bad[0].contains("lib.rs:1:"), "{bad:?}");
+    assert!(
+        bad[1].contains("lib.rs:8:") && bad[1].contains("DirSource"),
+        "{bad:?}"
+    );
+}
+
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn the_scan_recognises_each_way_of_deciding_on_the_primary_alone() {
+    for shape in [
+        "let a = realm.registry.clone();",
+        "let a = m.realm.registry;",
+        "let a = ctx.realm.registry;",
+        "let a = r.registry;",
+        "let a = realm.sources[0].clone();",
+        "let a = realm.sources.first();",
+        "let a = RegistrySource::new(r);",
+        "let a = OciLayoutSource::at(p);",
+        "let a = DirSource::at(p);",
+        "let a = varve_core::install(&pin, s, v, st, m, p);",
+        "let a = varve_core::install_by_digest(d, s, v, st, m, p);",
+        "let a = varve_core::install::install(&pin, s, v, st, m, p);",
+        "let a = source_from_spec(spec, platform);",
+        "let a = realm.sources.iter().next();",
+    ] {
+        let bad = scan(&format!("fn f() {{ {shape} }}\n"));
+        assert_eq!(bad.len(), 1, "{shape} must be refused: {bad:?}");
+    }
+    assert!(scan("fn f() { let a = realm.sources.clone(); }\n").is_empty());
+}
+
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_gated_item_on_the_attributes_own_line_does_not_blank_the_next_production_line() {
+    let bad = scan(
+        "#[cfg(test)] use x::DirSource;\nfn real() { let _ = DirSource::at(p); }\n\
+         #[cfg(test)] fn t() { let _ = OciLayoutSource::at(p); }\nfn also() { let _ = DirSource::at(q); }\n",
+    );
+    assert_eq!(bad.len(), 2, "{bad:?}");
+    assert!(bad[0].contains("lib.rs:2:"), "{bad:?}");
+    assert!(bad[1].contains("lib.rs:4:"), "{bad:?}");
+}
+
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn braces_inside_literals_do_not_end_a_gated_block_early() {
+    let bad = scan(
+        "#[cfg(test)]\nmod t {\n    const A: &str = \"}\";\n    const B: char = '}';\n    \
+         const C: &str = r#\"} }\"#;\n    fn x() { let _ = DirSource::at(p); }\n}\n\
+         fn real() { let _ = DirSource::at(p); }\n",
+    );
+    assert_eq!(bad.len(), 1, "{bad:?}");
+    assert!(bad[0].contains("lib.rs:8:"), "{bad:?}");
+}
+
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn destructuring_a_realm_for_its_registry_and_hand_built_mirrors_are_refused() {
+    for shape in [
+        "let Realm { registry, .. } = realm;",
+        "let m = Mirrors::single(\"x\", p);",
+        "let m = Mirrors::new(vec![]);",
+    ] {
+        let bad = scan(&format!("fn f() {{ {shape} }}\n"));
+        assert_eq!(bad.len(), 1, "{shape} must be refused: {bad:?}");
+    }
+    assert!(scan("fn f() { let m = Mirrors::for_realm(n, s, p); }\n").is_empty());
+}
+
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_gated_use_and_a_gated_fn_are_blanked_too() {
+    let bad = scan(
+        "#[cfg(test)]\nuse x::DirSource;\n#[cfg(test)]\nfn t() { let _ = DirSource::at(p); }\n\
+         fn real() {}\n",
+    );
+    assert!(bad.is_empty(), "{bad:?}");
+}
+
+#[test]
+fn every_allowlist_entry_states_a_reason_and_still_matches_a_line_of_production_code() {
+    let crates = workspace_crates();
+    let mut files = Vec::new();
+    for c in std::fs::read_dir(&crates).unwrap().filter_map(Result::ok) {
+        let src = c.path().join("src");
+        if src.is_dir() {
+            rust_files(&src, &mut files);
+        }
+    }
+    for (suffix, frag, why) in ALLOWED {
+        assert!(why.len() > 20, "{suffix}: an allowance needs a real reason");
+        let matched = files.iter().any(|f| {
+            f.to_string_lossy().ends_with(suffix)
+                && std::fs::read_to_string(f).is_ok_and(|t| {
+                    production_lines(&t)
+                        .iter()
+                        .any(|l| l.contains(frag) && FORBIDDEN.iter().any(|p| l.contains(p)))
+                })
+        });
+        assert!(
+            matched,
+            "stale allowlist entry ({suffix}, {frag}): it allows no forbidden line; remove it"
+        );
+    }
+}
