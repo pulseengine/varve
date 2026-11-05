@@ -3833,13 +3833,17 @@ fn realm_trust(realm: &varve_core::Realm) -> anyhow::Result<varve_core::keyroles
 /// The fallback is deliberately narrow. A PINNED project resolves through
 /// `project_ctx` and any failure there propagates, because a realm's root is
 /// authoritative and must not quietly degrade to whatever `VARVE_TRUST_ROOT`
-/// happens to say — a malformed realms file is an error, not an invitation to
-/// trust the ambient environment. Only the absence of a pin reaches the
-/// environment at all.
+/// happens to say — a malformed realms file, or a varve.toml that exists and
+/// cannot be loaded, is an error, not an invitation to trust the ambient
+/// environment. Only the ABSENCE of a varve.toml reaches the environment at
+/// all.
 fn trust_here(base: &Store) -> anyhow::Result<varve_core::keyroles::RealmTrust> {
-    match load_pin() {
-        Ok(_) => ctx_trust(&project_ctx(base)?),
-        Err(_) => varve_core::keyroles::RealmTrust::root_only(&trust_root_bytes()?)
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+    match discover::find_pin(&cwd) {
+        // A pin that EXISTS decides, and one that cannot be loaded is an error
+        // naming it (`load_pin` does), never the environment's root in its place.
+        Some(_) => ctx_trust(&project_ctx(base)?),
+        None => varve_core::keyroles::RealmTrust::root_only(&trust_root_bytes()?)
             .map_err(|e| anyhow::anyhow!("{e}")),
     }
 }
@@ -4771,14 +4775,21 @@ fn verify_every_partition(ctx: &ProjectCtx, timing: bool) -> anyhow::Result<()> 
     // fingerprint -> (realm name, verifier). A partition whose realm is not
     // defined here cannot be checked, and is REPORTED rather than skipped: an
     // unverifiable layer sitting in the store is what this command is for.
-    let mut by_fp: std::collections::BTreeMap<String, (String, varve_core::PinnedKeyVerifier)> =
+    //
+    // A realm that IS defined but whose trust cannot be built (a roles realm
+    // whose delegation is missing or refused) is kept with the reason: telling
+    // the operator the realm is "not defined" would send them to add what is
+    // already there, and hide the delegation they need to repair.
+    type Judge = Result<varve_core::PinnedKeyVerifier, String>;
+    let mut by_fp: std::collections::BTreeMap<String, (String, Judge)> =
         std::collections::BTreeMap::new();
     for name in varve_core::realm::realm_names(&cwd).unwrap_or_default() {
-        if let Ok(realm) = varve_core::resolve_realm(&cwd, &name)
-            && let Ok(trust) = realm.trust()
-        {
-            let v = varve_core::PinnedKeyVerifier::from_trust(trust);
-            by_fp.insert(realm.fingerprint(), (name, v));
+        if let Ok(realm) = varve_core::resolve_realm(&cwd, &name) {
+            let judge = realm
+                .trust()
+                .map(varve_core::PinnedKeyVerifier::from_trust)
+                .map_err(|e| e.to_string());
+            by_fp.insert(realm.fingerprint(), (name, judge));
         }
     }
 
@@ -4798,13 +4809,24 @@ fn verify_every_partition(ctx: &ProjectCtx, timing: bool) -> anyhow::Result<()> 
         partitions_seen += 1;
         // Whose root speaks for this partition?
         let chosen = match &fp {
-            Some(fp) => by_fp.get(fp).map(|(n, v)| (n.clone(), v)),
+            Some(fp) => by_fp.get(fp).map(|(n, v)| (n.clone(), v.as_ref())),
             // The top-level core is not realm-scoped: the pin's own root.
-            None => Some(("(no realm)".to_string(), &own)),
+            None => Some(("(no realm)".to_string(), Ok(&own))),
         };
         for layer in layers {
             total_layers += 1;
-            let Some((realm_name, verifier)) = &chosen else {
+            if let Some((realm_name, Err(why))) = &chosen {
+                failures.push(format!(
+                    "layer {} ({}) sits in the partition of realm {realm_name}, which \
+                     varve-realms.toml defines but whose trust cannot be built, so nothing \
+                     can vouch for it: {why}\n    at {}",
+                    layer.layer,
+                    layer.digest,
+                    layer.root.display()
+                ));
+                continue;
+            }
+            let Some((realm_name, Ok(verifier))) = &chosen else {
                 failures.push(format!(
                     "layer {} ({}) sits in realm partition {} which varve-realms.toml does not \
                      define — nothing here can vouch for it. Add that realm, or remove the \
@@ -5464,7 +5486,9 @@ fn load_pin() -> anyhow::Result<(Pin, PathBuf)> {
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    Ok((Pin::load(&path)?, root))
+    let pin =
+        Pin::load(&path).with_context(|| format!("cannot load the pin {}", path.display()))?;
+    Ok((pin, root))
 }
 
 fn which(store: &Store, tool: &str) -> anyhow::Result<()> {

@@ -928,3 +928,75 @@ fn a_status_signed_cached_status_raises_the_first_contact_floor_in_a_roles_realm
         .failure()
         .stderr(predicate::str::contains("below the floor of 5"));
 }
+
+// rivet: verifies REQ-KEYROLES-001
+#[test]
+fn a_pin_that_exists_but_cannot_be_read_is_an_error_never_a_fall_back_to_the_environments_root() {
+    // Only the ABSENCE of varve.toml may reach VARVE_TRUST_ROOT. A pin that is
+    // there and broken is the project's own statement of which realm judges,
+    // and the ambient environment must not quietly answer in its place.
+    let w = world(false);
+    let archive = w.dir.join("varve-release.tar.gz");
+    std::fs::write(&archive, b"release-bytes").unwrap();
+    let by_root = sign_sums(&w, &archive, &w.root, false, "root");
+    let root_file = w.dir.join("env-root.pub");
+    std::fs::write(&root_file, hex::encode(&w.root.pk)).unwrap();
+    let verify = || {
+        let mut cmd = varve(&w);
+        cmd.env("VARVE_TRUST_ROOT", &root_file)
+            .args(["self-verify", "--archive"])
+            .arg(&archive)
+            .arg("--envelope")
+            .arg(&by_root);
+        cmd.assert()
+    };
+
+    // No pin at all: the environment's root is the trust, as it always was.
+    let pin = w.project.join("varve.toml");
+    let kept = std::fs::read_to_string(&pin).unwrap();
+    std::fs::remove_file(&pin).unwrap();
+    verify().success().stdout(predicate::str::contains(
+        "verified against the signed release sums",
+    ));
+
+    // A pin that is present and unreadable: an error that names it.
+    std::fs::write(&pin, "this is [not toml").unwrap();
+    verify()
+        .failure()
+        .stderr(predicate::str::contains("varve.toml"))
+        .stdout(predicate::str::contains("verified").not());
+    std::fs::write(&pin, kept).unwrap();
+}
+
+// rivet: verifies REQ-KEYROLES-001
+#[test]
+fn verify_all_reports_a_roles_realms_refused_delegation_not_that_the_realm_is_undefined() {
+    let w = world(true);
+    install(&w, &deposit(&w, &w.layer, "layer")).success();
+    // The project now pins another, flat realm `s`; realm `r`, whose partition
+    // holds the layer, is still defined here — and its delegation is gone.
+    std::fs::write(
+        w.project.join("varve-realms.toml"),
+        format!(
+            "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{}\"\n\
+             key-roles = true\ndelegation-file = \"r.delegation.dsse\"\n\
+             [realm.s]\nregistry = \"oci://example/y\"\ntrust-root = \"{}\"\n",
+            hex::encode(&w.root.pk),
+            hex::encode(&w.status.pk)
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        w.project.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nrealm = \"s\"\nchannel = \"qualified\"\n\
+         layer = \"2026.08.0\"\n",
+    )
+    .unwrap();
+    std::fs::remove_file(&w.delegation).unwrap();
+    varve(&w)
+        .args(["verify", "--all"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("r.delegation.dsse"))
+        .stderr(predicate::str::contains("does not define").not());
+}
