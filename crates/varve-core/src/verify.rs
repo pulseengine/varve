@@ -15,41 +15,48 @@
 use wsc::dsse::{DsseEnvelope, DsseError, DsseSigner, Ed25519DsseSigner, Ed25519DsseVerifier};
 
 use crate::install::{ManifestVerifier, VerifyError};
+use crate::keyroles::RealmTrust;
 
 /// The authenticated payload type for a layer manifest envelope.
 pub const LAYER_PAYLOAD_TYPE: &str = "application/vnd.pulseengine.varve.layer.v1+json";
 
-/// Verifies layer-manifest envelopes against a pinned ed25519 root public
-/// key (32 raw bytes).
+/// Verifies layer-manifest envelopes against a realm's pinned trust.
+///
+/// Built from a bare root key it is the flat verifier that predates roles;
+/// built from a [`RealmTrust`] (`from_trust`) a layer manifest is judged under
+/// the realm's LAYER keys when the realm declares roles (REQ-KEYROLES-001).
 pub struct PinnedKeyVerifier {
-    verifier: Ed25519DsseVerifier,
-    public_key: Vec<u8>,
+    trust: RealmTrust,
 }
 
 impl PinnedKeyVerifier {
     pub fn from_public_key_bytes(public_key: &[u8]) -> Result<Self, VerifyError> {
-        let verifier = Ed25519DsseVerifier::from_bytes(public_key)
-            .map_err(|e| VerifyError(format!("invalid trust-root public key: {e}")))?;
         Ok(PinnedKeyVerifier {
-            verifier,
-            public_key: public_key.to_vec(),
+            trust: RealmTrust::root_only(public_key)?,
         })
     }
 
-    /// The root this verifier accepts — what a document that must name the
-    /// signer (the SBOM's author) names it by.
+    /// A verifier for a realm's trust: a roles realm accepts a layer manifest
+    /// only from its LAYER keys, a realm declaring no roles only from its root.
+    pub fn from_trust(trust: RealmTrust) -> Self {
+        PinnedKeyVerifier { trust }
+    }
+
+    /// The realm ROOT — what a document that must name the signer (the SBOM's
+    /// author) names it by, and what the store partitions on. In a roles realm
+    /// this is NOT the key that signs layer manifests.
     pub fn public_key(&self) -> &[u8] {
-        &self.public_key
+        self.trust.root()
     }
 }
 
 impl ManifestVerifier for PinnedKeyVerifier {
     fn verify(&self, fetched: &[u8]) -> Result<Vec<u8>, VerifyError> {
-        verify_with(&self.verifier, fetched, LAYER_PAYLOAD_TYPE)
+        self.trust.verify_bytes(fetched, LAYER_PAYLOAD_TYPE)
     }
 
     fn root_public_key(&self) -> Option<&[u8]> {
-        Some(&self.public_key)
+        Some(self.trust.root())
     }
 }
 

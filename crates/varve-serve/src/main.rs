@@ -151,8 +151,11 @@ fn resolve_layers(
         Some(name) => {
             let realm = varve_core::resolve_realm(&cwd, name)?;
             let s = varve_core::Store::at(realm.effective_root(base.root()));
-            let v = varve_core::PinnedKeyVerifier::from_public_key_bytes(&realm.trust_root)
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            // The realm's full trust: a roles realm's layers verify under its
+            // LAYER keys, a realm declaring no roles under its root.
+            let v = varve_core::PinnedKeyVerifier::from_trust(
+                realm.trust().map_err(|e| anyhow::anyhow!(e.to_string()))?,
+            );
             (s, v)
         }
         None => {
@@ -185,14 +188,14 @@ fn resolve_layers(
     // composition, found it. Two commands disagreeing about what one pin
     // contains is the defect; the walk now lives in varve-core, where both use
     // the same one.
-    let roots = realm_roots(&cwd)?;
+    let trusts = realm_trusts(&cwd)?;
     let own_realm = pin.realm.clone().unwrap_or_else(|| "(this project)".into());
-    let layers = varve_core::compose::walk_installed(
+    let layers = varve_core::compose::walk_installed_trusted(
         &store,
         &entry,
         &verifier,
         &own_realm,
-        &roots,
+        &trusts,
         &varve_core::host_platform(),
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -332,15 +335,17 @@ fn store_root() -> anyhow::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(home).join(".varve"))
 }
 
-/// Every realm this project can name, mapped to its trust root.
+/// Every realm this project can name, mapped to its trust.
 ///
-/// The composition walk verifies each included layer against the root of the
+/// The composition walk verifies each included layer against the trust of the
 /// realm its include NAMES, and varve-core does not read varve-realms.toml —
 /// resolving them is the caller's job, so that the crate that verifies has no
-/// opinion about where trust material lives.
-fn realm_roots(
+/// opinion about where trust material lives. A roles realm whose delegation
+/// does not verify is left out, so an include naming it is refused rather than
+/// quietly judged by its root alone.
+fn realm_trusts(
     cwd: &std::path::Path,
-) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+) -> anyhow::Result<std::collections::BTreeMap<String, varve_core::keyroles::RealmTrust>> {
     let mut out = std::collections::BTreeMap::new();
     let names = match varve_core::realm::realm_names(cwd) {
         Ok(names) => names,
@@ -351,7 +356,12 @@ fn realm_roots(
     };
     for name in names {
         if let Ok(realm) = varve_core::resolve_realm(cwd, &name) {
-            out.insert(name, realm.trust_root.clone());
+            match realm.trust() {
+                Ok(trust) => {
+                    out.insert(name, trust);
+                }
+                Err(e) => eprintln!("realm '{name}' left out of the composition: {e}"),
+            }
         }
     }
     Ok(out)
