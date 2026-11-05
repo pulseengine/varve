@@ -13,7 +13,7 @@ use std::path::Path;
 use crate::install::VerifyError;
 use crate::layer::LayerId;
 use crate::store::manifest_digest;
-use crate::verify::sign_layer_manifest;
+use crate::verify::sign_layer_manifest_with;
 
 /// An RFC 3339 timestamp, not merely a date. `epoch_days` accepts a bare
 /// `YYYY-MM-DD` because it only needs day resolution; a manifest's issued-at
@@ -962,6 +962,18 @@ pub fn deposit_with_options(
     dest: &Path,
     options: &DepositOptions,
 ) -> Result<DepositOutcome, DepositError> {
+    let signer = crate::verify::FileSigner::new_unchecked(signing_key, key_id)?;
+    deposit_with_signer(spec, &signer, dest, options)
+}
+
+/// `deposit_with_options` with any [`crate::verify::RealmSigner`]: the key may
+/// live somewhere other than a file (REQ-SIGNERSEAM-001).
+pub fn deposit_with_signer(
+    spec: &DepositSpec,
+    signer: &dyn crate::verify::RealmSigner,
+    dest: &Path,
+    options: &DepositOptions,
+) -> Result<DepositOutcome, DepositError> {
     // FIRST, before anything is validated or signed. `write_oci_layout` runs
     // the same guard — it is the single writer, and clause 4 lives there — but
     // asking here too means a deposit that would destroy signed work is
@@ -1209,15 +1221,15 @@ pub fn deposit_with_options(
         "manifests": entries,
     });
     let payload = serde_json::to_vec_pretty(&payload_json).expect("payload serializes");
-    let envelope = sign_layer_manifest(&payload, signing_key, key_id)?;
+    let envelope = sign_layer_manifest_with(&payload, signer)?;
     // Read our own work back before publishing it. The cheapest possible guard
     // against emitting a release artifact nobody can verify — and the last
     // point at which it is still correctable (REQ-PRODUCER-001).
-    let public = &signing_key[32..];
+    let public = signer.public_key();
     match crate::verify::dsse_verify_typed(
         envelope.as_bytes(),
         crate::verify::LAYER_PAYLOAD_TYPE,
-        public,
+        &public,
     ) {
         Ok(back) if back == payload => {}
         _ => return Err(DepositError::SelfVerifyFailed),
@@ -2354,5 +2366,24 @@ mod tests {
                 .unwrap()
                 .digest,
         );
+    }
+
+    // rivet: verifies REQ-SIGNERSEAM-001
+    #[test]
+    fn deposit_through_a_non_file_signer_is_byte_identical_and_self_verifies() {
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let by_key = deposit(&spec(), &sk, "mock-1", &tmp.path().join("a")).unwrap();
+
+        let mock = crate::verify::testsigner::CountingSigner::new(&sk);
+        let by_signer = deposit_with_signer(
+            &spec(),
+            &mock,
+            &tmp.path().join("b"),
+            &DepositOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(mock.calls(), 1, "one manifest, one signature");
+        assert_eq!(by_key.digest, by_signer.digest);
     }
 }

@@ -3858,8 +3858,8 @@ artifacts:
   - id: REQ-SIGNERSEAM-001
     type: requirement
     title: Signing goes through a seam, so the key can live somewhere other than a file
-    status: draft
-    release: v0.31.0
+    status: approved
+    release: v0.45.0
     description: >
       `--key <FILE>` is varve's entire key input. There is no PKCS#11 provider,
       no KMS backend, no hardware path — at some moment the raw 128 characters
@@ -5484,6 +5484,24 @@ artifacts:
     links:
       - type: traces-to
         target: REQ-ZMODEXPORT-001
+
+  - id: DD-041
+    type: design-decision
+    title: "Key roles: payloadType is the role claim; root signs only delegations; LAYER signs layers, attestations and release sums; STATUS signs line-status, line-index and advisories; no deposit baseline in a roles realm"
+    status: approved
+    release: v0.45.0
+    description: "Decided by the maintainer on 2026-11-04, on top of the 2026-10-27 role set (an offline ROOT key signs only a delegation naming role keys; a LAYER role signs layer manifests and attestations; a STATUS role signs line-status, line-index and advisory documents, used on a human merge and never by the unattended deposit job). Q1: in a roles realm, deposit publishes NO baseline line-status, because the baseline would have to be signed by the depositor and the status role is not the depositor's. Q2: the LAYER role also signs release SHA256SUMS. Q3: in a roles realm the root signing anything other than a delegation is refused. Q4: the role claim is the authenticated DSSE payloadType mapped through a fixed table, with no new payload field, so published envelopes stay byte-identical and a role cannot be stripped from a signature. A realm that declares no roles runs today's verifier unchanged. The signer seam (REQ-SIGNERSEAM-001) is step 1 and changes no role logic."
+    fields:
+      rationale: Binding the role to the authenticated payloadType means published envelopes stay byte-identical, no new field can be stripped or forged, and the reaction channel (status, index, advisories) sits outside the unattended depositor's blast radius.
+    links:
+      - type: satisfies
+        target: REQ-KEYROLES-001
+      - type: satisfies
+        target: REQ-SIGNERSEAM-001
+    provenance:
+      created-by: ai-assisted
+      model: claude-sonnet-5-5
+      timestamp: 2026-11-04T22:04:08Z
 
   - id: REQ-AGENTDOCS-006
     type: requirement
