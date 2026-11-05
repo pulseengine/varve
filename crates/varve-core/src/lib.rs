@@ -85,8 +85,8 @@ pub use ingest::{
 };
 pub use install::{DigestConsent, cached_consent_why_not};
 pub use install::{
-    InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError, install,
-    install_by_digest, install_by_digest_from, install_from,
+    DigestRole, InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, VerifyError,
+    install, install_by_digest, install_by_digest_from, install_from,
 };
 pub use kind::{ANN_KIND, PayloadKind, UnknownKind};
 pub use layer::{LayerId, LayerIdError, Line};

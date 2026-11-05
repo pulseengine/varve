@@ -3822,6 +3822,7 @@ fn support_horizon(
 fn fetch_included_layer(
     ctx: &ProjectCtx,
     digest: &str,
+    layer: Option<&str>,
     realm_name: &str,
     platform: &str,
     now: &str,
@@ -3845,6 +3846,12 @@ fn fetch_included_layer(
     // layer was not installed, because the composition walk looks for siblings.
     let store = Store::at(realm.effective_root(&ctx.base_root));
     let sources = varve_core::mirror::Mirrors::for_realm(&realm.name, &realm.sources, platform)?;
+    // The line this digest should turn out to be, from the include that named
+    // it: a mirror is refused a first contact BEFORE it is contacted, and a
+    // digest alone names no line.
+    let expected_line = layer
+        .and_then(|name| name.parse::<varve_core::LayerId>().ok())
+        .map(|id| id.line().clone());
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let index = Some(varve_core::IndexPolicy {
         realm: &realm.name,
@@ -3861,7 +3868,19 @@ fn fetch_included_layer(
         .attempt(
             |source, is_primary| {
                 varve_core::install_by_digest_from(
-                    digest, source, &verifier, &store, &mut marks, &policy, is_primary,
+                    digest,
+                    source,
+                    &verifier,
+                    &store,
+                    &mut marks,
+                    &policy,
+                    if is_primary {
+                        varve_core::DigestRole::Primary
+                    } else {
+                        varve_core::DigestRole::Mirror {
+                            expected_line: expected_line.as_ref(),
+                        }
+                    },
                 )
             },
             varve_core::InstallError::fails_over,
@@ -3945,7 +3964,15 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
     // (REQ-MIRROR-002 clause 2).
     let verified = sources
         .attempt_some(
-            |source, _is_primary| -> Result<_, varve_core::InstallError> {
+            |source, is_primary| -> Result<_, varve_core::InstallError> {
+                // With no cached index this machine has nothing to bound a
+                // mirror's answer by: "nothing newer" from a mirror could be
+                // an old index, and is not an answer.
+                if !is_primary && cached.is_none() {
+                    return Err(varve_core::InstallError::FirstContactNeedsPrimary {
+                        line: line.clone(),
+                    });
+                }
                 let envelope = source.fetch_line_index(&line)?;
                 let served = source.served_layers(&line)?;
                 Ok(varve_core::lineindex::check(
@@ -4280,7 +4307,14 @@ fn install(
                         continue;
                     }
                 };
-                match fetch_included_layer(&ctx, &inc.digest, &realm_name, &platform, &now) {
+                match fetch_included_layer(
+                    &ctx,
+                    &inc.digest,
+                    inc.layer.as_deref(),
+                    &realm_name,
+                    &platform,
+                    &now,
+                ) {
                     Ok(entry) => {
                         println!(
                             "  fetched composed layer {} from realm '{realm_name}'",

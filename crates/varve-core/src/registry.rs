@@ -2233,13 +2233,23 @@ mod tests {
             http().resolve(env(), &[]),
             CredentialLookup::Found(_)
         ));
-        // An https mirror elsewhere has no env credential, and no config entry
-        // for ITS host.
+        // An https mirror on another origin never gets the ENVIRONMENT
+        // credential, but may use its OWN host's docker-config entry. The
+        // credential found must be the config one ("secret"), not the
+        // environment one ("s3cret").
         let elsewhere = https().as_mirror_of(Some("https://elsewhere.example"));
-        assert!(
-            matches!(elsewhere.resolve(env(), paths), CredentialLookup::Found(_)),
-            "a restricted https source may still use its OWN host's config entry"
-        );
+        match elsewhere.resolve(env(), paths) {
+            CredentialLookup::Found(c) => {
+                assert_eq!(c.password, "secret", "the environment credential leaked");
+                assert!(c.origin.contains("config.json"), "{}", c.origin);
+            }
+            other => panic!("expected the docker-config credential, got {other:?}"),
+        }
+        // With NO docker-config entry for its host, it holds nothing at all.
+        assert!(matches!(
+            elsewhere.resolve(env(), &[]),
+            CredentialLookup::Absent
+        ));
     }
 
     // rivet: verifies REQ-MIRROR-002

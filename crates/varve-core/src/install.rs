@@ -260,7 +260,31 @@ pub fn install_by_digest(
     marks: &mut HighWaterMarks,
     policy: &InstallPolicy<'_>,
 ) -> Result<InstallOutcome, InstallError> {
-    install_by_digest_from(digest, source, verifier, store, marks, policy, true)
+    install_by_digest_from(
+        digest,
+        source,
+        verifier,
+        store,
+        marks,
+        policy,
+        DigestRole::Primary,
+    )
+}
+
+/// Which source an install-by-digest is reading from. A digest names no line,
+/// so a MIRROR carries the line the caller expects (from the include that
+/// named the digest) and the first-contact refusal is decided on it BEFORE the
+/// mirror is asked anything.
+#[derive(Debug, Clone, Copy)]
+pub enum DigestRole<'a> {
+    /// The realm's primary (or its only source).
+    Primary,
+    /// A mirror. `expected_line` is the line of the layer the digest should
+    /// turn out to be, if the caller knows it; without it the line cannot be
+    /// known before fetching, no history can be shown, and a mirror is refused.
+    Mirror {
+        expected_line: Option<&'a crate::layer::Line>,
+    },
 }
 
 /// [`install_by_digest`] from a source that is, or is not, the realm's
@@ -273,8 +297,25 @@ pub fn install_by_digest_from(
     store: &Store,
     marks: &mut HighWaterMarks,
     policy: &InstallPolicy<'_>,
-    source_is_primary: bool,
+    role: DigestRole<'_>,
 ) -> Result<InstallOutcome, InstallError> {
+    // First contact is decided BEFORE a mirror is contacted: reading the
+    // manifest here would otherwise be a fetch from a source that may not be
+    // allowed to answer. The line comes from the caller (the include that
+    // named this digest); `install_inner` re-checks it against the real
+    // manifest's line afterwards.
+    let source_is_primary = matches!(role, DigestRole::Primary);
+    if let DigestRole::Mirror { expected_line } = role {
+        let known = expected_line.filter(|line| has_local_history(line, store, verifier, marks));
+        if known.is_none() {
+            return Err(InstallError::FirstContactNeedsPrimary {
+                line: expected_line.map_or_else(
+                    || "(unknown: the include names no layer)".to_string(),
+                    ToString::to_string,
+                ),
+            });
+        }
+    }
     let fetched = source.fetch_manifest(&LayerRef::Digest(digest.to_string()))?;
     let bytes = verifier.verify(&fetched)?;
     let manifest = LayerManifest::parse(&bytes)?;
@@ -334,9 +375,11 @@ pub fn install(
 /// a protection: absence or an older document on a mirror is "unknown", not
 /// "none". So from a non-primary source (a) digest CONSENT to go below the
 /// mark is refused, because it lifts a protection and the mirror may be
-/// lagging a yank, and (b) a first contact (no local history for the line)
-/// needs a verified line-status to state the realm's floor, because without
-/// one the floor is unknown, not zero.
+/// lagging a yank, and (b) a FIRST CONTACT (no local history for the line: no
+/// high-water mark and no cached line-status) is refused outright with
+/// [`InstallError::FirstContactNeedsPrimary`], before anything is fetched,
+/// because a mirror cannot prove it is current and nothing bounds it. With
+/// history a mirror answers, bounded by the marks and the cached status.
 pub fn install_from(
     pin: &Pin,
     source: &dyn LayerSource,
@@ -473,8 +516,10 @@ fn install_inner(
         let envelope = source.fetch_line_index(&line_str)?;
         // A mirror with no index leaves the omission check unable to run: that
         // is UNKNOWN, not "nothing hidden", and it is reported (D4).
-        omission_check_skipped = !source_is_primary && envelope.is_none();
         let served = source.served_layers(&line_str)?;
+        // ... and so is a mirror whose index cannot be compared with a listing
+        // (it cannot enumerate what it serves): the check cannot run either.
+        omission_check_skipped = !source_is_primary && (envelope.is_none() || served.is_none());
         // Clause 2 needs something to compare AGAINST, and it is the cache
         // that supplies it. Passing `None` here left the whole
         // presented-older-than-held rule unreachable from the pipeline: it
@@ -508,15 +553,37 @@ fn install_inner(
     // protection either — closing it needs the realm to REQUIRE a status the
     // way `signed-index` requires an index, which is a realm-policy change and
     // not this requirement.
+    //
+    // With NO mark the floor is the one stated by the HIGHER-counter verified
+    // status among the one this machine already CACHED and the one the source
+    // serves. A source can therefore only raise the bar: an older status (a
+    // lower or absent `min_counter`), no status, or an unverifiable one leaves
+    // the recorded floor in force. That is what bounds a mirror's answer by
+    // what this machine has already recorded, primary or not.
     let mut first_contact_floor: Option<u64> = None;
     if marks.mark(line).is_none()
         && let Some(index_policy) = &policy.index
-        && let Some(bytes) = source.fetch_line_status(&layer_ref)?
-        && let Ok(doc) =
-            crate::linestatus::LineStatus::verify_and_parse(&bytes, index_policy.root_public_key)
-        && doc.line == line_str
     {
-        first_contact_floor = doc.min_counter;
+        let cached = crate::linestatus::StatusCache::at_root(store.root())
+            .load(line, index_policy.root_public_key)
+            .ok()
+            .flatten()
+            .filter(|doc| doc.line == line_str);
+        let served = source
+            .fetch_line_status(&layer_ref)?
+            .and_then(|bytes| {
+                crate::linestatus::LineStatus::verify_and_parse(
+                    &bytes,
+                    index_policy.root_public_key,
+                )
+                .ok()
+            })
+            .filter(|doc| doc.line == line_str);
+        first_contact_floor = [cached, served]
+            .into_iter()
+            .flatten()
+            .max_by_key(|doc| doc.counter)
+            .and_then(|doc| doc.min_counter);
     }
 
     // 4. Anti-rollback, before any blob moves.
@@ -2604,6 +2671,287 @@ mod tests {
             .unwrap();
         let source = std::mem::replace(&mut f.source, MemorySource::new());
         first_contact(&mut f, &source, false).expect("a cached status is history");
+    }
+
+    /// A status document with a stated `min_counter`, signed by `sk`.
+    fn status_with_floor(counter: u64, min_counter: Option<u64>, sk: &[u8]) -> Vec<u8> {
+        crate::linestatus::LineStatus {
+            line: "2026.07".into(),
+            counter,
+            issued_at: "2026-08-01T00:00:00Z".into(),
+            support_until: None,
+            min_counter,
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        }
+        .sign(sk, "root-1")
+        .unwrap()
+        .into_bytes()
+    }
+
+    /// No MARK for the line, but a verified status #3 cached with a raised
+    /// floor of 5. Installing layer counter 4 from `source` as the primary or a
+    /// mirror: the outcome.
+    fn install_four_against_a_cached_floor(
+        source_status: Option<Vec<u8>>,
+        cached: Vec<u8>,
+        pk: &[u8],
+        primary: bool,
+    ) -> Result<InstallOutcome, InstallError> {
+        let (_tmp, store, mut marks) = setup();
+        let (bytes, blobs) = layer_of("2026.07.2", 4, "four");
+        let mut source = MemorySource::new().with_manifest(&bytes);
+        for (d, b) in &blobs {
+            source = source.with_blob(d, b);
+        }
+        if let Some(status) = &source_status {
+            source = source.with_line_status(status);
+        }
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let doc = crate::linestatus::LineStatus::verify_and_parse(&cached, pk).unwrap();
+        crate::linestatus::StatusCache::at_root(store.root())
+            .update(&line, &cached, &doc)
+            .unwrap();
+        let policy = InstallPolicy {
+            index: Some(crate::lineindex::IndexPolicy {
+                realm: "acme",
+                root_public_key: pk,
+                required: false,
+            }),
+            ..policy()
+        };
+        install_from(
+            &pin("2026.07.2"),
+            &source,
+            &AcceptWithRoot(pk),
+            &store,
+            &mut marks,
+            &policy,
+            primary,
+        )
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_floor_this_machine_already_recorded_is_not_lowered_by_what_a_source_serves() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let cached = || status_with_floor(3, Some(5), &sk);
+        for primary in [false, true] {
+            // The source serves an OLDER status that states no floor.
+            let err = install_four_against_a_cached_floor(
+                Some(status_with_floor(1, None, &sk)),
+                cached(),
+                &pk,
+                primary,
+            )
+            .expect_err("counter 4 is below the recorded floor of 5");
+            assert!(
+                matches!(err, InstallError::BelowFloor { floor: 5, .. }),
+                "primary={primary}: {err}"
+            );
+            // The source serves no status at all.
+            let err = install_four_against_a_cached_floor(None, cached(), &pk, primary)
+                .expect_err("silence does not lower a recorded floor");
+            assert!(
+                matches!(err, InstallError::BelowFloor { floor: 5, .. }),
+                "primary={primary}: {err}"
+            );
+            // The source serves a status that does not verify.
+            let (other_sk, _) = crate::verify::generate_root_keypair();
+            let err = install_four_against_a_cached_floor(
+                Some(status_with_floor(9, None, &other_sk)),
+                cached(),
+                &pk,
+                primary,
+            )
+            .expect_err("a forged status does not lower it either");
+            assert!(matches!(err, InstallError::BelowFloor { .. }), "{err}");
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_newer_verified_status_decides_the_floor_whichever_side_holds_it() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        // The source serves a NEWER status (#4) with a higher floor: it binds.
+        let err = install_four_against_a_cached_floor(
+            Some(status_with_floor(4, Some(7), &sk)),
+            status_with_floor(3, Some(2), &sk),
+            &pk,
+            false,
+        )
+        .expect_err("the newer status raised the floor to 7");
+        assert!(
+            matches!(err, InstallError::BelowFloor { floor: 7, .. }),
+            "{err}"
+        );
+        // A newer status that LOWERS the floor is the realm's later word, and
+        // the cached one is outranked by it (counter 4 clears a floor of 2).
+        install_four_against_a_cached_floor(
+            Some(status_with_floor(4, Some(2), &sk)),
+            status_with_floor(3, Some(5), &sk),
+            &pk,
+            false,
+        )
+        .expect("the newer word lowered the floor");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_mirror_that_carries_an_index_but_cannot_enumerate_leaves_the_omission_check_unrun() {
+        // History as a MARK, so a mirror may answer.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let pk = f.pk.clone();
+        let index = crate::lineindex::LineIndex {
+            line: "2026.07".into(),
+            counter: 1,
+            issued_at: "2026-08-07T00:00:00Z".into(),
+            layers: vec![crate::lineindex::IndexedLayer {
+                layer: "2026.07.1".into(),
+                digest: manifest_digest(&f.newer),
+                channel: "qualified".into(),
+                counter: 2,
+            }],
+        }
+        .sign(&f.sk, "root-1")
+        .unwrap();
+        // The source carries the index but, like a directory or OCI layout,
+        // cannot ENUMERATE what it serves (`served_layers` is None).
+        let source =
+            std::mem::replace(&mut f.source, MemorySource::new()).with_line_index(index.as_bytes());
+        let policy = InstallPolicy {
+            index: Some(crate::lineindex::IndexPolicy {
+                realm: "acme",
+                root_public_key: &pk,
+                required: false,
+            }),
+            ..policy()
+        };
+        let newer = digest_pin("2026.07.1", &manifest_digest(&f.newer));
+        let outcome = install_from(
+            &newer,
+            &source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy,
+            false,
+        )
+        .expect("history lets a mirror answer");
+        assert!(
+            outcome.omission_check_skipped,
+            "an index it cannot compare with a listing is a check that could not run"
+        );
+        // The same source as the PRIMARY reports nothing skipped.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let source =
+            std::mem::replace(&mut f.source, MemorySource::new()).with_line_index(index.as_bytes());
+        let outcome = install_from(
+            &newer,
+            &source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy,
+            true,
+        )
+        .unwrap();
+        assert!(!outcome.omission_check_skipped);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_digest_install_refuses_a_mirror_before_contacting_it_when_there_is_no_history() {
+        struct Untouched;
+        impl LayerSource for Untouched {
+            fn fetch_manifest(&self, _: &LayerRef) -> Result<Vec<u8>, SourceError> {
+                panic!("a mirror was contacted for a first contact");
+            }
+            fn fetch_blob(&self, _: &str) -> Result<Vec<u8>, SourceError> {
+                panic!("a mirror was contacted for a first contact");
+            }
+        }
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        for expected_line in [Some(&line), None] {
+            let mut f = consent_fixture();
+            let pk = f.pk.clone();
+            let err = install_by_digest_from(
+                &manifest_digest(&f.older),
+                &Untouched,
+                &AcceptWithRoot(&pk),
+                &f.store,
+                &mut f.marks,
+                &policy(),
+                DigestRole::Mirror { expected_line },
+            )
+            .expect_err("no history, no mirror");
+            assert!(
+                matches!(err, InstallError::FirstContactNeedsPrimary { .. }),
+                "{err}"
+            );
+            assert!(!err.fails_over());
+        }
+        // An include that names no layer names no line: refused in words.
+        let mut f = consent_fixture();
+        let pk = f.pk.clone();
+        let err = install_by_digest_from(
+            &manifest_digest(&f.older),
+            &Untouched,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Mirror {
+                expected_line: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("names no layer"), "{err}");
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_digest_install_from_a_mirror_proceeds_when_the_expected_line_has_history() {
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let pk = f.pk.clone();
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        install_by_digest_from(
+            &manifest_digest(&f.newer),
+            &source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Mirror {
+                expected_line: Some(&line),
+            },
+        )
+        .expect("history for the line admits a mirror");
+        // History for ANOTHER line does not.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let other: crate::layer::Line = "2026.06".parse().unwrap();
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let err = install_by_digest_from(
+            &manifest_digest(&f.newer),
+            &source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Mirror {
+                expected_line: Some(&other),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, InstallError::FirstContactNeedsPrimary { .. }),
+            "{err}"
+        );
     }
 
     // rivet: verifies REQ-MIRROR-002

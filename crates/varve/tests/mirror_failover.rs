@@ -45,6 +45,12 @@ struct Spec<'a> {
     /// Serve everything but the layer itself (no tag, no layer manifest): a
     /// primary that answers the CORRECTION question but cannot supply bytes.
     no_layer: bool,
+    /// Sign the LAYER's envelope with a key that is not the realm's, while the
+    /// status documents stay genuine: a primary whose bytes fail the root but
+    /// whose status documents are good.
+    forge_layer: bool,
+    /// The counter of the baseline status (default 1).
+    baseline_counter: u64,
 }
 
 /// An OCI registry on a loopback port serving one layer signed by a fresh
@@ -68,6 +74,8 @@ fn serve_layer_signed(sk: &[u8], pk: &[u8], counter: u64) -> Served {
         published_until: None,
         forge_published: false,
         no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
     })
 }
 
@@ -82,6 +90,8 @@ fn serve_spec(spec: Spec<'_>) -> Served {
         published_until,
         forge_published,
         no_layer,
+        forge_layer,
+        baseline_counter,
     } = spec;
     let entries = match &tool {
         Some((signed, _)) => format!(
@@ -95,7 +105,13 @@ fn serve_spec(spec: Spec<'_>) -> Served {
         r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{LAYER}","eu.pulseengine.varve.line":"2026.10","eu.pulseengine.varve.channel":"rolling","eu.pulseengine.varve.counter":"{counter}","org.opencontainers.image.created":"2026-09-24T00:00:00Z"}},"manifests":[{entries}]}}"#
     );
     let digest = varve_core::manifest_digest(payload.as_bytes());
-    let envelope = varve_core::sign_layer_manifest(payload.as_bytes(), sk, "test-root").unwrap();
+    let layer_signer = if forge_layer {
+        varve_core::generate_root_keypair().0
+    } else {
+        sk.to_vec()
+    };
+    let envelope =
+        varve_core::sign_layer_manifest(payload.as_bytes(), &layer_signer, "test-root").unwrap();
     let env_digest = varve_core::manifest_digest(envelope.as_bytes());
     let mut blobs = std::collections::BTreeMap::new();
     blobs.insert(env_digest.clone(), envelope.into_bytes());
@@ -123,7 +139,7 @@ fn serve_spec(spec: Spec<'_>) -> Served {
         "annotations": { "eu.pulseengine.varve.role": "envelope" }
     })];
     if let Some(until) = baseline_until {
-        let doc = signed_status(until, 1);
+        let doc = signed_status(until, baseline_counter);
         let d = varve_core::manifest_digest(&doc);
         blobs.insert(d.clone(), doc);
         layers.push(serde_json::json!({
@@ -388,9 +404,10 @@ fn a_mirror_serving_bytes_the_root_did_not_sign_fails_closed() {
 // rivet: verifies REQ-MIRROR-002
 #[test]
 fn support_horizon_reads_an_include_through_a_mirror() {
-    // The primary is up for CORRECTIONS (it states one) but cannot supply the
-    // layer; the mirror carries the layer and its baseline. The layer bytes
-    // and baseline come from the mirror, the correction from the primary.
+    // The primary's LAYER fails the root (forged), but its status documents
+    // are good: a baseline and a correction. The mirror carries the genuine
+    // layer. The layer comes from the mirror; every status document that
+    // decides the window comes from the primary.
     let (sk, pk) = varve_core::generate_root_keypair();
     let primary = serve_spec(Spec {
         sk: &sk,
@@ -398,10 +415,12 @@ fn support_horizon_reads_an_include_through_a_mirror() {
         counter: 1,
         tool: None,
         drop_tool_blob: false,
-        baseline_until: None,
+        baseline_until: Some("2026-12-01"),
         published_until: Some("2026-10-24"),
         forge_published: false,
-        no_layer: true,
+        no_layer: false,
+        forge_layer: true,
+        baseline_counter: 1,
     });
     let mirror = serve_spec(Spec {
         sk: &sk,
@@ -409,23 +428,21 @@ fn support_horizon_reads_an_include_through_a_mirror() {
         counter: 1,
         tool: None,
         drop_tool_blob: false,
-        baseline_until: Some("2026-12-01"),
+        baseline_until: Some("2027-06-01"),
         published_until: None,
         forge_published: false,
         no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
     });
-    let p = project(&primary.registry, &[&mirror.registry], &mirror.root_hex);
-    let out = support_horizon_via(&p, &mirror.digest);
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    let out = support_horizon_via(&p, &primary.digest);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "2026-10-24\n",
-        "the primary's correction binds the mirror's baseline"
-    );
-    assert!(
-        stderr.contains(&mirror.registry) && stderr.contains("mirror"),
-        "the mirror must be named:\n{stderr}"
+        "the primary's correction binds, not the mirror's baseline"
     );
 }
 
@@ -527,6 +544,8 @@ fn serve_with_tool(sk: &[u8], pk: &[u8], served: Vec<u8>, drop_blob: bool) -> Se
         published_until: None,
         forge_published: false,
         no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
     })
 }
 
@@ -777,19 +796,48 @@ fn the_primary_still_receives_its_credential() {
 // rivet: verifies REQ-MIRROR-002
 #[test]
 fn support_horizon_tries_the_mirror_when_the_primary_serves_bytes_the_root_did_not_sign() {
-    let real = serve_with_status(Some("2026-10-24"), None);
-    let forged = serve_layer(); // same payload, signed by another key
-    assert_eq!(forged.digest, real.digest);
-    let p = project(&forged.registry, &[&real.registry], &real.root_hex);
-    let out = support_horizon_via(&p, &real.digest);
+    // The primary answers "no correction" and states a baseline (#5, the
+    // EARLIER date), but its layer fails the root so the walk moves to the
+    // mirror. The mirror's older baseline (#1, a LATER date) must not decide
+    // the window: every status document is the primary's.
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let primary = serve_spec(Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: Some("2026-10-24"),
+        published_until: None,
+        forge_published: false,
+        no_layer: false,
+        forge_layer: true,
+        baseline_counter: 5,
+    });
+    let mirror = serve_spec(Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: Some("2026-12-01"),
+        published_until: None,
+        forge_published: false,
+        no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
+    });
+    assert_eq!(primary.digest, mirror.digest);
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    let out = support_horizon_via(&p, &mirror.digest);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "2026-10-24\n",
-        "the genuine include must have been READ from the mirror"
+        "the later date came from a mirror's older baseline:\n{stderr}"
     );
-    assert!(stderr.contains(&real.registry), "{stderr}");
+    assert!(stderr.contains(&mirror.registry), "{stderr}");
 }
 
 /// A bad mirror spec breaks the realm it belongs to, and names it when that
@@ -885,6 +933,8 @@ fn serve_with_status(baseline: Option<&str>, published: Option<&str>) -> Served 
         published_until: published,
         forge_published: false,
         no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
     })
 }
 
@@ -980,6 +1030,8 @@ fn a_mirror_cannot_grant_the_rollback_consent_the_primary_could_not_give() {
         published_until: None,
         forge_published: false,
         no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
     });
     let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
     std::fs::write(
@@ -1029,6 +1081,8 @@ fn an_unverifiable_published_correction_on_a_mirror_does_not_establish_the_windo
         published_until: Some("2026-10-24"),
         forge_published: true,
         no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
     });
     let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
     let out = support_horizon_via(&p, &mirror.digest);
@@ -1083,6 +1137,8 @@ fn rollback_consent_is_never_granted_by_a_mirror_after_the_primary_failed() {
         published_until: None,
         forge_published: false,
         no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
     });
     let p = project(&primary, &[&mirror.registry], &mirror.root_hex);
     std::fs::write(
@@ -1203,6 +1259,8 @@ fn a_status_taken_from_a_mirror_is_not_cached_to_grant_consent_later() {
         published_until: None,
         forge_published: false,
         no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
     });
     // The older layer, as the primary (back up) serves it: no status at all.
     let older = serve_layer_signed(&sk, &pk, 1);
@@ -1328,6 +1386,27 @@ fn a_mirror_without_an_index_is_reported_as_an_omission_check_that_could_not_run
     assert!(out.status.success(), "{stderr}");
     assert!(
         stderr.contains("omission check could not run against the mirror"),
+        "{stderr}"
+    );
+}
+
+/// `varve outdated` through a mirror with NO cached index: "nothing newer"
+/// from a mirror could be an old index, so it is not an answer.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn outdated_through_a_mirror_without_a_cached_index_is_a_first_contact() {
+    let mirror = serve_with_status(Some("2027-01-01"), None);
+    let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
+    let out = varve(&p).arg("outdated").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "an answer was taken from a mirror with nothing to bound it:\nstdout:{}\nstderr:{stderr}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        stderr.contains("could not be established")
+            && stderr.contains("first contact with line 2026.10 needs the realm's primary"),
         "{stderr}"
     );
 }

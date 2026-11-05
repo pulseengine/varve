@@ -872,21 +872,17 @@ pub fn current_line_status(
     select_current(baseline, published, line, root_pk)
 }
 
-/// [`current_line_status`] with the published CORRECTION supplied by the
-/// caller instead of fetched from `source`: the baseline comes from `source`,
-/// the correction from wherever the caller was entitled to take it. The
-/// support walk uses this so a correction is taken only from the realm's
-/// primary while the layer bytes and baseline may come from a mirror.
-pub fn current_line_status_with_correction(
-    source: &dyn crate::source::LayerSource,
-    layer: &crate::source::LayerRef,
+/// The current status from DOCUMENTS the caller already holds: a baseline and a
+/// published correction, each from wherever the caller was entitled to take it.
+/// The support walk uses this so BOTH come only from the realm's primary while
+/// the layer bytes may come from a mirror: an older mirror baseline (a later
+/// `support-until`) could otherwise outrank "nothing" from the primary.
+pub fn current_line_status_from_documents(
+    baseline: Option<Vec<u8>>,
+    correction: Option<Vec<u8>>,
     line: &Line,
     root_pk: &[u8],
-    correction: Option<Vec<u8>>,
 ) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
-    let baseline = source
-        .fetch_line_status(layer)
-        .map_err(|e| LineStatusError::Payload(format!("fetching baseline line-status: {e}")))?;
     select_current(baseline, correction, line, root_pk)
 }
 
@@ -2794,7 +2790,6 @@ mod failover_class_tests {
 #[cfg(test)]
 mod correction_tests {
     use super::*;
-    use crate::source::{LayerRef, MemorySource};
 
     fn doc_for(line: &str, counter: u64, until: &str, sk: &[u8]) -> Vec<u8> {
         LineStatus {
@@ -2811,35 +2806,31 @@ mod correction_tests {
         .into_bytes()
     }
 
-    fn with_correction(
-        source: &MemorySource,
+    fn from_documents(
+        baseline: Option<Vec<u8>>,
         pk: &[u8],
         correction: Option<Vec<u8>>,
     ) -> Result<Option<(u64, Option<String>)>, String> {
         let line: Line = "2026.10".parse().unwrap();
-        let layer = LayerRef::Digest("sha256:x".into());
-        current_line_status_with_correction(source, &layer, &line, pk, correction)
+        current_line_status_from_documents(baseline, correction, &line, pk)
             .map(|found| found.map(|(_, d)| (d.counter, d.support_until)))
             .map_err(|e| e.to_string())
     }
 
     // rivet: verifies REQ-MIRROR-002
     #[test]
-    fn the_baseline_comes_from_the_source_and_the_correction_from_the_caller() {
+    fn the_baseline_and_the_correction_are_exactly_the_documents_supplied() {
         let (sk, pk) = crate::verify::generate_root_keypair();
-        // The SOURCE also carries a published document; it is NOT consulted.
-        let source = MemorySource::new()
-            .with_line_status(&doc_for("2026.10", 1, "2026-12-01", &sk))
-            .with_published_line_status(&doc_for("2026.10", 9, "2030-01-01", &sk));
+        let baseline = || Some(doc_for("2026.10", 1, "2026-12-01", &sk));
         // No correction supplied: the baseline stands.
         assert_eq!(
-            with_correction(&source, &pk, None),
+            from_documents(baseline(), &pk, None),
             Ok(Some((1, Some("2026-12-01".into()))))
         );
-        // A verified, higher-counter correction supplied by the caller binds.
+        // A verified, higher-counter correction binds.
         let c = doc_for("2026.10", 2, "2026-10-24", &sk);
         assert_eq!(
-            with_correction(&source, &pk, Some(c)),
+            from_documents(baseline(), &pk, Some(c)),
             Ok(Some((2, Some("2026-10-24".into()))))
         );
     }
@@ -2849,8 +2840,6 @@ mod correction_tests {
     fn an_unverifiable_or_misdirected_correction_cannot_displace_the_baseline() {
         let (sk, pk) = crate::verify::generate_root_keypair();
         let (other_sk, _) = crate::verify::generate_root_keypair();
-        let source =
-            MemorySource::new().with_line_status(&doc_for("2026.10", 1, "2026-12-01", &sk));
         // Verify first, rank second: neither a forged nor an other-line
         // correction is chosen, however high its counter.
         for forged in [
@@ -2858,7 +2847,11 @@ mod correction_tests {
             doc_for("2026.09", 99, "2026-01-01", &sk),
         ] {
             assert_eq!(
-                with_correction(&source, &pk, Some(forged)),
+                from_documents(
+                    Some(doc_for("2026.10", 1, "2026-12-01", &sk)),
+                    &pk,
+                    Some(forged)
+                ),
                 Ok(Some((1, Some("2026-12-01".into()))))
             );
         }
@@ -2869,14 +2862,14 @@ mod correction_tests {
     fn nothing_at_all_is_none_and_a_bad_lone_document_is_an_error() {
         let (sk, pk) = crate::verify::generate_root_keypair();
         let (other_sk, _) = crate::verify::generate_root_keypair();
-        assert_eq!(with_correction(&MemorySource::new(), &pk, None), Ok(None));
+        assert_eq!(from_documents(None, &pk, None), Ok(None));
         let lone = doc_for("2026.10", 1, "2026-12-01", &other_sk);
-        let err = with_correction(&MemorySource::new(), &pk, Some(lone)).unwrap_err();
+        let err = from_documents(None, &pk, Some(lone)).unwrap_err();
         assert!(!err.is_empty(), "present but bad is a finding");
         // A correction alone (no baseline) is usable when it verifies.
         let c = doc_for("2026.10", 3, "2026-11-11", &sk);
         assert_eq!(
-            with_correction(&MemorySource::new(), &pk, Some(c)),
+            from_documents(None, &pk, Some(c)),
             Ok(Some((3, Some("2026-11-11".into()))))
         );
     }

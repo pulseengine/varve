@@ -328,12 +328,13 @@ pub fn include_window(
 
 /// One layer's own window, and the layers it includes.
 ///
-/// The layer bytes and the baseline status come from `source`, which may be a
-/// mirror. A published CORRECTION comes ONLY from `primary` (the realm's first
-/// source): an older correction on a mirror could LENGTHEN the window, and a
-/// mirror's silence cannot prove the primary has none. When `source` is not
-/// the primary, the correction is asked of the primary, and if the primary
-/// cannot answer the window could not be established.
+/// The layer bytes (manifest, includes) come from `source`, which may be a
+/// mirror. The STATUS documents that decide the window, the baseline AND any
+/// published correction, come ONLY from `primary` (the realm's first source):
+/// an older document on a mirror (a lower counter, a later `support-until`)
+/// could LENGTHEN the window, and a mirror's silence proves nothing about what
+/// the primary holds. When `source` is not the primary, both are asked of the
+/// primary, and if it cannot answer the window could not be established.
 fn window_and_includes(
     source: &dyn crate::source::LayerSource,
     primary: &dyn crate::source::LayerSource,
@@ -367,35 +368,39 @@ fn window_and_includes(
         .map_err(|e| fail(format!("its includes do not read: {e}")))?
         .includes;
     let line = manifest.layer.line();
-    let correction = primary
-        .fetch_published_line_status(&line.to_string())
-        .map_err(|e| {
-            if source_is_primary {
-                fail(format!(
-                    "layer {}: cannot tell whether a correction was published for line {line}: {e}",
+    // Every status document comes from the PRIMARY, whichever source served
+    // the layer.
+    let from_primary = |what: &str, e: crate::source::SourceError| {
+        if source_is_primary {
+            fail(format!(
+                "layer {}: cannot read {what} for line {line}: {e}",
+                manifest.layer
+            ))
+        } else {
+            // Terminal: no other mirror could answer what only the primary may.
+            IncludeWindowError {
+                retry_elsewhere: false,
+                ..fail(format!(
+                    "layer {}: the support window could not be established: status documents \
+                     (the baseline and any correction) are only taken from the realm's primary, \
+                     and it could not supply {what} for line {line} ({e})",
                     manifest.layer
                 ))
-            } else {
-                // Terminal: no other mirror could answer what only the
-                // primary may.
-                IncludeWindowError {
-                    retry_elsewhere: false,
-                    ..fail(format!(
-                        "layer {}: the support window could not be established: corrections \
-                         are only taken from the realm's primary, and it could not answer for \
-                         line {line} ({e})",
-                        manifest.layer
-                    ))
-                }
             }
-        })?;
-    let status = crate::linestatus::current_line_status_with_correction(
-        source, &layer_ref, line, root_pk, correction,
-    )
-    // Every error here is about THIS source's baseline document (it could not
-    // be fetched, did not verify, or covers another line), so another source
-    // may be asked: `fail` retries elsewhere.
-    .map_err(|e| fail(format!("layer {}: its line-status: {e}", manifest.layer)))?;
+        }
+    };
+    let baseline = primary
+        .fetch_line_status(&layer_ref)
+        .map_err(|e| from_primary("the layer's baseline status", e))?;
+    let correction = primary
+        .fetch_published_line_status(&line.to_string())
+        .map_err(|e| from_primary("a published correction", e))?;
+    let status =
+        crate::linestatus::current_line_status_from_documents(baseline, correction, line, root_pk)
+            // A document the primary served that does not verify (or covers another
+            // line) is that source's finding: another source may be asked for the
+            // LAYER, but the status is the primary's, so this is the primary's verdict.
+            .map_err(|e| fail(format!("layer {}: its line-status: {e}", manifest.layer)))?;
     Ok((
         IncludeWindow {
             layer: manifest.layer.to_string(),
@@ -1553,27 +1558,39 @@ mod tests {
         }
 
         /// The primary's manifest fails the root (it is asked FIRST and
-        /// rejected), but it ANSWERS the correction question; the mirror
-        /// carries the layer and a baseline. `primary_correction` is what the
-        /// primary says is published (None: nothing); `mirror_correction` is
-        /// what the MIRROR carries, which must never matter.
+        /// rejected) but its STATUS documents are good; the mirror carries the
+        /// layer and a baseline of its own. Every status document that decides
+        /// the window must be the PRIMARY's, whatever the mirror carries.
         fn window_with(
+            primary_baseline: Option<(&str, u64)>,
             primary_correction: Option<(&str, u64)>,
+            mirror_baseline: Option<(&str, u64)>,
             mirror_correction: Option<(&str, u64)>,
         ) -> (Result<IncludeWindow, String>, Mirrors) {
             let (sk, pk) = generate_root_keypair();
             let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
             let digest = manifest_digest(&bytes);
-            let mut primary = MemorySource::new().with_manifest(&bytes);
-            if let Some((until, counter)) = primary_correction {
-                primary = primary.with_published_line_status(&status_doc(until, &sk, counter));
-            }
-            let mut second = MemorySource::new()
-                .with_manifest(&bytes)
-                .with_line_status(&status_doc("2026-12-01", &sk, 1));
-            if let Some((until, counter)) = mirror_correction {
-                second = second.with_published_line_status(&status_doc(until, &sk, counter));
-            }
+            let carry = |mut source: MemorySource,
+                         baseline: Option<(&str, u64)>,
+                         correction: Option<(&str, u64)>| {
+                if let Some((until, counter)) = baseline {
+                    source = source.with_line_status(&status_doc(until, &sk, counter));
+                }
+                if let Some((until, counter)) = correction {
+                    source = source.with_published_line_status(&status_doc(until, &sk, counter));
+                }
+                source
+            };
+            let primary = carry(
+                MemorySource::new().with_manifest(&bytes),
+                primary_baseline,
+                primary_correction,
+            );
+            let second = carry(
+                MemorySource::new().with_manifest(&bytes),
+                mirror_baseline,
+                mirror_correction,
+            );
             let mirrors = Mirrors::new(vec![mirror("primary", primary), mirror("mirror", second)]);
             let verifier = RejectsFirst(Cell::new(false));
             let r = {
@@ -1589,32 +1606,45 @@ mod tests {
 
         // rivet: verifies REQ-MIRROR-002
         #[test]
-        fn the_layer_and_baseline_may_come_from_a_mirror_when_the_primary_answered_the_correction()
-        {
-            // The primary says nothing is published: the mirror's baseline stands.
-            let (w, mirrors) = window_with(None, None);
-            assert_eq!(w.unwrap().support_until.as_deref(), Some("2026-12-01"));
+        fn the_layer_may_come_from_a_mirror_but_the_window_is_the_primarys() {
+            // The mirror's baseline (#1, the LATER date) must not outrank the
+            // primary's (#5, earlier): an older mirror baseline would lengthen
+            // the window signed.
+            let (w, mirrors) =
+                window_with(Some(("2026-11-20", 5)), None, Some(("2026-12-01", 1)), None);
+            assert_eq!(
+                w.unwrap().support_until.as_deref(),
+                Some("2026-11-20"),
+                "the primary's baseline decides"
+            );
             assert_eq!(mirrors.served_by().as_deref(), Some("mirror"));
-            // The primary's correction (a higher counter) binds, whatever
-            // source the baseline came from.
-            let (w, _) = window_with(Some(("2026-11-15", 2)), None);
+            // The primary's correction (a higher counter) binds, too.
+            let (w, _) = window_with(
+                Some(("2026-11-20", 5)),
+                Some(("2026-11-15", 6)),
+                Some(("2026-12-01", 1)),
+                None,
+            );
             assert_eq!(w.unwrap().support_until.as_deref(), Some("2026-11-15"));
         }
 
         // rivet: verifies REQ-MIRROR-002
         #[test]
-        fn a_correction_carried_only_by_a_mirror_is_never_used() {
-            // An older correction on a mirror could LENGTHEN the window; the
-            // primary (which answered: none) is the only voice on corrections.
-            let (w, _) = window_with(None, Some(("2026-10-24", 2)));
-            assert_eq!(
-                w.unwrap().support_until.as_deref(),
-                Some("2026-12-01"),
-                "the mirror's correction must be ignored, not preferred"
+        fn nothing_a_mirror_holds_about_status_is_ever_used() {
+            // A mirror's correction (older, later date) and baseline are both
+            // ignored; the primary's baseline stands.
+            let (w, _) = window_with(
+                Some(("2026-11-20", 5)),
+                None,
+                Some(("2027-06-01", 9)),
+                Some(("2027-06-01", 9)),
             );
-            // And it cannot shorten or lengthen the primary's.
-            let (w, _) = window_with(Some(("2026-11-15", 3)), Some(("2027-06-01", 9)));
-            assert_eq!(w.unwrap().support_until.as_deref(), Some("2026-11-15"));
+            assert_eq!(w.unwrap().support_until.as_deref(), Some("2026-11-20"));
+            // And a primary that states NO baseline leaves the window unstated
+            // (the include is then refused downstream), however much the
+            // mirror would be willing to state.
+            let (w, _) = window_with(None, None, Some(("2027-06-01", 9)), None);
+            assert_eq!(w.unwrap().support_until, None);
         }
 
         /// A primary that cannot be reached at all.
