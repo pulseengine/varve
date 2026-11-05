@@ -397,10 +397,14 @@ fn window_and_includes(
         .map_err(|e| from_primary("a published correction", e))?;
     let status =
         crate::linestatus::current_line_status_from_documents(baseline, correction, line, root_pk)
-            // A document the primary served that does not verify (or covers another
-            // line) is that source's finding: another source may be asked for the
-            // LAYER, but the status is the primary's, so this is the primary's verdict.
-            .map_err(|e| fail(format!("layer {}: its line-status: {e}", manifest.layer)))?;
+            // A status document the PRIMARY served that does not verify (or
+            // covers another line) is the primary's verdict, and TERMINAL:
+            // asking a mirror for the layer would only re-read the same primary
+            // documents and reach the same refusal.
+            .map_err(|e| IncludeWindowError {
+                retry_elsewhere: false,
+                ..fail(format!("layer {}: its line-status: {e}", manifest.layer))
+            })?;
     Ok((
         IncludeWindow {
             layer: manifest.layer.to_string(),
@@ -1665,6 +1669,34 @@ mod tests {
             ) -> Result<Option<Vec<u8>>, crate::source::SourceError> {
                 Err(crate::source::SourceError::Transport("down".into()))
             }
+        }
+
+        // rivet: verifies REQ-MIRROR-002
+        #[test]
+        fn a_primary_status_that_does_not_verify_is_terminal_not_retried_on_a_mirror() {
+            let (sk, pk) = generate_root_keypair();
+            let (other_sk, _) = generate_root_keypair();
+            let bytes = manifest_with_tools("2026.10.0", "rolling", 0, "2026-09-24T00:00:00Z", &[]);
+            let digest = manifest_digest(&bytes);
+            // The primary's manifest is rejected FIRST (so the walk reaches the
+            // mirror) and its baseline is signed by the wrong key.
+            let primary = MemorySource::new()
+                .with_manifest(&bytes)
+                .with_line_status(&status_doc("2026-11-20", &other_sk, 5));
+            let second = MemorySource::new()
+                .with_manifest(&bytes)
+                .with_line_status(&status_doc("2026-12-01", &sk, 1));
+            let mirrors = Mirrors::new(vec![mirror("primary", primary), mirror("mirror", second)]);
+            let verifier = RejectsFirst(Cell::new(false));
+            let realm = Realm {
+                mirrors: &mirrors,
+                verifier: &verifier,
+                pk: &pk,
+            };
+            let err = include_window_deep(&realm, &digest, "acme")
+                .expect_err("the primary's status is unverifiable");
+            assert!(!err.retry_elsewhere);
+            assert!(!err.to_string().contains("Tried"), "{err}");
         }
 
         // rivet: verifies REQ-MIRROR-002

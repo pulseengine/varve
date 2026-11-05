@@ -45,6 +45,17 @@ pub trait ManifestVerifier {
 #[error("manifest signature verification failed: {0}")]
 pub struct VerifyError(pub String);
 
+/// Why the omission check could not run against a MIRROR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OmissionSkipped {
+    /// The mirror carries no line index at all.
+    NoIndex,
+    /// The mirror carries an index but cannot enumerate the layers it serves
+    /// (a directory or OCI layout), so the index has nothing to be compared
+    /// with.
+    CannotEnumerate,
+}
+
 /// A successful install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallOutcome {
@@ -75,7 +86,7 @@ pub struct InstallOutcome {
     /// check (a layer the signed index names but the source hides) could not
     /// run against it. Reported, never silent: the install proceeds only
     /// because this machine has local history bounding what a mirror says.
-    pub omission_check_skipped: bool,
+    pub omission_check_skipped: Option<OmissionSkipped>,
     /// Set when this install went ahead of the machine's anti-rollback
     /// high-water mark on the strength of a digest in the project's pin
     /// (REQ-ROLLBACK-002). Carries what the caller must say out loud.
@@ -151,13 +162,24 @@ pub enum InstallError {
     )]
     FirstContactNeedsPrimary { line: String },
     #[error(
+        "first contact with line {line}'s index needs the realm's primary: this machine has no \
+         cached line index for it, so nothing bounds what a mirror says is newest"
+    )]
+    IndexFirstContactNeedsPrimary { line: String },
+    #[error(
+        "an install by digest from a mirror must know the layer's line before the mirror is \
+         contacted, and it cannot: {why}. Take it from the realm's primary"
+    )]
+    LineUnknownForMirror { why: String },
+    #[error(
         "layer on line {line} presents counter {presented}, below the floor of {floor} this \
          realm signs for the line — refusing.\n\n\
-         This machine has never installed from {line}, so it has no history to compare against. \
-         That is the one moment anti-rollback protects nobody, and the moment it is worth \
+         This machine has no high-water mark for {line} (it has never installed from it, or its \
+         marks were reset), so it has no installed history to compare against. That is the one \
+         moment anti-rollback protects nobody, and the moment it is worth \
          attacking: a fresh checkout, a new CI runner, a new laptop are all first contacts. The \
-         realm states a floor in its signed line-status so a consumer with no history still has \
-         one.\n\n\
+         realm states a floor in its signed line-status, served or cached by an earlier install, \
+         so a consumer with no mark still has one.\n\n\
          Either the pin names a layer the realm has withdrawn from first-contact use, or \
          something served an old signed layer to a new machine. Both are worth knowing before \
          installing."
@@ -208,6 +230,8 @@ impl InstallError {
             | InstallError::RollbackConsentRefused { .. }
             | InstallError::BelowFloor { .. }
             | InstallError::FirstContactNeedsPrimary { .. }
+            | InstallError::IndexFirstContactNeedsPrimary { .. }
+            | InstallError::LineUnknownForMirror { .. }
             | InstallError::ChannelMismatch { .. }
             | InstallError::NoPlatformEntry { .. }
             | InstallError::UnnamedEntry { .. }
@@ -275,15 +299,17 @@ pub fn install_by_digest(
 /// so a MIRROR carries the line the caller expects (from the include that
 /// named the digest) and the first-contact refusal is decided on it BEFORE the
 /// mirror is asked anything.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum DigestRole<'a> {
     /// The realm's primary (or its only source).
     Primary,
     /// A mirror. `expected_line` is the line of the layer the digest should
-    /// turn out to be, if the caller knows it; without it the line cannot be
-    /// known before fetching, no history can be shown, and a mirror is refused.
+    /// turn out to be, if the caller knows it. `Err(why)` says why the line
+    /// cannot be known before fetching (the include names no layer, or names
+    /// one that is not a valid layer id); a mirror is then refused, because no
+    /// history can be shown for an unknown line.
     Mirror {
-        expected_line: Option<&'a crate::layer::Line>,
+        expected_line: Result<&'a crate::layer::Line, String>,
     },
 }
 
@@ -305,15 +331,15 @@ pub fn install_by_digest_from(
     // named this digest); `install_inner` re-checks it against the real
     // manifest's line afterwards.
     let source_is_primary = matches!(role, DigestRole::Primary);
-    if let DigestRole::Mirror { expected_line } = role {
-        let known = expected_line.filter(|line| has_local_history(line, store, verifier, marks));
-        if known.is_none() {
-            return Err(InstallError::FirstContactNeedsPrimary {
-                line: expected_line.map_or_else(
-                    || "(unknown: the include names no layer)".to_string(),
-                    ToString::to_string,
-                ),
-            });
+    if let DigestRole::Mirror { expected_line } = &role {
+        match expected_line {
+            Err(why) => return Err(InstallError::LineUnknownForMirror { why: why.clone() }),
+            Ok(line) if !has_local_history(line, store, verifier, marks) => {
+                return Err(InstallError::FirstContactNeedsPrimary {
+                    line: line.to_string(),
+                });
+            }
+            Ok(_) => {}
         }
     }
     let fetched = source.fetch_manifest(&LayerRef::Digest(digest.to_string()))?;
@@ -507,7 +533,7 @@ fn install_inner(
     let line_str = line.to_string();
     let index_cache = crate::lineindex::IndexCache::at_root(store.root());
     let mut index_high_water: Option<u64> = None;
-    let mut omission_check_skipped = false;
+    let mut omission_check_skipped: Option<OmissionSkipped> = None;
     // The verified index and the bytes it came from, held until the install
     // lands: a refused install must not leave a raised index behind, for the
     // same reason it must not burn the high-water mark.
@@ -519,7 +545,15 @@ fn install_inner(
         let served = source.served_layers(&line_str)?;
         // ... and so is a mirror whose index cannot be compared with a listing
         // (it cannot enumerate what it serves): the check cannot run either.
-        omission_check_skipped = !source_is_primary && (envelope.is_none() || served.is_none());
+        if !source_is_primary {
+            omission_check_skipped = if envelope.is_none() {
+                Some(OmissionSkipped::NoIndex)
+            } else if served.is_none() {
+                Some(OmissionSkipped::CannotEnumerate)
+            } else {
+                None
+            };
+        }
         // Clause 2 needs something to compare AGAINST, and it is the cache
         // that supplies it. Passing `None` here left the whole
         // presented-older-than-held rule unreachable from the pipeline: it
@@ -965,6 +999,8 @@ mod failover_class_tests {
                 got: "b".into(),
             },
             InstallError::FirstContactNeedsPrimary { line: "l".into() },
+            InstallError::IndexFirstContactNeedsPrimary { line: "l".into() },
+            InstallError::LineUnknownForMirror { why: "w".into() },
             InstallError::RollbackConsentRefused {
                 line: "l".into(),
                 presented: 1,
@@ -2656,8 +2692,9 @@ mod tests {
             false,
         )
         .expect("a mark is history");
-        assert!(
+        assert_eq!(
             outcome.omission_check_skipped,
+            Some(OmissionSkipped::NoIndex),
             "a mirror with no index could not run the omission check"
         );
 
@@ -2839,8 +2876,9 @@ mod tests {
             false,
         )
         .expect("history lets a mirror answer");
-        assert!(
+        assert_eq!(
             outcome.omission_check_skipped,
+            Some(OmissionSkipped::CannotEnumerate),
             "an index it cannot compare with a listing is a check that could not run"
         );
         // The same source as the PRIMARY reports nothing skipped.
@@ -2858,7 +2896,7 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(!outcome.omission_check_skipped);
+        assert_eq!(outcome.omission_check_skipped, None);
     }
 
     // rivet: verifies REQ-MIRROR-002
@@ -2874,26 +2912,6 @@ mod tests {
             }
         }
         let line: crate::layer::Line = "2026.07".parse().unwrap();
-        for expected_line in [Some(&line), None] {
-            let mut f = consent_fixture();
-            let pk = f.pk.clone();
-            let err = install_by_digest_from(
-                &manifest_digest(&f.older),
-                &Untouched,
-                &AcceptWithRoot(&pk),
-                &f.store,
-                &mut f.marks,
-                &policy(),
-                DigestRole::Mirror { expected_line },
-            )
-            .expect_err("no history, no mirror");
-            assert!(
-                matches!(err, InstallError::FirstContactNeedsPrimary { .. }),
-                "{err}"
-            );
-            assert!(!err.fails_over());
-        }
-        // An include that names no layer names no line: refused in words.
         let mut f = consent_fixture();
         let pk = f.pk.clone();
         let err = install_by_digest_from(
@@ -2904,11 +2922,42 @@ mod tests {
             &mut f.marks,
             &policy(),
             DigestRole::Mirror {
-                expected_line: None,
+                expected_line: Ok(&line),
             },
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("names no layer"), "{err}");
+        .expect_err("no history, no mirror");
+        assert!(
+            matches!(err, InstallError::FirstContactNeedsPrimary { .. }),
+            "{err}"
+        );
+        assert!(!err.fails_over());
+        // An include whose line CANNOT be known: refused in words that say so,
+        // not as a missing history. Absent and unparseable read differently.
+        for why in [
+            "the include names no layer",
+            "the include's layer name \"x\" is not a valid layer id",
+        ] {
+            let mut f = consent_fixture();
+            let err = install_by_digest_from(
+                &manifest_digest(&f.older),
+                &Untouched,
+                &AcceptWithRoot(&pk),
+                &f.store,
+                &mut f.marks,
+                &policy(),
+                DigestRole::Mirror {
+                    expected_line: Err(why.to_string()),
+                },
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, InstallError::LineUnknownForMirror { why: w } if w == why),
+                "{err}"
+            );
+            assert!(err.to_string().contains(why), "{err}");
+            assert!(!err.to_string().contains("no history"), "{err}");
+            assert!(!err.fails_over());
+        }
     }
 
     // rivet: verifies REQ-MIRROR-002
@@ -2927,7 +2976,7 @@ mod tests {
             &mut f.marks,
             &policy(),
             DigestRole::Mirror {
-                expected_line: Some(&line),
+                expected_line: Ok(&line),
             },
         )
         .expect("history for the line admits a mirror");
@@ -2944,7 +2993,7 @@ mod tests {
             &mut f.marks,
             &policy(),
             DigestRole::Mirror {
-                expected_line: Some(&other),
+                expected_line: Ok(&other),
             },
         )
         .unwrap_err();
@@ -2956,11 +3005,54 @@ mod tests {
 
     // rivet: verifies REQ-MIRROR-002
     #[test]
+    fn an_include_that_names_one_line_but_digests_another_is_refused_terminally() {
+        // The include NAMES a layer of line 2026.07 (which this machine has
+        // history for) but the DIGEST is a layer of line 2026.06 (which it does
+        // not). The early check passes on the named line; install_inner then
+        // checks the REAL manifest's line and refuses.
+        let mut f = consent_fixture();
+        see_the_newer(&mut f);
+        let (other_layer, other_blobs) = layer_of("2026.06.0", 1, "elsewhere");
+        let mut source =
+            std::mem::replace(&mut f.source, MemorySource::new()).with_manifest(&other_layer);
+        for (d, b) in &other_blobs {
+            source = source.with_blob(d, b);
+        }
+        let named: crate::layer::Line = "2026.07".parse().unwrap();
+        let pk = f.pk.clone();
+        let err = install_by_digest_from(
+            &manifest_digest(&other_layer),
+            &source,
+            &AcceptWithRoot(&pk),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Mirror {
+                expected_line: Ok(&named),
+            },
+        )
+        .expect_err("a mislabelled include");
+        assert!(
+            matches!(&err, InstallError::FirstContactNeedsPrimary { line } if line == "2026.06"),
+            "{err}"
+        );
+        assert!(!err.fails_over());
+        assert!(
+            f.store
+                .get(&manifest_digest(&other_layer))
+                .unwrap()
+                .is_none(),
+            "nothing may be installed"
+        );
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
     fn a_primary_install_never_reports_a_skipped_omission_check() {
         let mut f = consent_fixture();
         let source = std::mem::replace(&mut f.source, MemorySource::new());
         let outcome = first_contact(&mut f, &source, true).unwrap();
-        assert!(!outcome.omission_check_skipped);
+        assert_eq!(outcome.omission_check_skipped, None);
     }
 
     // rivet: verifies REQ-ROLLBACK-002

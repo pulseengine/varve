@@ -2186,7 +2186,7 @@ fn note_mirror_acceptance(
     sources: &varve_core::mirror::Mirrors,
     line: &varve_core::Line,
     recorded: &str,
-    omission_check_skipped: bool,
+    omission_check_skipped: Option<varve_core::OmissionSkipped>,
 ) {
     let (Some(served), Some(primary)) = (sources.served_by(), sources.labels().first().copied())
     else {
@@ -2199,11 +2199,17 @@ fn note_mirror_acceptance(
         "note: a mirror's state may lag the primary's; {served} was accepted because it is not \
          older than what this machine has already recorded for line {line} ({recorded})."
     );
-    if omission_check_skipped {
+    if let Some(why) = omission_check_skipped {
+        let because = match why {
+            varve_core::OmissionSkipped::NoIndex => "it carries no line index",
+            varve_core::OmissionSkipped::CannotEnumerate => {
+                "it carries an index but cannot list the layers it serves, so there is nothing \
+                 to compare the index with"
+            }
+        };
         eprintln!(
-            "note: the omission check could not run against the mirror {served}: it carries no \
-             line index, so a layer the realm's signed index names could be hidden from this \
-             answer."
+            "note: the omission check could not run against the mirror {served}: {because}, so a \
+             layer the realm's signed index names could be hidden from this answer."
         );
     }
 }
@@ -3849,9 +3855,15 @@ fn fetch_included_layer(
     // The line this digest should turn out to be, from the include that named
     // it: a mirror is refused a first contact BEFORE it is contacted, and a
     // digest alone names no line.
-    let expected_line = layer
-        .and_then(|name| name.parse::<varve_core::LayerId>().ok())
-        .map(|id| id.line().clone());
+    let expected_line: Result<varve_core::Line, String> = match layer {
+        None => Err("the include names no layer".to_string()),
+        Some(name) => name
+            .parse::<varve_core::LayerId>()
+            .map(|id| id.line().clone())
+            .map_err(|e| {
+                format!("the include's layer name {name:?} is not a valid layer id ({e})")
+            }),
+    };
     let mut marks = varve_core::HighWaterMarks::load(store.root())?;
     let index = Some(varve_core::IndexPolicy {
         realm: &realm.name,
@@ -3878,7 +3890,7 @@ fn fetch_included_layer(
                         varve_core::DigestRole::Primary
                     } else {
                         varve_core::DigestRole::Mirror {
-                            expected_line: expected_line.as_ref(),
+                            expected_line: expected_line.as_ref().map_err(String::clone),
                         }
                     },
                 )
@@ -3969,7 +3981,7 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
                 // mirror's answer by: "nothing newer" from a mirror could be
                 // an old index, and is not an answer.
                 if !is_primary && cached.is_none() {
-                    return Err(varve_core::InstallError::FirstContactNeedsPrimary {
+                    return Err(varve_core::InstallError::IndexFirstContactNeedsPrimary {
                         line: line.clone(),
                     });
                 }

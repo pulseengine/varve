@@ -51,6 +51,8 @@ struct Spec<'a> {
     forge_layer: bool,
     /// The counter of the baseline status (default 1).
     baseline_counter: u64,
+    /// Serve a GENUINE, root-signed line index (counter 1) naming this layer.
+    serve_index: bool,
 }
 
 /// An OCI registry on a loopback port serving one layer signed by a fresh
@@ -76,6 +78,7 @@ fn serve_layer_signed(sk: &[u8], pk: &[u8], counter: u64) -> Served {
         no_layer: false,
         forge_layer: false,
         baseline_counter: 1,
+        serve_index: false,
     })
 }
 
@@ -92,6 +95,7 @@ fn serve_spec(spec: Spec<'_>) -> Served {
         no_layer,
         forge_layer,
         baseline_counter,
+        serve_index,
     } = spec;
     let entries = match &tool {
         Some((signed, _)) => format!(
@@ -188,6 +192,37 @@ fn serve_spec(spec: Spec<'_>) -> Served {
             .unwrap(),
         );
     }
+    let index_tag = varve_core::lineindex::index_tag("2026.10");
+    let mut index_manifest = None;
+    if serve_index {
+        let doc = varve_core::LineIndex {
+            line: "2026.10".into(),
+            counter: 1,
+            issued_at: "2026-09-24T00:00:00Z".into(),
+            layers: vec![varve_core::IndexedLayer {
+                layer: LAYER.into(),
+                digest: digest.clone(),
+                channel: "rolling".into(),
+                counter,
+            }],
+        }
+        .sign(sk, "k")
+        .unwrap()
+        .into_bytes();
+        let d = varve_core::manifest_digest(&doc);
+        blobs.insert(d.clone(), doc);
+        index_manifest = Some(
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "layers": [{
+                    "mediaType": "application/json", "digest": d, "size": 0,
+                    "annotations": { "eu.pulseengine.varve.role": "line-index" }
+                }],
+            }))
+            .unwrap(),
+        );
+    }
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -232,6 +267,11 @@ fn serve_spec(spec: Spec<'_>) -> Served {
                 .filter(|_| path == format!("/v2/inc/layers/manifests/{status_tag}"))
             {
                 ("200 OK", pm.clone())
+            } else if let Some(im) = index_manifest
+                .as_ref()
+                .filter(|_| path == format!("/v2/inc/layers/manifests/{index_tag}"))
+            {
+                ("200 OK", im.clone())
             } else if let Some(d) = path.strip_prefix("/v2/inc/layers/blobs/") {
                 match blobs.get(d) {
                     Some(b) => ("200 OK", b.clone()),
@@ -421,6 +461,7 @@ fn support_horizon_reads_an_include_through_a_mirror() {
         no_layer: false,
         forge_layer: true,
         baseline_counter: 1,
+        serve_index: false,
     });
     let mirror = serve_spec(Spec {
         sk: &sk,
@@ -434,6 +475,7 @@ fn support_horizon_reads_an_include_through_a_mirror() {
         no_layer: false,
         forge_layer: false,
         baseline_counter: 1,
+        serve_index: false,
     });
     let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
     let out = support_horizon_via(&p, &primary.digest);
@@ -443,6 +485,10 @@ fn support_horizon_reads_an_include_through_a_mirror() {
         String::from_utf8_lossy(&out.stdout),
         "2026-10-24\n",
         "the primary's correction binds, not the mirror's baseline"
+    );
+    assert!(
+        stderr.contains(&mirror.registry) && stderr.contains("mirror"),
+        "the mirror that supplied the layer must be named:\n{stderr}"
     );
 }
 
@@ -546,6 +592,7 @@ fn serve_with_tool(sk: &[u8], pk: &[u8], served: Vec<u8>, drop_blob: bool) -> Se
         no_layer: false,
         forge_layer: false,
         baseline_counter: 1,
+        serve_index: false,
     })
 }
 
@@ -813,6 +860,7 @@ fn support_horizon_tries_the_mirror_when_the_primary_serves_bytes_the_root_did_n
         no_layer: false,
         forge_layer: true,
         baseline_counter: 5,
+        serve_index: false,
     });
     let mirror = serve_spec(Spec {
         sk: &sk,
@@ -826,6 +874,7 @@ fn support_horizon_tries_the_mirror_when_the_primary_serves_bytes_the_root_did_n
         no_layer: false,
         forge_layer: false,
         baseline_counter: 1,
+        serve_index: false,
     });
     assert_eq!(primary.digest, mirror.digest);
     let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
@@ -935,6 +984,7 @@ fn serve_with_status(baseline: Option<&str>, published: Option<&str>) -> Served 
         no_layer: false,
         forge_layer: false,
         baseline_counter: 1,
+        serve_index: false,
     })
 }
 
@@ -1032,6 +1082,7 @@ fn a_mirror_cannot_grant_the_rollback_consent_the_primary_could_not_give() {
         no_layer: false,
         forge_layer: false,
         baseline_counter: 1,
+        serve_index: false,
     });
     let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
     std::fs::write(
@@ -1083,6 +1134,7 @@ fn an_unverifiable_published_correction_on_a_mirror_does_not_establish_the_windo
         no_layer: false,
         forge_layer: false,
         baseline_counter: 1,
+        serve_index: false,
     });
     let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
     let out = support_horizon_via(&p, &mirror.digest);
@@ -1139,6 +1191,7 @@ fn rollback_consent_is_never_granted_by_a_mirror_after_the_primary_failed() {
         no_layer: false,
         forge_layer: false,
         baseline_counter: 1,
+        serve_index: false,
     });
     let p = project(&primary, &[&mirror.registry], &mirror.root_hex);
     std::fs::write(
@@ -1261,6 +1314,7 @@ fn a_status_taken_from_a_mirror_is_not_cached_to_grant_consent_later() {
         no_layer: false,
         forge_layer: false,
         baseline_counter: 1,
+        serve_index: false,
     });
     // The older layer, as the primary (back up) serves it: no status at all.
     let older = serve_layer_signed(&sk, &pk, 1);
@@ -1406,7 +1460,44 @@ fn outdated_through_a_mirror_without_a_cached_index_is_a_first_contact() {
     );
     assert!(
         stderr.contains("could not be established")
-            && stderr.contains("first contact with line 2026.10 needs the realm's primary"),
+            && stderr.contains("first contact with line 2026.10's index needs the realm's primary")
+            && stderr.contains("no cached line index"),
         "{stderr}"
     );
+}
+
+/// A mirror that serves a GENUINE, root-signed but OLD line index (this machine
+/// has no cached index) is not an answer to "is there anything newer": the
+/// machine cannot tell the index is old.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn outdated_through_a_mirror_serving_a_genuine_old_index_is_refused() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let mirror = serve_spec(Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: Some("2027-01-01"),
+        published_until: None,
+        forge_published: false,
+        no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
+        serve_index: true,
+    });
+    let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
+    let out = varve(&p).arg("outdated").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a genuine old index answered for a machine with no cached index:\nstdout:{}\nstderr:{stderr}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        stderr.contains("first contact with line 2026.10's index needs the realm's primary"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("no cached line index"), "{stderr}");
 }
