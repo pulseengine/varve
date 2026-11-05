@@ -4303,15 +4303,20 @@ fn install(
         None => varve_core::LayerRef::Name(pin.layer.clone()),
     };
     let root_pk = ctx_root_bytes(&ctx)?;
-    // Through the realm's sources too (REQ-MIRROR-002 clause 1): a line-status
-    // is a fetch like any other, and one source's unverifiable copy must not
-    // hide another's good one.
+    // ONLY the realm's PRIMARY may supply the status that is cached
+    // (REQ-MIRROR-002). The cache is what a later digest-pinned install reads
+    // as rollback CONSENT, so a status taken from a mirror (which may lag a
+    // yank) would launder the mirror's word into a consent it could not give
+    // directly. A mirror is asked for nothing here; if the primary could not
+    // be reached, no baseline is cached and that is said.
     //
-    // Only a failure of THAT source's document is a reason to ask the next. A
-    // verified verdict (a counter regression against the cache) or a local
-    // error stops here, as a note, rather than caching an older mirror copy.
+    // Only a failure of THAT source's document is a note. A verified verdict
+    // (a counter regression against the cache) or a local error stops here.
     match sources.attempt_some(
-        |source, _is_primary| {
+        |source, is_primary| {
+            if !is_primary {
+                return Ok(None);
+            }
             varve_core::cache_baseline_line_status(
                 source,
                 &layer_ref,
@@ -4333,8 +4338,9 @@ fn install(
                 .collect::<Vec<_>>()
                 .join("; ");
             eprintln!(
-                "note: the line's baseline line-status could not be established from the \
-                 realm's sources, so none was cached: {why}"
+                "note: no baseline line-status was cached: only the realm's primary may \
+                 supply one (a mirror's could grant rollback consent it cannot give), and \
+                 it could not: {why}"
             );
         }
     }

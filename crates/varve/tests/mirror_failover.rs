@@ -1204,3 +1204,60 @@ fn a_cleartext_mirror_never_receives_a_docker_config_credential() {
         mirror_reqs.lock().unwrap()
     );
 }
+
+/// A status taken from a MIRROR must raise nothing that later grants consent.
+/// The mirror serves a newer layer and a status that supports every layer of
+/// the line; that install is ordinary and succeeds. If the status were then
+/// CACHED, a later digest pin below the mark would be granted consent from the
+/// cache, laundering a mirror's word through it.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_status_taken_from_a_mirror_is_not_cached_to_grant_consent_later() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let mirror = serve_spec(Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 2,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: Some("2027-01-01"),
+        published_until: None,
+        forge_published: false,
+    });
+    // The older layer, as the primary (back up) serves it: no status at all.
+    let older = serve_layer_signed(&sk, &pk, 1);
+    assert_ne!(older.digest, mirror.digest);
+    let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
+
+    // 1. An ordinary install of the newer layer, through the mirror.
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains(&mirror.registry), "{stderr}");
+
+    // 2. The primary is back (carrying the OLDER layer, and no status). A pin
+    // by the older layer's digest is below the mark and needs consent.
+    std::fs::write(
+        p.dir.join("varve-realms.toml"),
+        format!(
+            "[realm.acme]\nregistry = \"{}\"\ntrust-root = \"{}\"\n",
+            older.registry, mirror.root_hex
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        p.dir.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"rolling\"\nlayer = \"{LAYER}\"\ndigest = \"{}\"\n",
+            older.digest
+        ),
+    )
+    .unwrap();
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "consent was granted from a status a mirror supplied:\n{stderr}"
+    );
+    assert!(stderr.contains("rollback refused"), "{stderr}");
+}
