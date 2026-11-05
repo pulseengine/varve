@@ -176,6 +176,30 @@ pub enum LineStatusError {
     },
 }
 
+impl LineStatusError {
+    /// May another source be asked after this failure? (REQ-MIRROR-002.)
+    ///
+    /// Yes where this source's document was unavailable, did not verify,
+    /// was malformed, covers another line, or regresses against the local
+    /// cache (`Stale`: a later source is judged against the same cache, so it
+    /// can never pass below it; stopping would only cost availability). No for
+    /// everything that is local or about producing a document. Exhaustive, no
+    /// `_` arm.
+    pub fn fails_over(&self) -> bool {
+        match self {
+            LineStatusError::Envelope(_)
+            | LineStatusError::Payload(_)
+            | LineStatusError::LineMismatch { .. }
+            | LineStatusError::Stale { .. } => true,
+            LineStatusError::Sign(_)
+            | LineStatusError::DeadReference { .. }
+            | LineStatusError::UnknownLayer { .. }
+            | LineStatusError::NotALayout { .. }
+            | LineStatusError::Io { .. } => false,
+        }
+    }
+}
+
 /// What the signer could see of a line's layers when it validated an advisory
 /// (REQ-ADVISORY-002).
 ///
@@ -845,7 +869,31 @@ pub fn current_line_status(
             )));
         }
     };
+    select_current(baseline, published, line, root_pk)
+}
 
+/// The current status from DOCUMENTS the caller already holds: a baseline and a
+/// published correction, each from wherever the caller was entitled to take it.
+/// The support walk uses this so BOTH come only from the realm's primary while
+/// the layer bytes may come from a mirror: an older mirror baseline (a later
+/// `support-until`) could otherwise outrank "nothing" from the primary.
+pub fn current_line_status_from_documents(
+    baseline: Option<Vec<u8>>,
+    correction: Option<Vec<u8>>,
+    line: &Line,
+    root_pk: &[u8],
+) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
+    select_current(baseline, correction, line, root_pk)
+}
+
+/// Verify both documents, then choose: the one that VERIFIES and carries the
+/// higher counter.
+fn select_current(
+    baseline: Option<Vec<u8>>,
+    published: Option<Vec<u8>>,
+    line: &Line,
+    root_pk: &[u8],
+) -> Result<Option<(Vec<u8>, LineStatus)>, LineStatusError> {
     // VERIFY FIRST, RANK SECOND. Both documents are untrusted bytes from the
     // party this evidence exists to constrain. Choosing by counter before
     // checking the signature would hand the choice to whoever serves the tag:
@@ -2699,6 +2747,130 @@ mod tests {
             r.note.starts_with("4 advisory references checked"),
             "wrong reference count: {}",
             r.note
+        );
+    }
+}
+
+#[cfg(test)]
+mod failover_class_tests {
+    use super::*;
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn a_sources_bad_status_fails_over_but_a_verified_regression_or_local_error_does_not() {
+        assert!(LineStatusError::Envelope("x".into()).fails_over());
+        assert!(LineStatusError::Payload("x".into()).fails_over());
+        assert!(
+            LineStatusError::LineMismatch {
+                expected: "a".into(),
+                got: "b".into()
+            }
+            .fails_over()
+        );
+        assert!(
+            LineStatusError::Stale {
+                line: "l".into(),
+                presented: 1,
+                cached: 2
+            }
+            .fails_over()
+        );
+        assert!(!LineStatusError::Sign("x".into()).fails_over());
+        assert!(!LineStatusError::NotALayout { layout: "l".into() }.fails_over());
+        assert!(
+            !LineStatusError::Io {
+                path: "p".into(),
+                source: std::io::Error::other("x")
+            }
+            .fails_over()
+        );
+    }
+}
+
+#[cfg(test)]
+mod correction_tests {
+    use super::*;
+
+    fn doc_for(line: &str, counter: u64, until: &str, sk: &[u8]) -> Vec<u8> {
+        LineStatus {
+            min_counter: None,
+            line: line.into(),
+            counter,
+            issued_at: "2026-09-24T00:00:00Z".into(),
+            support_until: Some(until.into()),
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        }
+        .sign(sk, "k")
+        .unwrap()
+        .into_bytes()
+    }
+
+    fn from_documents(
+        baseline: Option<Vec<u8>>,
+        pk: &[u8],
+        correction: Option<Vec<u8>>,
+    ) -> Result<Option<(u64, Option<String>)>, String> {
+        let line: Line = "2026.10".parse().unwrap();
+        current_line_status_from_documents(baseline, correction, &line, pk)
+            .map(|found| found.map(|(_, d)| (d.counter, d.support_until)))
+            .map_err(|e| e.to_string())
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_baseline_and_the_correction_are_exactly_the_documents_supplied() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let baseline = || Some(doc_for("2026.10", 1, "2026-12-01", &sk));
+        // No correction supplied: the baseline stands.
+        assert_eq!(
+            from_documents(baseline(), &pk, None),
+            Ok(Some((1, Some("2026-12-01".into()))))
+        );
+        // A verified, higher-counter correction binds.
+        let c = doc_for("2026.10", 2, "2026-10-24", &sk);
+        assert_eq!(
+            from_documents(baseline(), &pk, Some(c)),
+            Ok(Some((2, Some("2026-10-24".into()))))
+        );
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn an_unverifiable_or_misdirected_correction_cannot_displace_the_baseline() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let (other_sk, _) = crate::verify::generate_root_keypair();
+        // Verify first, rank second: neither a forged nor an other-line
+        // correction is chosen, however high its counter.
+        for forged in [
+            doc_for("2026.10", 99, "2026-01-01", &other_sk),
+            doc_for("2026.09", 99, "2026-01-01", &sk),
+        ] {
+            assert_eq!(
+                from_documents(
+                    Some(doc_for("2026.10", 1, "2026-12-01", &sk)),
+                    &pk,
+                    Some(forged)
+                ),
+                Ok(Some((1, Some("2026-12-01".into()))))
+            );
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn nothing_at_all_is_none_and_a_bad_lone_document_is_an_error() {
+        let (sk, pk) = crate::verify::generate_root_keypair();
+        let (other_sk, _) = crate::verify::generate_root_keypair();
+        assert_eq!(from_documents(None, &pk, None), Ok(None));
+        let lone = doc_for("2026.10", 1, "2026-12-01", &other_sk);
+        let err = from_documents(None, &pk, Some(lone)).unwrap_err();
+        assert!(!err.is_empty(), "present but bad is a finding");
+        // A correction alone (no baseline) is usable when it verifies.
+        let c = doc_for("2026.10", 3, "2026-11-11", &sk);
+        assert_eq!(
+            from_documents(None, &pk, Some(c)),
+            Ok(Some((3, Some("2026-11-11".into()))))
         );
     }
 }
