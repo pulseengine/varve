@@ -222,9 +222,11 @@ fn topics_are_named_where_advertised_and_never_run_where_not() {
     assert!(!w.marker.exists(), "ask ran an unadvertised docs command");
 }
 
-/// A tool that never answers is killed and reported as having no help; the
-/// run still finishes.
+/// A tool that never answers is killed and reported as an incomplete harvest,
+/// not as a tool with no help; the run still finishes, and the timeout is not
+/// cached, so the next run asks again (varve#307).
 // rivet: verifies REQ-AGENTDOCS-001
+// rivet: verifies REQ-AGENTDOCS-006
 #[test]
 fn a_tool_that_times_out_has_no_help_and_does_not_stop_the_run() {
     let w = world();
@@ -241,8 +243,24 @@ fn a_tool_that_times_out_has_no_help_and_does_not_stop_the_run() {
         md[at..]
             .lines()
             .take(4)
-            .any(|l| l.contains("no help available")),
+            .any(|l| l.contains("harvest incomplete: `--help` did not finish")),
         "{md}"
+    );
+    assert!(
+        !md[at..]
+            .lines()
+            .take(4)
+            .any(|l| l.contains("no help available")),
+        "a timeout is not a tool with no help:\n{md}"
+    );
+    let again = stdout(&w.fx.run(BIN, &["context"]));
+    let at = again.find("### sleepy 0.1.0").expect("sleepy is listed");
+    assert!(
+        again[at..]
+            .lines()
+            .take(4)
+            .any(|l| l.contains("harvest incomplete")),
+        "the timeout was cached as an answer:\n{again}"
     );
 }
 
