@@ -74,6 +74,8 @@ pub struct ToolView {
     pub layer: String,
     pub digest: String,
     pub help_available: bool,
+    /// Why the harvest could not finish, when it could not (varve#307).
+    pub harvest_incomplete: Option<String>,
     pub summary: Option<(String, Source)>,
     pub warning: Option<String>,
     pub subs: Vec<SubView>,
@@ -165,6 +167,7 @@ fn view(t: ToolInput) -> ToolView {
     ToolView {
         collapsed: subs.len() > COLLAPSE_ABOVE,
         help_available: parsed.is_some(),
+        harvest_incomplete: harvested.incomplete,
         warning: parsed.as_ref().and_then(|h| h.warning.clone()),
         name: src.name,
         version: src.version,
@@ -368,7 +371,15 @@ pub fn render_md(c: &Context) -> String {
     );
     for t in &c.tools {
         o.push_str(&format!("\n### {} {} (harvested)\n", t.name, t.version));
+        if let Some(why) = &t.harvest_incomplete {
+            o.push_str(&format!(
+                "- harvest incomplete: {why}. Nothing was cached; the next run tries again\n"
+            ));
+        }
         if !t.help_available {
+            if t.harvest_incomplete.is_some() {
+                continue;
+            }
             o.push_str(
                 "- no help available: the pinned binary printed nothing usable, or did not \
                  answer in time, or is not laid down here\n",
@@ -472,6 +483,7 @@ pub fn render_json(c: &Context) -> String {
                 "layer": t.layer,
                 "digest": t.digest,
                 "help_available": t.help_available,
+                "harvest_incomplete": t.harvest_incomplete,
                 "summary": text_field(&t.summary),
                 "warning": t.warning.as_ref().map(|w| json!({"text": w, "source": "harvested"})),
                 "subcommands": t.subs.iter().map(|s| json!({
@@ -569,6 +581,7 @@ pub(crate) mod tests {
                         body: b.to_string(),
                     })
                     .collect(),
+                ..Harvested::default()
             },
             signed: Signed::default(),
         }
@@ -670,6 +683,45 @@ pub(crate) mod tests {
         );
         assert_eq!(c.tools[0].ask(), "sleepy --help");
         assert!(render_json(&c).contains("\"help_available\": false"));
+    }
+
+    /// A harvest that could not finish says so and why, in both renderings,
+    /// and is not mistaken for a tool that printed nothing usable (varve#307).
+    // rivet: verifies REQ-AGENTDOCS-006
+    #[test]
+    fn an_incomplete_harvest_says_so_and_why() {
+        let mut t = input("busy", None, &[]);
+        t.harvested.incomplete = Some("`--help` could not start: resource busy".into());
+        let c = build(facts(), vec![t], vec![], vec![]);
+        let (m, j) = (render_md(&c), render_json(&c));
+        assert!(
+            m.contains(
+                "### busy 1.0.0 (harvested)\n- harvest incomplete: `--help` could not start: \
+                 resource busy. Nothing was cached; the next run tries again"
+            ),
+            "{m}"
+        );
+        assert!(!m.contains("no help available"), "{m}");
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        let tool = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "busy")
+            .unwrap();
+        assert_eq!(
+            tool["harvest_incomplete"],
+            "`--help` could not start: resource busy"
+        );
+        assert_eq!(tool["help_available"], false);
+        let fine = build(
+            facts(),
+            vec![input("ok", Some("Ok\n"), &[])],
+            vec![],
+            vec![],
+        );
+        let v: serde_json::Value = serde_json::from_str(&render_json(&fine)).unwrap();
+        assert!(v["tools"][0]["harvest_incomplete"].is_null());
     }
 
     /// The warning is shown verbatim, and a name it points at that the pin
