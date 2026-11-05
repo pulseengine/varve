@@ -40,3 +40,10 @@ docs ci`.
   release artifact and verification fails until the name matches an entry.
 * This signs release files, not layers. Layers are signed by `varve deposit`
   and never by hand.
+
+## In a realm that declares key roles
+
+`--delegation FILE` makes this command sign as the LAYER role and refuses, before
+signing, a key that is not delegated to it (including the realm root).
+`--key-id` then defaults to the delegation's entry for the key. See `varve docs
+sign-delegation`. Without it the command behaves exactly as before.

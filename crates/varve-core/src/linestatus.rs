@@ -451,9 +451,21 @@ impl LineStatus {
         secret_key: &[u8],
         key_id: &str,
     ) -> Result<(String, RefCheck), LineStatusError> {
+        let signer = crate::verify::FileSigner::new_unchecked(secret_key, key_id)
+            .map_err(|VerifyError(msg)| LineStatusError::Sign(msg))?;
+        self.sign_against_with(known, force, &signer)
+    }
+
+    /// [`LineStatus::sign_against`] with any [`crate::verify::RealmSigner`].
+    pub fn sign_against_with(
+        &self,
+        known: &KnownLayers,
+        force: bool,
+        signer: &dyn crate::verify::RealmSigner,
+    ) -> Result<(String, RefCheck), LineStatusError> {
         let check = self.check_layer_refs_against(known, force)?;
         let payload = serde_json::to_vec_pretty(self).expect("status serializes");
-        let envelope = dsse_sign_typed(&payload, LINE_STATUS_PAYLOAD_TYPE, secret_key, key_id)
+        let envelope = crate::verify::dsse_sign_with(&payload, LINE_STATUS_PAYLOAD_TYPE, signer)
             .map_err(|VerifyError(msg)| LineStatusError::Sign(msg))?;
         Ok((envelope, check))
     }

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::install::VerifyError;
 use crate::layer::Line;
-use crate::verify::{dsse_sign_typed, dsse_verify_typed};
+use crate::verify::dsse_verify_typed;
 
 /// The authenticated payload type — a signed something-else (a layer manifest,
 /// a line-status) cannot be replayed as an index.
@@ -142,12 +142,17 @@ impl LineIndex {
 
     /// Sign an index (the producing side — CI, beside deposit).
     pub fn sign(&self, secret_key: &[u8], key_id: &str) -> Result<String, IndexError> {
+        let signer = crate::verify::FileSigner::new_unchecked(secret_key, key_id)?;
+        self.sign_with(&signer)
+    }
+
+    /// [`LineIndex::sign`] with any [`crate::verify::RealmSigner`].
+    pub fn sign_with(&self, signer: &dyn crate::verify::RealmSigner) -> Result<String, IndexError> {
         let payload = serde_json::to_vec_pretty(self).expect("index serializes");
-        Ok(dsse_sign_typed(
+        Ok(crate::verify::dsse_sign_with(
             &payload,
             LINE_INDEX_PAYLOAD_TYPE,
-            secret_key,
-            key_id,
+            signer,
         )?)
     }
 

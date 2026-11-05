@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use varve_core::{Pin, Store, discover, resolve};
+use varve_core::{Pin, RealmSigner, Store, discover, resolve};
 
 mod diff;
 mod docs;
@@ -277,9 +277,18 @@ enum Cmd {
         /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
-        /// Key identifier recorded in the signature.
-        #[arg(long, default_value = "varve-root-1")]
-        key_id: String,
+        /// Key identifier recorded in the signature. Defaults to the
+        /// delegation's entry for this key when `--delegation` is given, else
+        /// `varve-root-1`.
+        #[arg(long)]
+        key_id: Option<String>,
+        /// The realm's root-signed delegation (a DSSE envelope, from `varve
+        /// sign-delegation`). Given it, this command signs as the role it
+        /// belongs to and REFUSES, before signing, a key not delegated to
+        /// that role (REQ-KEYROLES-001). Without it the command signs exactly
+        /// as before: the right setting for a realm declaring no roles.
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
         /// Destination directory for the oci-layout.
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
@@ -524,8 +533,18 @@ enum Cmd {
         /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
-        #[arg(long, default_value = "varve-root-1")]
-        key_id: String,
+        /// Key identifier recorded in the signature. Defaults to the
+        /// delegation's entry for this key when `--delegation` is given, else
+        /// `varve-root-1`.
+        #[arg(long)]
+        key_id: Option<String>,
+        /// The realm's root-signed delegation (a DSSE envelope, from `varve
+        /// sign-delegation`). Given it, this command signs as the role it
+        /// belongs to and REFUSES, before signing, a key not delegated to
+        /// that role (REQ-KEYROLES-001). Without it the command signs exactly
+        /// as before: the right setting for a realm declaring no roles.
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
         /// Where to write the signed statement.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
@@ -563,8 +582,18 @@ enum Cmd {
         /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
-        #[arg(long, default_value = "varve-root-1")]
-        key_id: String,
+        /// Key identifier recorded in the signature. Defaults to the
+        /// delegation's entry for this key when `--delegation` is given, else
+        /// `varve-root-1`.
+        #[arg(long)]
+        key_id: Option<String>,
+        /// The realm's root-signed delegation (a DSSE envelope, from `varve
+        /// sign-delegation`). Given it, this command signs as the role it
+        /// belongs to and REFUSES, before signing, a key not delegated to
+        /// that role (REQ-KEYROLES-001). Without it the command signs exactly
+        /// as before: the right setting for a realm declaring no roles.
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         /// Machine-readable result on stdout (REQ-CIGATE-001).
@@ -600,8 +629,18 @@ enum Cmd {
         /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
-        #[arg(long, default_value = "varve-root-1")]
-        key_id: String,
+        /// Key identifier recorded in the signature. Defaults to the
+        /// delegation's entry for this key when `--delegation` is given, else
+        /// `varve-root-1`.
+        #[arg(long)]
+        key_id: Option<String>,
+        /// The realm's root-signed delegation (a DSSE envelope, from `varve
+        /// sign-delegation`). Given it, this command signs as the role it
+        /// belongs to and REFUSES, before signing, a key not delegated to
+        /// that role (REQ-KEYROLES-001). Without it the command signs exactly
+        /// as before: the right setting for a realm declaring no roles.
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         /// Machine-readable result on stdout (REQ-CIGATE-001).
@@ -641,6 +680,11 @@ enum Cmd {
         /// `affected` id names nothing can never fire (REQ-ADVISORY-002).
         #[arg(long)]
         force: bool,
+        /// The realm's delegation. In a realm that declares key roles a deposit
+        /// publishes NO baseline line-status (the status role is not the
+        /// depositor's), so given this the attach is REFUSED (REQ-KEYROLES-001).
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
     },
     /// Shims on PATH: thin dispatchers that resolve the pin from the
     /// invocation's working directory and exec — switching projects is cd.
@@ -656,6 +700,31 @@ enum Cmd {
     },
     /// Emit shell completion scripts (zsh, bash, fish, ...).
     Completions { shell: clap_complete::Shell },
+    /// (offline) Sign a realm's DELEGATION with the realm ROOT key: the one
+    /// document the root signs in a realm that declares key roles
+    /// (REQ-KEYROLES-001). The input names the root and the keys allowed to
+    /// sign for each role; the output is the DSSE envelope a realm's
+    /// `delegation-file` points at. The result is read back through the same
+    /// check a consumer runs, and a delegation it would refuse is not written.
+    SignDelegation {
+        /// The delegation document JSON: `realm-root` (hex), `counter`,
+        /// `issued-at`, and `roles` with `layer` and/or `status`, each
+        /// `{ threshold, keys: [{ key, keyid? }] }`.
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// The realm ROOT signing key file (128 hex characters). Its public
+        /// half must be the document's `realm-root`.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        /// Key identifier recorded in the signature.
+        #[arg(long, default_value = "varve-root-1")]
+        key_id: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// Machine-readable result on stdout (REQ-CIGATE-001).
+        #[arg(long)]
+        json: bool,
+    },
     /// (CI) Sign a release SHA256SUMS.txt into the DSSE envelope
     /// `self-verify` consumes — the producing half of DD-009.
     SignSums {
@@ -665,8 +734,18 @@ enum Cmd {
         /// followed by its 32-byte public key. Mint one with `varve keygen`.
         #[arg(long, value_name = "FILE")]
         key: PathBuf,
-        #[arg(long, default_value = "varve-root-1")]
-        key_id: String,
+        /// Key identifier recorded in the signature. Defaults to the
+        /// delegation's entry for this key when `--delegation` is given, else
+        /// `varve-root-1`.
+        #[arg(long)]
+        key_id: Option<String>,
+        /// The realm's root-signed delegation (a DSSE envelope, from `varve
+        /// sign-delegation`). Given it, this command signs as the role it
+        /// belongs to and REFUSES, before signing, a key not delegated to
+        /// that role (REQ-KEYROLES-001). Without it the command signs exactly
+        /// as before: the right setting for a realm declaring no roles.
+        #[arg(long, value_name = "FILE")]
+        delegation: Option<PathBuf>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         /// Machine-readable result on stdout (REQ-CIGATE-001).
@@ -842,6 +921,7 @@ fn run() -> anyhow::Result<Outcome> {
             issued_at,
             key,
             key_id,
+            delegation,
             out,
             tools,
             json,
@@ -853,7 +933,8 @@ fn run() -> anyhow::Result<Outcome> {
             counter,
             &issued_at,
             &key,
-            &key_id,
+            key_id.as_deref(),
+            delegation.as_deref(),
             &out,
             &tools,
             json,
@@ -908,6 +989,7 @@ fn run() -> anyhow::Result<Outcome> {
             file,
             key,
             key_id,
+            delegation,
             out,
             json,
             index,
@@ -916,7 +998,8 @@ fn run() -> anyhow::Result<Outcome> {
         } => sign_status(
             &file,
             &key,
-            &key_id,
+            key_id.as_deref(),
+            delegation.as_deref(),
             &out,
             json,
             index.as_deref(),
@@ -946,6 +1029,7 @@ fn run() -> anyhow::Result<Outcome> {
             producer,
             key,
             key_id,
+            delegation,
             out,
             attach_to,
             json,
@@ -956,7 +1040,8 @@ fn run() -> anyhow::Result<Outcome> {
             &file,
             &producer,
             &key,
-            &key_id,
+            key_id.as_deref(),
+            delegation.as_deref(),
             &out,
             attach_to.as_deref(),
             json,
@@ -967,14 +1052,30 @@ fn run() -> anyhow::Result<Outcome> {
             status,
             json,
             force,
-        } => attach_status(&layout, &status, json, force),
+            delegation,
+        } => attach_status(&layout, &status, json, force, delegation.as_deref()),
         Cmd::SignIndex {
+            file,
+            key,
+            key_id,
+            delegation,
+            out,
+            json,
+        } => sign_index(
+            &file,
+            &key,
+            key_id.as_deref(),
+            delegation.as_deref(),
+            &out,
+            json,
+        ),
+        Cmd::SignDelegation {
             file,
             key,
             key_id,
             out,
             json,
-        } => sign_index(&file, &key, &key_id, &out, json),
+        } => sign_delegation(&file, &key, &key_id, &out, json),
         Cmd::AttachIndex {
             layout,
             index,
@@ -991,9 +1092,17 @@ fn run() -> anyhow::Result<Outcome> {
             sums,
             key,
             key_id,
+            delegation,
             out,
             json,
-        } => sign_sums(&sums, &key, &key_id, &out, json),
+        } => sign_sums(
+            &sums,
+            &key,
+            key_id.as_deref(),
+            delegation.as_deref(),
+            &out,
+            json,
+        ),
         Cmd::SelfUpdate { check, to } => self_update(&store, check, to.as_deref()),
         Cmd::SelfVerify { archive, envelope } => self_verify(&store, &archive, &envelope),
         Cmd::Docs {
@@ -1236,21 +1345,92 @@ fn shim_install(store: &Store, extra_tools: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sign_sums(
-    sums: &std::path::Path,
+/// The identity a signing command signs as (REQ-KEYROLES-001).
+///
+/// The COMMAND implies the role (`role`); a delegation, when given, is the
+/// realm's statement of which keys may play it, and a key it does not delegate
+/// to that role is refused here, BEFORE anything is signed or written. The
+/// delegation is checked against the root it names (a producer holds no pinned
+/// root; a consumer's own pin is what authenticates it). Without a delegation
+/// this is exactly today's file-backed key, for a realm declaring no roles.
+fn role_signer(
     key: &std::path::Path,
-    key_id: &str,
-    out: &std::path::Path,
-    json: bool,
-) -> anyhow::Result<()> {
-    let bytes = std::fs::read(sums).with_context(|| format!("cannot read {}", sums.display()))?;
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
+    role: varve_core::keyroles::Role,
+) -> anyhow::Result<varve_core::FileSigner> {
     let hex_key = std::fs::read_to_string(key)
         .with_context(|| format!("cannot read signing key {}", key.display()))?;
     // Refuse a key that cannot produce verifiable signatures BEFORE signing.
     // varve used to accept 64 bytes of entropy here and emit a signed layer no
     // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
     let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
-    let envelope = varve_core::sign_release_sums(&bytes, &sk, key_id)?;
+    let mut hint: Option<String> = None;
+    if let Some(path) = delegation {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("cannot read delegation {}", path.display()))?;
+        let d = varve_core::keyroles::Delegation::from_producer_envelope(&bytes)
+            .map_err(|e| anyhow::anyhow!("delegation {} refused: {e}", path.display()))?;
+        hint = d
+            .authorise_signer(role, &sk[32..])
+            .map_err(|e| anyhow::anyhow!("{} cannot sign here: {e}", key.display()))?;
+    }
+    let key_id = key_id.map(str::to_string).or(hint);
+    varve_core::FileSigner::new_unchecked(&sk, key_id.as_deref().unwrap_or("varve-root-1"))
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// `varve sign-delegation`: the ROOT role's one act.
+fn sign_delegation(
+    file: &std::path::Path,
+    key: &std::path::Path,
+    key_id: &str,
+    out: &std::path::Path,
+    json: bool,
+) -> anyhow::Result<()> {
+    let doc = std::fs::read(file)
+        .with_context(|| format!("cannot read delegation document {}", file.display()))?;
+    let hex_key = std::fs::read_to_string(key)
+        .with_context(|| format!("cannot read signing key {}", key.display()))?;
+    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
+    let signer =
+        varve_core::FileSigner::new_unchecked(&sk, key_id).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let envelope = varve_core::keyroles::Delegation::sign(&doc, &signer)?;
+    let d = varve_core::keyroles::Delegation::from_producer_envelope(envelope.as_bytes())?;
+    std::fs::write(out, envelope)
+        .with_context(|| format!("cannot write delegation {}", out.display()))?;
+    report(
+        json,
+        &format!(
+            "signed delegation #{} ({}) -> {}",
+            d.counter(),
+            d.issued_at(),
+            out.display()
+        ),
+        serde_json::json!({
+            "command": "sign-delegation",
+            "counter": d.counter(),
+            "issued_at": d.issued_at(),
+            "key_id": key_id,
+            "out": out.display().to_string(),
+        }),
+    );
+    Ok(())
+}
+
+fn sign_sums(
+    sums: &std::path::Path,
+    key: &std::path::Path,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
+    out: &std::path::Path,
+    json: bool,
+) -> anyhow::Result<()> {
+    let bytes = std::fs::read(sums).with_context(|| format!("cannot read {}", sums.display()))?;
+    let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Layer)?;
+    let key_id = signer.realm_key_id();
+    let key_id = key_id.as_str();
+    let envelope = varve_core::selfverify::sign_release_sums_with(&bytes, &signer)?;
     std::fs::write(out, envelope).with_context(|| format!("cannot write {}", out.display()))?;
     report(
         json,
@@ -1389,7 +1569,23 @@ fn attach_status(
     status: &std::path::Path,
     json: bool,
     force: bool,
+    delegation: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    // REQ-KEYROLES-001 / DD-041 Q1: in a realm that declares roles the deposit
+    // publishes NO baseline line-status — it would have to be signed by the
+    // depositor, and the status role is not the depositor's. Status reaches a
+    // roles realm only through the registry's status tag, from a human merge.
+    if let Some(d) = delegation {
+        let bytes =
+            std::fs::read(d).with_context(|| format!("cannot read delegation {}", d.display()))?;
+        varve_core::keyroles::Delegation::from_producer_envelope(&bytes)
+            .map_err(|e| anyhow::anyhow!("delegation {} refused: {e}", d.display()))?;
+        bail!(
+            "this realm declares key roles ({}): a deposit publishes no baseline line-status,              because the status role is not the depositor's. Publish status with `varve \
+             sign-status` under the STATUS key instead.",
+            d.display()
+        );
+    }
     let envelope = std::fs::read(status)
         .with_context(|| format!("cannot read status envelope {}", status.display()))?;
     // REQ-ADVISORY-002: where the layout carries a line-index, the `affected`
@@ -1445,7 +1641,8 @@ fn attach_index(
 fn sign_index(
     file: &std::path::Path,
     key: &std::path::Path,
-    key_id: &str,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
     out: &std::path::Path,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -1459,12 +1656,10 @@ fn sign_index(
     // The line must be a real line, not merely a string that round-trips —
     // an index for "twenty twenty six" verifies fine and matches nothing.
     doc.line()?;
-    let hex_key = std::fs::read_to_string(key)
-        .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    // Refuse a key that cannot produce verifiable signatures BEFORE signing,
-    // as every other producing path does (REQ-PRODUCER-001).
-    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
-    let envelope = doc.sign(&sk, key_id)?;
+    let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Status)?;
+    let key_id = signer.realm_key_id();
+    let key_id = key_id.as_str();
+    let envelope = doc.sign_with(&signer)?;
     std::fs::write(out, envelope)
         .with_context(|| format!("cannot write envelope {}", out.display()))?;
     report(
@@ -1492,7 +1687,8 @@ fn sign_index(
 fn sign_status(
     file: &std::path::Path,
     key: &std::path::Path,
-    key_id: &str,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
     out: &std::path::Path,
     json: bool,
     index: Option<&std::path::Path>,
@@ -1536,12 +1732,9 @@ fn sign_status(
             })?;
         }
     }
-    let hex_key = std::fs::read_to_string(key)
-        .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
-    // varve used to accept 64 bytes of entropy here and emit a signed layer no
-    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
-    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
+    let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Status)?;
+    let key_id = signer.realm_key_id();
+    let key_id = key_id.as_str();
     // REQ-ADVISORY-002: a typo in an `affected` layer id used to sign cleanly,
     // and the advisory then never fired for anyone — producer sees success,
     // consumer sees nothing, the yank silently does not exist. Shape is always
@@ -1552,7 +1745,7 @@ fn sign_status(
         Some(path) => {
             let env = std::fs::read(path)
                 .with_context(|| format!("cannot read line-index envelope {}", path.display()))?;
-            varve_core::known_layers_from_index(&env, &sk[32..])?
+            varve_core::known_layers_from_index(&env, &signer.public_key())?
         }
         // The producer's own layouts: no network, no published index. This is
         // the path that actually runs for most realms (DD-023 clause 5).
@@ -1564,7 +1757,7 @@ fn sign_status(
              <envelope>` if this realm publishes a signed line-index",
         ),
     };
-    let (envelope, check) = doc.sign_against(&known, force, &sk, key_id)?;
+    let (envelope, check) = doc.sign_against_with(&known, force, &signer)?;
     std::fs::write(out, envelope)
         .with_context(|| format!("cannot write envelope {}", out.display()))?;
     report(
@@ -2630,7 +2823,8 @@ fn sign_attestation(
     file: &std::path::Path,
     producer: &str,
     key: &std::path::Path,
-    key_id: &str,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
     out: &std::path::Path,
     attach_to: Option<&std::path::Path>,
     json: bool,
@@ -2648,13 +2842,10 @@ fn sign_attestation(
         &bytes,
         producer,
     );
-    let hex_key = std::fs::read_to_string(key)
-        .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
-    // varve used to accept 64 bytes of entropy here and emit a signed layer no
-    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
-    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
-    let envelope = varve_core::attest::sign(&st, &sk, key_id)?;
+    let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Layer)?;
+    let key_id = signer.realm_key_id();
+    let key_id = key_id.as_str();
+    let envelope = varve_core::attest::sign_with(&st, &signer)?;
     std::fs::write(out, &envelope).with_context(|| format!("cannot write {}", out.display()))?;
     // Carriage (REQ-ATTEST-002): both blobs go into the layout as referrer
     // entries — the statement AND the attested bytes verbatim. Carrying only
@@ -3250,7 +3441,8 @@ fn deposit_cmd(
     counter: Option<u64>,
     issued_at: &str,
     key: &std::path::Path,
-    key_id: &str,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
     out: &std::path::Path,
     tools: &[String],
     json: bool,
@@ -3277,6 +3469,7 @@ fn deposit_cmd(
             issued_at,
             key,
             key_id,
+            delegation,
             out,
             deposit_tools,
             includes,
@@ -3334,6 +3527,7 @@ fn deposit_cmd(
         issued_at,
         key,
         key_id,
+        delegation,
         out,
         deposit_tools,
         // Composition is expressed in a spec file's [[include]] tables; the
@@ -3351,7 +3545,8 @@ fn run_deposit(
     counter: u64,
     issued_at: &str,
     key: &std::path::Path,
-    key_id: &str,
+    key_id: Option<&str>,
+    delegation: Option<&std::path::Path>,
     out: &std::path::Path,
     deposit_tools: Vec<varve_core::DepositTool>,
     includes: Vec<varve_core::deposit::DepositInclude>,
@@ -3370,12 +3565,13 @@ fn run_deposit(
              {out_str}`)."
         );
     }
-    let hex_key = std::fs::read_to_string(key)
-        .with_context(|| format!("cannot read signing key {}", key.display()))?;
-    // Refuse a key that cannot produce verifiable signatures BEFORE signing.
-    // varve used to accept 64 bytes of entropy here and emit a signed layer no
-    // trust root could ever verify, exit 0 (REQ-PRODUCER-001).
-    let sk = varve_core::keys::check_keypair(&hex_key, &key.display().to_string())?;
+    // The depositor signs as LAYER (REQ-KEYROLES-001): a delegated key that is
+    // not a LAYER key, and the realm root itself, are refused before the layout
+    // is touched. Deposit writes no baseline line-status (that is
+    // `attach-status`, refused in a roles realm).
+    let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Layer)?;
+    let key_id = signer.realm_key_id();
+    let key_id = key_id.as_str();
     let spec = varve_core::DepositSpec {
         includes,
         layer: layer.parse()?,
@@ -3392,10 +3588,9 @@ fn run_deposit(
     // referrers. `--force` is the deliberate override, and the refusal names
     // it — so the flag has to exist, or the message is telling the operator to
     // run something clap will reject.
-    let outcome = varve_core::deposit_with_options(
+    let outcome = varve_core::deposit::deposit_with_signer(
         &spec,
-        &sk,
-        key_id,
+        &signer,
         out,
         &varve_core::DepositOptions { force },
     )?;

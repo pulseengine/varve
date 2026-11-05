@@ -62,3 +62,11 @@ docs ci` for the whole pipeline and the key-handling patterns.
 * The signature binds the document under its own payload type; a signed
   line-status cannot be replayed as a layer manifest or a line-index, and
   vice versa.
+
+## In a realm that declares key roles
+
+`--delegation FILE` makes this command sign as the STATUS role and refuses, before
+signing, a key that is not delegated to it (including the realm root, and the
+depositor's LAYER key). `--key-id` then defaults to the delegation's entry for the
+key. See `varve docs sign-delegation`. Without it the command behaves exactly as
+before.
