@@ -77,7 +77,7 @@ pub use archive::{
 };
 pub use deposit::{
     DepositError, DepositFileSpec, DepositOptions, DepositOutcome, DepositSpec, DepositTool,
-    RunnerSpec, ToolSource, deposit, deposit_with_options, parse_deposit_spec,
+    RunnerSpec, ToolSource, deposit, deposit_with_options, deposit_with_signer, parse_deposit_spec,
 };
 pub use ingest::{
     ANN_PROOF, ANN_PROOF_ASSERTS, ANN_PROOF_SIGNER, ANN_SBOM, ANN_SBOM_SHA256, IngestProof,
@@ -126,11 +126,13 @@ pub use sdkexport::{
     check_destination_fits, export_sdk, relocate_bytes,
 };
 pub use selfverify::{
-    RELEASE_SUMS_PAYLOAD_TYPE, SelfVerifyError, sign_release_sums, verify_release_file,
+    RELEASE_SUMS_PAYLOAD_TYPE, SelfVerifyError, sign_release_sums, sign_release_sums_with,
+    verify_release_file,
 };
 pub use source::{DirSource, LayerRef, LayerSource, MemorySource, SourceError};
 pub use store::{InstalledLayer, Store, StoreError, manifest_digest};
 pub use verify::{
-    LAYER_PAYLOAD_TYPE, PinnedKeyVerifier, generate_root_keypair, sign_layer_manifest,
+    FileSigner, LAYER_PAYLOAD_TYPE, PinnedKeyVerifier, RealmSigner, dsse_sign_with,
+    generate_root_keypair, sign_layer_manifest, sign_layer_manifest_with,
 };
 pub use vsixexport::{VsixEntry, VsixExportError, export_vsix};
