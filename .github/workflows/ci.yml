@@ -355,6 +355,7 @@ jobs:
           - shard: varve-core (trust)
             files: >-
               -f crates/varve-core/src/verify.rs
+              -f crates/varve-core/src/keyroles.rs
               -f crates/varve-core/src/pin.rs
               -f crates/varve-core/src/realm.rs
               -f crates/varve-core/src/resolve.rs
