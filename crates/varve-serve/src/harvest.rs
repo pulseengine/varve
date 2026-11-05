@@ -72,21 +72,29 @@ impl Default for Sandbox {
     }
 }
 
-/// How many times a busy executable is retried before giving up.
+/// How many times a busy executable, or a full process table, is retried
+/// before giving up.
 const SPAWN_RETRIES: u32 = 20;
 
-/// Run `f`, retrying only while it fails with "text file busy".
+/// Run `f`, retrying only while it fails with "text file busy" or EAGAIN.
 ///
 /// A script written a moment ago can be busy while another thread forks; that
-/// is a race, not a refusal, and the next try succeeds. Any other error, or
-/// twenty busy answers in a row, is returned as it is.
+/// is a race, not a refusal, and the next try succeeds. EAGAIN ("resource
+/// temporarily unavailable") is a process table that is full for a moment
+/// (varve#307). Any other error, or twenty such answers in a row, is returned
+/// as it is.
 fn retrying<T>(pause: Duration, mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
     // A bounded `for`, not a counter in a `loop`: a counter that fails to
     // count (or a guard that is always true) would make an endless loop,
     // and that was reported as a timeout rather than caught.
     for _ in 0..SPAWN_RETRIES {
         match f() {
-            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ExecutableFileBusy | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
                 std::thread::sleep(pause);
             }
             other => return other,
@@ -117,6 +125,11 @@ impl Sandbox {
     /// Run `bin` with `args`; `None` if it could not start or did not finish
     /// in time (in which case it was killed).
     pub fn run(&self, bin: &Path, args: &[&str]) -> Option<Ran> {
+        self.attempt(bin, args).ok()
+    }
+
+    /// [`Sandbox::run`], saying why when the run could not finish.
+    pub fn attempt(&self, bin: &Path, args: &[&str]) -> Result<Ran, String> {
         let n = SCRATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let scratch = std::env::temp_dir().join(format!(
             "varve-serve-harvest-{}-{n}-{}",
@@ -126,8 +139,9 @@ impl Sandbox {
                 .map_or(0, |d| d.as_nanos())
         ));
         let (home, cwd) = (scratch.join("home"), scratch.join("cwd"));
-        std::fs::create_dir_all(&home).ok()?;
-        std::fs::create_dir_all(&cwd).ok()?;
+        let scratch_err = |e: std::io::Error| format!("could not prepare a scratch directory: {e}");
+        std::fs::create_dir_all(&home).map_err(scratch_err)?;
+        std::fs::create_dir_all(&cwd).map_err(scratch_err)?;
         let result = self.run_in(bin, args, &scratch, &home, &cwd);
         let _ = std::fs::remove_dir_all(&scratch);
         result
@@ -140,7 +154,7 @@ impl Sandbox {
         scratch: &Path,
         home: &Path,
         cwd: &Path,
-    ) -> Option<Ran> {
+    ) -> Result<Ran, String> {
         let (out_path, err_path) = (scratch.join("stdout"), scratch.join("stderr"));
         let mut child = retrying(Duration::from_millis(25), || {
             std::process::Command::new(bin)
@@ -157,7 +171,7 @@ impl Sandbox {
                 .stderr(std::fs::File::create(&err_path)?)
                 .spawn()
         })
-        .ok()?;
+        .map_err(|e| format!("could not start: {e}"))?;
         let started = Instant::now();
         let status = loop {
             match child.try_wait() {
@@ -165,10 +179,13 @@ impl Sandbox {
                 Ok(None) if started.elapsed() >= self.timeout => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return None;
+                    return Err(format!(
+                        "did not finish within {} ms and was killed",
+                        self.timeout.as_millis()
+                    ));
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(5)),
-                Err(_) => return None,
+                Err(e) => return Err(format!("could not be waited on: {e}")),
             }
         };
         let mut text =
@@ -178,7 +195,7 @@ impl Sandbox {
             text.push('\n');
         }
         text.push_str(&err);
-        Some(Ran {
+        Ok(Ran {
             text,
             success: status.success(),
         })
@@ -201,12 +218,23 @@ pub struct Harvested {
     /// The raw `--help` text, or `None`: "no help available".
     pub help: Option<String>,
     pub topics: Vec<Topic>,
+    /// Why the harvest could not finish, when it could not: an invocation
+    /// that did not start, timed out or could not be waited on. An
+    /// incomplete harvest is NEVER cached (varve#307), and is told apart from
+    /// a tool that answered with nothing usable.
+    pub incomplete: Option<String>,
 }
 
 /// Harvest one tool. See the module comment for what is and is not run.
 pub fn harvest_tool(sb: &Sandbox, bin: &Path, tool: &str) -> Harvested {
-    let Some(ran) = sb.run(bin, &["--help"]) else {
-        return Harvested::default();
+    let ran = match sb.attempt(bin, &["--help"]) {
+        Ok(ran) => ran,
+        Err(why) => {
+            return Harvested {
+                incomplete: Some(format!("`--help` {why}")),
+                ..Harvested::default()
+            };
+        }
     };
     let parsed = parse_help(tool, &ran.text);
     // A failing `--help` that still printed a command list (spar) is help; a
@@ -215,20 +243,28 @@ pub fn harvest_tool(sb: &Sandbox, bin: &Path, tool: &str) -> Harvested {
         return Harvested::default();
     }
     let mut topics = Vec::new();
-    if parsed.lists_docs()
-        && let Some(listing) = sb.run(bin, &["docs"])
-    {
-        for (name, desc) in parse_topics(&listing.text).into_iter().take(MAX_TOPICS) {
-            let body = sb
-                .run(bin, &["docs", &name])
-                .map(|r| help::clean_block(&r.text))
-                .unwrap_or_default();
-            topics.push(Topic { name, desc, body });
+    let mut incomplete = None;
+    if parsed.lists_docs() {
+        match sb.attempt(bin, &["docs"]) {
+            Err(why) => incomplete = Some(format!("`docs` {why}")),
+            Ok(listing) => {
+                for (name, desc) in parse_topics(&listing.text).into_iter().take(MAX_TOPICS) {
+                    let body = match sb.attempt(bin, &["docs", &name]) {
+                        Ok(r) => help::clean_block(&r.text),
+                        Err(why) => {
+                            incomplete.get_or_insert(format!("`docs {name}` {why}"));
+                            String::new()
+                        }
+                    };
+                    topics.push(Topic { name, desc, body });
+                }
+            }
         }
     }
     Harvested {
         help: Some(help::clean_block(&ran.text)),
         topics,
+        incomplete,
     }
 }
 
@@ -292,6 +328,7 @@ fn load(path: &Path, layer_digest: &str) -> BTreeMap<String, Harvested> {
             Harvested {
                 help: s(&t["help"]),
                 topics,
+                incomplete: None,
             },
         );
     }
@@ -344,7 +381,9 @@ pub fn harvest_all(sb: &Sandbox, tools: &[ToolSource]) -> BTreeMap<String, Harve
                 continue;
             }
         };
-        if let Some(slot) = slot {
+        // An incomplete harvest is not a fact about the binary, only about
+        // this moment: caching it would keep it for the life of the layer.
+        if let Some(slot) = slot.filter(|_| h.incomplete.is_none()) {
             caches
                 .get_mut(&slot)
                 .expect("inserted above")
@@ -462,7 +501,34 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2500));
         assert!(!marker.exists(), "the child was not killed");
         let h = harvest_tool(&impatient(), &bin, "t");
-        assert_eq!(h, Harvested::default(), "no help available");
+        assert_eq!(h.help, None);
+        assert!(h.topics.is_empty());
+        let why = h
+            .incomplete
+            .as_deref()
+            .expect("a timeout is reported, not hidden");
+        assert!(why.contains("did not finish"), "{why}");
+    }
+
+    /// A docs topic that does not answer makes the whole harvest incomplete,
+    /// so its empty body is not cached as if it were the topic's text.
+    // rivet: verifies REQ-AGENTDOCS-006
+    #[test]
+    fn a_topic_that_does_not_answer_makes_the_harvest_incomplete() {
+        let d = tempfile::tempdir().unwrap();
+        let docs = "if [ -n \"$2\" ]; then sleep 5; else printf '  alpha   First\\n'; fi";
+        let bin = fake(d.path(), WITH_DOCS, docs);
+        let sb = Sandbox {
+            timeout: Duration::from_secs(1),
+            max_output: MAX_OUTPUT,
+        };
+        let h = harvest_tool(&sb, &bin, "fake");
+        assert!(h.help.is_some(), "--help itself answered");
+        let why = h.incomplete.as_deref().expect("a lost topic is reported");
+        assert!(
+            why.contains("docs alpha") && why.contains("did not finish"),
+            "{why}"
+        );
     }
 
     /// Only "busy" is retried, and only twenty times.
@@ -476,6 +542,17 @@ mod tests {
             if calls < 4 { busy() } else { Ok(7) }
         });
         assert_eq!((ok.unwrap(), calls), (7, 4));
+        // EAGAIN: the process table is full for a moment (varve#307).
+        let mut calls = 0;
+        let ok = retrying(Duration::ZERO, || {
+            calls += 1;
+            if calls < 3 {
+                Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+            } else {
+                Ok(1u8)
+            }
+        });
+        assert_eq!((ok.unwrap(), calls), (1, 3), "EAGAIN is transient too");
         let mut calls = 0;
         let e = retrying(Duration::ZERO, || {
             calls += 1;
@@ -635,6 +712,29 @@ mod tests {
         assert_eq!(calls(d.path()).len(), 1, "the cache was not used");
         assert_eq!(first, second);
         assert!(first[&key_of(&t)].help.is_some());
+    }
+
+    /// A harvest that could not run is reported with its reason and never
+    /// cached: the next run, on a machine that recovered, tries again
+    /// (varve#307). Before this, the empty result was cached under the
+    /// binary's signed digest, for the life of the layer.
+    // rivet: verifies REQ-AGENTDOCS-006
+    #[test]
+    fn a_harvest_that_could_not_run_is_not_cached_and_the_next_run_tries_again() {
+        let d = tempfile::tempdir().unwrap();
+        let at = d.path().join("fake");
+        let t = source(d.path(), Some(at.clone()));
+        let first = harvest_all(&fast(), std::slice::from_ref(&t));
+        let h = &first[&key_of(&t)];
+        assert_eq!(h.help, None);
+        let why = h.incomplete.as_deref().expect("the failure is reported");
+        assert!(why.contains("could not start"), "{why}");
+        let bin = fake(d.path(), NO_DOCS, "true");
+        assert_eq!(bin, at);
+        let second = harvest_all(&fast(), std::slice::from_ref(&t));
+        let h = &second[&key_of(&t)];
+        assert!(h.help.is_some(), "the failed harvest was cached");
+        assert_eq!(h.incomplete, None);
     }
 
     /// A cache for another layer, another binary, another version, or garbage
