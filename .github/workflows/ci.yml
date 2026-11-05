@@ -355,13 +355,19 @@ jobs:
           - shard: varve-core (trust)
             files: >-
               -f crates/varve-core/src/verify.rs
-              -f crates/varve-core/src/keyroles.rs
               -f crates/varve-core/src/pin.rs
-              -f crates/varve-core/src/realm.rs
               -f crates/varve-core/src/resolve.rs
               -f crates/varve-core/src/consumer.rs
               -f crates/varve-core/src/mutationscope.rs
               -f crates/varve-core/src/shellquote.rs
+          # SPLIT AT v0.45.0, BEFORE it cancelled: after the install split this
+          # shard still took 68 minutes of its 90 on #316, and key roles PRs 4
+          # and 5 grow keyroles.rs and realm.rs. Who may sign what in a realm —
+          # the delegation and the realm's trust material — is its own shard.
+          - shard: varve-core (key roles)
+            files: >-
+              -f crates/varve-core/src/keyroles.rs
+              -f crates/varve-core/src/realm.rs
           # SPLIT AGAIN at v0.45.0, the fourth time. REQ-MIRROR-002 grew
           # install.rs (failover, first-contact floor) and REQ-KEYROLES-001
           # added keyroles.rs here; the shard was CANCELLED at 90:00 on PR #315
