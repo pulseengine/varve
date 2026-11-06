@@ -2323,7 +2323,10 @@ type DefinedRealm = (
 );
 
 impl DefinedRealms {
-    fn open(cwd: &std::path::Path) -> anyhow::Result<Self> {
+    /// `pinned_origin` is the origin of the PINNED realm's primary: the only
+    /// registry `$VARVE_REGISTRY_AUTH` may reach through these realms
+    /// (varve#312). `None` means it is unknown, and no realm gets it.
+    fn open(cwd: &std::path::Path, pinned_origin: Option<&str>) -> anyhow::Result<Self> {
         let mut realms = std::collections::BTreeMap::new();
         if let Ok(names) = varve_core::realm::realm_names(cwd) {
             for name in names {
@@ -2331,10 +2334,11 @@ impl DefinedRealms {
                     let realm = varve_core::resolve_realm(cwd, &name)?;
                     // Primary then mirrors (REQ-MIRROR-002): a down primary must
                     // not fail a realm that declares working mirrors.
-                    let source = varve_core::mirror::Mirrors::for_realm(
+                    let source = varve_core::mirror::Mirrors::for_realm_under(
                         &realm.name,
                         &realm.sources,
                         &varve_core::host_platform(),
+                        pinned_origin,
                     )?;
                     let trust = realm_trust(&realm)?;
                     let verifier = varve_core::PinnedKeyVerifier::from_trust(trust.clone());
@@ -3968,7 +3972,16 @@ fn support_horizon(
     let cwd = std::env::current_dir().context("cannot determine working directory")?;
     // Every realm this checkout defines, opened once: an include's own
     // includes may name any of them (REQ-COMPOSEWINDOW-002 clause 1).
-    let realms = DefinedRealms::open(&cwd)?;
+    // The support window is asked of the realms this checkout defines; the
+    // environment credential belongs to the one the project pins. Outside a
+    // pinned project (or when the pin's primary is not a registry) it is
+    // unknown, and no defined realm is offered the credential.
+    let pinned_origin = load_pin()
+        .ok()
+        .and_then(|(pin, _)| pin.realm)
+        .and_then(|name| varve_core::resolve_realm(&cwd, &name).ok())
+        .and_then(|realm| varve_core::mirror::primary_origin(&realm.sources));
+    let realms = DefinedRealms::open(&cwd, pinned_origin.as_deref())?;
     let mut windows = Vec::new();
     for inc in &includes {
         let Some(realm_name) = inc.realm.as_deref() else {
@@ -4044,6 +4057,7 @@ fn fetch_included_layer(
     realm_name: &str,
     platform: &str,
     now: &str,
+    pinned_origin: Option<&str>,
 ) -> anyhow::Result<varve_core::store::InstalledLayer> {
     let cwd = std::env::current_dir().context("cannot determine working directory")?;
     let realm = varve_core::resolve_realm(&cwd, realm_name).with_context(|| {
@@ -4063,7 +4077,15 @@ fn fetch_included_layer(
     // realm 'pulseengine'" and succeeded, and the very next command said the
     // layer was not installed, because the composition walk looks for siblings.
     let store = Store::at(realm.effective_root(&ctx.base_root));
-    let sources = varve_core::mirror::Mirrors::for_realm(&realm.name, &realm.sources, platform)?;
+    // An included realm is not the one the project pins: the operator's
+    // `$VARVE_REGISTRY_AUTH` reaches it only if it is the same registry origin
+    // (varve#312).
+    let sources = varve_core::mirror::Mirrors::for_realm_under(
+        &realm.name,
+        &realm.sources,
+        platform,
+        pinned_origin,
+    )?;
     // The line this digest should turn out to be, from the include that named
     // it: a mirror is refused a first contact BEFORE it is contacted, and a
     // digest alone names no line.
@@ -4322,6 +4344,14 @@ fn install(
             bail!("no source: pass --from, or name a realm in the pin so its registry applies")
         }
     };
+    // The registry the user named as THEIR target: the explicit `--from`, else
+    // the pinned realm's primary. Included realms get the environment
+    // credential only on this origin (varve#312).
+    let pinned_origin: Option<String> = match (from, &ctx.realm) {
+        (Some(explicit), _) => varve_core::mirror::spec_origin(explicit),
+        (None, Some(realm)) => varve_core::mirror::primary_origin(&realm.sources),
+        (None, None) => None,
+    };
     let pin = &ctx.pin;
     let verifier = ctx_verifier(&ctx)?;
     let store = &ctx.store;
@@ -4544,6 +4574,7 @@ fn install(
                     &realm_name,
                     &platform,
                     &now,
+                    pinned_origin.as_deref(),
                 ) {
                     Ok(entry) => {
                         println!(

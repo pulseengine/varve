@@ -84,16 +84,20 @@ fn url_scheme(spec: &str) -> Option<&str> {
 /// instead of saying what is wrong. The shape changes availability, never
 /// acceptance.
 pub fn source_from_spec(spec: &str, platform: &str) -> Result<Box<dyn LayerSource>, SourceError> {
-    build_source(spec, platform, Role::Primary)
+    build_source(spec, platform, Role::Primary, None)
 }
 
 fn build_source(
     spec: &str,
     platform: &str,
     role: Role<'_>,
+    env_bound_to: Option<Option<&str>>,
 ) -> Result<Box<dyn LayerSource>, SourceError> {
     if spec.starts_with("oci://") || spec.starts_with("oci+http://") {
         let mut registry = crate::RegistrySource::parse(spec)?;
+        if let Some(pinned_origin) = env_bound_to {
+            registry = registry.with_env_credential_bound_to(pinned_origin);
+        }
         if let Role::Mirror { primary_origin } = role {
             registry = registry.as_mirror_of(primary_origin);
         }
@@ -146,6 +150,17 @@ fn registry_origin(spec: &str) -> Option<String> {
         .map(|source| source.origin())
 }
 
+/// The origin of a realm's PRIMARY source, when that is a registry. The
+/// origin `$VARVE_REGISTRY_AUTH` is bound to for every other realm.
+pub fn primary_origin(sources: &[String]) -> Option<String> {
+    sources.first().and_then(|p| registry_origin(p))
+}
+
+/// The origin of one explicit source spec (an `--from`), when it is a registry.
+pub fn spec_origin(spec: &str) -> Option<String> {
+    registry_origin(spec)
+}
+
 /// A reason in one short line, for a notice.
 fn short_reason(e: &dyn std::fmt::Display) -> String {
     let text = e.to_string();
@@ -181,6 +196,29 @@ impl Mirrors {
         sources: &[String],
         platform: &str,
     ) -> Result<Self, SourceError> {
+        Self::build_realm(realm_name, sources, platform, None)
+    }
+
+    /// The sources of a realm that is NOT the one the project pins: one reached
+    /// through an `[[include]]` or a support-horizon lookup. Same as
+    /// `for_realm`, except `$VARVE_REGISTRY_AUTH` is offered only to a source on
+    /// `pinned_origin` (the pinned realm's primary origin, see
+    /// `primary_origin`), and to nobody when that is `None` (varve#312).
+    pub fn for_realm_under(
+        realm_name: &str,
+        sources: &[String],
+        platform: &str,
+        pinned_origin: Option<&str>,
+    ) -> Result<Self, SourceError> {
+        Self::build_realm(realm_name, sources, platform, Some(pinned_origin))
+    }
+
+    fn build_realm(
+        realm_name: &str,
+        sources: &[String],
+        platform: &str,
+        env_bound_to: Option<Option<&str>>,
+    ) -> Result<Self, SourceError> {
         let primary_origin = sources.first().and_then(|p| registry_origin(p));
         let mut mirrors = Vec::with_capacity(sources.len());
         for (i, spec) in sources.iter().enumerate() {
@@ -201,8 +239,13 @@ impl Mirrors {
                         .to_string(),
                 ));
             }
-            let source = build_source(spec, platform, role(i, primary_origin.as_deref()))
-                .map_err(|e| refuse(e.to_string()))?;
+            let source = build_source(
+                spec,
+                platform,
+                role(i, primary_origin.as_deref()),
+                env_bound_to,
+            )
+            .map_err(|e| refuse(e.to_string()))?;
             mirrors.push(Mirror {
                 label: spec.clone(),
                 source,
