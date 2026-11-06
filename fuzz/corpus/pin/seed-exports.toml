@@ -1,0 +1,23 @@
+manifest-version = 1
+
+[toolchain]
+channel = "qualified"
+layer   = "2026.07.0"
+
+[[export]]
+kind = "cargo"
+out  = "vendor/registry"
+
+[[export]]
+kind = "vsix"
+out  = ".vscode/varve-extensions"
+select = ["rust-lang.rust-analyzer", "vadimcn.vscode-lldb"]
+
+[[export]]
+kind = "sdk"
+out  = "toolchains/poky"
+select = ["poky-cortexa53"]
+
+[export.env]
+script = "environment-setup-cortexa53-poky-linux"
+path   = "before-shims"
