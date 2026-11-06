@@ -3552,3 +3552,21 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-11-06T10:03:24Z
+
+  - id: VER-REVIEW-311-001
+    type: verification
+    title: "varve#311 independently reviewed: holds, with four findings, all fixed test-first and re-verified by the author"
+    status: verified
+    release: v0.46.0
+    tags: [independence, review]
+    fields:
+      baseline: "Independent clean-room review (fresh context, refute-framed) of the varve#311 change (mirror failover carries what an earlier source verified, memory only) at 0302b987, 2026-11-06. VERDICT holds-with-findings: the carry is real and placed where it can act, and no path writes carried state to the cache or the high-water mark. FINDINGS, all accepted and fixed in 86be0764: (1) a surviving mutant, rollback.rs carry_status `>` to `>=`; a tie test now kills it. (2) The CHANGELOG and comments overclaimed (\"never a lower bar\"): a carried newer realm-signed status can state a lower first-contact floor, exactly as a served one always could; intended, and the wording now says so. (3) The mirror notice credited \"its cached line-status\" when the carried status supplied the bound; status_bound now names it, unit- and system-tested. (4) No test covered a primary whose index verifies and whose listing then fails; install_a_mirror_older_index_is_refused_after_the_primary_failed_at_the_listing added. AUTHOR RE-VERIFICATION: negative control, moving the carry below served_layers makes that test fail and restoring it passes; mirror_failover 34 passed; cargo mutants rollback.rs 116 tested, 111 caught, 5 unviable, 0 missed; install.rs install_inner 29 tested, 25 caught, 4 unviable, 0 missed. RESIDUAL recorded, not fixed (low): the layer manifest counter is not carried across sources. Advisory at v0.x (REQ-INDEP-001)."
+      method: review
+      steps: cargo test -p varve --test mirror_failover; cargo test -p varve --bin varve the_notice_credits_a_carried_status_only_when_it_is_newer_than_the_cached_one; cargo test -p varve-core rollback
+    links:
+      - type: verifies
+        target: REQ-MIRROR-002
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-06T22:10:34Z
