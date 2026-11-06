@@ -793,6 +793,23 @@ pub struct RegistrySource {
     /// to a token endpoint on its OWN host: a mirror is chosen by whoever
     /// edits the realms file, and its challenge can name any token realm.
     restricted: bool,
+    /// Which origin the environment credential is bound to (varve#312).
+    env_bound_to: EnvBinding,
+}
+
+/// Who may be offered `$VARVE_REGISTRY_AUTH`. The operator sets it for the
+/// registry of the realm their project pins; a realm reached only through an
+/// `[[include]]` or a support-horizon lookup is somebody else's registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EnvBinding {
+    /// No binding: the source is the user's own target (the pinned realm's
+    /// primary, an explicit `--from`).
+    Unbound,
+    /// Only a source on exactly this (normalised) origin.
+    Origin(String),
+    /// The pinned realm's origin is unknown (a directory / OCI-layout primary,
+    /// or no pin): no source gets it. Fails closed.
+    Nobody,
 }
 
 impl std::fmt::Debug for RegistrySource {
@@ -820,7 +837,21 @@ impl RegistrySource {
             token: RefCell::new(None),
             credential: OnceCell::new(),
             restricted: false,
+            env_bound_to: EnvBinding::Unbound,
         }
+    }
+
+    /// Bind the environment credential to the PINNED realm's primary origin:
+    /// this source is offered it only if its own origin is the same. `None`
+    /// (the pinned origin is unknown) offers it to nobody. Used for every realm
+    /// that is not the one the project pins (varve#312). The docker-config
+    /// entry keyed by this source's own host is unaffected.
+    pub fn with_env_credential_bound_to(mut self, pinned_origin: Option<&str>) -> Self {
+        self.env_bound_to = match pinned_origin {
+            Some(o) => EnvBinding::Origin(normalize_origin(o)),
+            None => EnvBinding::Nobody,
+        };
+        self
     }
 
     /// Mark this source as a MIRROR of a realm. It is credential-restricted
@@ -869,6 +900,11 @@ impl RegistrySource {
     /// a source on the realm primary's host (never a mirror elsewhere).
     fn offers_env_credential(&self) -> bool {
         !self.restricted
+            && match &self.env_bound_to {
+                EnvBinding::Unbound => true,
+                EnvBinding::Origin(o) => *o == self.origin(),
+                EnvBinding::Nobody => false,
+            }
     }
 
     /// A restricted source over CLEARTEXT (`oci+http://`) sends no credential
@@ -2022,6 +2058,70 @@ mod tests {
         assert!(!found(false), "a mirror on another host must never see it");
         assert!(matches!(
             credential_from("ghcr.io", true, None, &[]),
+            CredentialLookup::Absent
+        ));
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_environment_credential_goes_only_to_the_pinned_realms_origin() {
+        // varve#312: a realm reached only through an include or a support
+        // lookup is somebody else's registry.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(
+            &config,
+            r#"{"auths":{"other.example":{"auth":"Y2k6c2VjcmV0"}}}"#,
+        )
+        .unwrap();
+        let paths = std::slice::from_ref(&config);
+        let env = || Some("ci:s3cret".to_string());
+        let found_env = |l: &CredentialLookup| match l {
+            CredentialLookup::Found(c) => c.origin.contains(CREDENTIAL_ENV),
+            _ => false,
+        };
+        let pinned = "https://ghcr.io";
+
+        let other = RegistrySource::parse("oci://other.example/acme/layers")
+            .unwrap()
+            .with_env_credential_bound_to(Some(pinned));
+        assert!(
+            !other.offers_env_credential(),
+            "another origin: no env credential"
+        );
+        let got = other.resolve(env(), paths);
+        assert!(
+            matches!(got, CredentialLookup::Found(_)) && !found_env(&got),
+            "its own host's docker-config entry still works, and it is not the env value"
+        );
+        assert!(matches!(
+            other.resolve(env(), &[]),
+            CredentialLookup::Absent
+        ));
+
+        let same = RegistrySource::parse("oci://GHCR.io:443/acme/included")
+            .unwrap()
+            .with_env_credential_bound_to(Some(pinned));
+        assert!(
+            same.offers_env_credential(),
+            "the same origin is the same registry and operator"
+        );
+        assert!(found_env(&same.resolve(env(), &[])));
+
+        let other_port = RegistrySource::parse("oci+http://ghcr.io:5000/acme")
+            .unwrap()
+            .with_env_credential_bound_to(Some(pinned));
+        assert!(!other_port.offers_env_credential());
+
+        let unknown = RegistrySource::parse("oci://ghcr.io/acme/included")
+            .unwrap()
+            .with_env_credential_bound_to(None);
+        assert!(
+            !unknown.offers_env_credential(),
+            "an unknown pinned origin fails closed, even for the same host"
+        );
+        assert!(matches!(
+            unknown.resolve(env(), &[]),
             CredentialLookup::Absent
         ));
     }

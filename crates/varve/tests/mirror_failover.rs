@@ -1501,3 +1501,106 @@ fn outdated_through_a_mirror_serving_a_genuine_old_index_is_refused() {
     );
     assert!(stderr.contains("no cached line index"), "{stderr}");
 }
+
+// ---- varve#312: $VARVE_REGISTRY_AUTH belongs to the PINNED realm's origin ----
+
+/// A project pinned to realm `acme` (registry `acme_registry`) that also
+/// defines realm `other` (registry `other_registry`), and a layer manifest
+/// whose `[[include]]` names `other`. `support-horizon` then asks `other`'s
+/// registry, a realm the project does not pin.
+fn support_horizon_including_other(
+    acme_registry: &str,
+    other_registry: &str,
+) -> (Project, std::process::Output) {
+    let (_, pk) = varve_core::generate_root_keypair();
+    let root_hex = hex::encode(&pk);
+    let p = project(acme_registry, &[], &root_hex);
+    let realms = std::fs::read_to_string(p.dir.join("varve-realms.toml")).unwrap();
+    std::fs::write(
+        p.dir.join("varve-realms.toml"),
+        format!("{realms}\n[realm.other]\nregistry = \"{other_registry}\"\ntrust-root = \"{root_hex}\"\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        p.dir.join("layer.toml"),
+        format!(
+            "[varve]\nversion = \"v0.41.0\"\n\n[realm]\nname = \"acme\"\nchannel = \"rolling\"\n\
+             registry = \"oci://ghcr.io/acme/layers\"\n\n[[tool]]\nname = \"rivet\"\nversion = \"v0.34.0\"\n\n\
+             [[include]]\ndigest = \"sha256:{}\"\nrealm = \"other\"\nlayer = \"{LAYER}\"\n",
+            "0".repeat(64)
+        ),
+    )
+    .unwrap();
+    let out = varve(&p)
+        .env("VARVE_REGISTRY_AUTH", format!("ci:{SECRET}"))
+        .args([
+            "support-horizon",
+            "--channel",
+            "rolling",
+            "--issued-at",
+            "2026-10-02T10:00:00Z",
+            "--manifest",
+            "layer.toml",
+        ])
+        .output()
+        .unwrap();
+    (p, out)
+}
+
+/// The operator sets the variable for THEIR realm's registry. A realm reached
+/// only through an include is on another origin and must never see it, nor the
+/// token endpoint its registry names.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn an_included_realms_registry_on_another_origin_never_receives_the_env_credential() {
+    let (pinned_token, _) = token_server();
+    let (acme, _) = challenge_server(pinned_token);
+    let (other_token, other_token_reqs) = token_server();
+    let (other, other_reqs) = challenge_server(other_token);
+    let (_p, _out) = support_horizon_including_other(&acme, &other);
+    assert!(
+        !other_reqs.lock().unwrap().is_empty(),
+        "the included realm's registry must actually have been contacted"
+    );
+    assert!(
+        !any_carries_secret(&other_reqs),
+        "the included realm's registry was sent the operator's credential:\n{:?}",
+        other_reqs.lock().unwrap()
+    );
+    assert!(
+        !any_carries_secret(&other_token_reqs),
+        "the included realm's token endpoint was sent the operator's credential:\n{:?}",
+        other_token_reqs.lock().unwrap()
+    );
+}
+
+/// An included realm on the SAME origin as the pinned realm's primary is the
+/// same registry and the same operator: it still gets the credential.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn an_included_realm_on_the_pinned_realms_origin_still_receives_the_env_credential() {
+    let (token_url, token_reqs) = token_server();
+    let (acme, _) = challenge_server(token_url);
+    let other = acme.replace("/inc/layers", "/inc/other");
+    assert_ne!(acme, other);
+    let (_p, _out) = support_horizon_including_other(&acme, &other);
+    assert!(
+        any_carries_secret(&token_reqs),
+        "a same-origin realm must keep the credential:\n{:?}",
+        token_reqs.lock().unwrap()
+    );
+}
+
+/// Fail closed: when the pinned realm's primary is a directory its origin is
+/// unknown, so no other realm is offered the credential.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn a_directory_pinned_primary_offers_the_env_credential_to_no_included_realm() {
+    let (other_token, other_token_reqs) = token_server();
+    let (other, other_reqs) = challenge_server(other_token);
+    let empty = tempfile::tempdir().unwrap();
+    let (_p, _out) = support_horizon_including_other(empty.path().to_str().unwrap(), &other);
+    assert!(!other_reqs.lock().unwrap().is_empty());
+    assert!(!any_carries_secret(&other_reqs));
+    assert!(!any_carries_secret(&other_token_reqs));
+}

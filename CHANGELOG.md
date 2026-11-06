@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Upgrading: behaviour that changes
+
+* **`VARVE_REGISTRY_AUTH` now goes only to the pinned realm's registry origin**
+  (#312). Before, it was offered to the primary of every realm the process
+  contacted, so a realm reached only through an `[[include]]` or a
+  `support-horizon` lookup also received the credential you set for your own
+  realm. Now only a source on the same origin (scheme, host, port) as the
+  primary of the realm your `varve.toml` pins (or of an explicit `--from`)
+  receives it; an included realm on the same registry origin still does. Any
+  other realm falls back to the docker-config `auths` entry for its own host,
+  or to anonymous access. If the pinned primary is a directory or OCI layout, no
+  other realm gets the variable. `varve support-horizon` run outside a pinned
+  project (no readable `varve.toml` naming a realm) now offers
+  `VARVE_REGISTRY_AUTH` to no realm at all. If you relied on one variable authenticating
+  two registries, log in to the second with `docker login`.
+
 ## v0.45.0 — 2026-11-06
 
 *A realm's mirrors are used without ever becoming an authority, a realm can split

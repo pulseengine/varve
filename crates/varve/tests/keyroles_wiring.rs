@@ -1000,3 +1000,119 @@ fn verify_all_reports_a_roles_realms_refused_delegation_not_that_the_realm_is_un
         .stderr(predicate::str::contains("r.delegation.dsse"))
         .stderr(predicate::str::contains("does not define").not());
 }
+
+// ---- varve#312: install-time includes and $VARVE_REGISTRY_AUTH ----
+
+const SECRET_312: &str = "s3cr3t-pa55w0rd-DO-NOT-LEAK";
+
+/// A loopback HTTP server that records every request (line and headers). With
+/// `challenge`, it answers 401 with a bearer challenge naming that token realm;
+/// otherwise 500.
+fn recording_server(
+    challenge: Option<String>,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut seen = String::new();
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok() && line != "\r\n" && !line.is_empty() {
+                seen.push_str(&line);
+                line.clear();
+            }
+            recorded.lock().unwrap().push(seen);
+            let _ = match &challenge {
+                Some(realm) => write!(
+                    stream,
+                    "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"{realm}\",service=\"s\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                ),
+                None => write!(
+                    stream,
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                ),
+            };
+        }
+    });
+    (format!("{addr}"), requests)
+}
+
+fn carries_secret_312(reqs: &std::sync::Mutex<Vec<String>>) -> bool {
+    // base64 of "ci:<secret>", computed with the standard alphabet.
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut b64 = String::new();
+    for c in format!("ci:{SECRET_312}").as_bytes().chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        b64.push(T[(n >> 18) as usize & 63] as char);
+        b64.push(T[(n >> 12) as usize & 63] as char);
+        b64.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        b64.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    reqs.lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.contains(SECRET_312) || r.contains(&b64))
+}
+
+/// `varve install` of a layer that `[[include]]`s a realm whose registry is on
+/// ANOTHER origin from the pinned realm's: the operator's credential, set for
+/// their own realm, must reach neither that registry nor its token endpoint.
+/// The install path (`fetch_included_layer`) is separate from the support walk.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn install_never_sends_the_env_credential_to_an_included_realms_registry() {
+    let c = composition("root");
+    let (token_addr, token_reqs) = recording_server(None);
+    let (inc_addr, inc_reqs) = recording_server(Some(format!("http://{token_addr}/token")));
+    std::fs::write(
+        c.w.project.join("varve-realms.toml"),
+        format!(
+            "[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{}\"\n\
+             [realm.inc]\nregistry = \"oci+http://{inc_addr}/inc/layers\"\ntrust-root = \"{}\"\n",
+            hex::encode(&c.w.root.pk),
+            hex::encode(&c.inc_root.pk)
+        ),
+    )
+    .unwrap();
+    // The included realm's registry is contacted, so the leak could have
+    // happened; the install itself then fails to fetch the include.
+    varve(&c.w)
+        .env("VARVE_REGISTRY_AUTH", format!("ci:{SECRET_312}"))
+        .args(["install", "--from"])
+        .arg(&c.includer)
+        .assert()
+        .failure();
+    assert!(
+        !inc_reqs.lock().unwrap().is_empty(),
+        "the included realm's registry must actually have been contacted"
+    );
+    assert!(
+        !token_reqs.lock().unwrap().is_empty(),
+        "the included realm's token endpoint must actually have been contacted"
+    );
+    assert!(
+        !carries_secret_312(&inc_reqs),
+        "the included realm's registry was sent the operator's credential:\n{:?}",
+        inc_reqs.lock().unwrap()
+    );
+    assert!(
+        !carries_secret_312(&token_reqs),
+        "the included realm's token endpoint was sent the operator's credential:\n{:?}",
+        token_reqs.lock().unwrap()
+    );
+}
