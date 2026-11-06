@@ -4209,6 +4209,12 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
     // Per source, fetch AND check: an index a mirror serves that the realm's
     // root did not sign is refused and the next source is asked
     // (REQ-MIRROR-002 clause 2).
+    //
+    // What one source proves is a baseline for the next even if that source's
+    // answer then fails (varve#311): `proven` holds the highest index any
+    // source verified in this run, and a later source is judged against the
+    // higher of that and the cache. Memory only: `outdated` writes nothing.
+    let proven: std::cell::RefCell<Option<varve_core::LineIndex>> = std::cell::RefCell::new(None);
     let verified = sources
         .attempt_some(
             |source, is_primary| -> Result<_, varve_core::InstallError> {
@@ -4221,12 +4227,21 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
                     });
                 }
                 let envelope = source.fetch_line_index(&line)?;
+                if let Some(doc) = envelope
+                    .as_deref()
+                    .and_then(|b| varve_core::lineindex::proven_by(&line, b, &trust))
+                {
+                    let held = proven.borrow_mut().take();
+                    *proven.borrow_mut() = varve_core::lineindex::higher_counter(held, Some(doc));
+                }
                 let served = source.served_layers(&line)?;
+                let baseline =
+                    varve_core::lineindex::higher_counter(cached.clone(), proven.borrow().clone());
                 Ok(varve_core::lineindex::check(
                     &line,
                     envelope.as_deref(),
                     served.as_deref(),
-                    cached.as_ref(),
+                    baseline.as_ref(),
                     &policy,
                 )?)
             },

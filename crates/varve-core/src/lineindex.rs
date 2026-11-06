@@ -272,6 +272,32 @@ pub struct IndexPolicy<'a> {
     pub required: bool,
 }
 
+/// The index in `envelope` if it VERIFIES under the realm's trust and is about
+/// `line`; `None` otherwise (the failure is `check`'s to report, this only asks
+/// "what has this source proved?").
+///
+/// For a caller that must remember what an earlier source proved while a later
+/// one is asked (varve#311): a verified document is a baseline whether or not
+/// the rest of that source's attempt succeeded.
+pub fn proven_by(
+    line: &str,
+    envelope: &[u8],
+    trust: &crate::keyroles::RealmTrust,
+) -> Option<LineIndex> {
+    LineIndex::verify_and_parse(envelope, trust)
+        .ok()
+        .filter(|doc| doc.line == line)
+}
+
+/// The index with the higher counter; `a` on a tie. The baseline a later source
+/// is judged against is the higher of what is cached and what this run proved.
+pub fn higher_counter(a: Option<LineIndex>, b: Option<LineIndex>) -> Option<LineIndex> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(if b.counter > a.counter { b } else { a }),
+        (a, b) => a.or(b),
+    }
+}
+
 /// Run the whole index check for one line, returning the verified index when
 /// there is one. Separate from `install` so each clause is exercised directly:
 /// integration tests cannot kill mutants under `--workspace --lib`, and this
@@ -581,6 +607,46 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn proven_by_answers_only_for_a_verified_index_about_the_asked_line() {
+        let (sk, pk) = generate_root_keypair();
+        let (_other_sk, other_pk) = generate_root_keypair();
+        let doc = index(4, &[("2026.08.0", "sha256:aa")]);
+        let envelope = doc.sign(&sk, "root-1").unwrap();
+        let trust = crate::keyroles::test_support::rt(&pk);
+        assert_eq!(
+            proven_by("2026.08", envelope.as_bytes(), &trust),
+            Some(doc.clone())
+        );
+        // A different line, a different realm's root, and bytes that are not
+        // an envelope prove nothing.
+        assert_eq!(proven_by("2026.09", envelope.as_bytes(), &trust), None);
+        let other = crate::keyroles::test_support::rt(&other_pk);
+        assert_eq!(proven_by("2026.08", envelope.as_bytes(), &other), None);
+        assert_eq!(proven_by("2026.08", b"not an envelope", &trust), None);
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_baseline_is_the_higher_counter_and_a_tie_keeps_the_first() {
+        let lo = index(2, &[("2026.08.0", "sha256:aa")]);
+        let hi = index(5, &[("2026.08.0", "sha256:bb")]);
+        assert_eq!(
+            higher_counter(Some(lo.clone()), Some(hi.clone())),
+            Some(hi.clone())
+        );
+        assert_eq!(
+            higher_counter(Some(hi.clone()), Some(lo.clone())),
+            Some(hi.clone())
+        );
+        assert_eq!(higher_counter(Some(lo.clone()), None), Some(lo.clone()));
+        assert_eq!(higher_counter(None, Some(lo.clone())), Some(lo.clone()));
+        assert_eq!(higher_counter(None, None), None);
+        let same = index(5, &[("2026.08.0", "sha256:cc")]);
+        assert_eq!(higher_counter(Some(hi.clone()), Some(same)), Some(hi));
     }
 
     // rivet: verifies REQ-INDEXAUTH-001

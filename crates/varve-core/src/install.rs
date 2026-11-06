@@ -541,6 +541,16 @@ fn install_inner(
     let mut accepted_index: Option<(crate::lineindex::LineIndex, Vec<u8>)> = None;
     if let Some(index_policy) = &policy.index {
         let envelope = source.fetch_line_index(&line_str)?;
+        // What this source PROVED is a baseline for every later source in the
+        // run, whatever happens to the rest of this attempt (varve#311): the
+        // listing below or a blob later may fail and fail over, and a mirror
+        // must not then pass against an older index than this one.
+        if let Some(doc) = envelope
+            .as_deref()
+            .and_then(|b| crate::lineindex::proven_by(&line_str, b, index_policy.trust))
+        {
+            marks.carry_index(doc);
+        }
         // A mirror with no index leaves the omission check unable to run: that
         // is UNKNOWN, not "nothing hidden", and it is reported (D4).
         let served = source.served_layers(&line_str)?;
@@ -559,7 +569,10 @@ fn install_inner(
         // that supplies it. Passing `None` here left the whole
         // presented-older-than-held rule unreachable from the pipeline: it
         // could only ever fire in a test that called `check` itself.
-        let cached = index_cache.load(&line_str)?;
+        let cached = crate::lineindex::higher_counter(
+            index_cache.load(&line_str)?,
+            marks.carried_index(&line_str),
+        );
         let verified = crate::lineindex::check(
             &line_str,
             envelope.as_deref(),
@@ -610,7 +623,13 @@ fn install_inner(
                 crate::linestatus::LineStatus::verify_and_parse(&bytes, index_policy.trust).ok()
             })
             .filter(|doc| doc.line == line_str);
-        first_contact_floor = [cached, served]
+        // A status an earlier source proved in this run holds for this one,
+        // though that source's attempt failed over after (varve#311).
+        let carried = marks.carried_status(&line_str);
+        if let Some(doc) = &served {
+            marks.carry_status(doc.clone());
+        }
+        first_contact_floor = [cached, served, carried]
             .into_iter()
             .flatten()
             .max_by_key(|doc| doc.counter)
