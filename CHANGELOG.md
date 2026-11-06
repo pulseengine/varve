@@ -93,6 +93,30 @@ pulseengine-layers' `deposit-layer.yml` needs changes before any realm turns on
 key roles: drop the baseline-status step and pass `--delegation`. Realms without
 roles need nothing.
 
+### Falsification
+
+This release is wrong if any of these is observed in the field:
+
+* a machine with no high-water mark and no cached status for a line installing
+  bytes it got from a mirror;
+* a mirror overturning a verified refusal from the primary (rollback, below
+  floor, a channel demotion or platform);
+* a credential sent to an origin other than its own, or to a cleartext mirror;
+* in a realm declaring `key-roles = true`, any document accepted under a key
+  outside its role (a root-signed layer manifest, status or index; a
+  LAYER-signed status; a STATUS-signed layer), or a missing or refused
+  delegation falling back to the root;
+* in a realm without key roles, a signature differing by a byte from what
+  v0.44.0 produced for the same input;
+* `varve-serve context` reporting a harvest that timed out or could not spawn as
+  "no help", or serving it from cache.
+
+The release binaries were published by a re-dispatch of `release.yml` from main
+on 2026-11-06, after the first tag-push run was cancelled when GitHub retired
+`macos-14` (#324). The signing certificate therefore names
+`release.yml@refs/heads/main`, not `@refs/tags/v0.45.0`. The documented
+verification identity accepts both.
+
 ## v0.44.0 — 2026-11-04
 
 *A digest in your pin is consent to install below the machine's anti-rollback
