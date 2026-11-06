@@ -3512,3 +3512,26 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-11-03T23:24:57Z
+
+  - id: VER-REVIEW-V0-45-0
+    type: verification
+    title: "v0.45.0 independently reviewed: two PARTIAL clauses and one cosmetic defect, all reproduced and fixed test-first before promotion"
+    status: verified
+    release: v0.45.0
+    fields:
+      baseline: "Independent clean-room review (fresh context, refute-framed) of the v0.45.0 scope at c7cb67b0 (origin/main 409d07ff plus #317, identical in content to what merged as a89dba6a), 2026-11-05/06, with the ambient rivet 0.38.0. cargo test --workspace: 1953 passed, 0 failed, 2 ignored (SDK relocation, needs an x86_64 Linux host). 22 one-line mutations and 2 probes through a copy-aside harness, every restore clean. Verdicts: REQ-KEYROLES-001 with DD-041 CONFIRMED (a forced root-only trust was killed by 15 wiring tests; the role table, threshold, realm-root replay and producer authorisation mutations were all killed); REQ-SIGNERSEAM-001 CONFIRMED (all 5 golden signatures recomputed independently with Python cryptography, 5/5 match); REQ-MIRROR-002 PARTIAL, clause 5: defect D2, the fetch-site scan missed primary-only accessors, an injected sources.primary() fetch in install() passed 8/8; every decision D1-D5 CONFIRMED, no path lets a mirror act as authority; REQ-AGENTDOCS-006 PARTIAL, clause 2: defect D1, CACHE_VERSION stayed 1, so harvest caches v0.44.0 wrote with help null were still believed after upgrading. Cosmetic defect D4: a lost string continuation left a run of spaces in the attach-status refusal. ALL FIXED test-first before promotion: D1 (CACHE_VERSION 2; a_v0_44_0_cache_holding_a_failed_harvest_is_harvested_again failed first, binary never invoked; harvest.rs mutants 39 tested, 0 missed); D2 (FORBIDDEN covers .primary(), source_for_label, install_from, install_by_digest_from and DigestRole::Primary, each existing use allowlisted with a reason; the reviewer's exact insertion now fails no_realm_fetch_site_builds_its_source_from_the_primary_alone); D4 (message fixed, the test asserts no double space). Low residuals recorded, not fixed: the delegation counter is not compared against history; producer refusals act only with --delegation (consumers refuse out-of-role signatures regardless); sign-status --index checks with the signer's key alone, so a second STATUS key's index is refused (fails closed); origin means scheme+host+port, so a same-origin mirror path gets the primary's credential; delegation signing has no pre-seam golden bytes; mutation M13 (dropping the cached-status history arm) is killed only by install.rs unit tests, not by a system test. Advisory at v0.x (REQ-INDEP-001)."
+      method: review
+      steps: cargo test --workspace; cargo test -p varve-serve --lib a_v0_44_0_cache_holding_a_failed_harvest_is_harvested_again; cargo test -p varve --test realm_fetch_sites; cargo test -p varve --test keyroles_wiring; cargo test -p varve --test keyroles_producer; cargo test -p varve --test mirror_failover
+    links:
+      - type: verifies
+        target: REQ-AGENTDOCS-006
+      - type: verifies
+        target: REQ-MIRROR-002
+      - type: verifies
+        target: REQ-KEYROLES-001
+      - type: verifies
+        target: REQ-SIGNERSEAM-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-06T00:17:28Z

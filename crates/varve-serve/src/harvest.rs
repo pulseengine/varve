@@ -43,8 +43,11 @@ pub const TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_OUTPUT: u64 = 262_144; // 256 KiB
 /// The most topics fetched per tool.
 pub const MAX_TOPICS: usize = 64;
-/// Bumped when the cache's shape or the harvesting rules change.
-pub const CACHE_VERSION: u64 = 1;
+/// Bumped when the cache's shape or the harvesting rules change. Version 2:
+/// v0.44.0 cached a harvest that could not run as `"help":null` under version
+/// 1 and believed it for the life of the layer (varve#307), so those caches are
+/// discarded and re-harvested rather than trusted.
+pub const CACHE_VERSION: u64 = 2;
 
 /// Values a layer's signer may declare for a tool, which win over harvested
 /// ones. Deliberately empty and unused: the fields are not in `layer.toml`
@@ -737,6 +740,31 @@ mod tests {
         assert_eq!(h.incomplete, None);
     }
 
+    /// varve v0.44.0 wrote a harvest that could not run as `"help":null` under
+    /// cache version 1, and believed it for the life of the layer (varve#307).
+    /// A cache in that shape must not be believed after the upgrade: the tool
+    /// is harvested again.
+    // rivet: verifies REQ-AGENTDOCS-006
+    #[test]
+    fn a_v0_44_0_cache_holding_a_failed_harvest_is_harvested_again() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = fake(d.path(), NO_DOCS, "true");
+        let t = source(d.path(), Some(bin));
+        let cache = t.cache_file.clone().unwrap();
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        let poisoned = serde_json::json!({
+            "version": 1,
+            "layer": t.layer_digest,
+            "tools": { key(&t): { "help": null, "topics": [] } },
+        });
+        std::fs::write(&cache, poisoned.to_string()).unwrap();
+        let out = harvest_all(&fast(), std::slice::from_ref(&t));
+        assert_eq!(calls(d.path()).len(), 1, "the binary was never invoked");
+        let h = &out[&key_of(&t)];
+        assert!(h.help.is_some(), "a v0.44.0 failed harvest was believed");
+        assert_eq!(h.incomplete, None);
+    }
+
     /// A cache for another layer, another binary, another version, or garbage
     /// is ignored, and a tool with no binary here is not run or cached.
     // rivet: verifies REQ-AGENTDOCS-001
@@ -763,7 +791,7 @@ mod tests {
         assert_eq!(calls(d.path()).len(), 3, "a different layer reused a cache");
 
         let text = std::fs::read_to_string(&cache).unwrap();
-        std::fs::write(&cache, text.replace("\"version\":1", "\"version\":999")).unwrap();
+        std::fs::write(&cache, text.replace("\"version\":2", "\"version\":999")).unwrap();
         harvest_all(&fast(), std::slice::from_ref(&t));
         assert_eq!(
             calls(d.path()).len(),

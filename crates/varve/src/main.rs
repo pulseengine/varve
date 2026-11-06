@@ -1581,7 +1581,8 @@ fn attach_status(
         varve_core::keyroles::Delegation::from_producer_envelope(&bytes)
             .map_err(|e| anyhow::anyhow!("delegation {} refused: {e}", d.display()))?;
         bail!(
-            "this realm declares key roles ({}): a deposit publishes no baseline line-status,              because the status role is not the depositor's. Publish status with `varve \
+            "this realm declares key roles ({}): a deposit publishes no baseline line-status, \
+             because the status role is not the depositor's. Publish status with `varve \
              sign-status` under the STATUS key instead.",
             d.display()
         );

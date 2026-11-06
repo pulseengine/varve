@@ -1,5 +1,98 @@
 # Changelog
 
+## v0.45.0 — 2026-11-06
+
+*A realm's mirrors are used without ever becoming an authority, a realm can split
+its signing key by role, and a harvest that could not finish says so instead of
+being cached as "no help".*
+
+Scope chosen by the maintainer on 2026-11-04 (the lean cut): REQ-AGENTDOCS-006,
+REQ-MIRROR-002 and REQ-KEYROLES-001, with REQ-SIGNERSEAM-001 as its first step.
+The other 15 planned requirements moved to v0.46.0.
+
+### Upgrading: behaviour that changes
+
+* **Declared `mirrors` are now used** (#301). Before, they were parsed and never
+  read. What a mirror may and may not do:
+  - A mirror is tried only when the primary fails with inauthentic or
+    unavailable bytes. A verified refusal from the primary, such as rollback,
+    below floor, a channel demotion or platform, is final.
+  - **First contact with a line needs the primary.** A machine with no
+    high-water mark and no cached status for the line is refused
+    (`FirstContactNeedsPrimary`) before any mirror is contacted.
+  - Rollback consent and the support-horizon baseline come from the primary only.
+  - Credentials go only to the origin they belong to, and never to a cleartext
+    mirror.
+* **A broken `varve.toml` is an error.** Before, a pin file that existed but
+  failed to load fell back to `VARVE_TRUST_ROOT`.
+* **`varve-serve context`** prints `harvest incomplete: <why>` for a tool whose
+  `--help` or docs could not be harvested (spawn failure, timeout), and never
+  caches that result (#307). Harvest caches written by v0.44.0 are discarded
+  once and harvested again, because v0.44.0 cached failed harvests as "no help".
+
+### New
+
+* **Key roles (REQ-KEYROLES-001, DD-041).** A realm may declare
+  `key-roles = true` and a `delegation-file`. The root then signs only the
+  delegation. LAYER keys sign layer manifests, attestations and release sums,
+  and STATUS keys sign line-status and line-index. Every consumer verifies each
+  document under its role. A missing or refused delegation is an error, never a
+  fallback to the root. Realms without the keys are unchanged.
+  - Producer: `varve sign-delegation`, plus `--delegation` on every signing
+    command.
+  - A roles realm publishes no baseline line-status.
+  - `VARVE_TRUST_ROOT` with no pin is root-only, so use a roles realm through a
+    pin.
+* **Signer seam (REQ-SIGNERSEAM-001).** Every signature goes through
+  `RealmSigner`, and the bytes signed are identical to before.
+
+### Independent review
+
+A fresh-context, refute-framed review of the whole scope is recorded as
+VER-REVIEW-V0-45-0 (advisory at v0.x, REQ-INDEP-001).
+
+* REQ-KEYROLES-001 and REQ-SIGNERSEAM-001 are CONFIRMED. The reviewer
+  recomputed the five golden signatures independently.
+* REQ-MIRROR-002 and REQ-AGENTDOCS-006 were PARTIAL, one clause each:
+  - the fetch-site scan did not see primary-only accessors;
+  - v0.44.0's poisoned harvest caches survived an upgrade.
+* Both were reproduced and fixed test-first before promotion, along with one
+  message that had a run of spaces.
+
+### Gate potency
+
+Before tagging, each of the 22 required checks on main a89dba6a was audited by
+injecting a violation and watching for red:
+
+* **18 potent.**
+* **3 unproven:** the end-to-end systests, the shellcheck half of Script
+  portability, and coverage.
+* **1 inert:** the installer-shadow gate (#318). It greps `install.sh` rather
+  than running it. REQ-INSTALLSHADOW-001 is `implemented`, not `verified`, so no
+  verified claim rests on it.
+* **Weaker findings (#319):** a vacuous mutation shard would pass; the `pin`
+  fuzz target's deep branch is unreached; one required systest can be skipped by
+  removing a repo variable.
+
+### Known limits
+
+* The delegation's counter is not yet enforced against rollback.
+* With the primary down, a machine that has installed before can be served a
+  mirror state no older than what it recorded. A fresh machine cannot install
+  from a mirror at all.
+
+### Follow-ups filed
+
+#311 (carry the newest verified counter across sources) and #312
+(`VARVE_REGISTRY_AUTH` offered to included realms' primaries, which predates
+this release).
+
+### Downstream
+
+pulseengine-layers' `deposit-layer.yml` needs changes before any realm turns on
+key roles: drop the baseline-status step and pass `--delegation`. Realms without
+roles need nothing.
+
 ## v0.44.0 — 2026-11-04
 
 *A digest in your pin is consent to install below the machine's anti-rollback
