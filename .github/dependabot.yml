@@ -30,7 +30,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       # The wasm-tools crates release in LOCKSTEP and must land as one set:
-      # wit-component 0.262 requires wit-parser 0.262, so the two PRs
+      # wit-component requires the wit-parser of its own release, so the two PRs
       # dependabot raised separately (#282, #283) could each only fail alone.
       # Their 0.x minor is a breaking line for cargo, which is why the
       # minor-and-patch group below never caught them. No `update-types`
@@ -41,10 +41,24 @@ updates:
           - "wasm-encoder"
           - "wasm-metadata"
           - "wasmparser"
+      # The exclusions are what make the group above work. Without them the
+      # wasm-tools group never caught anything: Dependabot ranks a group with
+      # `update-types` as MORE specific than one with only `patterns`, so it
+      # assigned wit-* to this group, and this group then dropped them because
+      # a 0.x minor is a cargo major. Each crate fell through to its own PR.
+      # Measured in the 2026-11-06 scheduled run (Dependabot Updates
+      # 42138914913): "Skipping wit-component for group 'wasm-tools' - belongs
+      # to more specific group 'cargo-minor-and-patch'", which opened #321 and
+      # #322 separately, each failing alone.
       cargo-minor-and-patch:
         update-types:
           - minor
           - patch
+        exclude-patterns:
+          - "wit-*"
+          - "wasm-encoder"
+          - "wasm-metadata"
+          - "wasmparser"
 
     # rand and rand_chacha CANNOT move to the 0.9 line, and dependabot reopens
     # them every week unless told. They are dev-dependencies whose only job is
