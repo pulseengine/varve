@@ -93,8 +93,13 @@ jobs:
             os: ubuntu-latest
             archive: tar.gz
             cross: true
+          # x86_64 is cross-compiled on an arm64 runner, as it always was:
+          # macos-14 was itself arm64. v0.45.0's first release run was
+          # cancelled at this leg with "The configuration
+          # 'macos-14-arm64-us-default' is not supported" once GitHub retired
+          # that image, so this leg follows aarch64 onto macos-latest.
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-latest
             archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
