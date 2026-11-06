@@ -43,12 +43,96 @@ const FORBIDDEN: &[&str] = &[
     "source_from_spec(",
     // Taking "the primary" by position, by hand.
     "sources.iter().next()",
+    // The `Mirrors` accessors that return ONE source and not the failover
+    // list: `primary()` is the first source alone, `source_for_label(` a
+    // single named one. A fetch made through either does not fail over.
+    ".primary()",
+    "source_for_label(",
+    // The primary-only calls into the installer. `install_from` takes the
+    // primary role as a bare `bool` and `install_by_digest_from` as a
+    // `DigestRole`; a realm fetch passes the role `Mirrors::attempt` supplies,
+    // never a literal. Every use is in ALLOWED with the reason it is not
+    // primary-only.
+    "install_from(",
+    "install_by_digest_from(",
+    "DigestRole::Primary",
 ];
 
 /// (file suffix, a substring of the allowed line, why it is not a realm fetch).
 /// Each entry names the specific line it allows, so an unrelated new use in
 /// the same file is still refused.
 const ALLOWED: &[(&str, &str, &str)] = &[
+    (
+        "varve-core/src/support.rs",
+        ".primary()",
+        "`Mirrors::primary` read for the ONE thing only the primary may answer, \
+         a published correction; the fetch itself then runs through \
+         `sources.attempt` over every source, primary included, in order",
+    ),
+    (
+        "varve-core/src/mirror.rs",
+        "pub fn source_for_label(",
+        "the definition of `Mirrors::source_for_label`; callers are refused by \
+         this scan unless listed here with a reason",
+    ),
+    (
+        "varve/src/main.rs",
+        ".and_then(|label| sources.source_for_label(label))",
+        "a diagnosis asked of the ONE source whose bytes produced a verdict, \
+         after the failover fetch already ran; it fetches nothing for install",
+    ),
+    (
+        "varve-core/src/install.rs",
+        "    install_by_digest_from(",
+        "`install_by_digest`, the public wrapper that hard-codes the primary \
+         role; a realm fetch is refused from calling the wrapper by the \
+         `install_by_digest(` entries above",
+    ),
+    (
+        "varve-core/src/install.rs",
+        "pub fn install_by_digest_from(",
+        "the definition of the role-taking installer; the role is its argument",
+    ),
+    (
+        "varve-core/src/install.rs",
+        "        DigestRole::Primary,",
+        "`install_by_digest`, the public wrapper that hard-codes the primary \
+         role; a realm fetch is refused from calling the wrapper",
+    ),
+    (
+        "varve-core/src/install.rs",
+        "matches!(role, DigestRole::Primary)",
+        "reads the role the caller passed to derive `source_is_primary`; it \
+         chooses nothing",
+    ),
+    (
+        "varve-core/src/install.rs",
+        "install_from(pin, source, verifier, store, marks, policy, true)",
+        "`install`, the public wrapper that hard-codes the primary role; a \
+         realm fetch is refused from calling the wrapper",
+    ),
+    (
+        "varve-core/src/install.rs",
+        "pub fn install_from(",
+        "the definition of the role-taking installer; the role is its argument",
+    ),
+    (
+        "varve/src/main.rs",
+        "varve_core::install_by_digest_from(",
+        "the realm fetch itself, inside `sources.attempt`: the role comes from \
+         the closure's `is_primary`, not a literal",
+    ),
+    (
+        "varve/src/main.rs",
+        "varve_core::DigestRole::Primary",
+        "selected only `if is_primary`, the role `sources.attempt` supplies",
+    ),
+    (
+        "varve/src/main.rs",
+        "varve_core::install_from(",
+        "the realm fetch itself, inside `sources.attempt`: the role is the \
+         closure's `is_primary`, passed on the lines that follow",
+    ),
     (
         "varve-core/src/mirror.rs",
         "let mut registry = crate::RegistrySource::parse(spec)?;",
@@ -387,6 +471,11 @@ fn the_scan_recognises_each_way_of_deciding_on_the_primary_alone() {
         "let a = varve_core::install::install(&pin, s, v, st, m, p);",
         "let a = source_from_spec(spec, platform);",
         "let a = realm.sources.iter().next();",
+        "let a = sources.primary().map(|p| p.fetch_line_index(\"x\"));",
+        "let a = sources.source_for_label(l);",
+        "let a = install_from(&pin, s, v, st, m, p, true);",
+        "let a = install_by_digest_from(d, s, v, st, m, p, r);",
+        "let a = varve_core::DigestRole::Primary;",
     ] {
         let bad = scan(&format!("fn f() {{ {shape} }}\n"));
         assert_eq!(bad.len(), 1, "{shape} must be refused: {bad:?}");

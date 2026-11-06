@@ -398,8 +398,11 @@ fn a_roles_realm_deposit_publishes_no_baseline_status() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "publishes no baseline line-status",
-        ));
+            "a deposit publishes no baseline line-status, because the status role is not the \
+             depositor's. Publish status with `varve sign-status` under the STATUS key instead.",
+        ))
+        // A lost `\` continuation once left a run of spaces in this sentence.
+        .stderr(predicate::function(|e: &str| !e.contains("  ")));
 }
 
 // rivet: verifies REQ-KEYROLES-001
