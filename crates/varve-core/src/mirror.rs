@@ -596,6 +596,38 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
+    /// The origin `$VARVE_REGISTRY_AUTH` is bound to (varve#312) comes from
+    /// these two helpers. Only the `varve` crate's system tests exercised them,
+    /// and the mirror mutation shard runs varve-core's tests, so all six of
+    /// their return-value mutants survived on #328.
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_bound_origin_is_the_primary_registrys_scheme_host_and_port() {
+        let sources = vec![
+            "oci://Primary.Example:5000/acme/layers".to_string(),
+            "oci://mirror.example/acme/layers".to_string(),
+        ];
+        assert_eq!(
+            primary_origin(&sources).as_deref(),
+            Some("https://primary.example:5000"),
+            "the FIRST source, normalised; never a mirror's"
+        );
+        assert_eq!(
+            spec_origin("oci+http://R.example/x").as_deref(),
+            Some("http://r.example")
+        );
+        assert_eq!(
+            spec_origin("oci://r.example:443/x").as_deref(),
+            Some("https://r.example"),
+            "default port dropped, so it compares equal to the bare host"
+        );
+        // Not a registry, so there is no origin and nothing gets the
+        // credential: fail closed.
+        assert_eq!(primary_origin(&["/srv/layers".to_string()]), None);
+        assert_eq!(primary_origin(&[]), None);
+        assert_eq!(spec_origin("/srv/layers"), None);
+    }
+
     struct Fake {
         manifest: Option<Vec<u8>>,
         err: Option<SourceError>,
