@@ -2409,6 +2409,23 @@ fn note_mirror_acceptance(
     }
 }
 
+/// What bounded a mirror's answer when there is no high-water mark: the cached
+/// line-status, or, when a status verified in this run has a higher counter
+/// (varve#311), that one. Said as it is so the notice does not credit the cache
+/// for a bound the cache did not supply.
+fn status_bound(
+    carried: Option<varve_core::LineStatus>,
+    cached: Option<varve_core::LineStatus>,
+) -> String {
+    match carried {
+        Some(c) if cached.as_ref().is_none_or(|k| c.counter > k.counter) => format!(
+            "a line-status verified earlier in this run (counter {}), newer than any cached",
+            c.counter
+        ),
+        _ => "its cached line-status".to_string(),
+    }
+}
+
 /// The error for a realm whose sources did not produce an answer.
 ///
 /// A TERMINAL failure (a verified verdict such as a rollback refusal, or a
@@ -4448,7 +4465,15 @@ fn install(
         pin.layer.line(),
         &match prior_mark {
             Some(mark) => format!("high-water mark #{mark}"),
-            None => "its cached line-status".to_string(),
+            None => status_bound(
+                marks.carried_status(&pin.layer.line().to_string()),
+                realm_trust_here.as_ref().and_then(|trust| {
+                    varve_core::StatusCache::at_root(store.root())
+                        .load(pin.layer.line(), trust)
+                        .ok()
+                        .flatten()
+                }),
+            ),
         },
         outcome.omission_check_skipped,
     );
@@ -5920,6 +5945,39 @@ mod cli_contract_tests {
             .expect("REQ-INSPECT-001 needs a command, not a flag on an existing one");
         assert!(sub.get_arguments().any(|a| a.get_long() == Some("json")));
         assert!(sub.get_arguments().any(|a| a.get_long() == Some("layer")));
+    }
+
+    fn status(counter: u64) -> varve_core::LineStatus {
+        varve_core::LineStatus {
+            line: "2026.10".into(),
+            counter,
+            issued_at: "2026-09-24T00:00:00Z".into(),
+            support_until: None,
+            min_counter: None,
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn the_notice_credits_a_carried_status_only_when_it_is_newer_than_the_cached_one() {
+        let carried = super::status_bound(Some(status(3)), Some(status(1)));
+        assert!(
+            carried.contains("verified earlier in this run"),
+            "{carried}"
+        );
+        assert!(carried.contains("counter 3"), "{carried}");
+        assert!(super::status_bound(Some(status(3)), None).contains("earlier in this run"));
+        // Equal or older than the cache, or nothing carried: the cache bounded it.
+        for (c, k) in [
+            (Some(status(3)), Some(status(3))),
+            (Some(status(2)), Some(status(3))),
+            (None, Some(status(3))),
+            (None, None),
+        ] {
+            assert_eq!(super::status_bound(c, k), "its cached line-status");
+        }
     }
 }
 

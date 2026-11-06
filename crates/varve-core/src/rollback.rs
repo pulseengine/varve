@@ -338,6 +338,12 @@ mod tests {
             marks.carried_status("2026.08"),
             Some(status("2026.08", 3, Some(5)))
         );
+        // An equal counter does not displace the first (a tie keeps it).
+        marks.carry_status(status("2026.08", 3, Some(9)));
+        assert_eq!(
+            marks.carried_status("2026.08"),
+            Some(status("2026.08", 3, Some(5)))
+        );
         marks.carry_status(status("2026.08", 4, Some(6)));
         assert_eq!(
             marks.carried_status("2026.08").unwrap().min_counter,

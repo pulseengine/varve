@@ -1841,3 +1841,80 @@ fn install_a_mirror_without_the_floor_the_primary_proved_is_refused_below_it() {
     assert!(stderr.contains("below the floor"), "{stderr}");
     assert!(!installed_anything(&p));
 }
+
+/// install, listing step: the primary's index (counter 5) verifies, then its
+/// `tags/list` fails (not a blob). Moving the carry below the listing would
+/// lose the primary's index here, and the mirror's older one would pass.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn install_a_mirror_older_index_is_refused_after_the_primary_failed_at_the_listing() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let spec = |index_counter: u64, drop_tags_list: bool| Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: Some("2027-01-01"),
+        published_until: None,
+        forge_published: false,
+        no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
+        serve_index: true,
+        index_counter,
+        status_min_counter: None,
+        drop_tags_list,
+    };
+    let primary = serve_spec(spec(5, true));
+    let mirror = serve_spec(spec(2, false));
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    seed_high_water(&p, 1);
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a mirror's older index passed after the primary's listing failed:\n{stderr}"
+    );
+    assert!(stderr.contains("stale line-index"), "{stderr}");
+    assert!(!installed_anything(&p));
+}
+
+/// The notice names the carried status when IT bounded the mirror: the primary
+/// verified status #3 (floor 5) and then failed; the mirror serves a layer at
+/// the floor with an older status, and the cache holds only status #1.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn the_notice_names_a_status_verified_in_this_run_when_it_bounded_the_mirror() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let spec =
+        |baseline_counter: u64, status_min_counter: Option<u64>, drop_tool_blob: bool| Spec {
+            sk: &sk,
+            pk: &pk,
+            counter: 5,
+            tool: Some((probe_bytes(), probe_bytes())),
+            drop_tool_blob,
+            baseline_until: Some("2027-01-01"),
+            published_until: None,
+            forge_published: false,
+            no_layer: false,
+            forge_layer: false,
+            baseline_counter,
+            serve_index: false,
+            index_counter: 1,
+            status_min_counter,
+            drop_tags_list: false,
+        };
+    let primary = serve_spec(spec(3, Some(5), true));
+    let mirror = serve_spec(spec(2, None, false));
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    seed_status_cache(&p, &sk, 1);
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("a line-status verified earlier in this run (counter 3)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("its cached line-status"), "{stderr}");
+}

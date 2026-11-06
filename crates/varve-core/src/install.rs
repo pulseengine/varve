@@ -603,11 +603,14 @@ fn install_inner(
     // not this requirement.
     //
     // With NO mark the floor is the one stated by the HIGHER-counter verified
-    // status among the one this machine already CACHED and the one the source
-    // serves. A source can therefore only raise the bar: an older status (a
-    // lower or absent `min_counter`), no status, or an unverifiable one leaves
-    // the recorded floor in force. That is what bounds a mirror's answer by
-    // what this machine has already recorded, primary or not.
+    // status among the one this machine already CACHED, the one the source
+    // serves, and the one an earlier source VERIFIED in this run (varve#311).
+    // An OLDER status (a lower or absent `min_counter`), no status, or an
+    // unverifiable one leaves the recorded floor in force: that is what bounds
+    // a mirror's answer by what this machine has already recorded, primary or
+    // not. A NEWER realm-signed status supersedes an older one and states its
+    // own floor, which may be lower: that is intended, and a served status
+    // always could do it.
     let mut first_contact_floor: Option<u64> = None;
     if marks.mark(line).is_none()
         && let Some(index_policy) = &policy.index
