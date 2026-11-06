@@ -18,6 +18,18 @@
   `VARVE_REGISTRY_AUTH` to no realm at all. If you relied on one variable authenticating
   two registries, log in to the second with `docker login`.
 
+### Fixed
+
+* **`varve-producer` reads back every spec it writes** (#305). The previous-spec
+  reader kept `deny_unknown_fields` but did not know `docs-format`,
+  `docs-entry`, `docs-title`, `docs-documents` or `libc`, so a spec carrying a
+  docs payload (the pulseengine layer's varve-core-api) failed to read back. It
+  now knows them all, and a test sets every field the writer can emit at once.
+  A genuinely unknown field is still refused.
+* **`varve-producer plan` refuses an `sdk` or `toolchain` entry with no `asset`**
+  (#306) with an error naming the entry, as it already did for a
+  `zephyr-module`. It panicked.
+
 ## v0.45.0 — 2026-11-06
 
 *A realm's mirrors are used without ever becoming an authority, a realm can split

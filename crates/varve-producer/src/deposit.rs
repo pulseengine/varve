@@ -65,6 +65,24 @@ pub fn previous_from_spec(text: &str) -> anyhow::Result<BTreeMap<String, Previou
         #[serde(rename = "allow-pip", default)]
         #[allow(dead_code)]
         allow_pip: Option<Vec<String>>,
+        // Every key `ToolOut` can emit must be KNOWN here (#305): the docs
+        // quartet and the measured libc were not, so any spec carrying a docs
+        // payload could not be read back by the next run.
+        #[serde(rename = "docs-format", default)]
+        #[allow(dead_code)]
+        docs_format: Option<String>,
+        #[serde(rename = "docs-entry", default)]
+        #[allow(dead_code)]
+        docs_entry: Option<String>,
+        #[serde(rename = "docs-title", default)]
+        #[allow(dead_code)]
+        docs_title: Option<String>,
+        #[serde(rename = "docs-documents", default)]
+        #[allow(dead_code)]
+        docs_documents: Option<String>,
+        #[serde(default)]
+        #[allow(dead_code)]
+        libc: Option<String>,
         name: String,
         platform: Option<String>,
         source: PrevSource,
@@ -1287,6 +1305,119 @@ mod tests {
         assert!(text.contains("allow-pip"), "{text}");
         let prev = previous_from_spec(&text).expect("deny_unknown_fields must not trip");
         assert_eq!(prev["gale"].repo, "pulseengine/gale");
+    }
+
+    fn full_tool(name: &str, kind: &str) -> ToolOut {
+        ToolOut {
+            name: name.into(),
+            version: "1.0.0".into(),
+            platform: None,
+            path: format!("{kind}/{name}"),
+            kind: Some(kind.into()),
+            docs_format: None,
+            docs_entry: None,
+            docs_title: None,
+            docs_documents: None,
+            zephyr_allow_pip: None,
+            libc: None,
+            source: SourceOut {
+                repo: format!("pulseengine/{name}"),
+                release: "v1.0.0".into(),
+                asset: format!("{name}-1.0.0.tar.gz"),
+                sha256: "a".repeat(64),
+                proof: Some("cosign-sums".into()),
+                proof_signer: None,
+                proof_asserts: None,
+                license: None,
+                sbom: None,
+                sbom_sha256: None,
+            },
+        }
+    }
+
+    /// The reader once refused any spec carrying a `docs` payload: it did not
+    /// know `docs-format`, so the NEXT run could not read the spec THIS run
+    /// wrote (#305). A docs, an sdk and a zephyr-module payload go through the
+    /// real writer and the real reader together.
+    // rivet: verifies REQ-CARRYFORWARD-001
+    #[test]
+    fn a_previous_spec_with_docs_sdk_and_zephyr_payloads_reads_back() {
+        let mut spec = SpecOut::new("2026.11.2", "rolling", 9);
+        let mut docs = full_tool("traceability", "docs");
+        docs.docs_format = Some("html".into());
+        docs.docs_entry = Some("index.html".into());
+        docs.docs_title = Some("Traceability".into());
+        docs.docs_documents = Some("varve".into());
+        let sdk = full_tool("zsdk", "sdk");
+        let mut zmod = full_tool("gale", "zephyr-module");
+        zmod.zephyr_allow_pip = Some(vec!["scripts/requirements.txt".into()]);
+        spec.tools.extend([docs, sdk, zmod]);
+        let text = spec
+            .render()
+            .expect("the real parser accepts what we write");
+        assert!(text.contains("docs-format"), "{text}");
+        let prev = previous_from_spec(&text).expect("the reader must know every field written");
+        assert_eq!(prev.len(), 3, "{text}");
+        assert_eq!(prev["traceability"].repo, "pulseengine/traceability");
+        assert_eq!(prev["zsdk"].asset, "zsdk-1.0.0.tar.gz");
+        assert_eq!(prev["gale"].release, "v1.0.0");
+    }
+
+    /// By construction rather than by remembering: EVERY optional field the
+    /// writer can emit is set at once, and the reader must take the lot. A
+    /// field added to `ToolOut` or `SourceOut` and not to the reader fails
+    /// here, instead of at the next live deposit.
+    // rivet: verifies REQ-CARRYFORWARD-001
+    #[test]
+    fn the_reader_accepts_every_field_the_writer_can_emit() {
+        let mut t = full_tool("everything", "docs");
+        t.platform = Some("x86_64-unknown-linux-gnu".into());
+        t.docs_format = Some("html".into());
+        t.docs_entry = Some("index.html".into());
+        t.docs_title = Some("T".into());
+        t.docs_documents = Some("d".into());
+        t.zephyr_allow_pip = Some(vec!["r.txt".into()]);
+        t.libc = Some("glibc-2.34".into());
+        t.source.proof_signer = Some("s".into());
+        t.source.proof_asserts = Some("a".into());
+        t.source.license = Some("MIT".into());
+        t.source.sbom = Some("x.cdx.json".into());
+        t.source.sbom_sha256 = Some("f".repeat(64));
+        let mut spec = SpecOut::new("2026.11.2", "rolling", 9);
+        spec.tools.push(t);
+        spec.includes.push(crate::spec::IncludeOut {
+            digest: format!("sha256:{}", "b".repeat(64)),
+            realm: Some("r".into()),
+            layer: Some("l".into()),
+        });
+        // Serialised directly: `render` would (rightly) refuse a docs payload
+        // that also carries `allow-pip`, and this test is about the reader.
+        let text = toml::to_string_pretty(&spec).expect("serialises");
+        let prev = previous_from_spec(&text).expect("every writer field must be readable");
+        assert!(
+            prev.contains_key("everything@x86_64-unknown-linux-gnu"),
+            "{text}"
+        );
+    }
+
+    /// `deny_unknown_fields` stays: a key the writer never emits is refused,
+    /// because a reader that tolerates it reads an empty history that looks
+    /// exactly like a first run.
+    // rivet: verifies REQ-CARRYFORWARD-001
+    #[test]
+    fn a_genuinely_unknown_field_in_a_previous_spec_is_still_refused() {
+        let mut spec = SpecOut::new("2026.11.2", "rolling", 9);
+        spec.tools.push(full_tool("rivet", "tarball"));
+        let text = spec.render().expect("renders");
+        let tool_poisoned = text.replace("[tool.source]", "[tool.source]\nnot-a-field = 1");
+        assert_ne!(
+            tool_poisoned, text,
+            "the fixture must contain [tool.source]: {text}"
+        );
+        let e = previous_from_spec(&tool_poisoned).expect_err("unknown source field refused");
+        assert!(e.to_string().contains("not-a-field"), "{e}");
+        let top_poisoned = format!("mystery = 1\n{text}");
+        previous_from_spec(&top_poisoned).expect_err("unknown top-level field refused");
     }
 
     /// One layer carries the same tool for four platforms, so a previous-entry

@@ -156,6 +156,11 @@ pub enum PlanError {
     ZephyrNeedsAsset {
         name: String,
     },
+    /// An `sdk` or `toolchain` names no asset, and none can be derived.
+    NeedsAsset {
+        name: String,
+        layout: String,
+    },
     /// `allow-pip` on an entry that is not a `zephyr-module`.
     AllowPipNotOnZephyrModule {
         tool: String,
@@ -223,6 +228,12 @@ impl std::fmt::Display for PlanError {
                 f,
                 "zephyr-module {name:?} names no `asset`. The archive's name is the \
                  upstream's and cannot be derived from the module's name, so the \
+                 manifest states it, e.g. asset = \"{name}-%V.tar.gz\"."
+            ),
+            PlanError::NeedsAsset { name, layout } => write!(
+                f,
+                "{layout} {name:?} names no `asset`. The archive's name is the \
+                 upstream's and cannot be derived from the entry's name, so the \
                  manifest states it, e.g. asset = \"{name}-%V.tar.gz\"."
             ),
             PlanError::AllowPipNotOnZephyrModule { tool } => write!(
@@ -328,6 +339,14 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             }
             Some(_) => {}
         }
+    }
+    // Likewise an sdk's or a toolchain's: upstream's name, not derivable, so a
+    // missing one is a refusal naming the entry and not a panic (#306).
+    if t.asset.is_none() && matches!(kind, PayloadKind::Sdk | PayloadKind::Toolchain) {
+        return Err(PlanError::NeedsAsset {
+            name: t.name.clone(),
+            layout: t.layout.clone().unwrap_or_default(),
+        });
     }
     let template = template_of(t, kind);
     let repo = repo_of(&t.repo, &t.name);
@@ -1176,6 +1195,31 @@ mod tests {
             "{e:?}"
         );
         assert!(e.to_string().contains("gale-%V.tar.gz"), "{e}");
+    }
+
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn an_sdk_without_an_asset_is_refused_not_a_panic() {
+        let m = manifest("[[tool]]\nname = \"zsdk\"\nversion = \"0.17.0\"\nlayout = \"sdk\"\n");
+        let e = plan(&m, PLATFORMS).expect_err("must refuse");
+        assert!(
+            matches!(&e, PlanError::NeedsAsset { name, layout } if name == "zsdk" && layout == "sdk"),
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("zsdk"), "{e}");
+        assert!(e.to_string().contains("zsdk-%V.tar.gz"), "{e}");
+    }
+
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn a_toolchain_without_an_asset_is_refused_not_a_panic() {
+        let m =
+            manifest("[[tool]]\nname = \"rustc\"\nversion = \"1.98.1\"\nlayout = \"toolchain\"\n");
+        let e = plan(&m, PLATFORMS).expect_err("must refuse");
+        assert!(
+            matches!(&e, PlanError::NeedsAsset { name, layout } if name == "rustc" && layout == "toolchain"),
+            "{e:?}"
+        );
     }
 
     /// `allow-pip` on anything that is not a module would be signed or
