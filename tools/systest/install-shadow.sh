@@ -11,8 +11,9 @@
 # varve refuses to claim success when PATH shadows a pinned tool
 # (REQ-SHADOW-001). This gate holds varve's own installer to that standard.
 #
-# It runs install.sh's real decision logic against a fabricated PATH; the
-# download and signature steps are not what is under test here.
+# It runs install.sh's OWN check_shadow (via VARVE_INSTALL_SHADOW_CHECK_ONLY=1)
+# against a fabricated PATH; no copy of the logic lives here, so changing the
+# real condition changes this gate's verdict.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -23,43 +24,32 @@ printf '#!/bin/sh\necho "varve 9.9.9"\n' > "$WORK/installed/bin/varve"
 printf '#!/bin/sh\necho "varve 0.25.0"\n' > "$WORK/other/bin/varve"
 chmod +x "$WORK/installed/bin/varve" "$WORK/other/bin/varve"
 
-# The decision under test, lifted verbatim in shape from install.sh.
-probe() { # PATH-value -> prints, exit 7 when it warns
-  INSTALL_DIR="$WORK/installed/bin" installed="varve 9.9.9" \
-  PATH="$1" bash -c '
-    winner="$(command -v varve 2>/dev/null || true)"
-    if [ -n "$winner" ] && [ "$winner" != "${INSTALL_DIR}/varve" ]; then
-      echo "WARNING: varve on PATH is not the binary just installed: $winner"
-      exit 7
-    fi
-    echo "ok: the install wins"
-  '
+# Run install.sh's real check with PATH set to $1; prints its output.
+run_check() {
+  VARVE_INSTALL_SHADOW_CHECK_ONLY=1 VARVE_INSTALL_DIR="$WORK/installed/bin" \
+    PATH="$1" sh "$HERE/install.sh" 2>&1
 }
 
 # rivet: verifies REQ-INSTALLSHADOW-001
-echo "== the warning must FIRE when another varve wins PATH"
-if probe "$WORK/other/bin:$WORK/installed/bin:/usr/bin:/bin" >/dev/null 2>&1; then
-  fail "a shadowing varve did not produce a warning — the exact defect this gate exists for"
-fi
+echo "== the warning must FIRE, and name the winner, when another varve wins PATH"
+out="$(run_check "$WORK/other/bin:$WORK/installed/bin:/usr/bin:/bin")" \
+  || fail "install.sh's shadow check failed to run: $out"
+case "$out" in *"is NOT the binary just installed"*) ;; *)
+  fail "a shadowing varve did not produce a warning — the exact defect this gate exists for: $out" ;; esac
+case "$out" in *"$WORK/other/bin/varve"*"varve 0.25.0"*) ;; *)
+  fail "the warning does not name the winning binary and its version: $out" ;; esac
 echo "   fired as required"
 
 echo "== and must NOT fire when the install wins"
-probe "$WORK/installed/bin:$WORK/other/bin:/usr/bin:/bin" >/dev/null 2>&1 \
-  || fail "warned when the installed binary is the one that runs (false alarm)"
+out="$(run_check "$WORK/installed/bin:$WORK/other/bin:/usr/bin:/bin")" \
+  || fail "install.sh's shadow check failed to run: $out"
+case "$out" in *"NOT the binary"*) fail "warned when the installed binary is the one that runs (false alarm): $out" ;; esac
 echo "   quiet as required"
 
 echo "== nor when nothing else is on PATH"
-probe "$WORK/installed/bin:/usr/bin:/bin" >/dev/null 2>&1 \
-  || fail "warned with no competing varve on PATH"
+out="$(run_check "$WORK/installed/bin:/usr/bin:/bin")" \
+  || fail "install.sh's shadow check failed to run: $out"
+case "$out" in *"NOT the binary"*) fail "warned with no competing varve on PATH: $out" ;; esac
 echo "   quiet as required"
-
-echo "== install.sh actually carries the check"
-grep -q 'command -v varve' "$HERE/install.sh" \
-  || fail "install.sh no longer resolves varve the way the shell does"
-grep -q 'is NOT the binary just installed' "$HERE/install.sh" \
-  || fail "install.sh no longer warns about a shadowing varve"
-grep -q 'replaced' "$HERE/install.sh" \
-  || fail "install.sh no longer reports what it replaced"
-echo "   present"
 
 echo "install-shadow systest: PASS — the installer names the winner, and the check can fail"

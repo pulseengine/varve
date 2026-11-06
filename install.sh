@@ -46,6 +46,29 @@ Set VARVE_ALLOW_ROOT=1 to permit running as root (refused by default).
 USAGE
 }
 
+# The post-install shadow check (REQ-INSTALLSHADOW-001 clause 2). A function so
+# tools/systest/install-shadow.sh can run THIS code, not a copy of it. Reads
+# INSTALL_DIR and ${installed}; sets ${winner}, which the PATH advice below uses.
+check_shadow() {
+	winner="$(command -v varve 2>/dev/null || true)"
+	if [ -n "$winner" ] && [ "$winner" != "${INSTALL_DIR}/varve" ]; then
+		winner_version="$("$winner" --version 2>/dev/null || echo "unknown version")"
+		say ""
+		say "WARNING: \`varve\` on your PATH is NOT the binary just installed."
+		say ""
+		say "    your shell runs   ${winner}  (${winner_version})"
+		say "    this installed    ${INSTALL_DIR}/varve  (${installed})"
+		say ""
+		say "Everything below, and every command in the docs, will use the first one."
+		say "To make this install win, put its directory FIRST on PATH:"
+		say ""
+		say "    export PATH=\"${INSTALL_DIR}:\$PATH\""
+		say ""
+		say "…or remove the other one. If it came from cargo: cargo uninstall varve"
+		say ""
+	fi
+}
+
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--version) [ "$#" -ge 2 ] || die "--version needs a tag"; VERSION="$2"; shift 2 ;;
@@ -54,6 +77,14 @@ while [ "$#" -gt 0 ]; do
 		*)         usage >&2; die "unknown argument: $1" ;;
 	esac
 done
+
+# Test hook for tools/systest/install-shadow.sh: run only the shadow check,
+# against an already-"installed" ${INSTALL_DIR}/varve. Not for users.
+if [ "${VARVE_INSTALL_SHADOW_CHECK_ONLY:-0}" = "1" ]; then
+	installed="$("${INSTALL_DIR}/varve" --version)" || die "no varve at ${INSTALL_DIR}/varve"
+	check_shadow
+	exit 0
+fi
 
 # ── Refuse to run as root ─────────────────────────────────────────────────
 # A supply-chain tool that installs itself system-wide by accident is a bad
@@ -270,23 +301,7 @@ fi
 # (REQ-INSTALLSHADOW-001 clause 2).
 #
 # Resolved the way the shell resolves it, rather than by guessing at locations.
-winner="$(command -v varve 2>/dev/null || true)"
-if [ -n "$winner" ] && [ "$winner" != "${INSTALL_DIR}/varve" ]; then
-	winner_version="$("$winner" --version 2>/dev/null || echo "unknown version")"
-	say ""
-	say "WARNING: \`varve\` on your PATH is NOT the binary just installed."
-	say ""
-	say "    your shell runs   ${winner}  (${winner_version})"
-	say "    this installed    ${INSTALL_DIR}/varve  (${installed})"
-	say ""
-	say "Everything below, and every command in the docs, will use the first one."
-	say "To make this install win, put its directory FIRST on PATH:"
-	say ""
-	say "    export PATH=\"${INSTALL_DIR}:\$PATH\""
-	say ""
-	say "…or remove the other one. If it came from cargo: cargo uninstall varve"
-	say ""
-fi
+check_shadow
 
 case ":${PATH}:" in
 	*":${INSTALL_DIR}:"*)
