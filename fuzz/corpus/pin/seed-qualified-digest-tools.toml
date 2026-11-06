@@ -1,0 +1,7 @@
+manifest-version = 1
+
+[toolchain]
+channel = "qualified"
+layer   = "2026.07.0"
+digest  = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+tools   = ["rivet", "synth"]

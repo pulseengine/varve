@@ -1,0 +1,6 @@
+manifest-version = 1
+[toolchain]
+realm = "pulseengine"
+channel = "qualified"
+layer = "2026.07.0"
+tools = ["pulseengine:rivet", "synth-c", "cargo_x"]

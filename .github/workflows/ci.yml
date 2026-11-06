@@ -623,22 +623,14 @@ jobs:
           # shellcheck disable=SC2086 -- FILES is a deliberate flag list
           cargo mutants --no-shuffle -j 4 --timeout 120 $FILES 2>&1 | tee mutants.log
           set -e
-          SUMMARY="$(grep -E '[0-9]+ mutants tested' mutants.log | tail -1 || true)"
-          if [ -z "$SUMMARY" ]; then
-            echo "::error::cargo-mutants produced no summary — the gate did not run"
-            exit 1
-          fi
-          echo "::notice::$SUMMARY"
-          MISSED="$(printf '%s' "$SUMMARY" | grep -oE '[0-9]+ missed' | grep -oE '[0-9]+' || echo 0)"
-          if [ "$MISSED" -ne 0 ]; then
-            echo "::error::$MISSED mutant(s) SURVIVED — a change nothing noticed"
-            exit 1
-          fi
-          if printf '%s' "$SUMMARY" | grep -q 'timeout'; then
-            echo "::warning::$SUMMARY — timed-out mutants are ones the suite \
-          never finished under, which is detection, not silence. Named above."
-            grep 'TIMEOUT' mutants.log || true
-          fi
+          # The verdict is a tested tool, not inline shell (#319): it fails
+          # on no summary, on a survivor, on a summary it cannot read, AND on
+          # a shard that tested nothing or caught nothing. The inline version
+          # looked for "N missed" alone, so `5 mutants tested in 1s: 5
+          # unviable` and `0 mutants tested in 0s` both passed.
+          # tools/test_mutants_verdict.py holds it to those cases.
+          python3 tools/mutants-verdict.py mutants.log
+          grep 'TIMEOUT' mutants.log || true
 
   # The name the branch ruleset requires. It must not move when the gate is
   # resharded, so it lives on a job that does no work and only reports.

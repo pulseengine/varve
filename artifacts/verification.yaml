@@ -3535,3 +3535,20 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-11-06T00:17:28Z
+
+  - id: VER-MUTATE-VERDICT-001
+    type: verification
+    title: "A mutation shard passes only on evidence it tested something: a summary, no survivor, a mutant tested, one caught or timed out"
+    status: implemented
+    release: v0.46.0
+    fields:
+      baseline: "Found by the pre-v0.45.0 gate-potency audit (#319 item 1): the inline ci.yml verdict looked for 'N missed' alone, so '5 mutants tested in 1s: 5 unviable' and '0 mutants tested in 0s' passed with nothing caught. tools/mutants-verdict.py replaces it. Red first, 2026-11-06: a port of the inline logic failed 4 of the 10 tests then written (both #319 logs passed, an unreadable summary read as 0 missed, and the singular '1 mutant tested' form was not recognised). A later ANSI-coloured summary test failed until escapes were stripped. Hand mutations (dropping the tested==0 rule, dropping the caught-or-timeout rule, turning every failure into a pass) each turned the suite red. Against real CI: the raw summary lines of all 18 shards of run 42188263619 (varve#325) each pass."
+      method: test
+      steps: python3 -m unittest discover -s tools -p 'test_*.py'
+    links:
+      - type: verifies
+        target: REQ-MUTATE-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-06T10:03:24Z
