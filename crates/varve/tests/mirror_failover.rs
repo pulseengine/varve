@@ -1913,8 +1913,49 @@ fn the_notice_names_a_status_verified_in_this_run_when_it_bounded_the_mirror() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(
-        stderr.contains("a line-status verified earlier in this run (counter 3)"),
+        stderr.contains("a line-status verified in this run (counter 3)"),
         "{stderr}"
     );
+    assert!(!stderr.contains("its cached line-status"), "{stderr}");
+}
+
+/// The same notice when the status that bounded the mirror is the MIRROR'S OWN:
+/// the primary verified status #2 (no floor) and failed; the mirror serves
+/// status #4 (floor 5) at the floor, and the cache holds only status #1. The
+/// notice must not say the status came from an earlier source.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn the_notice_is_true_when_the_mirrors_own_status_bounded_it() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let spec =
+        |baseline_counter: u64, status_min_counter: Option<u64>, drop_tool_blob: bool| Spec {
+            sk: &sk,
+            pk: &pk,
+            counter: 5,
+            tool: Some((probe_bytes(), probe_bytes())),
+            drop_tool_blob,
+            baseline_until: Some("2027-01-01"),
+            published_until: None,
+            forge_published: false,
+            no_layer: false,
+            forge_layer: false,
+            baseline_counter,
+            serve_index: false,
+            index_counter: 1,
+            status_min_counter,
+            drop_tags_list: false,
+        };
+    let primary = serve_spec(spec(2, None, true));
+    let mirror = serve_spec(spec(4, Some(5), false));
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    seed_status_cache(&p, &sk, 1);
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("a line-status verified in this run (counter 4)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("earlier"), "{stderr}");
     assert!(!stderr.contains("its cached line-status"), "{stderr}");
 }
