@@ -160,6 +160,9 @@ pub enum PlanError {
     NeedsAsset {
         name: String,
         layout: String,
+        /// The entry did name its files through `asset-for`, which does not
+        /// substitute for `asset` on these layouts (#331).
+        has_asset_for: bool,
     },
     /// `allow-pip` on an entry that is not a `zephyr-module`.
     AllowPipNotOnZephyrModule {
@@ -230,7 +233,19 @@ impl std::fmt::Display for PlanError {
                  upstream's and cannot be derived from the module's name, so the \
                  manifest states it, e.g. asset = \"{name}-%V.tar.gz\"."
             ),
-            PlanError::NeedsAsset { name, layout } => write!(
+            PlanError::NeedsAsset {
+                name,
+                layout,
+                has_asset_for: true,
+            } => write!(
+                f,
+                "{layout} {name:?} sets `asset-for` but no `asset`. On a {layout} \
+                 layout `asset-for` does not substitute for `asset`: an `asset` \
+                 template is still required, since the archive's name is the \
+                 upstream's and cannot be derived from the entry's name, e.g. \
+                 asset = \"{name}-%V.tar.gz\"."
+            ),
+            PlanError::NeedsAsset { name, layout, .. } => write!(
                 f,
                 "{layout} {name:?} names no `asset`. The archive's name is the \
                  upstream's and cannot be derived from the entry's name, so the \
@@ -346,6 +361,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
         return Err(PlanError::NeedsAsset {
             name: t.name.clone(),
             layout: t.layout.clone().unwrap_or_default(),
+            has_asset_for: !t.asset_for.is_empty(),
         });
     }
     let template = template_of(t, kind);
@@ -1203,11 +1219,47 @@ mod tests {
         let m = manifest("[[tool]]\nname = \"zsdk\"\nversion = \"0.17.0\"\nlayout = \"sdk\"\n");
         let e = plan(&m, PLATFORMS).expect_err("must refuse");
         assert!(
-            matches!(&e, PlanError::NeedsAsset { name, layout } if name == "zsdk" && layout == "sdk"),
+            matches!(&e, PlanError::NeedsAsset { name, layout, .. } if name == "zsdk" && layout == "sdk"),
             "{e:?}"
         );
         assert!(e.to_string().contains("zsdk"), "{e}");
         assert!(e.to_string().contains("zsdk-%V.tar.gz"), "{e}");
+        assert!(!e.to_string().contains("asset-for"), "{e}");
+    }
+
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn an_sdk_with_only_asset_for_is_refused_and_told_asset_for_is_no_substitute() {
+        let m = manifest(
+            "[[tool]]\nname = \"zsdk\"\nversion = \"0.17.0\"\nlayout = \"sdk\"\n\
+             [tool.asset-for]\n\"x86_64-unknown-linux-gnu\" = \"zsdk-linux.tar.xz\"\n",
+        );
+        let e = plan(&m, PLATFORMS).expect_err("must refuse");
+        assert!(
+            matches!(&e, PlanError::NeedsAsset { name, layout, .. } if name == "zsdk" && layout == "sdk"),
+            "{e:?}"
+        );
+        let text = e.to_string();
+        assert!(text.contains("asset-for"), "{text}");
+        assert!(text.contains("does not substitute"), "{text}");
+        assert!(text.contains("zsdk-%V.tar.gz"), "{text}");
+    }
+
+    // rivet: verifies REQ-SDKDEPOSIT-001
+    #[test]
+    fn a_toolchain_with_only_asset_for_is_refused_and_told_asset_for_is_no_substitute() {
+        let m = manifest(
+            "[[tool]]\nname = \"rustc\"\nversion = \"1.98.1\"\nlayout = \"toolchain\"\n\
+             [tool.asset-for]\n\"x86_64-unknown-linux-gnu\" = \"rustc-linux.tar.xz\"\n",
+        );
+        let e = plan(&m, PLATFORMS).expect_err("must refuse");
+        assert!(
+            matches!(&e, PlanError::NeedsAsset { name, layout, .. } if name == "rustc" && layout == "toolchain"),
+            "{e:?}"
+        );
+        let text = e.to_string();
+        assert!(text.contains("asset-for"), "{text}");
+        assert!(text.contains("does not substitute"), "{text}");
     }
 
     // rivet: verifies REQ-SDKDEPOSIT-001
@@ -1217,7 +1269,7 @@ mod tests {
             manifest("[[tool]]\nname = \"rustc\"\nversion = \"1.98.1\"\nlayout = \"toolchain\"\n");
         let e = plan(&m, PLATFORMS).expect_err("must refuse");
         assert!(
-            matches!(&e, PlanError::NeedsAsset { name, layout } if name == "rustc" && layout == "toolchain"),
+            matches!(&e, PlanError::NeedsAsset { name, layout, .. } if name == "rustc" && layout == "toolchain"),
             "{e:?}"
         );
     }
