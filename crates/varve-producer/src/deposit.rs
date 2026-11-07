@@ -482,13 +482,9 @@ mod tests {
     use super::*;
 
     use crate::gh::RunOutput;
-    use std::path::PathBuf;
 
-    fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("varve-deposit-{name}"));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).expect("scratch");
-        d
+    fn scratch(name: &str) -> crate::testscratch::Scratch {
+        crate::testscratch::Scratch::new(&format!("deposit-{name}"))
     }
 
     /// A minimal ELF header the arch check can read: x86_64 or aarch64.
@@ -903,7 +899,7 @@ mod tests {
         tag: &str,
         files: &[(&str, &str)],
         allow_pip: Option<Vec<String>>,
-    ) -> (std::path::PathBuf, anyhow::Result<ToolOut>) {
+    ) -> (crate::testscratch::Scratch, anyhow::Result<ToolOut>) {
         let root = scratch(tag);
         let dl = root.join("dl");
         std::fs::create_dir_all(&dl).unwrap();

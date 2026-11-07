@@ -726,8 +726,8 @@ mod digest_file_tests {
     // rivet: verifies REQ-VERIFYSTREAM-001
     #[test]
     fn a_streamed_digest_equals_the_whole_file_digest_at_every_boundary() {
-        let dir = std::env::temp_dir().join(format!("varve-digest-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
+        let guard = tempfile::tempdir().expect("temp dir");
+        let dir = guard.path();
         let b = DIGEST_BUFFER;
         for len in [0, 1, b - 1, b, b + 1, 3 * b + 7] {
             // Not all zeros: a pattern that changes with position, so a chunk
@@ -741,7 +741,6 @@ mod digest_file_tests {
                 "streaming and whole-file digests disagree at {len} bytes"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The timed path and the untimed path must agree about the digest, at
@@ -845,7 +844,8 @@ mod digest_file_tests {
     // rivet: verifies REQ-VERIFYSTREAM-001
     #[test]
     fn a_missing_file_is_an_error_not_the_empty_digest() {
-        let missing = std::env::temp_dir().join("varve-digest-definitely-absent-0");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("definitely-absent");
         assert!(digest_file(&missing).is_err());
     }
 }

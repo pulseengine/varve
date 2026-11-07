@@ -902,11 +902,10 @@ mod mirror_tests {
     use super::*;
 
     fn parse(text: &str, name: &str) -> Realm {
-        let dir = std::env::temp_dir().join(format!("varve-realm-mirror-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch");
+        let guard = tempfile::tempdir().expect("scratch");
+        let dir = guard.path();
         std::fs::write(dir.join(REALMS_FILE), text).expect("write");
-        resolve_realm(&dir, name).expect("parses")
+        resolve_realm(dir, name).expect("parses")
     }
 
     /// Clause 5. Every realms file in existence names one registry and no
@@ -952,9 +951,8 @@ mod mirror_tests {
     // rivet: verifies REQ-MIRROR-001
     #[test]
     fn mirrors_cannot_carry_a_trust_root_of_their_own() {
-        let dir = std::env::temp_dir().join("varve-realm-mirror-root");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch");
+        let guard = tempfile::tempdir().expect("scratch");
+        let dir = guard.path();
         std::fs::write(
             dir.join(REALMS_FILE),
             "[realm.x]\nregistry = \"oci://a\"\n\
@@ -963,7 +961,7 @@ mod mirror_tests {
         )
         .expect("write");
         assert!(
-            resolve_realm(&dir, "x").is_err(),
+            resolve_realm(dir, "x").is_err(),
             "a mirror must not be able to declare its own trust root"
         );
     }
