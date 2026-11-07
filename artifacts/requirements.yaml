@@ -4647,7 +4647,7 @@ artifacts:
       created-by: ai-assisted
       model: claude-opus-5
       timestamp: 2026-09-29T20:24:40Z
-    release: v0.47.0
+    release: v0.48.0
 
   - id: DD-033
     type: design-decision
@@ -4731,7 +4731,7 @@ artifacts:
       created-by: ai-assisted
       model: claude-opus-5
       timestamp: 2026-09-30T13:13:14Z
-    release: v0.47.0
+    release: v0.48.0
 
   - id: DD-034
     type: design-decision
@@ -5232,7 +5232,7 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-10-21T19:12:07Z
-    release: v0.47.0
+    release: v0.48.0
 
   - id: REQ-SHIMFALLBACK-001
     type: requirement
@@ -5305,7 +5305,7 @@ artifacts:
     type: requirement
     title: The pulseengine layer carries varve's own documentation, and Markdown counts as documentation
     status: approved
-    release: v0.47.0
+    release: v0.48.0
     description: "The MCP research measured the pinned pulseengine layer at ONE docs payload (varve-core's rustdoc) and the wasm layer at none, so an agent docs server would have almost nothing to serve. Decided by the maintainer on 2026-10-27. Clauses: (1) The pulseengine realm's layer shall carry the documentation varve's release already signs: varve's rustdoc and its traceability HTML report, each as a [[docs]] payload ingested through the release's verified sums. (2) A tool's Markdown documentation (a docs/ tree or a book) shall be acceptable as a docs payload in format markdown, and varve-serve shall render it as text for map, search and page. (3) Each new docs payload is shown by varve-serve map listing it for the pinned layer."
     links:
       - type: derives-from
@@ -5319,7 +5319,7 @@ artifacts:
     type: requirement
     title: A tool's built-in docs topics are served from the verified binary that carries them
     status: approved
-    release: v0.47.0
+    release: v0.48.0
     description: "rivet, varve-producer and varve-serve answer version-exact questions with their own docs command (rivet docs has 57 topics), and harvesting that output at deposit would mean running third-party binaries in the signing pipeline. Decided by the maintainer on 2026-10-27: serve them on demand from the verified binary. Clauses: (1) layer.toml shall be able to declare a tool's docs-command (the argv that lists topics and the one that prints one, with --format json where the tool offers it), signed into the layer as an annotation. (2) varve-serve map shall list those topics, and page shall print one, by running ONLY the binary the layer verified, re-verified against its signed digest at that moment, with no shell, a clean environment, no network where the platform allows, and a time limit. (3) A tool with no declared docs-command is never executed by varve-serve. (4) The output is treated as untrusted text (the same prompt-injection warning as REQ-AGENTDOCS-003 clause 5)."
     links:
       - type: derives-from
@@ -5333,7 +5333,7 @@ artifacts:
     type: requirement
     title: A layer carries Renode platform definitions, and any Renode finds them without touching its install
     status: approved
-    release: v0.47.0
+    release: v0.48.0
     description: "From the Zephyr/Renode research (2026-10-27) and the maintainer's decisions: DEFINITIONS ONLY, users bring their own Renode (Renode publishes no checksums, signatures or attestations, so carrying the runtime would be an unverified, Linux-only opt-in). Definitions are code, not data (.resc runs commands, .robot runs Python), so they need the same proof rung as a tool. Clauses: (1) A new held payload kind `renode` (role definitions) shall be declarable in layer.toml with a namespace, a tested Renode version list and a supported range, signed into the layer and shown by varve inspect. (2) The deposit shall refuse a carried .resc or .repl that references a path outside its own tree or relative to the working directory (`@hardware/...`), naming the file; $ORIGIN-relative paths are accepted. (3) varve export-renode --out D shall lay the definitions down verbatim under D/defs/<namespace>/, write D/defs/varve-renode.resc containing the path add, and stamp per-tree digests (needs varve#288), so `include @D/defs/varve-renode.resc` then `@<namespace>/<file>` resolves in an unmodified Renode. (4) An export can never override a file Renode ships, because Renode searches its own install first and the namespace is unique; shown by a test that a namespaced name never resolves to a built-in. . NO PYTHON, decided by the maintainer on 2026-10-27: varve distributes the BLOCKS a project adds (a Renode platform model, a Zephyr module), never the full Renode or Zephyr, and deploying a block shall need no Python on the consumer's machine. The user's own Renode or Zephyr installation, and whatever it needs, stays theirs. (5) A renode definitions payload shall be usable by plain Renode with no host Python: its self-test is a .resc that `renode --console --disable-xwt` runs and that exits non-zero on failure. Robot suites may travel as optional extras, but nothing in the layer's own check depends on renode-test or Robot Framework. Renode's built-in IronPython peripherals (pydev, e.g. flipflop.py) are part of Renode, not host Python, and are allowed."
     links:
       - type: derives-from
@@ -5347,7 +5347,7 @@ artifacts:
     type: requirement
     title: The jess Pixhawk 6X-RT Renode model is distributed through the layer and boots, offline, from the export alone
     status: approved
-    release: v0.47.0
+    release: v0.48.0
     description: "The maintainer's first concrete case (2026-10-27): ship jess's stable core now, the PX4 bring-up parts later as their own version. Prerequisites in jess: an Apache-2.0 OR MIT licence, $ORIGIN-relative paths in its .resc scripts, and a release asset (described in a jess issue). Clauses: (1) jess publishes the stable core (pixhawk6xrt.repl, vehicle/rt1176-dualcore.repl, rt1176-smoke.resc/.robot and the smoke ELF with its boot.S/link.ld, plus READMEs and a generated renode-model.toml) as ONE deterministic archive listed by a committed MODEL.files, built before SHA256SUMS so its existing cosign signature and build provenance cover it, and released only after the self-test passes on the UNPACKED archive. (2) The pulseengine layer carries it as kind renode, role definitions, on the cosign rung, namespace pulseengine/jess, with a signed fidelity statement that it is a bring-up model not yet cross-validated against the board (jess REQ-PIX-011). (3) With the network removed (proved by a failing curl), from /, and with NO Python on PATH, the exported smoke self-test .resc passes under plain `renode --console --disable-xwt` and the exported dual-core platform loads through the generated path-add script, on every Renode version the layer lists as tested (1.16.1 first); without the include the load fails, and one flipped byte in the exported .repl fails varve verify. . NO PYTHON, decided by the maintainer on 2026-10-27: varve distributes the BLOCKS a project adds (a Renode platform model, a Zephyr module), never the full Renode or Zephyr, and deploying a block shall need no Python on the consumer's machine. The user's own Renode or Zephyr installation, and whatever it needs, stays theirs. The jess smoke check therefore ships as a .resc that asserts the UART line itself; rt1176-smoke.robot may travel as an optional extra."
     links:
       - type: derives-from
@@ -5375,7 +5375,7 @@ artifacts:
     type: requirement
     title: A vendor blob travels in a layer only when its licence permits redistribution, and says so
     status: approved
-    release: v0.47.0
+    release: v0.48.0
     description: "The maintainer's decision (2026-10-27): carry vendor HAL blobs where the licence allows. Clauses: (1) A blob a carried module declares is ingested only with its sha256 matching the module's own zephyr/module.yml, and only if its declared licence is on the realm's redistribution allow-list. (2) A blob whose licence requires click-through acceptance is refused unless the realm records that acceptance in the signed layer. (3) Each carried blob's licence appears in the layer SBOM (REQ-SBOMFIELDS-001)."
     links:
       - type: derives-from
@@ -5405,7 +5405,7 @@ artifacts:
     type: requirement
     title: A tool can state its own purpose and docs command in the signed layer, so an agent reads the producer's word, not a harvest
     status: approved
-    release: v0.47.0
+    release: v0.48.0
     description: "Split from REQ-AGENTDOCS-001 clause 2 on 2026-10-29. Clauses: (1) A `[[tool]]` entry in layer.toml may carry `summary` and `docs-command`, signed with the manifest. (2) `varve-serve context` prefers the signed values and marks them `source: signed`; it harvests (`--help` only, `docs` only where advertised) ONLY for a tool that declares neither. (3) varve-producer plan validates both fields (one line, no control characters, a docs-command that names the tool itself), so a layer cannot sign a command that runs something else. Measured motive: ordeal, kilnd and with-device give no usable purpose line from `--help`, and harvesting `kilnd docs` started the runtime."
     tags: [trimmed-from-v0.44.0]
     fields:
@@ -5433,7 +5433,7 @@ artifacts:
     type: requirement
     title: A reason to exceed a composition's cap is signed, every composing deposit uses the cap, and an include whose line ends arrives as a proposed line change
     status: approved
-    release: v0.47.0
+    release: v0.48.0
     description: "Split from REQ-COMPOSEWINDOW-002 clauses 3-5 on 2026-10-29. Clauses: (1) A reason given to exceed the cap is carried in the signed line-status beside the date, so 'on the record' means signed, not a CI log. (2) Every layers repository whose layers include others passes the layer's manifest to support-horizon in its deposit, and a deposit of a composing layer without it is refused rather than silently using the channel's window. (3) The scanner reports an include whose line is out of support, or will be within the channel's notice period, and proposes the newest supported layer of the next line as a line change in a reviewed pull request, never an unattended move (varve#285)."
     tags: [trimmed-from-v0.44.0]
     fields:
@@ -5447,7 +5447,7 @@ artifacts:
     type: requirement
     title: Each layers repository runs the advisory watch on a schedule and opens the prepared line-status as a pull request
     status: approved
-    release: v0.47.0
+    release: v0.48.0
     description: "Split from REQ-ADVISORYWATCH-002 clause 1 on 2026-10-29. Clauses: (1) Each layers repository runs `varve-producer advisories` on a schedule (needs a released varve carrying the watcher and REQ-ADVISORYWATCH-002's coverage) and opens the prepared line-status as a signed pull request, so an advisory arrives as something to merge, not news to notice. (2) A scheduled run that cannot reach an advisory source fails loudly rather than reporting nothing found."
     tags: [trimmed-from-v0.44.0]
     fields:
@@ -5475,7 +5475,7 @@ artifacts:
     type: requirement
     title: A Zephyr module export knows the west workspace it lands in, and builds offline for a real board
     status: approved
-    release: v0.47.0
+    release: v0.48.0
     description: "Split from REQ-ZMODEXPORT-001 on 2026-11-03. Clauses: (1) The export reads the team's west workspace and refuses a module whose name collides with one the workspace already provides, unless --override is given; Zephyr itself lets the later one silently win. (2) A `build: depends` naming a module the WORKSPACE provides, rather than the export, is accepted once it has been read there, instead of being refused as in v0.44.0. (3) With the network removed, a Zephyr test that needs gale builds for a board using gale only from the export, and the same build without the cmake script fails. One flipped byte in the exported tree fails varve verify. Stated scope: this proves the added module is offline and verified, not Zephyr or Python."
     tags: [zephyr, distribution]
     fields:
