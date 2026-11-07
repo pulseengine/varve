@@ -1098,21 +1098,34 @@ trust-root = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         assert!(msg.contains("zzz"), "{msg}");
     }
 
-    /// The realms file varve publishes parses, and states what an older
-    /// binary may skip.
+    /// The realms file varve publishes parses, and declares no `ignorable`.
+    ///
+    /// Every released varve before this feature refuses `ignorable` itself
+    /// as an unknown field (measured: varve 0.46.0 refuses the file at the
+    /// `ignorable` line). Publishing it would hand every current consumer the
+    /// #234 failure instead of curing it. `retired-roots` is known to every
+    /// supported binary, so it needs no marking. The published file gains
+    /// `ignorable` only together with a field that older binaries lack and
+    /// may skip, as a deliberate, CHANGELOG-stated break for varve < 0.47.0.
     // rivet: verifies REQ-REALM-001
     #[test]
-    fn the_published_realms_file_parses_and_marks_retired_roots_ignorable() {
+    fn the_published_realms_file_parses_and_declares_no_ignorable() {
         let text = include_str!("../../../varve-realms.toml");
         let dir = realms_dir(text);
         let realm = resolve_realm(dir.path(), "pulseengine-wasm").expect("published file parses");
         assert!(!realm.retired_roots.is_empty());
         resolve_realm(dir.path(), "pulseengine").expect("parses");
         let table: toml::Table = toml::from_str(text).unwrap();
-        let ign = table["realm"]["pulseengine-wasm"]["ignorable"]
-            .as_array()
-            .expect("the published file declares ignorable");
-        assert!(ign.iter().any(|v| v.as_str() == Some("retired-roots")));
+        assert!(
+            !table.contains_key("ignorable"),
+            "the published file declares a top-level ignorable, which every varve before 0.47.0 refuses"
+        );
+        for (name, realm) in table["realm"].as_table().expect("realm tables") {
+            assert!(
+                realm.get("ignorable").is_none(),
+                "the published realm {name:?} declares ignorable, which every varve before 0.47.0 refuses"
+            );
+        }
     }
 
     // rivet: verifies REQ-INDEXAUTH-001

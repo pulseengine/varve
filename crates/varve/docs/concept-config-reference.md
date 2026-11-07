@@ -81,7 +81,6 @@ trust-root      = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da
 signed-index    = false                                      # default
 # mirrors       = ["oci://mirror.example/layers"]   # see "mirrors" below
 # Roots this realm used to sign with. DIAGNOSTIC ONLY — see below.
-ignorable       = ["retired-roots"]                   # see "ignorable" below
 retired-roots   = [
   { key = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973", retired = "2026-09-07", last-layer = "2026.09.1" },
 ]
@@ -135,7 +134,7 @@ ignorable  = ["retired-roots"]
 * `ignorable` is a list of strings, inside the realm whose keys it covers. A top-level `ignorable` (before the first `[realm.*]` table) covers top-level keys only.
 * A key this varve does **not** know and that `ignorable` names is skipped (silently). A key it does not know and that is not named is refused.
 * **A key this varve knows is always parsed and enforced, even if `ignorable` names it.** `ignorable` cannot switch off `trust-root`, `signed-index` or anything else the binary understands.
-* Only a varve that has this feature honours it. Binaries released before it still refuse the field, and refuse `ignorable` itself. Mark only fields that are diagnostic or advisory; anything a consumer must act on stays unmarked, so an older binary refuses rather than guesses.
+* Only varve 0.47.0 and later honour it. **A varve before 0.47.0 refuses `ignorable` itself as an unknown key**, so adding `ignorable` to a file breaks it for those binaries. varve's own published file does not carry it yet: `retired-roots` is known to every supported binary and needs no marking. Mark only fields that are diagnostic or advisory; anything a consumer must act on stays unmarked, so an older binary refuses rather than guesses.
 
 ### `retired-roots` — what it is, and emphatically what it is not
 
