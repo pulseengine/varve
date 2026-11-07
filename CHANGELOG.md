@@ -6,6 +6,12 @@
 
 - `varve-producer plan`: an `sdk` or `toolchain` entry that names its files through `asset-for` but sets no `asset` is still refused, but the error now says `asset-for` does not substitute for `asset` on those layouts and an `asset` template is required, instead of claiming the entry names no files (#331).
 
+### CI and release machinery
+
+- The install-shadow system test now also runs `install.sh`'s normal path, against a local archive served by a fake `curl`, and asserts the shadow warning in the installer's own output. Before, it ran only `check_shadow` through the check-only hook, so removing the installer's call to it left the gate green (#333).
+- `pr_gates_cannot_be_switched_off` checks every `if:` in a PR workflow against an allowlist of the four conditions in use, instead of flagging only `vars.`. A switch on `github.repository`, `github.actor` or anything else a setting or fork can change is now refused (#333).
+- `tools/trace-gate.py` no longer counts a `verifies` edge from a `draft` verification, or from one with no steps, as evidence for a `verified` requirement. An `inspection` or `review` record still counts without steps, since what it checked is outside this repository's CI (#333).
+
 ## v0.46.0 — 2026-11-07
 
 *A registry credential stays with the realm it was set for, a mirror cannot
