@@ -3570,3 +3570,25 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-11-06T22:10:34Z
+
+  - id: VER-REVIEW-V0-46-0
+    type: verification
+    title: "v0.46.0 independently reviewed: two PARTIAL claims, two medium and three low defects; medium and two low fixed test-first, one low filed"
+    status: verified
+    release: v0.46.0
+    tags: [independence, review]
+    fields:
+      baseline: "Independent clean-room review (fresh context, refute-framed) of the whole v0.46.0 scope (#312 merged in #328, #305 and #306 merged in #329, #311 in #330) at c210e0a3, 2026-11-07. cargo test --workspace: 1977 passed, 0 failed, 2 ignored. 8 probes, every restore clean. VERDICTS: C1 #312 credential bound to the pinned origin CONFIRMED (every source construction site enumerated; install and outdated reach only the pinned realm or --from, includes and support-horizon are bound, a directory primary binds nobody; the install system test exercises only the nobody branch, the other-origin branch is unit-covered). C3 #306 CONFIRMED (every kind_of result is refused before template_of's unreachable arms; the real plan binary run on asset-less sdk, toolchain, zephyr-module, raw-per-platform and crate entries never panicked). C2 #305 PARTIAL: a writer field added as None everywhere left every test green (probe P1 survived), and removing PrevTool's deny_unknown_fields left all 614 producer tests green (P2 survived). C4 #311 PARTIAL: carry placement and memory-only state confirmed and killed by system tests (probes A-D), but the CHANGELOG's 'exactly as if it had been cached' overstated it: a carried status does not count as local history for first contact, and a later source serving no index on a realm without signed-index is not bounded by the carried index. C5 PARTIAL: REQ-MIRROR-002 D2 still said a source 'can only raise' the floor, and no clause stated #311's carry or #312's origin binding although their tests claim REQ-MIRROR-002; #306's tests claimed REQ-SDKDEPOSIT-001, which had no such clause. DEFECTS AND DISPOSITION: (1, medium) concept-environment.md still said the credential reaches every registry a composition is installed from: rewritten. (2, medium) the REQ-MIRROR-002 and REQ-SDKDEPOSIT-001 gaps: D2 corrected, D6 and D7 added, clause 6 added. (3, low) P1 and P2: a tool-level unknown key is now refused by test (P2 killed), and the drift test destructures every writer struct exhaustively, so a new field fails to compile it; re-run by the author with the field set None at every production literal, the only error was E0027 on that field. (4, low) the mirror notice said 'earlier in this run' when the answering mirror's own status had bounded it: now 'verified in this run', with a system test for the mirror-own case. (5, low) a toolchain named only through asset-for is refused with a misleading 'names no asset': not a regression (it panicked before), fails closed, filed as varve#331. RESIDUALS (low, recorded): the layer manifest counter is not carried; each include gets a fresh HighWaterMarks; with a directory --from an include of the pinned realm itself gets no credential (fails closed); the four carry call sites are killed only by varve system tests, not by varve-core lib tests. Advisory at v0.x (REQ-INDEP-001)."
+      method: review
+      steps: cargo test --workspace; cargo test -p varve --test mirror_failover; cargo test -p varve --test keyroles_wiring; cargo test -p varve-producer --lib deposit; cargo test -p varve-producer --lib plan; cargo test -p varve --bin varve
+    links:
+      - type: verifies
+        target: REQ-MIRROR-002
+      - type: verifies
+        target: REQ-CARRYFORWARD-001
+      - type: verifies
+        target: REQ-SDKDEPOSIT-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-07T00:43:14Z
