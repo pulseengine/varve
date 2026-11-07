@@ -511,11 +511,11 @@ mod tests {
     // rivet: verifies REQ-INGEST-001
     #[test]
     fn cosign_is_not_run_against_a_release_that_publishes_no_sums() {
-        let tmp = std::env::temp_dir().join("varve-producer-probe-test");
+        let tmp = scratch("probe-test");
         let src = GhSource::new(
             Scripted(vec![("gh release".into(), out(0, r#"{"assets":[]}"#, ""))]),
             Forge::github_com(),
-            &tmp,
+            &*tmp,
         );
         let p = src
             .probe(&Forge::github_com(), "o/r", "v1")
@@ -526,10 +526,8 @@ mod tests {
         assert_eq!(p.attestation, crate::ingest::AttestationProbe::NotAttested);
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("varve-producer-{name}"));
-        let _ = std::fs::remove_dir_all(&d);
-        d
+    fn scratch(name: &str) -> crate::testscratch::Scratch {
+        crate::testscratch::Scratch::new(&format!("producer-{name}"))
     }
 
     const SUMS_TEXT: &str = "aaaa  ./one.tar.gz\nbbbb  ./two.tar.gz\n";
@@ -548,7 +546,7 @@ mod tests {
             .file(BUNDLE, b"bundle-bytes")
             .file("one.tar.gz", b"payload-bytes")
             .reply("cosign verify-blob", out(0, "", ""));
-        let src = GhSource::new(gh, Forge::github_com(), &dir);
+        let src = GhSource::new(gh, Forge::github_com(), &*dir);
         let p = src
             .probe(&Forge::github_com(), "o/r", "v1")
             .expect("probes");
@@ -581,7 +579,7 @@ mod tests {
                 .file(BUNDLE, b"b")
                 .file("one.tar.gz", b"p")
                 .reply("gh attestation", out(1, "", "no attestations found"));
-            let src = GhSource::new(gh, Forge::github_com(), &dir);
+            let src = GhSource::new(gh, Forge::github_com(), &*dir);
             let p = src
                 .probe(&Forge::github_com(), "o/r", "v1")
                 .expect("probes");
@@ -607,7 +605,7 @@ mod tests {
         let gh = FakeGh::new()
             .file("two.tar.gz", b"bytes of two")
             .reply("gh attestation", out(0, DOC, ""));
-        let src = GhSource::new(gh, Forge::github_com(), &dir);
+        let src = GhSource::new(gh, Forge::github_com(), &*dir);
 
         let json = src
             .attestation_json_for("o/r", "v1", "two.tar.gz")
@@ -642,7 +640,7 @@ mod tests {
             "gh attestation",
             out(1, "", "no attestations found for subject"),
         );
-        let src = GhSource::new(gh, Forge::github_com(), &dir);
+        let src = GhSource::new(gh, Forge::github_com(), &*dir);
 
         let e = src
             .attestation_json_for("o/r", "v1", "two.tar.gz")
@@ -670,7 +668,7 @@ mod tests {
             .file(SUMS, SUMS_TEXT.as_bytes())
             .file("one.tar.gz", b"p")
             .reply("gh attestation", out(1, "", "no attestations found"));
-        let src = GhSource::new(gh, Forge::github_com(), &dir);
+        let src = GhSource::new(gh, Forge::github_com(), &*dir);
         src.probe(&Forge::github_com(), "o/r", "v1")
             .expect("probes");
         // The download that fed `gh attestation verify` was the payload.
@@ -702,7 +700,7 @@ mod tests {
         let gh = FakeGh::new()
             .listing(&[SUMS])
             .file(SUMS, SUMS_TEXT.as_bytes());
-        let src = GhSource::new(gh, Forge::github_com(), &dir);
+        let src = GhSource::new(gh, Forge::github_com(), &*dir);
         let p = src
             .probe(&Forge::github_com(), "o/r", "v1")
             .expect("probes");
@@ -737,8 +735,7 @@ mod tests {
     // rivet: verifies REQ-CARRYFORWARD-001
     #[test]
     fn rung_two_is_not_probed_when_rung_one_already_settled_the_release() {
-        let tmp = std::env::temp_dir().join("varve-producer-shortcircuit-test");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = scratch("shortcircuit-test");
         let src = GhSource::new(
             Scripted(vec![
                 (
@@ -755,7 +752,7 @@ mod tests {
                 ("gh attestation".into(), out(0, "{}", "")),
             ]),
             Forge::github_com(),
-            &tmp,
+            &*tmp,
         );
         // The download of SHA256SUMS.txt itself is scripted through `gh
         // release`, which writes nothing; so assert on the probe's verdict.

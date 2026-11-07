@@ -1357,8 +1357,8 @@ mod tests {
         // array of strings while the parser wanted an array of structs, so the
         // one file the docs taught was the one file varve rejected — and the
         // reader had nothing to recover with. These run the SHIPPING parsers.
-        let tmp = std::env::temp_dir().join(format!("varve-docs-parse-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp_guard = tempfile::tempdir().unwrap();
+        let tmp = tmp_guard.path().to_path_buf();
         let mut checked = 0;
 
         // Every topic, not just config-reference: the elided `sha256:83a699…`

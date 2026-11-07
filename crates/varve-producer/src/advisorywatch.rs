@@ -2941,19 +2941,10 @@ unaffected = ["< 0.21.0"]
         }
     }
 
-    /// A unique scratch directory per CALL, not merely per test name — tests
-    /// run in parallel threads of one process, so `name` + pid alone
-    /// collided between tests that happened to reuse a name (`"sbom"`
-    /// appears in several), each wiping the other's in-flight directory.
-    static SCRATCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    fn scratch(name: &str) -> PathBuf {
-        let n = SCRATCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let d = std::env::temp_dir().join(format!(
-            "varve-producer-advwatch-{name}-{}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&d);
+    /// A unique scratch directory per CALL (a `TempDir`), not merely per test
+    /// name: tests share one process and one temp dir.
+    fn scratch(name: &str) -> crate::testscratch::Scratch {
+        let d = crate::testscratch::Scratch::new(&format!("producer-advwatch-{name}"));
         std::fs::create_dir_all(d.join("line-index")).unwrap();
         std::fs::create_dir_all(d.join("line-status")).unwrap();
         d
@@ -3474,7 +3465,7 @@ patched = ["not a requirement at all"]
             .into_bytes()
     }
 
-    fn wsc_layer_root(sbom_sha: &str) -> (PathBuf, MemorySource, String) {
+    fn wsc_layer_root(sbom_sha: &str) -> (crate::testscratch::Scratch, MemorySource, String) {
         let root = scratch("sbom");
         let payload = layer_manifest_payload(
             "2026.10.0",
@@ -3504,7 +3495,10 @@ patched = ["not a requirement at all"]
     /// can still name the SAME advisory id, which is exactly what
     /// `push_unique` has to collapse to one report entry
     /// (REQ-ADVISORYWATCH-001's dedup rule).
-    fn two_tool_layer_root(sbom_sha_a: &str, sbom_sha_b: &str) -> (PathBuf, MemorySource, String) {
+    fn two_tool_layer_root(
+        sbom_sha_a: &str,
+        sbom_sha_b: &str,
+    ) -> (crate::testscratch::Scratch, MemorySource, String) {
         let root = scratch("dedup");
         let payload = layer_manifest_payload(
             "2026.10.0",
@@ -5470,7 +5464,10 @@ patched = [">= 1.0.5"]
             ]
         }]"#;
 
-    fn wasmtime_49_0_1(name: &str, ghsa: &str) -> (PathBuf, MemorySource, FakeGh) {
+    fn wasmtime_49_0_1(
+        name: &str,
+        ghsa: &str,
+    ) -> (crate::testscratch::Scratch, MemorySource, FakeGh) {
         let root = scratch(name);
         let (source, digest) = with_layer(
             MemorySource::new(),

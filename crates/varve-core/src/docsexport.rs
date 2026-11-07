@@ -582,8 +582,8 @@ mod tests {
             bytes,
         };
 
-        let dir = std::env::temp_dir().join(format!("varve-docs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let guard = tempfile::tempdir().expect("tempdir");
+        let dir = guard.path().join("export");
         let report = export(&doc, &dir).expect("exports");
 
         assert_eq!(report.files, 2);
@@ -611,7 +611,6 @@ mod tests {
             None,
             "a missing page is None, not an error"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A single-file document has nothing inside to address, and that is a

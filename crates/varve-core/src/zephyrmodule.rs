@@ -1726,17 +1726,29 @@ mod tests {
 
     // ------------------------------------------------------------ export
 
-    fn temp(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "varve-zmod-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// A per-call `TempDir`, removed on drop; derefs to its path.
+    struct Temp(tempfile::TempDir);
+
+    impl std::ops::Deref for Temp {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<std::path::Path> for Temp {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+
+    fn temp(tag: &str) -> Temp {
+        Temp(
+            tempfile::Builder::new()
+                .prefix(&format!("varve-zmod-{tag}-"))
+                .tempdir()
+                .unwrap(),
+        )
     }
 
     // rivet: verifies REQ-ZMODEXPORT-001
@@ -2509,9 +2521,9 @@ mod tests {
             let build = temp("build");
             let o = std::process::Command::new(&cmake)
                 .args(["-S"])
-                .arg(&project)
+                .arg(&*project)
                 .arg("-B")
-                .arg(&build)
+                .arg(&*build)
                 .args(args)
                 .output()
                 .unwrap();

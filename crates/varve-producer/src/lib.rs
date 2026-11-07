@@ -37,3 +37,43 @@ pub mod spec;
 pub mod stage;
 pub mod statusdraft;
 pub mod sums;
+/// A per-run scratch directory for tests (#246).
+///
+/// Tests used to derive scratch paths from a FIXED name in the shared temp
+/// directory and `remove_dir_all` them on entry, so two concurrent runs of the
+/// same test binary (two mutation shards on one host) deleted each other's
+/// staged files. Every scratch is now its own `tempfile::TempDir`: unique per
+/// call, removed on drop, and never wiped by anyone else.
+#[cfg(test)]
+pub(crate) mod testscratch {
+    use std::path::Path;
+
+    /// A unique scratch directory that lives as long as this value does.
+    pub struct Scratch(tempfile::TempDir);
+
+    impl Scratch {
+        /// `tag` only makes a leftover directory recognisable; uniqueness comes
+        /// from `tempfile`, not from the tag.
+        pub fn new(tag: &str) -> Self {
+            Scratch(
+                tempfile::Builder::new()
+                    .prefix(&format!("varve-{tag}-"))
+                    .tempdir()
+                    .expect("scratch"),
+            )
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<Path> for Scratch {
+        fn as_ref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+}

@@ -479,11 +479,8 @@ mod tests {
         );
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("varve-stage-{name}"));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).expect("scratch");
-        d
+    fn scratch(name: &str) -> crate::testscratch::Scratch {
+        crate::testscratch::Scratch::new(&format!("stage-{name}"))
     }
 
     /// Repos differ on whether the binary sits at the archive root or in a
