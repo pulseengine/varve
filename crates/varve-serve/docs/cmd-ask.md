@@ -14,7 +14,13 @@ that matched.
 
 ## What is searched
 
-- documentation payload pages (title and path), read from the verified store;
+- documentation payload pages (Markdown, HTML and rustdoc HTML): title, path and
+  the page's TEXT, ranked by best line like topics, read from the verified store.
+  For HTML the markup, script and style are dropped, and where a page has a
+  `<main>` element (rustdoc does) only its content is searched, not the sidebar.
+  At most the first 512 KiB of a page is searched. A hit points at the page and
+  names the question's own words that one of its lines holds; no page text is
+  ever printed;
 - every pinned tool's subcommands, and its one-line overview with its warning;
 - the text of each tool's built-in docs topics, where its `--help` advertised
   `docs`;

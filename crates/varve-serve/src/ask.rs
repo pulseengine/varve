@@ -6,7 +6,7 @@
 //! recomputing it.
 //!
 //! What it indexes (each source was measured to matter): documentation pages
-//! (title and path), every tool's subcommands, every tool's one-line overview
+//! (title, path and TEXT, scored by best line), every tool's subcommands, every tool's one-line overview
 //! with its warning, the TEXT of the built-in docs topics the tool advertised,
 //! `varve`'s own subcommands, held payloads, and the names a tool's warning
 //! points at that the pin lacks.
@@ -90,7 +90,7 @@ pub struct Unit {
     pub name: String,
     /// A description of it.
     pub desc: String,
-    /// Text searched but never shown (a docs topic's body).
+    /// Text searched but never shown (a docs topic's or page's body).
     pub body: String,
     /// The tool it is about, if it is about one.
     pub tool: Option<String>,
@@ -225,11 +225,17 @@ fn snippet_of(line: &str) -> String {
     out
 }
 
+/// Whose body is scored by its best line: a topic's text and a documentation
+/// page's text (REQ-AGENTDOCS-005) — one scorer for both, not two.
+fn has_line_body(kind: Kind) -> bool {
+    matches!(kind, Kind::Topic | Kind::DocsPage)
+}
+
 fn base_score(u: &Unit, words: &[String]) -> u32 {
     let name = tokens(&u.name);
     let desc = tokens(&format!("{} {}", u.title, u.desc));
     // A topic's body is scored by `best_line` instead.
-    let body = if u.kind == Kind::Topic {
+    let body = if has_line_body(u.kind) {
         Vec::new()
     } else {
         tokens(&u.body)
@@ -276,7 +282,7 @@ fn score(u: &Unit, words: &[String]) -> (u32, Option<String>) {
             (0, None)
         };
     }
-    let line = if u.kind == Kind::Topic {
+    let line = if has_line_body(u.kind) {
         best_line(&u.body, &rest)
     } else {
         None
@@ -490,7 +496,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 title: page.title.clone(),
                 name: page.path.clone(),
                 desc: String::new(),
-                body: String::new(),
+                body: page.text.clone(),
                 tool: None,
                 layer: d.layer.clone(),
                 digest: Some(d.digest.clone()),
@@ -961,10 +967,13 @@ mod tests {
     fn weights_order_name_over_description_over_body() {
         let name = unit(Kind::Topic, "n", "zebra", "t", "");
         let desc = unit(Kind::Topic, "d", "other", "t", "a zebra here");
-        // Body weight is for whole-text units; a TOPIC's body is scored by
-        // its best line (see `a_topic_answers_by_its_best_line_and_shows_it`).
-        let mut body = unit(Kind::DocsPage, "b", "other2", "t", "");
+        // Body weight is for whole-text units; a TOPIC's or a PAGE's body is
+        // scored by its best line (REQ-AGENTDOCS-005).
+        let mut body = unit(Kind::Held, "b", "other2", "t", "");
         body.body = "text about a zebra".into();
+        let mut page = unit(Kind::DocsPage, "pg", "other3", "t", "");
+        page.body = "text about a zebra".into();
+        assert_eq!(score(&page, &["zebra".to_string()]).0, DESC);
         let part = unit(Kind::Topic, "p", "zebras", "t", "");
         let w = vec!["zebra".to_string()];
         assert_eq!(score(&name, &w).0, NAME);
