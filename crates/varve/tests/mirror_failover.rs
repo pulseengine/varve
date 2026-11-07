@@ -53,6 +53,13 @@ struct Spec<'a> {
     baseline_counter: u64,
     /// Serve a GENUINE, root-signed line index (counter 1) naming this layer.
     serve_index: bool,
+    /// Counter of the served line index (default 1).
+    index_counter: u64,
+    /// `min-counter` the baseline status states (REQ-FIRSTCONTACT-001).
+    status_min_counter: Option<u64>,
+    /// Hang up on the `tags/list` request: the source can serve its signed
+    /// index but cannot enumerate what it serves.
+    drop_tags_list: bool,
 }
 
 /// An OCI registry on a loopback port serving one layer signed by a fresh
@@ -79,6 +86,9 @@ fn serve_layer_signed(sk: &[u8], pk: &[u8], counter: u64) -> Served {
         forge_layer: false,
         baseline_counter: 1,
         serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     })
 }
 
@@ -96,6 +106,9 @@ fn serve_spec(spec: Spec<'_>) -> Served {
         forge_layer,
         baseline_counter,
         serve_index,
+        index_counter,
+        status_min_counter,
+        drop_tags_list,
     } = spec;
     let entries = match &tool {
         Some((signed, _)) => format!(
@@ -130,7 +143,7 @@ fn serve_spec(spec: Spec<'_>) -> Served {
             counter,
             issued_at: "2026-09-24T00:00:00Z".into(),
             support_until: Some(until.into()),
-            min_counter: None,
+            min_counter: status_min_counter,
             yanked: Default::default(),
             known_problems: Vec::new(),
         }
@@ -197,7 +210,7 @@ fn serve_spec(spec: Spec<'_>) -> Served {
     if serve_index {
         let doc = varve_core::LineIndex {
             line: "2026.10".into(),
-            counter: 1,
+            counter: index_counter,
             issued_at: "2026-09-24T00:00:00Z".into(),
             layers: vec![varve_core::IndexedLayer {
                 layer: LAYER.into(),
@@ -247,6 +260,9 @@ fn serve_spec(spec: Spec<'_>) -> Served {
                 header.clear();
             }
             recorded.lock().unwrap().push(seen);
+            if drop_tags_list && path == "/v2/inc/layers/tags/list" {
+                continue;
+            }
             if drop_tool_blob && path.ends_with(&tool_digest) && !tool_digest.is_empty() {
                 continue; // hang up without a response
             }
@@ -462,6 +478,9 @@ fn support_horizon_reads_an_include_through_a_mirror() {
         forge_layer: true,
         baseline_counter: 1,
         serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     });
     let mirror = serve_spec(Spec {
         sk: &sk,
@@ -476,6 +495,9 @@ fn support_horizon_reads_an_include_through_a_mirror() {
         forge_layer: false,
         baseline_counter: 1,
         serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     });
     let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
     let out = support_horizon_via(&p, &primary.digest);
@@ -593,6 +615,9 @@ fn serve_with_tool(sk: &[u8], pk: &[u8], served: Vec<u8>, drop_blob: bool) -> Se
         forge_layer: false,
         baseline_counter: 1,
         serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     })
 }
 
@@ -861,6 +886,9 @@ fn support_horizon_tries_the_mirror_when_the_primary_serves_bytes_the_root_did_n
         forge_layer: true,
         baseline_counter: 5,
         serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     });
     let mirror = serve_spec(Spec {
         sk: &sk,
@@ -875,6 +903,9 @@ fn support_horizon_tries_the_mirror_when_the_primary_serves_bytes_the_root_did_n
         forge_layer: false,
         baseline_counter: 1,
         serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     });
     assert_eq!(primary.digest, mirror.digest);
     let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
@@ -985,6 +1016,9 @@ fn serve_with_status(baseline: Option<&str>, published: Option<&str>) -> Served 
         forge_layer: false,
         baseline_counter: 1,
         serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     })
 }
 
@@ -1083,6 +1117,9 @@ fn a_mirror_cannot_grant_the_rollback_consent_the_primary_could_not_give() {
         forge_layer: false,
         baseline_counter: 1,
         serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     });
     let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
     std::fs::write(
@@ -1135,6 +1172,9 @@ fn an_unverifiable_published_correction_on_a_mirror_does_not_establish_the_windo
         forge_layer: false,
         baseline_counter: 1,
         serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     });
     let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
     let out = support_horizon_via(&p, &mirror.digest);
@@ -1192,6 +1232,9 @@ fn rollback_consent_is_never_granted_by_a_mirror_after_the_primary_failed() {
         forge_layer: false,
         baseline_counter: 1,
         serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     });
     let p = project(&primary, &[&mirror.registry], &mirror.root_hex);
     std::fs::write(
@@ -1315,6 +1358,9 @@ fn a_status_taken_from_a_mirror_is_not_cached_to_grant_consent_later() {
         forge_layer: false,
         baseline_counter: 1,
         serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     });
     // The older layer, as the primary (back up) serves it: no status at all.
     let older = serve_layer_signed(&sk, &pk, 1);
@@ -1486,6 +1532,9 @@ fn outdated_through_a_mirror_serving_a_genuine_old_index_is_refused() {
         forge_layer: false,
         baseline_counter: 1,
         serve_index: true,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
     });
     let p = project(DEAD, &[&mirror.registry], &mirror.root_hex);
     let out = varve(&p).arg("outdated").output().unwrap();
@@ -1603,4 +1652,269 @@ fn a_directory_pinned_primary_offers_the_env_credential_to_no_included_realm() {
     assert!(!other_reqs.lock().unwrap().is_empty());
     assert!(!any_carries_secret(&other_reqs));
     assert!(!any_carries_secret(&other_token_reqs));
+}
+
+// ───────── varve#311: a verified document is a baseline for later sources ─────────
+//
+// A later source must never pass against a lower bar than an earlier source
+// in the SAME run proved. The primary's verified index or status counts even
+// though the primary's attempt then failed over.
+
+/// The store a project's realm installs into.
+fn project_store(p: &Project) -> varve_core::Store {
+    let realm = varve_core::resolve_realm(&p.dir, "acme").unwrap();
+    varve_core::Store::at(realm.effective_root(&p.root))
+}
+
+/// Seed the realm's cached, verified line index, as an earlier run would have.
+fn seed_index_cache(p: &Project, sk: &[u8], counter: u64) {
+    let doc = varve_core::LineIndex {
+        line: "2026.10".into(),
+        counter,
+        issued_at: "2026-09-24T00:00:00Z".into(),
+        layers: Vec::new(),
+    };
+    let envelope = doc.sign(sk, "k").unwrap();
+    varve_core::IndexCache::at_root(project_store(p).root())
+        .update("2026.10", envelope.as_bytes(), &doc)
+        .unwrap();
+}
+
+/// Seed the realm's cached, verified line-status (no floor), as an earlier
+/// install's baseline would have.
+fn seed_status_cache(p: &Project, sk: &[u8], counter: u64) {
+    let doc = varve_core::LineStatus {
+        line: "2026.10".into(),
+        counter,
+        issued_at: "2026-09-24T00:00:00Z".into(),
+        support_until: Some("2027-01-01".into()),
+        min_counter: None,
+        yanked: Default::default(),
+        known_problems: Vec::new(),
+    };
+    let envelope = doc.sign(sk, "k").unwrap();
+    let line: varve_core::Line = "2026.10".parse().unwrap();
+    varve_core::StatusCache::at_root(project_store(p).root())
+        .update(&line, envelope.as_bytes(), &doc)
+        .unwrap();
+}
+
+/// install: the primary's index (counter 5) verifies, then its blob fails and
+/// the install fails over. The mirror's genuine but OLDER index (counter 2)
+/// must not govern the omission check and be cached.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn install_a_mirror_older_index_is_refused_after_the_primary_verified_a_newer_one() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let spec = |index_counter: u64, drop_tool_blob: bool| Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: Some((probe_bytes(), probe_bytes())),
+        drop_tool_blob,
+        baseline_until: Some("2027-01-01"),
+        published_until: None,
+        forge_published: false,
+        no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
+        serve_index: true,
+        index_counter,
+        status_min_counter: None,
+        drop_tags_list: false,
+    };
+    let primary = serve_spec(spec(5, true));
+    let mirror = serve_spec(spec(2, false));
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    seed_high_water(&p, 1);
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a mirror's older index passed after the primary proved a newer one:\n{stderr}"
+    );
+    assert!(stderr.contains("stale line-index"), "{stderr}");
+    assert!(!installed_anything(&p));
+    let cached = varve_core::IndexCache::at_root(project_store(&p).root())
+        .load("2026.10")
+        .unwrap();
+    assert!(
+        cached.as_ref().is_none_or(|i| i.counter != 2),
+        "the mirror's older index was cached: {cached:?}"
+    );
+}
+
+/// outdated: the primary's index (counter 5) verifies but its listing then
+/// fails, so the closure errors and fails over. The mirror's older index
+/// (counter 2) must not answer "nothing newer".
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn outdated_a_mirror_older_index_is_refused_after_the_primary_verified_a_newer_one() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let spec = |index_counter: u64, drop_tags_list: bool| Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: Some("2027-01-01"),
+        published_until: None,
+        forge_published: false,
+        no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
+        serve_index: true,
+        index_counter,
+        status_min_counter: None,
+        drop_tags_list,
+    };
+    let primary = serve_spec(spec(5, true));
+    let mirror = serve_spec(spec(2, false));
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    seed_index_cache(&p, &sk, 1);
+    let out = varve(&p).arg("outdated").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a mirror's older index answered after the primary proved a newer one:\nstdout:{}\nstderr:{stderr}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(stderr.contains("stale line-index"), "{stderr}");
+    // `outdated` writes nothing (REQ-LAYERDIFF-001 clause 4).
+    let cached = varve_core::IndexCache::at_root(project_store(&p).root())
+        .load("2026.10")
+        .unwrap();
+    assert_eq!(cached.map(|i| i.counter), Some(1));
+}
+
+/// First-contact floor: the primary's verified status states a floor of 5,
+/// then its blob fails. The mirror's older status states none; its counter-2
+/// layer must still be refused as below the floor the primary proved.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn install_a_mirror_without_the_floor_the_primary_proved_is_refused_below_it() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let primary = serve_spec(Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 5,
+        tool: Some((probe_bytes(), probe_bytes())),
+        drop_tool_blob: true,
+        baseline_until: Some("2027-01-01"),
+        published_until: None,
+        forge_published: false,
+        no_layer: false,
+        forge_layer: false,
+        baseline_counter: 3,
+        serve_index: false,
+        index_counter: 1,
+        status_min_counter: Some(5),
+        drop_tags_list: false,
+    });
+    let mirror = serve_spec(Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 2,
+        tool: Some((probe_bytes(), probe_bytes())),
+        drop_tool_blob: false,
+        baseline_until: Some("2027-01-01"),
+        published_until: None,
+        forge_published: false,
+        no_layer: false,
+        forge_layer: false,
+        baseline_counter: 2,
+        serve_index: false,
+        index_counter: 1,
+        status_min_counter: None,
+        drop_tags_list: false,
+    });
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    // History without a mark, so a mirror may answer and the floor is what
+    // bounds it: a cached status with no floor.
+    seed_status_cache(&p, &sk, 1);
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a mirror installed below the floor the primary proved:\n{stderr}"
+    );
+    assert!(stderr.contains("below the floor"), "{stderr}");
+    assert!(!installed_anything(&p));
+}
+
+/// install, listing step: the primary's index (counter 5) verifies, then its
+/// `tags/list` fails (not a blob). Moving the carry below the listing would
+/// lose the primary's index here, and the mirror's older one would pass.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn install_a_mirror_older_index_is_refused_after_the_primary_failed_at_the_listing() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let spec = |index_counter: u64, drop_tags_list: bool| Spec {
+        sk: &sk,
+        pk: &pk,
+        counter: 1,
+        tool: None,
+        drop_tool_blob: false,
+        baseline_until: Some("2027-01-01"),
+        published_until: None,
+        forge_published: false,
+        no_layer: false,
+        forge_layer: false,
+        baseline_counter: 1,
+        serve_index: true,
+        index_counter,
+        status_min_counter: None,
+        drop_tags_list,
+    };
+    let primary = serve_spec(spec(5, true));
+    let mirror = serve_spec(spec(2, false));
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    seed_high_water(&p, 1);
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a mirror's older index passed after the primary's listing failed:\n{stderr}"
+    );
+    assert!(stderr.contains("stale line-index"), "{stderr}");
+    assert!(!installed_anything(&p));
+}
+
+/// The notice names the carried status when IT bounded the mirror: the primary
+/// verified status #3 (floor 5) and then failed; the mirror serves a layer at
+/// the floor with an older status, and the cache holds only status #1.
+// rivet: verifies REQ-MIRROR-002
+#[test]
+fn the_notice_names_a_status_verified_in_this_run_when_it_bounded_the_mirror() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let spec =
+        |baseline_counter: u64, status_min_counter: Option<u64>, drop_tool_blob: bool| Spec {
+            sk: &sk,
+            pk: &pk,
+            counter: 5,
+            tool: Some((probe_bytes(), probe_bytes())),
+            drop_tool_blob,
+            baseline_until: Some("2027-01-01"),
+            published_until: None,
+            forge_published: false,
+            no_layer: false,
+            forge_layer: false,
+            baseline_counter,
+            serve_index: false,
+            index_counter: 1,
+            status_min_counter,
+            drop_tags_list: false,
+        };
+    let primary = serve_spec(spec(3, Some(5), true));
+    let mirror = serve_spec(spec(2, None, false));
+    let p = project(&primary.registry, &[&mirror.registry], &primary.root_hex);
+    seed_status_cache(&p, &sk, 1);
+    let out = varve(&p).arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("a line-status verified earlier in this run (counter 3)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("its cached line-status"), "{stderr}");
 }

@@ -53,6 +53,15 @@ pub enum RollbackVerdict {
 pub struct HighWaterMarks {
     path: PathBuf,
     marks: BTreeMap<String, u64>,
+    /// Documents a source VERIFIED during this run (varve#311). Memory only,
+    /// never written: see [`Self::carry_index`].
+    carried: Carried,
+}
+
+#[derive(Debug, Default)]
+struct Carried {
+    index: BTreeMap<String, crate::lineindex::LineIndex>,
+    status: BTreeMap<String, crate::linestatus::LineStatus>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -89,7 +98,55 @@ impl HighWaterMarks {
                 });
             }
         };
-        Ok(HighWaterMarks { path, marks })
+        Ok(HighWaterMarks {
+            path,
+            marks,
+            carried: Carried::default(),
+        })
+    }
+
+    /// Remember a line index that VERIFIED against the realm's root during this
+    /// run, so a later source in the same operation is judged against it even
+    /// when the source that proved it failed over before its attempt finished
+    /// (varve#311: a later source must never pass against a lower bar than an
+    /// earlier one proved).
+    ///
+    /// In memory only. Nothing is persisted here: persisting is the install's
+    /// own step 7, and a run that ends in a refusal must not leave a raised
+    /// state behind (the cache that decides `has_local_history` is untouched).
+    /// The caller passes only a document that passed signature verification;
+    /// the highest counter is kept.
+    pub fn carry_index(&mut self, doc: crate::lineindex::LineIndex) {
+        let keep = self
+            .carried
+            .index
+            .get(&doc.line)
+            .is_none_or(|have| doc.counter > have.counter);
+        if keep {
+            self.carried.index.insert(doc.line.clone(), doc);
+        }
+    }
+
+    /// The highest verified index carried for `line` this run, if any.
+    pub fn carried_index(&self, line: &str) -> Option<crate::lineindex::LineIndex> {
+        self.carried.index.get(line).cloned()
+    }
+
+    /// As [`Self::carry_index`], for a verified line-status.
+    pub fn carry_status(&mut self, doc: crate::linestatus::LineStatus) {
+        let keep = self
+            .carried
+            .status
+            .get(&doc.line)
+            .is_none_or(|have| doc.counter > have.counter);
+        if keep {
+            self.carried.status.insert(doc.line.clone(), doc);
+        }
+    }
+
+    /// The highest verified line-status carried for `line` this run, if any.
+    pub fn carried_status(&self, line: &str) -> Option<crate::linestatus::LineStatus> {
+        self.carried.status.get(line).cloned()
     }
 
     /// The recorded mark for a line, if any.
@@ -228,6 +285,81 @@ pub fn epoch_days(rfc3339: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    fn idx(line: &str, counter: u64, digest: &str) -> crate::lineindex::LineIndex {
+        crate::lineindex::LineIndex {
+            line: line.into(),
+            counter,
+            issued_at: "2026-08-18T00:00:00Z".into(),
+            layers: vec![crate::lineindex::IndexedLayer {
+                layer: format!("{line}.0"),
+                digest: digest.into(),
+                channel: "rolling".into(),
+                counter: 1,
+            }],
+        }
+    }
+
+    fn status(line: &str, counter: u64, min: Option<u64>) -> crate::linestatus::LineStatus {
+        crate::linestatus::LineStatus {
+            line: line.into(),
+            counter,
+            issued_at: "2026-08-18T00:00:00Z".into(),
+            support_until: None,
+            min_counter: min,
+            yanked: Default::default(),
+            known_problems: Vec::new(),
+        }
+    }
+
+    // rivet: verifies REQ-MIRROR-002
+    #[test]
+    fn carried_documents_keep_the_highest_counter_per_line_and_never_touch_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut marks = HighWaterMarks::load(tmp.path()).unwrap();
+        assert!(marks.carried_index("2026.08").is_none());
+        assert!(marks.carried_status("2026.08").is_none());
+
+        marks.carry_index(idx("2026.08", 5, "sha256:aa"));
+        // Lower, and an equal one with other content, do not displace it.
+        marks.carry_index(idx("2026.08", 2, "sha256:bb"));
+        marks.carry_index(idx("2026.08", 5, "sha256:cc"));
+        assert_eq!(
+            marks.carried_index("2026.08"),
+            Some(idx("2026.08", 5, "sha256:aa"))
+        );
+        marks.carry_index(idx("2026.08", 7, "sha256:dd"));
+        assert_eq!(marks.carried_index("2026.08").unwrap().counter, 7);
+        // Per line.
+        assert!(marks.carried_index("2026.09").is_none());
+
+        marks.carry_status(status("2026.08", 3, Some(5)));
+        marks.carry_status(status("2026.08", 2, None));
+        assert_eq!(
+            marks.carried_status("2026.08"),
+            Some(status("2026.08", 3, Some(5)))
+        );
+        // An equal counter does not displace the first (a tie keeps it).
+        marks.carry_status(status("2026.08", 3, Some(9)));
+        assert_eq!(
+            marks.carried_status("2026.08"),
+            Some(status("2026.08", 3, Some(5)))
+        );
+        marks.carry_status(status("2026.08", 4, Some(6)));
+        assert_eq!(
+            marks.carried_status("2026.08").unwrap().min_counter,
+            Some(6)
+        );
+        assert!(marks.carried_status("2026.09").is_none());
+
+        // In memory only: a reload sees nothing, and no file was written.
+        assert!(
+            HighWaterMarks::load(tmp.path())
+                .unwrap()
+                .carried_index("2026.08")
+                .is_none()
+        );
+        assert!(!tmp.path().join("state").exists());
+    }
 
     // rivet: verifies REQ-PROOF-001
     #[test]

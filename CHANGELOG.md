@@ -29,6 +29,26 @@
 * **`varve-producer plan` refuses an `sdk` or `toolchain` entry with no `asset`**
   (#306) with an error naming the entry, as it already did for a
   `zephyr-module`. It panicked.
+* **A later source is judged against at least what an earlier source verified
+  in the same run, exactly as if it had been cached (varve#311, REQ-MIRROR-002).**
+  A signed line index or
+  line-status that verified from the primary was only kept if the primary's
+  whole attempt then succeeded. If the attempt failed over (a blob error, or a
+  failed listing in `varve outdated`), a mirror was judged against the cached
+  state alone, so its older but validly signed index could govern the omission
+  check and be cached, `outdated` could answer "nothing newer" from it, and a
+  mirror with no or an older line-status removed the first-contact floor the
+  primary had just proved. Each verified document is now the baseline for every
+  later source in the same operation. It is held in memory for the run and is
+  not written to the cache or the high-water mark, so a refused run still leaves
+  nothing behind and `varve outdated` still writes nothing.
+
+  Trade-off: a lagging mirror that used to succeed after the primary failed over
+  is now refused with `stale line-index` when the primary had already proved a
+  newer index. A newer realm-signed line-status still supersedes an older one
+  and states its own first-contact floor, which can be lower; that is unchanged.
+  The mirror notice names a status verified in this run when it, and not the
+  cache, supplied the bound.
 
 ## v0.45.0 — 2026-11-06
 
