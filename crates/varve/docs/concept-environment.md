@@ -75,9 +75,16 @@ across a redirect. A trailing newline is trimmed, so
 **You often do not need this variable at all.** `docker login <registry>` (or
 `podman login`) puts the credential where varve already looks, which is usually
 what you want on a workstation; the variable is for CI and for cloud registries
-whose credential is minted by a command. Either way it is per REGISTRY, not per
-layer: one value covers every `varve install` against that host, and `export`
-reaches the subshells a multi-layer composition is installed from.
+whose credential is minted by a command. Either way it is bound to ONE registry origin, not to a
+layer: it is offered only to a source
+on the same origin (scheme, host, port) as the primary of the realm your
+`varve.toml` pins (or an explicit `--from`); an `[[include]]`d realm on that
+origin gets it too. An included realm or a `support-horizon` realm on another
+origin does not: it falls back to its own docker-config `auths` entry, or to
+anonymous access. With a directory or OCI-layout primary no other realm gets
+it, and `varve support-horizon` outside a pinned project offers it to nobody.
+A mirror on a different origin than the primary never gets it either. If one
+variable used to authenticate two registries, `docker login` to the second.
 
 Credential precedence, first usable match wins:
 
