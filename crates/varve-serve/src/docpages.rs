@@ -133,35 +133,36 @@ pub fn pages(payload: &DocsPayload) -> anyhow::Result<Vec<Page>> {
 
 /// Markup removed, scripts and styles dropped, entities decoded.
 pub fn html_text(html: &str) -> String {
+    // One lowercased copy, searched by offset. `to_ascii_lowercase` keeps
+    // every byte offset, so an index into `lower` is an index into `html`.
+    // Lowercasing the remainder at each `<script`/`<style` instead made a page
+    // of repeated `<script></script>` quadratic: 344 ms for one 512 KiB page.
+    let lower = html.to_ascii_lowercase();
     let mut out = String::new();
-    let mut rest = html;
-    while let Some(open) = rest.find('<') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open..];
-        let lower: String = after
-            .chars()
-            .take(8)
-            .collect::<String>()
-            .to_ascii_lowercase();
-        let skip_to = if lower.starts_with("<script") {
+    let mut at = 0;
+    while let Some(open) = html[at..].find('<').map(|o| at + o) {
+        out.push_str(&html[at..open]);
+        let skip_to = if lower[open..].starts_with("<script") {
             Some("</script>")
-        } else if lower.starts_with("<style") {
+        } else if lower[open..].starts_with("<style") {
             Some("</style>")
         } else {
             None
         };
         if let Some(end_tag) = skip_to {
-            let l = after.to_ascii_lowercase();
-            rest = l.find(end_tag).map_or("", |e| &after[e + end_tag.len()..]);
+            at = lower[open..]
+                .find(end_tag)
+                .map_or(html.len(), |e| open + e + end_tag.len());
             continue;
         }
-        let Some(close) = after.find('>') else {
-            rest = "";
+        let Some(close) = html[open..].find('>') else {
+            at = html.len();
             break;
         };
         out.push(' ');
-        rest = &after[close + 1..];
+        at = open + close + 1;
     }
+    let rest = &html[at..];
     out.push_str(rest);
     decode_entities(&out)
         .lines()
@@ -277,6 +278,20 @@ mod tests {
         assert_eq!(html_text("a < b"), "a");
         assert_eq!(html_text("plain"), "plain");
         assert_eq!(html_text("x<script>never closed"), "x");
+    }
+
+    /// A page made of many `<script>` elements is stripped in one pass.
+    /// Lowercasing the remainder at each one made this quadratic (344 ms for
+    /// one 512 KiB page, against ~3.5 ms now). Every element is still skipped
+    /// with its contents, case-insensitively, and the text after them is kept.
+    // rivet: verifies REQ-AGENTDOCS-005
+    #[test]
+    fn many_script_elements_are_skipped_in_one_pass() {
+        let mut page = "<SCRIPT>evil()</ScRiPt>".repeat(20_000);
+        page.push_str("<style>x{}</STYLE>kept <b>text</b>");
+        assert_eq!(html_text(&page), "kept text");
+        assert_eq!(html_text("a<script>never closed"), "a");
+        assert_eq!(html_text("a<b no close"), "a");
     }
 
     /// What a question is matched against: markdown as written; HTML as text
