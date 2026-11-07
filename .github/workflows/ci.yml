@@ -453,8 +453,12 @@ jobs:
           # change between two layers and what counts as a finding — what a CI
           # gate refuses a toolchain bump on — so it is gated, not declared.
           - shard: varve-core (delta)
+            # ingest.rs joined at v0.47.0: it names the mechanism that vouched
+            # for a tool, and delta's vouch() reads it. Its read-back omitted
+            # `upstream-sums` for releases while it sat in `not-yet`.
             files: >-
               -f crates/varve-core/src/delta.rs
+              -f crates/varve-core/src/ingest.rs
           # NEW at v0.44.0 (REQ-SHIMFALLBACK-001). It decides what a refused
           # shim tells the person to do — which binary to run, which pin line
           # to write — so a wrong answer is a wrong instruction. Small, so its
