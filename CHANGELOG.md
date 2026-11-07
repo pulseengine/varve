@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## v0.46.0 — 2026-11-07
+
+*A registry credential stays with the realm it was set for, a mirror cannot
+pass against less than the primary proved a moment earlier, and the producer
+reads back what it writes.*
+
+Scope chosen by the maintainer on 2026-11-06 (the lean cut): #312, #311, #305
+and #306. The 15 requirements that had been planned for v0.46.0 moved to
+v0.47.0.
 
 ### Upgrading: behaviour that changes
 
@@ -56,6 +64,94 @@
   and states its own first-contact floor, which can be lower; that is unchanged.
   The mirror notice names a status verified in this run when it, and not the
   cache, supplied the bound.
+
+### CI and release machinery
+
+* **The installer-shadow gate runs `install.sh`'s own check** (#318, in #325).
+  It used to grep a copy of the logic. `install.sh` gains a check-only hook,
+  `VARVE_INSTALL_SHADOW_CHECK_ONLY=1`, which the gate uses and a normal
+  install does not set.
+* **A mutation shard that tested nothing, or caught nothing, fails** (#319, in
+  #327). `tools/mutants-verdict.py` scores each shard on its summary line: no
+  summary, a survivor, zero mutants tested, or none caught or timed out is red.
+* **No PR gate is switched off by a repository variable** (#319, in #327). The
+  selfhost-cargo systest no longer reads one, and a test fails if any PR
+  workflow's `if:` reads `vars.`. The `pin` fuzz target gained seeds that reach
+  its deep branch.
+* **`x86_64-apple-darwin` release binaries build on `macos-latest`** (#324),
+  since GitHub retired `macos-14`.
+* **Dependencies:** the wasm-tools crates move to 0.263 as one set, and the
+  Dependabot group now actually groups them (#326). `wsc-attestation` moves to
+  0.12.0 (#323).
+
+### Independent review
+
+A fresh-context, refute-framed review of the whole scope ran at c210e0a3. It
+ran 1977 tests and 8 probes. It is recorded as VER-REVIEW-V0-46-0, and the
+#311 review on its own as VER-REVIEW-311-001.
+
+* **Confirmed:** #312, the credential's binding at every fetch site; #306, no
+  tool kind without an `asset` can reach a panic.
+* **Partial:**
+  * #305: removing the tool-level `deny_unknown_fields` left every test green,
+    and so did a writer field added as `None` everywhere.
+  * #311: "exactly as if it had been cached" overstated the change.
+  * Traceability: REQ-MIRROR-002 still said a source "can only raise" the floor,
+    and no requirement clause stated #311's carry, #312's binding or #306's
+    refusal.
+* **Fixed test-first before promotion** (#332): the `varve docs environment`
+  credential paragraph; a tool-level unknown-key test; a drift test that fails
+  to compile when a writer field is added without the reader; the mirror
+  notice's wording; the CHANGELOG limits; REQ-MIRROR-002 D2, D6 and D7, and
+  REQ-SDKDEPOSIT-001 clause 6.
+* **Filed, not fixed:** #331, a toolchain named only through `asset-for` is
+  refused with a misleading message. It panicked before, and it fails closed.
+
+### Gate potency
+
+Before tagging, the gates that changed since v0.45.0's full audit, the three
+it left unproven, and the gates guarding this release's claims were audited
+on main 137f2042. Each had a violation injected and a clean run beside it.
+These controls ran locally with CI's exact commands, not in GitHub's CI.
+
+* **6 potent:** install-shadow; the mutation verdict and its aggregate gate (a
+  skipped or cancelled shard cannot make it green); the required-context
+  switches, with the change detector failing closed on every error path tried;
+  shellcheck and the Python 3.9 floor; `rivet validate` and trace-gate; fmt,
+  clippy with `-D warnings`, and test.
+* **Coverage** goes red only on a failed test, install or artifact round trip.
+  It has no threshold, by design.
+* **0 inert.**
+* **Weaker than they look (#333):** the install-shadow gate proves the check
+  works, not that the installer calls it; the switch scanner flags only
+  `vars.`; trace-gate counts a draft verification with no steps as evidence.
+  The requirements behind the first two are `implemented`, not `verified`.
+
+### Known limits
+
+* A layer manifest's counter is not carried between sources the way the line
+  index and line-status are.
+* Each `[[include]]` is fetched with its own high-water marks, so nothing an
+  earlier include proved bounds a later one.
+* With a directory `--from`, an include of the pinned realm itself gets no
+  `VARVE_REGISTRY_AUTH` (it fails closed).
+
+### Falsification
+
+This release is wrong if any of these is observed in the field:
+
+* `VARVE_REGISTRY_AUTH` sent to a source whose origin (scheme, host, port)
+  differs from the pinned realm's primary or an explicit `--from`, or sent to
+  any other realm when the pinned primary is a directory or OCI layout;
+* in one run, a mirror's line index older than one the primary had already
+  verified governing the omission check, being cached, or letting
+  `varve outdated` answer "nothing newer";
+* in one run, a mirror installing below a first-contact floor stated by a
+  status the primary had already verified;
+* anything carried between sources found on disk after a run, in the cache or
+  the high-water mark;
+* `varve-producer` failing to read back a spec it wrote, or `varve-producer
+  plan` panicking on any manifest.
 
 ## v0.45.0 — 2026-11-06
 
