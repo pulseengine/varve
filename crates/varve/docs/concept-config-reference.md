@@ -81,6 +81,7 @@ trust-root      = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da
 signed-index    = false                                      # default
 # mirrors       = ["oci://mirror.example/layers"]   # see "mirrors" below
 # Roots this realm used to sign with. DIAGNOSTIC ONLY — see below.
+ignorable       = ["retired-roots"]                   # see "ignorable" below
 retired-roots   = [
   { key = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973", retired = "2026-09-07", last-layer = "2026.09.1" },
 ]
@@ -117,6 +118,24 @@ Two things are operator acts that change what counts as "primary" and "history",
 * **`varve status --from-file <envelope>` caches a verified line-status**, and a cached status counts as history for its line: it lets a mirror answer later. For a line with no high-water mark, its floor then bounds what a mirror may serve (a mirror cannot lower it); once the line has a mark, the mark is what bounds a mirror, and the cached status matters only to rollback consent. Cache only a status you obtained from the realm.
 
 A mirror on a different origin than the primary is also never sent your registry credential (`VARVE_REGISTRY_AUTH`), and a cleartext `oci+http://` mirror is never sent any credential.
+
+### `ignorable` — fields an older varve may skip
+
+A varve refuses a realms file that carries a key it does not know: a newer file may add a security field (`signed-index` was one), and a binary that dropped it would skip the check the file asks for. So an unknown key is an error by default, and the error names the version (`this is varve X.Y.Z`) and says the file may come from a newer varve.
+
+A file can mark the keys that are safe to skip:
+
+```toml
+[realm.acme]
+registry   = "oci://registry.example/acme/layers"
+trust-root = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"
+ignorable  = ["retired-roots"]
+```
+
+* `ignorable` is a list of strings, inside the realm whose keys it covers. A top-level `ignorable` (before the first `[realm.*]` table) covers top-level keys only.
+* A key this varve does **not** know and that `ignorable` names is skipped (silently). A key it does not know and that is not named is refused.
+* **A key this varve knows is always parsed and enforced, even if `ignorable` names it.** `ignorable` cannot switch off `trust-root`, `signed-index` or anything else the binary understands.
+* Only a varve that has this feature honours it. Binaries released before it still refuse the field, and refuse `ignorable` itself. Mark only fields that are diagnostic or advisory; anything a consumer must act on stays unmarked, so an older binary refuses rather than guesses.
 
 ### `retired-roots` — what it is, and emphatically what it is not
 

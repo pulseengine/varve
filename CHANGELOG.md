@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- A realms file can now mark the fields an older varve may skip with `ignorable = ["retired-roots"]` (per realm, or at top level for top-level keys), and varve's own published `varve-realms.toml` does. An unknown field that is not marked is still refused, so a later security field cannot be dropped silently, and a field varve knows is always enforced even if listed. The refusal now names the running varve version and says the file may come from a newer varve. Already-released binaries (0.29.0 and every other tag through 0.46.0) cannot honour `ignorable` and are not helped; this takes effect from the next release on (#234).
 - `varve-producer plan`: an `sdk` or `toolchain` entry that names its files through `asset-for` but sets no `asset` is still refused, but the error now says `asset-for` does not substitute for `asset` on those layouts and an `asset` template is required, instead of claiming the entry names no files (#331).
 
 ### CI and release machinery

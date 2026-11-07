@@ -258,6 +258,12 @@ pub enum RealmError {
 struct RawRealmsFile {
     #[serde(default)]
     realm: BTreeMap<String, RawRealm>,
+    /// Top-level keys an older varve may skip. Consumed before this struct is
+    /// built (see [`parse_realms`]); declared here so it is type-checked and
+    /// not refused as unknown.
+    #[serde(default)]
+    #[allow(dead_code)]
+    ignorable: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -295,6 +301,12 @@ struct RawRealm {
     /// Roots this realm has retired (REQ-ROTATE-002). Diagnostic only.
     #[serde(rename = "retired-roots", default)]
     retired_roots: Vec<RawRetiredRoot>,
+    /// Keys of THIS realm that a varve which does not know them may skip
+    /// (#234), like a non-critical X.509 extension. Consumed before this
+    /// struct is built (see [`parse_realms`]).
+    #[serde(default)]
+    #[allow(dead_code)]
+    ignorable: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -304,6 +316,82 @@ struct RawRetiredRoot {
     retired: String,
     #[serde(rename = "last-layer", default)]
     last_layer: Option<String>,
+}
+
+/// Top-level keys this binary knows. KEEP IN SYNC with [`RawRealmsFile`]
+/// (a test compares them): a key missing here could be skipped by
+/// `ignorable` even though it is enforced.
+const KNOWN_FILE_KEYS: &[&str] = &["realm"];
+
+/// Realm keys this binary knows. KEEP IN SYNC with [`RawRealm`].
+const KNOWN_REALM_KEYS: &[&str] = &[
+    "registry",
+    "mirrors",
+    "trust-root",
+    "trust-root-file",
+    "signed-index",
+    "key-roles",
+    "delegation-file",
+    "retired-roots",
+];
+
+/// Remove from `table` every key that this binary does NOT know and that the
+/// table's own `ignorable` list names. A key this binary knows is never
+/// removed, so `ignorable` cannot switch off a check. A malformed `ignorable`
+/// removes nothing; the strict struct then refuses it. Returns whether
+/// anything was removed.
+fn strip_ignorable(table: &mut toml::Table, known: &[&str]) -> bool {
+    let Some(list) = table.get("ignorable").and_then(toml::Value::as_array) else {
+        return false;
+    };
+    if !list.iter().all(toml::Value::is_str) {
+        return false;
+    }
+    let skip: Vec<String> = list
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter(|k| *k != "ignorable" && !known.contains(k))
+        .map(str::to_string)
+        .collect();
+    let mut stripped = false;
+    for key in skip {
+        stripped |= table.remove(&key).is_some();
+    }
+    stripped
+}
+
+/// Parse a realms file. Unknown keys are refused (fail closed) unless the
+/// file marks them `ignorable` (top level, or inside the realm that carries
+/// them); the refusal says the file may be newer than this binary.
+fn parse_realms(text: &str) -> Result<RawRealmsFile, String> {
+    let hint = |e: toml::de::Error| {
+        let mut reason = e.to_string();
+        if reason.contains("unknown field") {
+            reason.push_str(&format!(
+                "\nThis realms file may come from a newer varve; this is varve {}. Fields a \
+                 newer file marks `ignorable` are skipped; an unknown field that is not marked \
+                 may carry a check this version cannot perform, so it is refused.",
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
+        reason
+    };
+    let mut table: toml::Table = toml::from_str(text).map_err(hint)?;
+    let mut stripped = strip_ignorable(&mut table, KNOWN_FILE_KEYS);
+    if let Some(realms) = table.get_mut("realm").and_then(toml::Value::as_table_mut) {
+        for (_, def) in realms.iter_mut() {
+            if let Some(def) = def.as_table_mut() {
+                stripped |= strip_ignorable(def, KNOWN_REALM_KEYS);
+            }
+        }
+    }
+    if stripped {
+        table.try_into().map_err(hint)
+    } else {
+        // Nothing skipped: parse the original text so errors keep their
+        // line and column.
+        toml::from_str(text).map_err(hint)
+    }
 }
 
 /// Find the realms file by walking up from `start`.
@@ -330,9 +418,9 @@ pub fn realm_names(start: &Path) -> Result<Vec<String>, RealmError> {
         path: path.display().to_string(),
         source,
     })?;
-    let file: RawRealmsFile = toml::from_str(&text).map_err(|e| RealmError::Parse {
+    let file: RawRealmsFile = parse_realms(&text).map_err(|reason| RealmError::Parse {
         path: path.display().to_string(),
-        reason: e.to_string(),
+        reason,
     })?;
     Ok(file.realm.into_keys().collect())
 }
@@ -354,9 +442,9 @@ pub fn resolve_realm(start: &Path, name: &str) -> Result<Realm, RealmError> {
         path: path.display().to_string(),
         source,
     })?;
-    let raw: RawRealmsFile = toml::from_str(&text).map_err(|e| RealmError::Parse {
+    let raw: RawRealmsFile = parse_realms(&text).map_err(|reason| RealmError::Parse {
         path: path.display().to_string(),
-        reason: e.to_string(),
+        reason,
     })?;
     let Some(def) = raw.realm.get(name) else {
         return Err(RealmError::Undefined {
@@ -865,6 +953,166 @@ trust-root = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 "{name} must refuse"
             );
         }
+    }
+
+    // ---- forward compatibility (#234) ----
+
+    fn realm_with_extra(extra: &str) -> String {
+        format!("[realm.r]\nregistry = \"oci://example/x\"\ntrust-root = \"{NEW}\"\n{extra}\n")
+    }
+
+    fn load_err(text: &str) -> String {
+        let tmp = realms_dir(text);
+        resolve_realm(tmp.path(), "r")
+            .expect_err("must refuse")
+            .to_string()
+    }
+
+    /// A newer file marks a field it adds as skippable; this binary skips it.
+    // rivet: verifies REQ-REALM-001
+    #[test]
+    fn an_unknown_field_the_file_marks_ignorable_is_skipped() {
+        let tmp = realms_dir(&realm_with_extra(
+            "ignorable = [\"future-diagnostic\"]\nfuture-diagnostic = [{ anything = 1 }]",
+        ));
+        let realm = resolve_realm(tmp.path(), "r").expect("an ignorable unknown field loads");
+        assert_eq!(realm.name, "r");
+        assert!(realm_names(tmp.path()).unwrap().contains(&"r".to_string()));
+    }
+
+    /// Fail closed: an unknown field NOT marked ignorable is refused, and the
+    /// message says the file may be newer and which varve this is.
+    // rivet: verifies REQ-REALM-001
+    #[test]
+    fn an_unmarked_unknown_field_is_refused_naming_this_version() {
+        for text in [
+            realm_with_extra("future-check = true"),
+            // Marking a DIFFERENT key does not cover this one.
+            realm_with_extra("ignorable = [\"other\"]\nfuture-check = true"),
+        ] {
+            let msg = load_err(&text);
+            assert!(msg.contains("future-check"), "names the field: {msg}");
+            assert!(
+                msg.contains(&format!("varve {}", env!("CARGO_PKG_VERSION"))),
+                "names this binary's version: {msg}"
+            );
+            assert!(msg.contains("newer varve"), "names the likely cause: {msg}");
+        }
+    }
+
+    /// A parse error that is NOT about an unknown field gets no skew hint.
+    // rivet: verifies REQ-REALM-001
+    #[test]
+    fn a_type_error_is_not_blamed_on_version_skew() {
+        let msg = load_err(&realm_with_extra("signed-index = \"yes\""));
+        assert!(!msg.contains("newer varve"), "no false skew hint: {msg}");
+    }
+
+    /// `ignorable` can never switch off a field this binary knows.
+    // rivet: verifies REQ-REALM-001
+    #[test]
+    fn ignorable_cannot_switch_off_a_known_field() {
+        // Still enforced: a malformed value is refused...
+        let msg = load_err(&realm_with_extra(
+            "ignorable = [\"signed-index\"]\nsigned-index = \"yes\"",
+        ));
+        assert!(!msg.contains("newer varve"), "{msg}");
+        let msg = load_err(
+            "[realm.r]\nregistry = \"oci://x\"\ntrust-root = \"zz\"\nignorable = [\"trust-root\"]\n",
+        );
+        assert!(
+            msg.contains("trust root"),
+            "trust-root still validated: {msg}"
+        );
+        // ...and a well-formed one still takes effect.
+        let tmp = realms_dir(&realm_with_extra(
+            "ignorable = [\"signed-index\", \"key-roles\", \"registry\"]\nsigned-index = true",
+        ));
+        assert!(resolve_realm(tmp.path(), "r").unwrap().signed_index);
+    }
+
+    /// Every field this binary knows is on the not-skippable list, and the
+    /// list holds nothing the struct does not know. Drift in either direction
+    /// would let `ignorable` silence a real field.
+    // rivet: verifies REQ-REALM-001
+    #[test]
+    fn the_known_field_lists_match_the_structs() {
+        fn expected(err: &str) -> Vec<String> {
+            // "expected `a` or `b`" for two fields, "expected one of ..." for more.
+            let tail = err.split(", expected ").nth(1).expect("lists fields");
+            let tail = tail.lines().next().unwrap();
+            let mut v: Vec<String> = tail
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect();
+            v.sort();
+            v
+        }
+        let mut file_keys: Vec<String> = KNOWN_FILE_KEYS.iter().map(|s| s.to_string()).collect();
+        file_keys.push("ignorable".into());
+        file_keys.sort();
+        let e = toml::from_str::<RawRealmsFile>("bogus = 1").err().unwrap();
+        assert_eq!(expected(&e.to_string()), file_keys);
+        let mut realm_keys: Vec<String> = KNOWN_REALM_KEYS.iter().map(|s| s.to_string()).collect();
+        realm_keys.push("ignorable".into());
+        realm_keys.sort();
+        let e = toml::from_str::<RawRealm>("bogus = 1").err().unwrap();
+        assert_eq!(expected(&e.to_string()), realm_keys);
+    }
+
+    /// `ignorable` is itself validated.
+    // rivet: verifies REQ-REALM-001
+    #[test]
+    fn ignorable_must_be_a_list_of_strings() {
+        for extra in [
+            "ignorable = [\"a\", 3]",
+            "ignorable = \"a\"",
+            "ignorable = [[\"a\"]]",
+        ] {
+            let msg = load_err(&realm_with_extra(extra));
+            assert!(msg.contains("ignorable"), "names ignorable: {msg}");
+        }
+        let msg = load_err(&format!(
+            "ignorable = [1]\n[realm.r]\nregistry = \"oci://x\"\ntrust-root = \"{NEW}\"\n"
+        ));
+        assert!(msg.contains("ignorable"), "top level too: {msg}");
+    }
+
+    /// Top level carries the same declaration for top-level keys.
+    // rivet: verifies REQ-REALM-001
+    #[test]
+    fn a_top_level_ignorable_skips_a_top_level_field() {
+        let body = format!("[realm.r]\nregistry = \"oci://x\"\ntrust-root = \"{NEW}\"\n");
+        let tmp = realms_dir(&format!(
+            "ignorable = [\"future-top\"]\nfuture-top = 1\n{body}"
+        ));
+        resolve_realm(tmp.path(), "r").expect("loads");
+        let msg = load_err(&format!("future-top = 1\n{body}"));
+        assert!(msg.contains("newer varve"), "{msg}");
+        // A top-level `ignorable` does not excuse a per-realm unknown key.
+        let msg = load_err(&format!(
+            "ignorable = [\"zzz\"]\n[realm.r]\nregistry = \"oci://x\"\ntrust-root = \"{NEW}\"\nzzz = 1\n"
+        ));
+        assert!(msg.contains("zzz"), "{msg}");
+    }
+
+    /// The realms file varve publishes parses, and states what an older
+    /// binary may skip.
+    // rivet: verifies REQ-REALM-001
+    #[test]
+    fn the_published_realms_file_parses_and_marks_retired_roots_ignorable() {
+        let text = include_str!("../../../varve-realms.toml");
+        let dir = realms_dir(text);
+        let realm = resolve_realm(dir.path(), "pulseengine-wasm").expect("published file parses");
+        assert!(!realm.retired_roots.is_empty());
+        resolve_realm(dir.path(), "pulseengine").expect("parses");
+        let table: toml::Table = toml::from_str(text).unwrap();
+        let ign = table["realm"]["pulseengine-wasm"]["ignorable"]
+            .as_array()
+            .expect("the published file declares ignorable");
+        assert!(ign.iter().any(|v| v.as_str() == Some("retired-roots")));
     }
 
     // rivet: verifies REQ-INDEXAUTH-001

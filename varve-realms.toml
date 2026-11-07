@@ -35,6 +35,13 @@ trust-root = "f1300acb791d330da9b81951d4137f5b1fb0c5efc50213deee4d7a981be28745"
 # This is not key rotation and must not be read as one: nothing signs "this new
 # root replaces the old one" (`varve docs threat-model`). It only means the
 # failure explains itself.
+#
+# `ignorable` tells a varve that predates a field it may skip it (#234): a file
+# stays loadable by an older binary only for the fields listed here. A field
+# not listed is refused by a binary that does not know it, because it might
+# carry a check that binary cannot perform. A field a binary DOES know is
+# always enforced, listed or not.
+ignorable = ["retired-roots"]
 retired-roots = [
   # Retired in v0.32.1. It existed ONLY as a write-only CI secret, so nobody
   # could back it up, move it, or rotate with it — varve#110. Every layer from
