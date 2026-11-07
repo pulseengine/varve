@@ -24,15 +24,40 @@ fn workflow(name: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
 }
 
-/// Every `if:` line in `text` that reads a repository variable, as
+/// The exact `if:` conditions a job or step in a PR workflow may carry. An
+/// ALLOWLIST, not a denylist of `vars.`: a denylist misses every switch it did
+/// not think of (`github.repository == 'x/y' &&` passed it, #333 item 2). Each
+/// form here is one currently used, and none reads anything a repository
+/// setting can change. Adding a form is a reviewable edit to this file.
+const ALLOWED_CONDITIONS: &[&str] = &[
+    // a required job: runs unless cancelled or the change touched no code
+    "!cancelled() && needs.changes.outputs.code != 'false'",
+    // the same, for jobs that do not run in the merge queue
+    "!cancelled() && github.event_name != 'merge_group' && needs.changes.outputs.code != 'false'",
+    // the aggregate gates, which must run to turn a skipped shard red
+    "always()",
+    // upload-a-crash-corpus step: runs only to preserve evidence of a failure
+    "failure()",
+];
+
+/// The condition of an `if:` line with its `${{ }}` wrapper stripped, or None
+/// when the line is not an `if:`.
+fn condition(line: &str) -> Option<String> {
+    let t = line.trim_start().trim_start_matches("- ");
+    let c = t.strip_prefix("if:")?.trim();
+    let c = c
+        .strip_prefix("${{")
+        .and_then(|c| c.strip_suffix("}}"))
+        .unwrap_or(c);
+    Some(c.trim().to_string())
+}
+
+/// Every `if:` line in `text` whose condition is not on the allowlist, as
 /// (line number, line).
 fn variable_switches(text: &str) -> Vec<(usize, String)> {
     text.lines()
         .enumerate()
-        .filter(|(_, l)| {
-            let t = l.trim_start().trim_start_matches("- ");
-            t.starts_with("if:") && t.contains("vars.")
-        })
+        .filter(|(_, l)| condition(l).is_some_and(|c| !ALLOWED_CONDITIONS.contains(&c.as_str())))
         .map(|(i, l)| (i + 1, l.trim().to_string()))
         .collect()
 }
@@ -50,22 +75,47 @@ fn no_pr_gate_is_switched_by_a_repository_variable() {
         let found = variable_switches(&w);
         assert!(
             found.is_empty(),
-            "{name} gates a job or step on a repository variable: {found:?}. A \
+            "{name} gates a job or step on a condition outside ALLOWED_CONDITIONS: {found:?}. A \
              skipped required check counts as passed, so deleting the variable \
-             would turn this gate green without running it. Park a gate by \
+             would turn this gate green without running it (a variable, a \
+             repository name, anything a setting or fork can change). Park a gate by \
              editing the workflow, where review sees it."
         );
     }
 }
 
 /// The scanner itself must be able to find what it looks for, at both the
-/// job and the step level, or the test above would pass on nothing.
+/// job and the step level, or the test above would pass on nothing. The
+/// negative controls are permanent: a `vars.` switch AND a non-variable one
+/// (#333 item 2) must both be flagged, and today's forms must not.
 #[test]
-fn the_scanner_finds_a_variable_switch_at_job_and_step_level() {
+fn the_scanner_flags_any_switch_outside_the_allowlist_at_job_and_step_level() {
     let job = "  x:\n    if: ${{ !cancelled() && vars.FLAG == '1' }}\n";
     let step = "    steps:\n      - if: vars.FLAG == '1'\n        run: true\n";
-    let clean = "    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}\n";
-    assert_eq!(variable_switches(job).len(), 1);
-    assert_eq!(variable_switches(step).len(), 1);
-    assert!(variable_switches(clean).is_empty());
+    let repo = "  x:\n    if: ${{ github.repository == 'x/y' && !cancelled() && needs.changes.outputs.code != 'false' }}\n";
+    let actor = "    steps:\n      - if: github.actor != 'bot'\n        run: true\n";
+    for (name, text) in [
+        ("job", job),
+        ("step", step),
+        ("repository", repo),
+        ("actor", actor),
+    ] {
+        assert_eq!(
+            variable_switches(text).len(),
+            1,
+            "{name} switch not flagged"
+        );
+    }
+    for ok in ALLOWED_CONDITIONS {
+        for text in [
+            format!("    if: ${{{{ {ok} }}}}\n"),
+            format!("    if: {ok}\n"),
+            format!("      - if: {ok}\n"),
+        ] {
+            assert!(
+                variable_switches(&text).is_empty(),
+                "allowed form flagged: {text}"
+            );
+        }
+    }
 }

@@ -10,7 +10,10 @@ WHAT COUNTS AS EVIDENCE, and why there are two kinds:
   * a source marker — `// rivet: verifies REQ-X` on a test. This is how a
     property of the CODE is discharged, and it is the cheap path the loop
     prescribes.
-  * an incoming `verifies` edge from a verification artifact. This is how a
+  * an incoming `verifies` edge from a NON-DRAFT verification artifact that
+    has at least one step (a draft one, or one with `steps: []`, runs nothing
+    and does not count; an `inspection` or `review` counts without steps,
+    since what it checked is outside this repository's CI). This is how a
     property of the PIPELINE is discharged — that fuzzing runs, that the
     release matrix covers four platforms, that the mutation gate is required.
     No unit test can assert those, and demanding a marker for them would push
@@ -52,22 +55,59 @@ SOURCES = "crates"
 MARKER = re.compile(r"rivet:\s*(?:partially-)?verifies\s+([A-Z][A-Z0-9-]+)")
 
 
+def counts_as_evidence(a):
+    """Whether an artifact's `verifies` edge is evidence (#333, item 3).
+
+    An edge from a `draft` verification, or from one with no steps, was
+    satisfying this gate for a `verified` requirement although nothing in it
+    is run. Evidence must be non-draft AND name at least one step.
+    """
+    if a.get("status") == "draft":
+        return False
+    fields = a.get("fields") or {}
+    # An inspection or a review records a fact checked by a person or a
+    # fresh-context reviewer -- a published layer in another repository, a
+    # release review -- that nothing in this repository's CI can run. Its
+    # identifiers are in its description; requiring a step would force an
+    # invented one. Every other method must name what it runs.
+    if fields.get("method") in ("inspection", "review"):
+        return True
+    steps = fields.get("steps")
+    if isinstance(steps, str):
+        return bool(steps.strip())
+    return isinstance(steps, list) and len(steps) > 0
+
+
+def edges(artifacts):
+    """(requirement ids with a counting incoming `verifies` edge,
+    {requirement id: ids of edges that were ignored and why})."""
+    incoming, ignored = set(), {}
+    for a in artifacts.values():
+        for link in a.get("links") or []:
+            if isinstance(link, dict) and link.get("type") in (
+                "verifies",
+                "partially-verifies",
+            ):
+                target = link.get("target")
+                if counts_as_evidence(a):
+                    incoming.add(target)
+                else:
+                    ignored.setdefault(target, []).append(a["id"])
+    return incoming, ignored
+
+
 def load():
-    """Every artifact, and every incoming `verifies` target."""
-    artifacts, incoming = {}, set()
+    """Every artifact, the requirements with counting `verifies` evidence, and
+    the edges that were ignored."""
+    artifacts = {}
     for fn in sorted(os.listdir(ARTIFACTS)):
         if not fn.endswith(".yaml"):
             continue
         doc = yaml.safe_load(open(os.path.join(ARTIFACTS, fn))) or {}
         for a in doc.get("artifacts") or []:
             artifacts[a["id"]] = a
-            for link in a.get("links") or []:
-                if isinstance(link, dict) and link.get("type") in (
-                    "verifies",
-                    "partially-verifies",
-                ):
-                    incoming.add(link.get("target"))
-    return artifacts, incoming
+    incoming, ignored = edges(artifacts)
+    return artifacts, incoming, ignored
 
 
 def markers():
@@ -84,7 +124,7 @@ def markers():
 
 
 def main() -> int:
-    artifacts, incoming = load()
+    artifacts, incoming, ignored = load()
     marked = markers()
     reqs = {i: a for i, a in artifacts.items() if a.get("type") == "requirement"}
     verified = {i for i, a in reqs.items() if a.get("status") == "verified"}
@@ -101,9 +141,11 @@ def main() -> int:
         if r not in marked and r not in incoming:
             failures.append(
                 f"{r} is `verified` with NO evidence: no `// rivet: verifies {r}` "
-                f"marker on any test, and no incoming `verifies` link. Either "
-                f"discharge it or move it back to `implemented` — a status is a "
-                f"claim, and this one has nothing behind it."
+                f"marker on any test, and no incoming `verifies` link from a "
+                f"non-draft verification with at least one step"
+                + (f" (ignored: {', '.join(sorted(ignored[r]))})" if r in ignored else "")
+                + f". Either discharge it or move it back to `implemented` — a "
+                f"status is a claim, and this one has nothing behind it."
             )
 
     # 2. A marker naming a requirement that does not exist is a rename's
