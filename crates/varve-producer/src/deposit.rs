@@ -1364,32 +1364,101 @@ mod tests {
     }
 
     /// By construction rather than by remembering: EVERY optional field the
-    /// writer can emit is set at once, and the reader must take the lot. A
-    /// field added to `ToolOut` or `SourceOut` and not to the reader fails
-    /// here, instead of at the next live deposit.
+    /// writer can emit is set at once, and the reader must take the lot.
+    ///
+    /// The mechanism is the compiler, not a regex over source text: the value
+    /// below is a struct literal and the checks that follow are struct
+    /// patterns, and NEITHER uses `..`. A field added to `ToolOut`,
+    /// `SourceOut` or `IncludeOut` makes this test fail to COMPILE until the
+    /// field is listed in both places; the pattern then asserts it is `Some`
+    /// (a field left `None` is never serialised, so it would prove nothing
+    /// about the reader), and the round trip below fails if `PrevTool` /
+    /// `PrevSource` do not know it. Do not add `..` to any of them.
     // rivet: verifies REQ-CARRYFORWARD-001
     #[test]
     fn the_reader_accepts_every_field_the_writer_can_emit() {
-        let mut t = full_tool("everything", "docs");
-        t.platform = Some("x86_64-unknown-linux-gnu".into());
-        t.docs_format = Some("html".into());
-        t.docs_entry = Some("index.html".into());
-        t.docs_title = Some("T".into());
-        t.docs_documents = Some("d".into());
-        t.zephyr_allow_pip = Some(vec!["r.txt".into()]);
-        t.libc = Some("glibc-2.34".into());
-        t.source.proof_signer = Some("s".into());
-        t.source.proof_asserts = Some("a".into());
-        t.source.license = Some("MIT".into());
-        t.source.sbom = Some("x.cdx.json".into());
-        t.source.sbom_sha256 = Some("f".repeat(64));
-        let mut spec = SpecOut::new("2026.11.2", "rolling", 9);
-        spec.tools.push(t);
-        spec.includes.push(crate::spec::IncludeOut {
+        let t = ToolOut {
+            name: "everything".into(),
+            version: "1.0.0".into(),
+            platform: Some("x86_64-unknown-linux-gnu".into()),
+            path: "docs/everything".into(),
+            kind: Some("docs".into()),
+            docs_format: Some("html".into()),
+            docs_entry: Some("index.html".into()),
+            docs_title: Some("T".into()),
+            docs_documents: Some("d".into()),
+            zephyr_allow_pip: Some(vec!["r.txt".into()]),
+            libc: Some("glibc-2.34".into()),
+            source: SourceOut {
+                repo: "pulseengine/everything".into(),
+                release: "v1.0.0".into(),
+                asset: "everything-1.0.0.tar.gz".into(),
+                sha256: "a".repeat(64),
+                proof: Some("cosign-sums".into()),
+                proof_signer: Some("s".into()),
+                proof_asserts: Some("a".into()),
+                license: Some("MIT".into()),
+                sbom: Some("x.cdx.json".into()),
+                sbom_sha256: Some("f".repeat(64)),
+            },
+        };
+        let ToolOut {
+            name: _,
+            version: _,
+            platform,
+            path: _,
+            kind,
+            docs_format,
+            docs_entry,
+            docs_title,
+            docs_documents,
+            zephyr_allow_pip,
+            libc,
+            source,
+        } = &t;
+        let SourceOut {
+            repo: _,
+            release: _,
+            asset: _,
+            sha256: _,
+            proof,
+            proof_signer,
+            proof_asserts,
+            license,
+            sbom,
+            sbom_sha256,
+        } = source;
+        assert!(
+            platform.is_some()
+                && kind.is_some()
+                && docs_format.is_some()
+                && docs_entry.is_some()
+                && docs_title.is_some()
+                && docs_documents.is_some()
+                && zephyr_allow_pip.is_some()
+                && libc.is_some()
+                && proof.is_some()
+                && proof_signer.is_some()
+                && proof_asserts.is_some()
+                && license.is_some()
+                && sbom.is_some()
+                && sbom_sha256.is_some(),
+            "every optional writer field must be set here, or it proves nothing: {t:?}"
+        );
+        let include = crate::spec::IncludeOut {
             digest: format!("sha256:{}", "b".repeat(64)),
             realm: Some("r".into()),
             layer: Some("l".into()),
-        });
+        };
+        let crate::spec::IncludeOut {
+            digest: _,
+            realm,
+            layer,
+        } = &include;
+        assert!(realm.is_some() && layer.is_some());
+        let mut spec = SpecOut::new("2026.11.2", "rolling", 9);
+        spec.tools.push(t);
+        spec.includes.push(include);
         // Serialised directly: `render` would (rightly) refuse a docs payload
         // that also carries `allow-pip`, and this test is about the reader.
         let text = toml::to_string_pretty(&spec).expect("serialises");
@@ -1416,6 +1485,15 @@ mod tests {
         );
         let e = previous_from_spec(&tool_poisoned).expect_err("unknown source field refused");
         assert!(e.to_string().contains("not-a-field"), "{e}");
+        // The tool table itself (PrevTool), not just its source sub-table.
+        let tool_table_poisoned = text.replace("[[tool]]", "[[tool]]\nfrob = 1");
+        assert_ne!(
+            tool_table_poisoned, text,
+            "the fixture must contain [[tool]]: {text}"
+        );
+        let e = previous_from_spec(&tool_table_poisoned)
+            .expect_err("unknown field in a [[tool]] table refused");
+        assert!(e.to_string().contains("frob"), "{e}");
         let top_poisoned = format!("mystery = 1\n{text}");
         previous_from_spec(&top_poisoned).expect_err("unknown top-level field refused");
     }

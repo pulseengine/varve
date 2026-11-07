@@ -2411,7 +2411,8 @@ fn note_mirror_acceptance(
 
 /// What bounded a mirror's answer when there is no high-water mark: the cached
 /// line-status, or, when a status verified in this run has a higher counter
-/// (varve#311), that one. Said as it is so the notice does not credit the cache
+/// (varve#311), that one: a status an earlier source verified, or the answering
+/// source's own, so the wording claims neither. Said as it is so the notice does not credit the cache
 /// for a bound the cache did not supply.
 fn status_bound(
     carried: Option<varve_core::LineStatus>,
@@ -2419,7 +2420,7 @@ fn status_bound(
 ) -> String {
     match carried {
         Some(c) if cached.as_ref().is_none_or(|k| c.counter > k.counter) => format!(
-            "a line-status verified earlier in this run (counter {}), newer than any cached",
+            "a line-status verified in this run (counter {}), newer than any cached",
             c.counter
         ),
         _ => "its cached line-status".to_string(),
@@ -5963,12 +5964,11 @@ mod cli_contract_tests {
     #[test]
     fn the_notice_credits_a_carried_status_only_when_it_is_newer_than_the_cached_one() {
         let carried = super::status_bound(Some(status(3)), Some(status(1)));
-        assert!(
-            carried.contains("verified earlier in this run"),
-            "{carried}"
-        );
+        assert!(carried.contains("verified in this run"), "{carried}");
         assert!(carried.contains("counter 3"), "{carried}");
-        assert!(super::status_bound(Some(status(3)), None).contains("earlier in this run"));
+        assert!(
+            super::status_bound(Some(status(3)), None).contains("verified in this run (counter 3)")
+        );
         // Equal or older than the cache, or nothing carried: the cache bounded it.
         for (c, k) in [
             (Some(status(3)), Some(status(3))),
