@@ -94,6 +94,19 @@ pub enum IngestProof {
 }
 
 impl IngestProof {
+    /// Every mechanism. The single production list that `FromStr`, the
+    /// unknown-mechanism error text and the tests all derive from, so the
+    /// spellings `as_str` writes and the ones `from_str` reads cannot diverge
+    /// (they did once: `upstream-sums` was written but not readable). A new
+    /// variant must be added here; the test `every_variant_is_listed` fails to
+    /// compile until it is matched there and fails if it is not listed.
+    pub const VARIANTS: &'static [IngestProof] = &[
+        IngestProof::CosignSums,
+        IngestProof::BuildProvenance,
+        IngestProof::UpstreamSums,
+        IngestProof::Unverified,
+    ];
+
     /// The canonical wire string, as written in the signed annotation.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -138,22 +151,32 @@ impl fmt::Display for IngestProof {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "unknown ingestion proof '{0}': this varve does not know what that mechanism asserts \
-     (expected one of cosign-sums, build-provenance, unverified). The payload's bytes still \
+     (expected one of {known}). The payload's bytes still \
      verify against the signed digest — only the claim about how they were vouched for is \
-     unreadable here. A newer varve may know it."
+     unreadable here. A newer varve may know it.",
+    known = known_mechanisms()
 )]
 pub struct UnknownProof(pub String);
+
+/// The known wire spellings, comma-separated, generated from
+/// [`IngestProof::VARIANTS`].
+fn known_mechanisms() -> String {
+    IngestProof::VARIANTS
+        .iter()
+        .map(|p| p.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 impl FromStr for IngestProof {
     type Err = UnknownProof;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "cosign-sums" => Ok(IngestProof::CosignSums),
-            "build-provenance" => Ok(IngestProof::BuildProvenance),
-            "unverified" => Ok(IngestProof::Unverified),
-            other => Err(UnknownProof(other.to_string())),
-        }
+        IngestProof::VARIANTS
+            .iter()
+            .copied()
+            .find(|p| p.as_str() == s)
+            .ok_or_else(|| UnknownProof(s.to_string()))
     }
 }
 
@@ -161,19 +184,49 @@ impl FromStr for IngestProof {
 mod tests {
     use super::*;
 
-    /// Every mechanism, in one place, so the tests below cannot silently skip a
-    /// newly added one — the mistake `kind.rs` records having made twice.
-    const ALL: &[IngestProof] = &[
-        IngestProof::CosignSums,
-        IngestProof::BuildProvenance,
-        IngestProof::Unverified,
-    ];
+    use super::IngestProof as P;
+
+    const ALL: &[IngestProof] = IngestProof::VARIANTS;
+
+    /// Drift guard. The `match` has NO wildcard arm, so adding a variant to
+    /// `IngestProof` stops this module compiling until the new variant gets an
+    /// arm here with the next free index; and `every_variant_is_listed` then
+    /// requires `VARIANTS` to hold exactly that many entries, each at the
+    /// index its arm claims. A variant cannot be added without being listed.
+    fn index(p: P) -> usize {
+        match p {
+            P::CosignSums => 0,
+            P::BuildProvenance => 1,
+            P::UpstreamSums => 2,
+            P::Unverified => 3,
+        }
+    }
+    const VARIANT_COUNT: usize = 4;
+
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn every_variant_is_listed() {
+        assert_eq!(IngestProof::VARIANTS.len(), VARIANT_COUNT);
+        for (i, p) in IngestProof::VARIANTS.iter().enumerate() {
+            assert_eq!(index(*p), i, "{p} is listed out of order");
+        }
+    }
+
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_error_names_every_known_mechanism() {
+        let msg = "nope".parse::<IngestProof>().unwrap_err().to_string();
+        for p in ALL {
+            assert!(msg.contains(p.as_str()), "{msg} omits {p}");
+        }
+    }
 
     // rivet: verifies REQ-INGEST-001
     #[test]
     fn the_wire_spelling_round_trips_and_is_what_the_spec_and_the_annotation_share() {
         for p in ALL {
             assert_eq!(p.as_str().parse::<IngestProof>().unwrap(), *p);
+            assert_eq!(p.to_string(), p.as_str(), "Display is the wire spelling");
             // The deposit spec (TOML) and the signed annotation must spell the
             // mechanism the SAME way, or a spec would deposit a proof the
             // consumer reads as unknown. Deserialisation is derived and
@@ -186,6 +239,7 @@ mod tests {
         // these strings are a compatibility promise, inside a signature.
         assert_eq!(IngestProof::CosignSums.as_str(), "cosign-sums");
         assert_eq!(IngestProof::BuildProvenance.as_str(), "build-provenance");
+        assert_eq!(IngestProof::UpstreamSums.as_str(), "upstream-sums");
         assert_eq!(IngestProof::Unverified.as_str(), "unverified");
     }
 
@@ -203,6 +257,7 @@ mod tests {
         }
         assert!(IngestProof::CosignSums.is_verified());
         assert!(IngestProof::BuildProvenance.is_verified());
+        assert!(IngestProof::UpstreamSums.is_verified());
         assert!(
             !IngestProof::Unverified.is_verified(),
             "the whole point of the state is that nothing vouched for it"

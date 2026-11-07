@@ -1908,6 +1908,12 @@ mod tests {
             .annotations
             .insert(crate::ingest::ANN_PROOF.into(), "build-provenance".into());
         assert_eq!(entry.ingest_proof(), Ok(Some(IngestProof::BuildProvenance)));
+        // The proof this build writes for an unsigned upstream digest list
+        // must read back, not fall into the unknown branch.
+        entry
+            .annotations
+            .insert(crate::ingest::ANN_PROOF.into(), "upstream-sums".into());
+        assert_eq!(entry.ingest_proof(), Ok(Some(IngestProof::UpstreamSums)));
         // An unknown mechanism is reported verbatim, never guessed into a
         // known one — a newer varve may mint mechanisms this build has not
         // heard of, and quietly reading one as `cosign-sums` would be a lie.
