@@ -30,8 +30,7 @@
   (#306) with an error naming the entry, as it already did for a
   `zephyr-module`. It panicked.
 * **A later source is judged against at least what an earlier source verified
-  in the same run, exactly as if it had been cached (varve#311, REQ-MIRROR-002).**
-  A signed line index or
+  in the same run (varve#311, REQ-MIRROR-002).** A signed line index or
   line-status that verified from the primary was only kept if the primary's
   whole attempt then succeeded. If the attempt failed over (a blob error, or a
   failed listing in `varve outdated`), a mirror was judged against the cached
@@ -42,6 +41,14 @@
   later source in the same operation. It is held in memory for the run and is
   not written to the cache or the high-water mark, so a refused run still leaves
   nothing behind and `varve outdated` still writes nothing.
+
+  Two limits, so this is not read as "exactly as if cached": a status verified
+  earlier in the run supplies the first-contact floor but does not count as
+  local history for the first-contact rule (only a high-water mark or a cached
+  status does), so it is stricter than a cached one; and a later source that
+  serves no line index on a realm without `signed-index` is not bounded by the
+  carried index, since the omission check is skipped and reported, as with a
+  cached index.
 
   Trade-off: a lagging mirror that used to succeed after the primary failed over
   is now refused with `stale line-index` when the primary had already proved a
