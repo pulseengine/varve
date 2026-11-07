@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `varve-producer plan`: an `sdk` or `toolchain` entry that names its files through `asset-for` but sets no `asset` is still refused, but the error now says `asset-for` does not substitute for `asset` on those layouts and an `asset` template is required, instead of claiming the entry names no files (#331).
+
 ## v0.46.0 — 2026-11-07
 
 *A registry credential stays with the realm it was set for, a mirror cannot
