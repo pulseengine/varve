@@ -118,6 +118,24 @@ Two things are operator acts that change what counts as "primary" and "history",
 
 A mirror on a different origin than the primary is also never sent your registry credential (`VARVE_REGISTRY_AUTH`), and a cleartext `oci+http://` mirror is never sent any credential.
 
+### `ignorable` — fields an older varve may skip
+
+A varve refuses a realms file that carries a key it does not know: a newer file may add a security field (`signed-index` was one), and a binary that dropped it would skip the check the file asks for. So an unknown key is an error by default, and the error names the version (`this is varve X.Y.Z`) and says the file may come from a newer varve.
+
+A file can mark the keys that are safe to skip:
+
+```toml
+[realm.acme]
+registry   = "oci://registry.example/acme/layers"
+trust-root = "7d3b892e6a33c70043becc708e08042e1cef0d54dd5ae6f23d7d4c68de1da1a0"
+ignorable  = ["retired-roots"]
+```
+
+* `ignorable` is a list of strings, inside the realm whose keys it covers. A top-level `ignorable` (before the first `[realm.*]` table) covers top-level keys only.
+* A key this varve does **not** know and that `ignorable` names is skipped (silently). A key it does not know and that is not named is refused.
+* **A key this varve knows is always parsed and enforced, even if `ignorable` names it.** `ignorable` cannot switch off `trust-root`, `signed-index` or anything else the binary understands.
+* Only varve 0.47.0 and later honour it. **A varve before 0.47.0 refuses `ignorable` itself as an unknown key**, so adding `ignorable` to a file breaks it for those binaries. varve's own published file does not carry it yet: `retired-roots` is known to every supported binary and needs no marking. Mark only fields that are diagnostic or advisory; anything a consumer must act on stays unmarked, so an older binary refuses rather than guesses.
+
 ### `retired-roots` — what it is, and emphatically what it is not
 
 `key-roles = true` (default `false`) and `delegation-file = "trust-roots/<realm>.delegation.dsse"` declare that this realm scopes its keys by role (REQ-KEYROLES-001): the root signs only a delegation, and the delegated keys sign layers and statuses. The delegation file is read relative to the realms file, like `trust-root-file`. With `key-roles = true`, a missing, unreadable or refused delegation is an error, never a fallback to root-only. `delegation-file` without `key-roles = true` is refused at load rather than ignored. **Roles are enforced at every verification site** (install, status, line-index, attestation, composition, self-update, `varve-serve`). The role a signature claims is the authenticated payload type of what it signs, never its `keyid`: a LAYER key signs layer manifests, attestations and release sums; a STATUS key signs line-status (advisories included) and line-index; the root signs only the delegation, and a root signature on anything else is refused. The store partition and the SBOM author stay the root's fingerprint. A realm that declares no roles behaves exactly as before. The delegation is read from `delegation-file` only: carrying it with a layer, and refusing a rolled-back delegation, come later. An older varve refuses a realms file that carries either key, rather than verifying a roles realm as root-only. `VARVE_TRUST_ROOT` without a pin is root-only trust and cannot carry a delegation, so a roles realm must be used through a pin (a `varve.toml` naming the realm); only the absence of a `varve.toml` falls back to `VARVE_TRUST_ROOT`, and a `varve.toml` that exists but cannot be loaded is an error naming it. See `varve docs sign-delegation`.
