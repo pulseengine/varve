@@ -78,6 +78,17 @@ class GateProbe(unittest.TestCase):
         # EVENT_NAME runs everything), which is the vacuous-probe shape.
         self.assertEqual(classify([NOT_CODE]), "false")
 
+    def test_the_contract_declares_the_negative_control(self):
+        # `negative_controls` is the field spar#612 uses and that has been
+        # proposed to temper. Every entry must classify as NOT code; the
+        # one this file builds in pieces must be among them.
+        with open(CONTRACT) as f:
+            negatives = json.load(f)["detectors"][0]["negative_controls"]
+        self.assertIn(NOT_CODE, negatives)
+        for path in negatives:
+            with self.subTest(path=path):
+                self.assertEqual(classify([path]), "false")
+
     def test_one_code_path_among_docs_runs_everything(self):
         self.assertEqual(classify([NOT_CODE, "Cargo.toml"]), "true")
 
