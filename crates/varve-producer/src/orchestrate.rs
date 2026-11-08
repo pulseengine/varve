@@ -124,6 +124,14 @@ pub enum RunError {
         field: &'static str,
         tools: Vec<String>,
     },
+    /// A planned asset name does not contain the release it claims to belong
+    /// to, so a signed list for another release could cover it.
+    AssetNotBoundToRelease {
+        tool: String,
+        asset: String,
+        version: String,
+        release: String,
+    },
     /// Something in the outside world failed.
     Io {
         context: String,
@@ -159,6 +167,18 @@ impl fmt::Display for RunError {
                  The proof is a signature over a list of digests; an asset that \
                  is not in the list is not covered by it, however valid the \
                  signature over the list is. Refusing to record it as proven."
+            ),
+            RunError::AssetNotBoundToRelease {
+                tool,
+                asset,
+                version,
+                release,
+            } => write!(
+                f,
+                "{tool}: the asset {asset:?} contains neither the declared version {version:?} \
+                 nor the release {release:?}, so a validly signed list for a different release \
+                 could cover it. Refusing: a signed digest list is bound to a release only \
+                 through the names it lists."
             ),
             RunError::GroupDisagrees {
                 repo,
@@ -769,6 +789,36 @@ fn check_group_agrees(
     disagree("upstream-sums", &|p| p.upstream_sums != first.upstream_sums)
 }
 
+/// Ingestion's own check that a sha256sums-verified asset is bound to a release.
+///
+/// The plan refuses versionless and moving names, but the plan is not the only
+/// way to reach `run`, and a binding that holds only if an earlier step ran is
+/// not one. Every expanded asset name must contain the concrete version or
+/// release (a leading `v` set aside) it is bound to, and only a value that
+/// names ONE release counts.
+fn check_assets_are_bound(plans: &[PayloadPlan], idxs: &[usize]) -> Result<(), RunError> {
+    for i in idxs {
+        let p = &plans[*i];
+        let Some(spec) = &p.pgp_sums else { continue };
+        if spec.format != crate::pgpsums::ListFormat::Sha256Sums {
+            continue;
+        }
+        let bound = [spec.version.as_str(), spec.release.as_str()]
+            .into_iter()
+            .filter(|v| crate::plan::names_a_release(v))
+            .map(|v| v.strip_prefix('v').unwrap_or(v));
+        if !bound.into_iter().any(|b| p.asset.contains(b)) {
+            return Err(RunError::AssetNotBoundToRelease {
+                tool: p.name.clone(),
+                asset: p.asset.clone(),
+                version: spec.version.clone(),
+                release: spec.release.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Walk the whole plan.
 pub fn run<S: Source>(
     src: &S,
@@ -798,6 +848,7 @@ pub fn run<S: Source>(
         // ONE declaration per release, or none: verifying with whichever plan
         // happens to come first would silently skip another member's.
         check_group_agrees(plans, &idxs, &repo, &version)?;
+        check_assets_are_bound(plans, &idxs)?;
         let declared = Declared {
             upstream_sums: sums_asset,
             pgp_sums: idxs.first().and_then(|i| plans[*i].pgp_sums.as_ref()),
@@ -2695,10 +2746,10 @@ mod tests {
     // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn a_good_signature_is_recorded_as_pgp_sums_under_the_fingerprint() {
-        let (f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let (f, pgp, _) = good_pgp_release(&[("a-1.tar.gz", A)]);
         let got = run_pgp(
             &f,
-            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &[pgp_plan("a-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .unwrap();
@@ -2731,17 +2782,25 @@ mod tests {
     #[test]
     fn a_subkey_signature_records_the_signing_subkey_beside_the_identity() {
         let (secret, key) = testkit::generated_key_with_signing_subkey("Sub <sub@example.invalid>");
-        let list = list_for(&[("a.tar.gz", A)]);
+        let list = list_for(&[("a-1.tar.gz", A)]);
         let sig = testkit::sign_binary_with_subkey(&secret, list.as_bytes());
         let primary =
             hex::encode(pgp::types::KeyDetails::fingerprint(&secret.primary_key).as_bytes());
         let sub = hex::encode(
             pgp::types::KeyDetails::fingerprint(&secret.secret_subkeys[0].key).as_bytes(),
         );
-        let (f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &key, &primary);
+        let (f, pgp) = pgp_release(
+            "o/r",
+            "v1",
+            &[("a-1.tar.gz", A)],
+            &list,
+            sig,
+            &key,
+            &primary,
+        );
         let got = run_pgp(
             &f,
-            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &[pgp_plan("a-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .unwrap();
@@ -2766,16 +2825,16 @@ mod tests {
     #[test]
     fn a_bad_signature_is_rejected_and_is_neither_upstream_sums_nor_unverified() {
         let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
-        let list = list_for(&[("a.tar.gz", A)]);
+        let list = list_for(&[("a-1.tar.gz", A)]);
         let sig = testkit::sign_binary(&secret, b"a different list");
-        let (f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &key, "-");
+        let (f, pgp) = pgp_release("o/r", "v1", &[("a-1.tar.gz", A)], &list, sig, &key, "-");
         let mut optins = BTreeMap::new();
         optins.insert("o/r".to_string(), "carry it anyway".to_string());
-        let mut p = pgp_plan("a.tar.gz", pgp.key_path());
+        let mut p = pgp_plan("a-1.tar.gz", pgp.key_path());
         let e = run_pgp(&f, std::slice::from_ref(&p), &optins).expect_err("must refuse");
         assert!(proof_rejected(&e).contains("does not verify"), "{e}");
         // And the bytes were never fetched on the strength of anything.
-        assert!(!f.log().iter().any(|c| c == "fetch o/r@v1/a.tar.gz"));
+        assert!(!f.log().iter().any(|c| c == "fetch o/r@v1/a-1.tar.gz"));
         // A declared unsigned list is no way around it either.
         p.upstream_sums = Some(LIST.into());
         let e = run_pgp(&f, &[p], &optins).expect_err("must refuse");
@@ -2788,12 +2847,12 @@ mod tests {
     fn a_signature_by_a_different_key_is_rejected() {
         let (_, pinned) = testkit::generated_key("Pinned <pinned@example.invalid>");
         let (other, _) = testkit::generated_key("Other <other@example.invalid>");
-        let list = list_for(&[("a.tar.gz", A)]);
+        let list = list_for(&[("a-1.tar.gz", A)]);
         let sig = testkit::sign_binary(&other, list.as_bytes());
-        let (f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &pinned, "-");
+        let (f, pgp) = pgp_release("o/r", "v1", &[("a-1.tar.gz", A)], &list, sig, &pinned, "-");
         let e = run_pgp(
             &f,
-            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &[pgp_plan("a-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .expect_err("must refuse");
@@ -2806,12 +2865,12 @@ mod tests {
     fn a_revoked_pinned_certificate_is_rejected() {
         let (secret, _) = testkit::generated_key("Up Stream <up@example.invalid>");
         let revoked = testkit::revoked_export(&secret);
-        let list = list_for(&[("a.tar.gz", A)]);
+        let list = list_for(&[("a-1.tar.gz", A)]);
         let sig = testkit::sign_binary(&secret, list.as_bytes());
-        let (f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &revoked, "-");
+        let (f, pgp) = pgp_release("o/r", "v1", &[("a-1.tar.gz", A)], &list, sig, &revoked, "-");
         let e = run_pgp(
             &f,
-            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &[pgp_plan("a-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .expect_err("must refuse");
@@ -2823,12 +2882,12 @@ mod tests {
     #[test]
     fn a_text_type_signature_is_rejected() {
         let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
-        let list = list_for(&[("a.tar.gz", A)]);
+        let list = list_for(&[("a-1.tar.gz", A)]);
         let sig = testkit::sign_text(&secret, list.as_bytes());
-        let (f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &key, "-");
+        let (f, pgp) = pgp_release("o/r", "v1", &[("a-1.tar.gz", A)], &list, sig, &key, "-");
         let e = run_pgp(
             &f,
-            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &[pgp_plan("a-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .expect_err("must refuse");
@@ -2840,12 +2899,12 @@ mod tests {
     #[test]
     fn an_asset_the_verified_list_does_not_name_is_a_failure() {
         let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
-        let list = list_for(&[("a.tar.gz", A)]);
+        let list = list_for(&[("a-1.tar.gz", A)]);
         let sig = testkit::sign_binary(&secret, list.as_bytes());
         let (f, pgp) = pgp_release(
             "o/r",
             "v1",
-            &[("a.tar.gz", A), ("b.tar.gz", B)],
+            &[("a-1.tar.gz", A), ("b-1.tar.gz", B)],
             &list,
             sig,
             &key,
@@ -2853,13 +2912,13 @@ mod tests {
         );
         let e = run_pgp(
             &f,
-            &[pgp_plan("b.tar.gz", pgp.key_path())],
+            &[pgp_plan("b-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .expect_err("must refuse");
         assert!(
             matches!(&e, RunError::NotCoveredByProof { asset, mechanism, .. }
-                if asset == "b.tar.gz" && *mechanism == "pgp-sums"),
+                if asset == "b-1.tar.gz" && *mechanism == "pgp-sums"),
             "{e:?}"
         );
     }
@@ -2869,13 +2928,13 @@ mod tests {
     #[test]
     fn an_asset_whose_bytes_differ_from_the_verified_list_is_a_failure() {
         let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
-        let list = list_for(&[("a.tar.gz", A)]);
+        let list = list_for(&[("a-1.tar.gz", A)]);
         let sig = testkit::sign_binary(&secret, list.as_bytes());
-        let (mut f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &key, "-");
-        f.blobs.insert("o/r@v1/a.tar.gz".into(), B.to_vec());
+        let (mut f, pgp) = pgp_release("o/r", "v1", &[("a-1.tar.gz", A)], &list, sig, &key, "-");
+        f.blobs.insert("o/r@v1/a-1.tar.gz".into(), B.to_vec());
         let e = run_pgp(
             &f,
-            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &[pgp_plan("a-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .expect_err("must refuse");
@@ -2887,11 +2946,11 @@ mod tests {
     // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn a_missing_key_file_is_an_error_and_not_a_fallback() {
-        let (f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let (f, pgp, _) = good_pgp_release(&[("a-1.tar.gz", A)]);
         let mut optins = BTreeMap::new();
         optins.insert("o/r".to_string(), "carry it anyway".to_string());
         let missing = pgp.dir.path().join("not-there.asc");
-        let e = run_pgp(&f, &[pgp_plan("a.tar.gz", missing)], &optins).expect_err("must refuse");
+        let e = run_pgp(&f, &[pgp_plan("a-1.tar.gz", missing)], &optins).expect_err("must refuse");
         match &e {
             RunError::Io { context, .. } => {
                 assert!(context.contains("pgp-key-file"), "{context}");
@@ -2910,7 +2969,7 @@ mod tests {
     // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn a_declared_list_the_release_does_not_publish_is_rejected() {
-        let (mut f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let (mut f, pgp, _) = good_pgp_release(&[("a-1.tar.gz", A)]);
         f.probes
             .get_mut("o/r@v1")
             .unwrap()
@@ -2918,7 +2977,7 @@ mod tests {
             .retain(|n| n != LIST_SIG);
         let e = run_pgp(
             &f,
-            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &[pgp_plan("a-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .expect_err("must refuse");
@@ -2933,11 +2992,11 @@ mod tests {
     // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn a_list_that_cannot_be_fetched_is_rejected() {
-        let (mut f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let (mut f, pgp, _) = good_pgp_release(&[("a-1.tar.gz", A)]);
         f.blobs.remove(&format!("o/r@v1/{LIST}"));
         let e = run_pgp(
             &f,
-            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &[pgp_plan("a-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .expect_err("must refuse");
@@ -2949,11 +3008,11 @@ mod tests {
     // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn a_cosign_capable_release_still_picks_cosign_when_pgp_sums_is_declared() {
-        let (_, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
-        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)]);
+        let (_, pgp, _) = good_pgp_release(&[("a-1.tar.gz", A)]);
+        let f = Fixture::signed("o/r", "v1", &[("a-1.tar.gz", A)]);
         let got = run_pgp(
             &f,
-            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &[pgp_plan("a-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .unwrap();
@@ -2969,11 +3028,11 @@ mod tests {
     // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn an_attested_release_still_picks_build_provenance_when_pgp_sums_is_declared() {
-        let (_, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
-        let f = Fixture::attested_as_one_batch("o/r", "v1", &[("a.tar.gz", A)]);
+        let (_, pgp, _) = good_pgp_release(&[("a-1.tar.gz", A)]);
+        let f = Fixture::attested_as_one_batch("o/r", "v1", &[("a-1.tar.gz", A)]);
         let got = run_pgp(
             &f,
-            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &[pgp_plan("a-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .unwrap();
@@ -2986,18 +3045,18 @@ mod tests {
     #[test]
     fn an_entry_with_only_upstream_sums_still_yields_upstream_sums() {
         let mut f = Fixture::default();
-        let list = list_for(&[("a.tar.gz", A)]);
-        f.blobs.insert("o/r@v1/a.tar.gz".into(), A.to_vec());
+        let list = list_for(&[("a-1.tar.gz", A)]);
+        f.blobs.insert("o/r@v1/a-1.tar.gz".into(), A.to_vec());
         f.blobs
             .insert("o/r@v1/sha256.sum".into(), list.as_bytes().to_vec());
         f.probes.insert(
             "o/r@v1".into(),
             ReleaseProbe {
-                published: vec!["a.tar.gz".into(), "sha256.sum".into()],
+                published: vec!["a-1.tar.gz".into(), "sha256.sum".into()],
                 ..Default::default()
             },
         );
-        let mut p = plan("t", "o/r", "v1", "a.tar.gz");
+        let mut p = plan("t", "o/r", "v1", "a-1.tar.gz");
         p.upstream_sums = Some("sha256.sum".into());
         let got = run_pgp(&f, &[p], &BTreeMap::new()).unwrap();
         assert_eq!(got[0].accepted.mechanism, Mechanism::UpstreamSums);
@@ -3180,14 +3239,14 @@ mod tests {
 
     // ------------- one declaration per release; a list is bound to its release
 
-    /// Two plans of one release, from two tools, both asking for `a.tar.gz`
-    /// and `b.tar.gz`, so a group of two is exercised.
+    /// Two plans of one release, from two tools, both asking for `a-1.tar.gz`
+    /// and `b-1.tar.gz`, so a group of two is exercised.
     fn two_tool_group(pgp: &Pgp) -> (Fixture, Vec<PayloadPlan>) {
-        let mut f = good_pgp_release(&[("a.tar.gz", A), ("b.tar.gz", B)]).0;
+        let mut f = good_pgp_release(&[("a-1.tar.gz", A), ("b-1.tar.gz", B)]).0;
         let _ = pgp;
-        f.blobs.insert("o/r@v1/b.tar.gz".into(), B.to_vec());
-        let mut one = plan("one", "o/r", "v1", "a.tar.gz");
-        let mut two = plan("two", "o/r", "v1", "b.tar.gz");
+        f.blobs.insert("o/r@v1/b-1.tar.gz".into(), B.to_vec());
+        let mut one = plan("one", "o/r", "v1", "a-1.tar.gz");
+        let mut two = plan("two", "o/r", "v1", "b-1.tar.gz");
         one.pgp_sums = Some(pgp_spec(pgp.key_path()));
         two.pgp_sums = Some(pgp_spec(pgp.key_path()));
         (f, vec![one, two])
@@ -3296,19 +3355,19 @@ mod tests {
     #[test]
     fn plans_of_one_release_with_identical_declarations_are_accepted() {
         let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
-        let list = list_for(&[("a.tar.gz", A), ("b.tar.gz", B)]);
+        let list = list_for(&[("a-1.tar.gz", A), ("b-1.tar.gz", B)]);
         let sig = testkit::sign_binary(&secret, list.as_bytes());
         let (f, pgp) = pgp_release(
             "o/r",
             "v1",
-            &[("a.tar.gz", A), ("b.tar.gz", B)],
+            &[("a-1.tar.gz", A), ("b-1.tar.gz", B)],
             &list,
             sig,
             &key,
             "-",
         );
-        let mut one = plan("one", "o/r", "v1", "a.tar.gz");
-        let mut two = plan("two", "o/r", "v1", "b.tar.gz");
+        let mut one = plan("one", "o/r", "v1", "a-1.tar.gz");
+        let mut two = plan("two", "o/r", "v1", "b-1.tar.gz");
         one.pgp_sums = Some(pgp_spec(pgp.key_path()));
         two.pgp_sums = Some(pgp_spec(pgp.key_path()));
         let got = run_pgp(&f, &[one, two], &BTreeMap::new()).unwrap();
@@ -3316,35 +3375,6 @@ mod tests {
         assert!(
             got.iter()
                 .all(|r| r.accepted.mechanism == Mechanism::PgpSums)
-        );
-    }
-
-    /// REPLAY, sha256sums: the host serves an OLD validly signed list with the
-    /// OLD assets. The entry now declares the new release, whose asset name
-    /// the old list cannot name.
-    // rivet: verifies REQ-SIGNEDSUMS-001
-    #[test]
-    fn an_older_signed_list_served_for_a_newer_release_is_refused() {
-        let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
-        let old = list_for(&[("t-1.0.tar.gz", A)]);
-        let sig = testkit::sign_binary(&secret, old.as_bytes());
-        let (mut f, pgp) = pgp_release("o/r", "v2", &[("t-1.0.tar.gz", A)], &old, sig, &key, "-");
-        // The attacker also serves the old bytes under the NEW asset name.
-        f.probes
-            .get_mut("o/r@v2")
-            .unwrap()
-            .published
-            .push("t-2.0.tar.gz".into());
-        f.blobs.insert("o/r@v2/t-2.0.tar.gz".into(), A.to_vec());
-        let mut p = plan("t", "o/r", "v2", "t-2.0.tar.gz");
-        let mut spec = pgp_spec(pgp.key_path());
-        spec.version = "2.0".into();
-        spec.release = "v2".into();
-        p.pgp_sums = Some(spec);
-        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
-        assert!(
-            matches!(&e, RunError::NotCoveredByProof { asset, .. } if asset == "t-2.0.tar.gz"),
-            "{e:?}"
         );
     }
 
@@ -3370,10 +3400,10 @@ mod tests {
     // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn the_recorded_assertion_names_the_release_it_was_bound_to() {
-        let (f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let (f, pgp, _) = good_pgp_release(&[("a-1.tar.gz", A)]);
         let got = run_pgp(
             &f,
-            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &[pgp_plan("a-1.tar.gz", pgp.key_path())],
             &BTreeMap::new(),
         )
         .unwrap();
@@ -3385,5 +3415,150 @@ mod tests {
             "{}",
             got[0].accepted.asserts
         );
+    }
+
+    /// The same plans an operator's input would produce, so the test goes
+    /// through the PLAN path and not around it.
+    fn planned(
+        version: &str,
+        asset: &str,
+        key_file: &std::path::Path,
+    ) -> Result<Vec<PayloadPlan>, crate::plan::PlanError> {
+        let text = format!(
+            "[varve]\nversion = \"v0.29.0\"\n\n[realm]\nname = \"r\"\nchannel = \"rolling\"\n\
+             registry = \"oci://x\"\n\n[[tool]]\nname = \"t\"\nrepo = \"o/r\"\n\
+             version = \"{version}\"\nasset = \"{asset}\"\npgp-sums = \"SUMS-%V\"\n\
+             pgp-key-file = \"{}\"\n",
+            key_file.display()
+        );
+        let m = varve_core::layerspec::parse_layer_manifest(&text).expect("parses");
+        crate::plan::plan(&m, &["x86_64-unknown-linux-gnu"])
+    }
+
+    /// REPLAY, sha256sums, through the plan path: an OLD release's list and
+    /// assets are validly signed, and the entry now declares the new release.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_older_signed_list_served_for_a_newer_release_is_refused() {
+        let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
+        let old = list_for(&[("t-1.0.tar.gz", A)]);
+        let sig = testkit::sign_binary(&secret, old.as_bytes());
+        let (mut f, pgp) = pgp_release("o/r", "2.0", &[("t-1.0.tar.gz", A)], &old, sig, &key, "-");
+        // The host serves the list and signature under the NEW release's names
+        // and the old bytes under the new asset name.
+        for name in ["SUMS-2.0", "SUMS-2.0.asc"] {
+            let from = if name.ends_with(".asc") {
+                LIST_SIG
+            } else {
+                LIST
+            };
+            let bytes = f.blobs.get(&format!("o/r@2.0/{from}")).unwrap().clone();
+            f.blobs.insert(format!("o/r@2.0/{name}"), bytes);
+            f.probes
+                .get_mut("o/r@2.0")
+                .unwrap()
+                .published
+                .push(name.into());
+        }
+        f.probes
+            .get_mut("o/r@2.0")
+            .unwrap()
+            .published
+            .push("t-2.0.tar.gz".into());
+        f.blobs.insert("o/r@2.0/t-2.0.tar.gz".into(), A.to_vec());
+        let plans = planned("2.0", "t-%V.tar.gz", &pgp.key_path()).expect("a real version plans");
+        let e = run_pgp(&f, &plans, &BTreeMap::new()).expect_err("must refuse");
+        assert!(
+            matches!(&e, RunError::NotCoveredByProof { asset, .. } if asset == "t-2.0.tar.gz"),
+            "{e:?}"
+        );
+    }
+
+    /// REPLAY by MOVING TAG: with a version of `latest` the expanded names are
+    /// the same every time, so the old list names exactly what is asked for.
+    /// Only the plan can refuse this.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_moving_tag_cannot_be_planned_so_an_old_list_never_covers_it() {
+        let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
+        let old = list_for(&[("t-latest.tar.gz", A)]);
+        let sig = testkit::sign_binary(&secret, old.as_bytes());
+        let (_, pgp) = pgp_release(
+            "o/r",
+            "latest",
+            &[("t-latest.tar.gz", A)],
+            &old,
+            sig,
+            &key,
+            "-",
+        );
+        let err = planned("latest", "t-%V.tar.gz", &pgp.key_path()).expect_err("must refuse");
+        assert!(
+            matches!(err, crate::plan::PlanError::PgpSumsMovingTag { .. }),
+            "{err}"
+        );
+    }
+
+    /// Ingestion does not trust that the plan ran: every expanded asset name
+    /// must contain the concrete version or release it is bound to.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_asset_name_that_carries_no_release_is_refused_at_ingestion() {
+        let (f, pgp, _) = good_pgp_release(&[("a-1.tar.gz", A)]);
+        let mut p = pgp_plan("a-1.tar.gz", pgp.key_path());
+        p.asset = "a.tar.gz".into();
+        let spec = p.pgp_sums.as_mut().unwrap();
+        spec.version = "2.0".into();
+        spec.release = "v2".into();
+        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
+        assert!(
+            matches!(&e, RunError::AssetNotBoundToRelease { asset, .. } if asset == "a.tar.gz"),
+            "{e:?}"
+        );
+        assert!(
+            f.log().iter().all(|c| !c.starts_with("fetch")),
+            "{:?}",
+            f.log()
+        );
+    }
+
+    /// Ingestion refuses a moving version on its own account too.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_moving_version_is_refused_at_ingestion_even_when_the_name_contains_it() {
+        let (f, pgp, _) = good_pgp_release(&[("a-1.tar.gz", A)]);
+        let mut p = pgp_plan("a-1.tar.gz", pgp.key_path());
+        p.asset = "a-latest.tar.gz".into();
+        let spec = p.pgp_sums.as_mut().unwrap();
+        spec.version = "latest".into();
+        spec.release = "latest".into();
+        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
+        assert!(
+            matches!(e, RunError::AssetNotBoundToRelease { .. }),
+            "{e:?}"
+        );
+    }
+
+    /// Either the version or the release in the name binds it, a leading `v`
+    /// is not part of either.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_name_carrying_the_version_or_the_release_is_accepted_at_ingestion() {
+        for (asset, version, release) in [
+            ("t-1.2.3.tar.gz", "v1.2.3", "rel"),
+            ("t-1.2.3.tar.gz", "v1.2.3", "v1.2.3"),
+            ("t-2026-10-01.tar.gz", "other", "2026-10-01"),
+        ] {
+            let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
+            let list = list_for(&[(asset, A)]);
+            let sig = testkit::sign_binary(&secret, list.as_bytes());
+            let (f, pgp) = pgp_release("o/r", "v1", &[(asset, A)], &list, sig, &key, "-");
+            let mut p = pgp_plan(asset, pgp.key_path());
+            let spec = p.pgp_sums.as_mut().unwrap();
+            spec.version = version.into();
+            spec.release = release.into();
+            run_pgp(&f, &[p], &BTreeMap::new())
+                .unwrap_or_else(|e| panic!("{asset} {version} {release}: {e}"));
+        }
     }
 }
