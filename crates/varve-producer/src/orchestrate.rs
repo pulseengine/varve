@@ -2072,6 +2072,7 @@ mod tests {
                 mechanism: Mechanism::Unverified,
                 signer: Some("nobody".into()),
                 asserts: "no proof was offered".into(),
+                signing_key: None,
             },
             sums: None,
         };
@@ -2306,6 +2307,7 @@ mod tests {
                 mechanism: Mechanism::Unverified,
                 signer: None,
                 asserts: "no proof was offered".into(),
+                signing_key: None,
             },
             sums: None,
         };
@@ -2741,6 +2743,12 @@ mod tests {
             signer.starts_with(&format!("openpgp:{}", pgp.fingerprint)),
             "{signer}"
         );
+        // Recorded as its own field whenever pgp-sums vouched; for a primary-key
+        // signature it is the primary.
+        assert_eq!(
+            got[0].accepted.signing_key.as_deref(),
+            Some(pgp.fingerprint.as_str())
+        );
         let asserts = &got[0].accepted.asserts;
         assert!(
             asserts.contains(&format!("OpenPGP key {}", pgp.fingerprint)),
@@ -2788,6 +2796,11 @@ mod tests {
         assert!(
             signer.starts_with(&format!("openpgp:{primary}")),
             "{signer}"
+        );
+        assert_eq!(
+            got[0].accepted.signing_key.as_deref(),
+            Some(sub.as_str()),
+            "the subkey that signed is recorded apart from the identity"
         );
         assert!(
             got[0]
@@ -3014,6 +3027,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got[0].accepted.mechanism, Mechanism::CosignSums);
+        assert_eq!(got[0].accepted.signing_key, None);
         assert!(
             !f.log().iter().any(|c| c.contains(LIST)),
             "cosign decided first; the signed list is never consulted: {:?}",

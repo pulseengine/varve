@@ -184,6 +184,7 @@ fn what_layer_toml_declares_is_what_the_signed_layer_says() {
                 mechanism: Mechanism::CosignSums,
                 signer: Some("https://github.com/pulseengine/varve/.github/workflows/release.yml@refs/tags/v0.36.0".into()),
                 asserts: "SHA256SUMS.txt".into(),
+                signing_key: None,
             },
             bytes: None,
             decision: Decision::Fetch {
@@ -581,6 +582,7 @@ asset   = "ordeal-%V-%T.tar.gz"
             mechanism: Mechanism::Unverified,
             signer: None,
             asserts: "NOTHING vouched for these bytes; fixture".into(),
+            signing_key: None,
         };
         let r = Resolved {
             plan: item.clone(),

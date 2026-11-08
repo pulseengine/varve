@@ -47,6 +47,12 @@ pub const ANN_PROOF: &str = "eu.pulseengine.source.proof";
 /// The identity that vouched: the certificate identity cosign matched, or the
 /// attestation's `buildSignerURI`. Absent where nothing vouched.
 pub const ANN_PROOF_SIGNER: &str = "eu.pulseengine.source.proof-signer";
+/// The key that actually produced the signature, when it is a different fact
+/// from `ANN_PROOF_SIGNER` (REQ-SIGNEDSUMS-001 clause 1): for an OpenPGP list,
+/// the signer is the certificate's primary fingerprint and this is the
+/// (sub)key that signed. Recorded separately because collapsing them is how a
+/// compromised subkey goes unnoticed. Absent for mechanisms with no such split.
+pub const ANN_PROOF_SIGNING_KEY: &str = "eu.pulseengine.source.proof-signing-key";
 /// One line stating what that mechanism ASSERTED — the sums blob it covered,
 /// the source commit it bound the build to, or the operator's recorded reason
 /// for shipping bytes nothing vouched for.

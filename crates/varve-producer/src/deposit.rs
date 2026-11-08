@@ -99,6 +99,9 @@ pub fn previous_from_spec(text: &str) -> anyhow::Result<BTreeMap<String, Previou
         #[serde(rename = "proof-asserts", default)]
         #[allow(dead_code)]
         proof_asserts: Option<String>,
+        #[serde(rename = "proof-signing-key", default)]
+        #[allow(dead_code)]
+        proof_signing_key: Option<String>,
         // Carried only so a spec this run itself wrote does not trip
         // `deny_unknown_fields` next time around; carry-forward does not
         // need either value — the fresh probe decides them again.
@@ -362,6 +365,7 @@ pub fn stage_one<R: CommandRunner>(
             proof: Some(r.accepted.mechanism.as_str().to_string()),
             proof_signer: r.accepted.signer.clone(),
             proof_asserts: Some(r.accepted.asserts.clone()),
+            proof_signing_key: r.accepted.signing_key.clone(),
             license: r.license.clone(),
             sbom: r.sbom.as_ref().map(|s| s.name.clone()),
             sbom_sha256: r.sbom.as_ref().map(|s| s.sha256.clone()),
@@ -541,6 +545,7 @@ mod tests {
                 mechanism: crate::ingest::Mechanism::CosignSums,
                 signer: Some("s".into()),
                 asserts: "a".into(),
+                signing_key: None,
             },
             bytes: None,
             decision: crate::carryforward::Decision::Fetch {
@@ -1158,6 +1163,7 @@ mod tests {
             proof: Some("cosign-sums".into()),
             proof_signer: Some("https://github.com/pulseengine/rivet/".into()),
             proof_asserts: Some("signed".into()),
+            proof_signing_key: None,
             license: None,
             sbom: None,
             sbom_sha256: None,
@@ -1255,6 +1261,7 @@ mod tests {
                 proof: Some("cosign-sums".into()),
                 proof_signer: Some("https://github.com/pulseengine/rivet/".into()),
                 proof_asserts: Some("signed".into()),
+                proof_signing_key: None,
                 license: Some("MIT".into()),
                 sbom: Some("rivet-v0.34.0.cdx.json".into()),
                 sbom_sha256: Some("f".repeat(64)),
@@ -1291,6 +1298,7 @@ mod tests {
                 proof: Some("cosign-sums".into()),
                 proof_signer: None,
                 proof_asserts: None,
+                proof_signing_key: None,
                 license: None,
                 sbom: None,
                 sbom_sha256: None,
@@ -1325,6 +1333,7 @@ mod tests {
                 proof: Some("cosign-sums".into()),
                 proof_signer: None,
                 proof_asserts: None,
+                proof_signing_key: None,
                 license: None,
                 sbom: None,
                 sbom_sha256: None,
@@ -1394,6 +1403,7 @@ mod tests {
                 proof: Some("cosign-sums".into()),
                 proof_signer: Some("s".into()),
                 proof_asserts: Some("a".into()),
+                proof_signing_key: Some("k".into()),
                 license: Some("MIT".into()),
                 sbom: Some("x.cdx.json".into()),
                 sbom_sha256: Some("f".repeat(64)),
@@ -1421,6 +1431,7 @@ mod tests {
             proof,
             proof_signer,
             proof_asserts,
+            proof_signing_key,
             license,
             sbom,
             sbom_sha256,
@@ -1437,6 +1448,7 @@ mod tests {
                 && proof.is_some()
                 && proof_signer.is_some()
                 && proof_asserts.is_some()
+                && proof_signing_key.is_some()
                 && license.is_some()
                 && sbom.is_some()
                 && sbom_sha256.is_some(),
@@ -1583,6 +1595,7 @@ mod tests {
                 mechanism: crate::ingest::Mechanism::CosignSums,
                 signer: Some("s".into()),
                 asserts: "a".into(),
+                signing_key: None,
             },
             bytes: None,
             decision: crate::carryforward::Decision::Fetch {
@@ -1657,6 +1670,7 @@ mod tests {
                 mechanism: crate::ingest::Mechanism::CosignSums,
                 signer: Some("s".into()),
                 asserts: "a".into(),
+                signing_key: None,
             },
             bytes: None,
             decision: crate::carryforward::Decision::Fetch {

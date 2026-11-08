@@ -179,6 +179,7 @@ pub enum PgpSumsProbe {
 pub struct VerifiedPgpSums {
     signer: String,
     asserts: String,
+    signing_key: String,
     sums: crate::sums::Sums,
 }
 
@@ -211,6 +212,7 @@ impl PgpSumsProbe {
                  are trustworthy",
                 vouched.primary_fingerprint, bound.release, bound.version
             ),
+            signing_key: vouched.signing_fingerprint.clone(),
             sums,
         })
     }
@@ -262,6 +264,10 @@ pub struct Accepted {
     /// cannot express it.
     pub signer: Option<String>,
     pub asserts: String,
+    /// The key that actually produced the signature, where that is a different
+    /// fact from `signer`: for `pgp-sums`, the (sub)key under the certificate
+    /// the signer names. `None` for every mechanism with no such split.
+    pub signing_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -496,6 +502,7 @@ pub fn choose(
                 mechanism: Mechanism::CosignSums,
                 signer: Some(signer),
                 asserts,
+                signing_key: None,
             });
         }
         // The one branch that must never become a fallback.
@@ -514,6 +521,7 @@ pub fn choose(
                 mechanism: Mechanism::BuildProvenance,
                 signer: Some(signer),
                 asserts,
+                signing_key: None,
             });
         }
         Rung::Failed(detail) => {
@@ -531,10 +539,16 @@ pub fn choose(
     // signature at all.
     match rung_pgp_sums(probe) {
         Rung::Accepted { signer, asserts } => {
+            // Recorded as its own fact whenever this rung vouched.
+            let signing_key = match &probe.pgp_sums {
+                PgpSumsProbe::Verified(v) => Some(v.signing_key.clone()),
+                _ => None,
+            };
             return Ok(Accepted {
                 mechanism: Mechanism::PgpSums,
                 signer: Some(signer),
                 asserts,
+                signing_key,
             });
         }
         Rung::Failed(detail) => {
@@ -556,6 +570,7 @@ pub fn choose(
                 mechanism: Mechanism::UpstreamSums,
                 signer: Some(signer),
                 asserts,
+                signing_key: None,
             });
         }
         Rung::Failed(detail) => {
@@ -576,6 +591,7 @@ pub fn choose(
                 "NOTHING vouched for these bytes — ingested on an explicit \
                  operator opt-in. Recorded reason: {reason}"
             ),
+            signing_key: None,
         }),
         Some(_) => Err(IngestError::OptInWithoutReason {
             repo: repo.to_string(),
@@ -1183,6 +1199,7 @@ mod pgp_sums_tests {
             signer: "openpgp:abcd (Up Stream <up@example.invalid>)".into(),
             asserts: "the publisher holding OpenPGP key abcd signed the digest list".into(),
             sums: Sums::default(),
+            signing_key: "abcd".into(),
         })
     }
 
