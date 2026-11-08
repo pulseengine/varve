@@ -604,14 +604,19 @@ pub fn verify_and_parse_sha256sums(
 /// equals the version token of the manifest's `rust` package (`1.98.1` out of
 /// `1.98.1 (48a229cea 2026-09-01)`); or the manifest's `date` equals the
 /// declared version or release tag as written (a mirror that tags releases by
-/// channel date). Anything else is a different release, however well signed.
+/// channel date). When that version has a PRERELEASE part (any `-`: `-nightly`,
+/// `-beta.2`) only the date binds, because every build of the cycle carries the
+/// same version. Anything else is a different release, however well signed.
 fn channel_is_for(channel: &RustChannel, bound: &BoundRelease<'_>) -> Result<(), PgpSumsError> {
     let bare = |s: &str| s.strip_prefix('v').unwrap_or(s).to_string();
     let declared = [bound.version, bound.release];
+    // A PRERELEASE version (`1.99.0-nightly`, `-beta.2`: anything with a `-`) is
+    // shared by every build of its cycle, so matching it binds nothing; only
+    // the date can tell one nightly from the next.
     let by_version = channel
         .rust_version
         .as_ref()
-        .is_some_and(|v| declared.iter().any(|d| bare(d) == *v));
+        .is_some_and(|v| !v.contains('-') && declared.iter().any(|d| bare(d) == *v));
     let by_date = declared.iter().any(|d| *d == channel.date);
     if by_version || by_date {
         return Ok(());
@@ -2105,5 +2110,69 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
     fn the_real_rust_key_still_verifies_under_the_flag_rules() {
         let v = verify_detached_signature(&rust_manifest(), RUST_SIG_ASC, RUST_KEY_ASC).unwrap();
         assert_eq!(v.signing_fingerprint, RUST_PRIMARY_FPR);
+    }
+
+    // ------------------------------------------- prereleases bind by date
+
+    /// A tiny signed channel manifest whose `rust` package says `version_line`.
+    fn signed_channel(version_line: &str, date: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let (secret, key) = generated_key("n <n@example.invalid>");
+        let manifest = format!(
+            "manifest-version = \"2\"\ndate = \"{date}\"\n\n[pkg.rust]\nversion = \"{version_line}\"\n"
+        )
+        .into_bytes();
+        let signature = sign_binary(&secret, &manifest);
+        (manifest, signature, key)
+    }
+
+    fn bound_to(
+        (manifest, signature, key): &(Vec<u8>, Vec<u8>, Vec<u8>),
+        version: &str,
+        release: &str,
+    ) -> Result<VerifiedList, PgpSumsError> {
+        verify_digest_list(
+            ListFormat::RustChannel,
+            manifest,
+            signature,
+            key,
+            &BoundRelease { version, release },
+        )
+    }
+
+    /// Every nightly of a cycle carries the SAME version, so a version match
+    /// binds nothing: the older nightly (validly signed) must not stand in for
+    /// a newer date.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_older_nightly_served_for_a_newer_nightly_is_refused() {
+        let older = signed_channel("1.99.0-nightly (abc123 2026-09-30)", "2026-10-01");
+        // The version matches exactly, and the date is a day old.
+        let err = bound_to(&older, "1.99.0-nightly", "2026-10-02").unwrap_err();
+        assert!(matches!(err, PgpSumsError::WrongRelease { .. }), "{err}");
+        let err = bound_to(&older, "2026-10-02", "1.99.0-nightly").unwrap_err();
+        assert!(matches!(err, PgpSumsError::WrongRelease { .. }), "{err}");
+        // A version match alone is not enough even with nothing else declared.
+        let err = bound_to(&older, "1.99.0-nightly", "v1").unwrap_err();
+        assert!(matches!(err, PgpSumsError::WrongRelease { .. }), "{err}");
+        // The right date binds it.
+        bound_to(&older, "1.99.0-nightly", "2026-10-01").unwrap();
+    }
+
+    /// Any prerelease part (`-beta.2`, `-rc.1`, `-nightly`) is the same shape.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn every_prerelease_binds_by_date_and_a_stable_still_binds_by_version() {
+        for pre in ["1.99.0-beta.2", "1.99.0-rc.1", "1.99.0-nightly"] {
+            let c = signed_channel(&format!("{pre} (abc 2026-09-30)"), "2026-10-01");
+            let err = bound_to(&c, pre, pre).unwrap_err();
+            assert!(
+                matches!(err, PgpSumsError::WrongRelease { .. }),
+                "{pre}: {err}"
+            );
+            bound_to(&c, pre, "2026-10-01").unwrap_or_else(|e| panic!("{pre}: {e}"));
+        }
+        let stable = signed_channel("1.99.0 (abc 2026-09-30)", "2026-10-01");
+        bound_to(&stable, "1.99.0", "v1").unwrap();
+        bound_to(&stable, "v1", "v1.99.0").unwrap();
     }
 }
