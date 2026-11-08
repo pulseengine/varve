@@ -174,6 +174,25 @@ pub enum PgpSumsError {
     )]
     KeyRevoked { count: usize },
     #[error(
+        "the certificate's own signature that decides whether key {fingerprint} may sign is made \
+         with {hash} ({bits} bits), below the {floor}-bit floor this module requires"
+    )]
+    CertificateSignatureWeak {
+        fingerprint: String,
+        hash: String,
+        bits: usize,
+        floor: usize,
+    },
+    #[error(
+        "signature {index} states no creation time in its hashed area, which RFC 9580 requires"
+    )]
+    SignatureHasNoCreationTime { index: usize },
+    #[error(
+        "signature {index} carries a CRITICAL hashed subpacket ({kind}) this module does not \
+         understand, and a signature that depends on one cannot be honoured"
+    )]
+    CriticalSubpacket { index: usize, kind: String },
+    #[error(
         "the signature was made by subkey {fingerprint}, which the certificate's primary key \
          has REVOKED — a revoked subkey vouches for nothing"
     )]
@@ -313,11 +332,7 @@ pub fn verify_detached_signature(
     let mut candidates: Vec<(&dyn VerifyCandidate, String, Standing)> = vec![(
         &cert.primary_key,
         primary_fingerprint.clone(),
-        if primary_may_sign(&cert) {
-            Standing::Good
-        } else {
-            Standing::PrimaryNotForSigning
-        },
+        primary_standing(&cert),
     )];
     for subkey in &cert.public_subkeys {
         candidates.push((
@@ -679,9 +694,15 @@ impl VerifyCandidate for pgp::packet::PublicSubkey {
 }
 
 /// Whether a key in the certificate may stand behind a signature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Standing {
     Good,
+    /// The certificate signature that decides this key's standing is made with
+    /// a hash below the floor.
+    WeakCertificate {
+        hash: String,
+        bits: usize,
+    },
     /// The primary has revoked this subkey.
     Revoked,
     /// The subkey's latest binding does not carry the SIGN flag (0x02), or it
@@ -692,9 +713,15 @@ enum Standing {
 }
 
 impl Standing {
-    fn refusal(self, fingerprint: &str) -> PgpSumsError {
+    fn refusal(&self, fingerprint: &str) -> PgpSumsError {
         let fingerprint = fingerprint.to_string();
         match self {
+            Standing::WeakCertificate { hash, bits } => PgpSumsError::CertificateSignatureWeak {
+                fingerprint,
+                hash: hash.clone(),
+                bits: *bits,
+                floor: MIN_SIGNATURE_DIGEST_BITS,
+            },
             Standing::Revoked => PgpSumsError::SubkeyRevoked { fingerprint },
             Standing::NotForSigning => PgpSumsError::SubkeyNotForSigning { fingerprint },
             Standing::PrimaryNotForSigning => PgpSumsError::PrimaryNotForSigning { fingerprint },
@@ -719,6 +746,21 @@ fn stated_flags(signature: &pgp::packet::Signature) -> Option<pgp::packet::KeyFl
 /// subkey was made by the primary, so what is read here is trusted as the
 /// primary's word: any SubkeyRevocation retires the subkey for good, and
 /// otherwise the LATEST binding decides whether it may sign.
+/// The hash a signature was made with, if it is below the floor.
+fn weak_hash(signature: &pgp::packet::Signature) -> Option<Standing> {
+    let Some(hash) = signature.hash_alg() else {
+        return Some(Standing::WeakCertificate {
+            hash: "unknown".to_string(),
+            bits: 0,
+        });
+    };
+    let bits = hash.digest_size().unwrap_or(0) * 8;
+    (bits < MIN_SIGNATURE_DIGEST_BITS).then(|| Standing::WeakCertificate {
+        hash: format!("{hash:?}"),
+        bits,
+    })
+}
+
 fn subkey_standing(subkey: &pgp::composed::SignedPublicSubKey) -> Standing {
     if subkey
         .signatures
@@ -735,7 +777,12 @@ fn subkey_standing(subkey: &pgp::composed::SignedPublicSubKey) -> Standing {
         .max_by_key(|(i, s)| (s.created(), *i))
         .map(|(_, s)| s);
     match latest {
-        Some(binding) if binding.key_flags().sign() => Standing::Good,
+        // The binding that lets the subkey sign, and the back-signature the
+        // subkey made over the primary, are both signatures the decision rests
+        // on, so both must clear the digest floor.
+        Some(binding) if binding.key_flags().sign() => weak_hash(binding)
+            .or_else(|| binding.embedded_signature().and_then(weak_hash))
+            .unwrap_or(Standing::Good),
         _ => Standing::NotForSigning,
     }
 }
@@ -763,7 +810,7 @@ fn subkey_standing(subkey: &pgp::composed::SignedPublicSubKey) -> Standing {
 ///   signature that is merely silent, nor by revoking the user ID that stated it.
 ///
 /// A certificate that states no flags anywhere (Rust's) has no restriction.
-fn primary_may_sign(cert: &SignedPublicKey) -> bool {
+fn primary_standing(cert: &SignedPublicKey) -> Standing {
     let is_certification = |s: &&pgp::packet::Signature| {
         matches!(
             s.typ(),
@@ -819,14 +866,21 @@ fn primary_may_sign(cert: &SignedPublicKey) -> bool {
     let eligible: Vec<&pgp::packet::Signature> =
         [direct, certification].into_iter().flatten().collect();
     if eligible.is_empty() {
-        return false;
+        return Standing::PrimaryNotForSigning;
     }
+    // NO digest floor here, deliberately. A primary's self-signature grants it
+    // nothing: the primary is the key the operator pinned, and its
+    // certification can only state flags, never introduce key material. The
+    // measured case is Rust's own release key, whose certification is SHA-1 and
+    // which must keep verifying (REQ-SIGNEDSUMS-001, DD-034). The floor is
+    // applied where a signature DOES grant power: a subkey's binding and its
+    // back-signature (`subkey_standing`).
     let stated: Vec<_> = eligible.iter().filter_map(|s| stated_flags(s)).collect();
     if stated.iter().any(|f| !f.sign()) {
-        return false;
+        return Standing::PrimaryNotForSigning;
     }
     if !stated.is_empty() {
-        return true;
+        return Standing::Good;
     }
     // Nothing eligible states flags. Silence only counts as "no restriction"
     // when nothing anywhere ever stated one.
@@ -836,7 +890,11 @@ fn primary_may_sign(cert: &SignedPublicKey) -> bool {
         .iter()
         .chain(cert.details.users.iter().flat_map(|u| u.signatures.iter()))
         .any(|s| stated_flags(s).is_some());
-    !anywhere
+    if anywhere {
+        Standing::PrimaryNotForSigning
+    } else {
+        Standing::Good
+    }
 }
 
 fn hex_fingerprint(key: &impl VerifyCandidate) -> String {
@@ -1428,6 +1486,91 @@ pub(crate) mod testkit {
             )
             .unwrap();
         public.public_subkeys[0].signatures.push(binding);
+        public.to_armored_bytes(Default::default()).unwrap()
+    }
+
+    /// An RSA-2048 primary (rPGP will not sign with SHA-1 under Ed25519, so
+    /// RSA is the key that can carry a weak self-signature) with an Ed25519
+    /// signing subkey. Generated once: RSA key generation is slow in a test
+    /// build, and the key is only ever read.
+    pub(crate) fn rsa_key_with_signing_subkey() -> SignedSecretKey {
+        static KEY: std::sync::OnceLock<SignedSecretKey> = std::sync::OnceLock::new();
+        KEY.get_or_init(|| {
+            let uid = "rsa <rsa@example.invalid>";
+            SecretKeyParamsBuilder::default()
+                .key_type(KeyType::Rsa(2048))
+                .can_sign(true)
+                .primary_user_id(uid.to_string())
+                .subkey(
+                    SubkeyParamsBuilder::default()
+                        .key_type(KeyType::Ed25519)
+                        .can_sign(true)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap()
+                .generate(rng_for(uid))
+                .unwrap()
+        })
+        .clone()
+    }
+
+    /// The first subkey's binding, re-signed by the primary with `hash`, with
+    /// its subpackets (flags and embedded back-signature) kept as they were.
+    pub(crate) fn subkey_rebound_with_hash(
+        secret: &SignedSecretKey,
+        hash: HashAlgorithm,
+    ) -> Vec<u8> {
+        let mut public: SignedPublicKey = secret.clone().into();
+        let original = public.public_subkeys[0].signatures[0].clone();
+        let mut config =
+            SignatureConfig::v4(SignatureType::SubkeyBinding, PublicKeyAlgorithm::RSA, hash);
+        config.hashed_subpackets = original
+            .config()
+            .unwrap()
+            .hashed_subpackets()
+            .cloned()
+            .collect();
+        let binding = config
+            .sign_subkey_binding(
+                &secret.primary_key,
+                &secret.primary_key.public_key(),
+                &Password::empty(),
+                &public.public_subkeys[0].key,
+            )
+            .unwrap();
+        public.public_subkeys[0].signatures = vec![binding];
+        public.to_armored_bytes(Default::default()).unwrap()
+    }
+
+    /// The primary's only certification re-signed with `hash`.
+    pub(crate) fn primary_certified_with_hash(
+        secret: &SignedSecretKey,
+        hash: HashAlgorithm,
+    ) -> Vec<u8> {
+        let mut public: SignedPublicKey = secret.clone().into();
+        let user_id = public.details.users[0].id.clone();
+        let original = public.details.users[0].signatures[0].clone();
+        let mut config =
+            SignatureConfig::v4(SignatureType::CertPositive, PublicKeyAlgorithm::RSA, hash);
+        config.hashed_subpackets = original
+            .config()
+            .unwrap()
+            .hashed_subpackets()
+            .cloned()
+            .collect();
+        public.details.users[0].signatures = vec![
+            config
+                .sign_certification(
+                    &secret.primary_key,
+                    &secret.primary_key.public_key(),
+                    &Password::empty(),
+                    pgp::types::Tag::UserId,
+                    &user_id,
+                )
+                .unwrap(),
+        ];
         public.to_armored_bytes(Default::default()).unwrap()
     }
 
@@ -2574,5 +2717,41 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
             matches!(err, PgpSumsError::SubkeyNotForSigning { .. }),
             "{err}"
         );
+    }
+
+    // ------------------------------------ weak hashes in the certificate itself
+
+    /// The digest floor applies to the certificate's own signatures that the
+    /// decision rests on, not only to the signature over the list. (Ed25519
+    /// keys re-signed with SHA-1 stand in for RSA/DSA/ECDSA ones: the check
+    /// reads the hash of the signature, whatever made it.)
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_subkey_bound_with_sha1_is_refused() {
+        let secret = rsa_key_with_signing_subkey();
+        let signature = sign_binary_with_subkey(&secret, SUMS);
+        let strong = subkey_rebound_with_hash(&secret, HashAlgorithm::Sha256);
+        verify_detached_signature(SUMS, &signature, &strong).unwrap();
+        let weak = subkey_rebound_with_hash(&secret, HashAlgorithm::Sha1);
+        let err = verify_detached_signature(SUMS, &signature, &weak).unwrap_err();
+        match err {
+            PgpSumsError::CertificateSignatureWeak { bits, floor, .. } => {
+                assert_eq!((bits, floor), (160, MIN_SIGNATURE_DIGEST_BITS));
+            }
+            other => panic!("expected CertificateSignatureWeak, got {other}"),
+        }
+    }
+
+    /// The primary is the DECISION: Rust's own release key certifies itself
+    /// with SHA-1 and must keep verifying. A primary's self-certification
+    /// grants it nothing (the operator pinned the key), so the floor does not
+    /// apply there; it applies to what grants power, a subkey's binding.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_primary_certified_with_sha1_still_verifies_as_rust_does() {
+        let secret = rsa_key_with_signing_subkey();
+        let weak = primary_certified_with_hash(&secret, HashAlgorithm::Sha1);
+        let v = verify_detached_signature(SUMS, &sign_binary(&secret, SUMS), &weak).unwrap();
+        assert_eq!(v.signing_fingerprint, v.primary_fingerprint);
     }
 }
