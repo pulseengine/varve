@@ -80,14 +80,27 @@ ONE release: after one leading `v`, `MAJOR.MINOR[.PATCH]` with an optional
 release. This is a name heuristic, not a cryptographic binding: a publisher who
 reuses a numbered tag defeats it. The list or its signature name must carry
 `%V` or `%R` too, and ingestion re-checks that every asset name contains the
-concrete version or release it is bound to. A Rust channel whose version has a
+concrete version or release it is bound to. Cycle labels (`nightly`, `snapshot`, `dev`, `daily`,
+`weekly`, `tip`, `trunk`, `develop`, `unstable`, `latest*`) count only when a
+build number follows (`1.2.3-nightly.20261108`), a token holding `/`, `%` or
+whitespace is refused, and at ingestion the version must sit on a token
+boundary in the asset name (`1.2` is not found in `tool-v1.2.3.tar.gz`). A Rust
+channel whose version has a
 prerelease part (`1.99.0-nightly`, `-beta.2`) binds by its `date` only, since
 every build of the cycle carries the same version.
 
 The signing key is recorded as its own annotation, `proof-signing-key`, beside
 the signer: the primary's fingerprint when the primary signed, the subkey's
-otherwise. A subkey the primary has revoked, an encryption-only subkey, and a
-primary whose newest self-signatures state flags without SIGN do not vouch.
+otherwise. A subkey the primary has revoked (in any entry carrying its fingerprint), an
+encryption-only subkey (a same-second tie between bindings goes to the one
+without SIGN), a subkey whose binding or back-signature uses a hash below 256
+bits, and a primary whose newest self-signatures state flags without SIGN do
+not vouch. A list signature must state its creation time, and a critical
+hashed subpacket other than creation time and issuer refuses it. Signature
+and binding expiry are not checked, for the same reason key expiry is not.
+The digest floor is deliberately not applied to the primary's own
+certification: it grants the pinned key nothing, and Rust's release key
+certifies itself with SHA-1.
 
 The recorded assertion names that release. Every entry that ingests from one
 repository release must declare the same `pgp-sums` (and the same
