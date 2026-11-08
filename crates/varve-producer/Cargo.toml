@@ -69,3 +69,9 @@ rand_chacha = "0.3"
 tar = "0.4"
 flate2 = "1.1"
 tempfile = "3.27.0"
+# Parses the PR workflows structurally in tests/pr_gates_cannot_be_switched_off.rs
+# (a line scanner was bypassable with valid YAML: extra spaces after `-`, a flow
+# mapping, a quoted key). No YAML crate was in the workspace. yaml-rust2 is pure
+# safe Rust; serde_yaml was tried first and fails cargo-deny (it pulls the
+# unmaintained unsafe-libyaml). Test-only, never in a shipped binary.
+yaml-rust2 = "0.13"
