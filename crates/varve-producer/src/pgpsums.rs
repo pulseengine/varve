@@ -961,7 +961,45 @@ fn check_signature_shape(index: usize, signature: &DetachedSignature) -> Result<
             floor: MIN_SIGNATURE_DIGEST_BITS,
         });
     }
-    Ok(())
+    check_hashed_subpackets(index, &signature.signature)
+}
+
+/// The hashed area must state when the signature was made (RFC 9580
+/// section 5.2.3.11), and any CRITICAL subpacket in it must be one this module
+/// understands: creation time and the issuer. A critical notation, regular
+/// expression or expiry says the signature means something the verifier must
+/// act on; this module acts on none of them (expiry needs a clock, see the
+/// module docs), so it cannot honour the signature and refuses it. The same
+/// subpackets are ignorable when NOT marked critical.
+fn check_hashed_subpackets(
+    index: usize,
+    signature: &pgp::packet::Signature,
+) -> Result<(), PgpSumsError> {
+    let Some(config) = signature.config() else {
+        return Err(PgpSumsError::SignatureHasNoCreationTime { index });
+    };
+    let mut has_creation_time = false;
+    for subpacket in config.hashed_subpackets() {
+        match &subpacket.data {
+            SubpacketData::SignatureCreationTime(_) => has_creation_time = true,
+            SubpacketData::IssuerKeyId(_) | SubpacketData::IssuerFingerprint(_) => {}
+            other if subpacket.is_critical => {
+                let shown = format!("{other:?}");
+                let kind = shown
+                    .split(['(', ' ', '{'])
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string();
+                return Err(PgpSumsError::CriticalSubpacket { index, kind });
+            }
+            _ => {}
+        }
+    }
+    if has_creation_time {
+        Ok(())
+    } else {
+        Err(PgpSumsError::SignatureHasNoCreationTime { index })
+    }
 }
 
 /// Both halves of one `(url, digest)` pair, or neither. The `(Some, None)` and
@@ -1572,6 +1610,47 @@ pub(crate) mod testkit {
                 .unwrap(),
         ];
         public.to_armored_bytes(Default::default()).unwrap()
+    }
+
+    /// A binary detached signature by the primary with EXACTLY these hashed
+    /// subpackets, nothing added.
+    pub(crate) fn sign_with_hashed_subpackets(
+        secret: &SignedSecretKey,
+        data: &[u8],
+        hashed: Vec<Subpacket>,
+    ) -> Vec<u8> {
+        DetachedSignature::sign_binary_data_with_subpackets(
+            rng(),
+            &secret.primary_key,
+            &Password::empty(),
+            HashAlgorithm::Sha256,
+            data,
+            pgp::composed::SubpacketConfig::UserDefined {
+                hashed,
+                unhashed: vec![],
+            },
+        )
+        .unwrap()
+        .to_armored_bytes(Default::default())
+        .unwrap()
+    }
+
+    pub(crate) fn creation_time_subpacket(critical: bool) -> Subpacket {
+        let data = SubpacketData::SignatureCreationTime(
+            Timestamp::try_from(std::time::SystemTime::now()).unwrap(),
+        );
+        if critical {
+            Subpacket::critical(data).unwrap()
+        } else {
+            Subpacket::regular(data).unwrap()
+        }
+    }
+
+    pub(crate) fn issuer_subpacket(secret: &SignedSecretKey) -> Subpacket {
+        Subpacket::regular(SubpacketData::IssuerKeyId(
+            secret.primary_key.legacy_key_id(),
+        ))
+        .unwrap()
     }
 
     /// A TEXT-type detached signature, which a digest list must refuse.
@@ -2753,5 +2832,76 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
         let weak = primary_certified_with_hash(&secret, HashAlgorithm::Sha1);
         let v = verify_detached_signature(SUMS, &sign_binary(&secret, SUMS), &weak).unwrap();
         assert_eq!(v.signing_fingerprint, v.primary_fingerprint);
+    }
+
+    // ------------------------------------------------------ signature shape
+
+    /// RFC 9580 section 5.2.3.11: a signature states when it was made, in the
+    /// HASHED area. One that does not is not a signature this module honours.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_signature_with_no_creation_time_is_refused() {
+        let (secret, key) = generated_key("s <s@example.invalid>");
+        let sig = sign_with_hashed_subpackets(&secret, SUMS, vec![issuer_subpacket(&secret)]);
+        let err = verify_detached_signature(SUMS, &sig, &key).unwrap_err();
+        assert!(
+            matches!(err, PgpSumsError::SignatureHasNoCreationTime { index: 0 }),
+            "{err}"
+        );
+        // With it, and with it marked critical (the usual spelling), it verifies.
+        for critical in [false, true] {
+            let sig = sign_with_hashed_subpackets(
+                &secret,
+                SUMS,
+                vec![creation_time_subpacket(critical), issuer_subpacket(&secret)],
+            );
+            verify_detached_signature(SUMS, &sig, &key).unwrap();
+        }
+    }
+
+    /// A critical subpacket this module cannot honour (a notation, a regular
+    /// expression, an expiry it will not enforce) means the signature says
+    /// something it cannot act on.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_critical_subpacket_outside_the_allowlist_is_refused() {
+        let (secret, key) = generated_key("s <s@example.invalid>");
+        let critical = [
+            SubpacketData::Notation(pgp::packet::Notation {
+                readable: true,
+                name: b"x@example.invalid".to_vec().into(),
+                value: b"y".to_vec().into(),
+            }),
+            SubpacketData::RegularExpression(b"^a$".to_vec().into()),
+            SubpacketData::SignatureExpirationTime(pgp::types::Duration::from_secs(60)),
+        ];
+        for data in critical {
+            let sig = sign_with_hashed_subpackets(
+                &secret,
+                SUMS,
+                vec![
+                    creation_time_subpacket(false),
+                    issuer_subpacket(&secret),
+                    Subpacket::critical(data.clone()).unwrap(),
+                ],
+            );
+            let err = verify_detached_signature(SUMS, &sig, &key).unwrap_err();
+            assert!(
+                matches!(err, PgpSumsError::CriticalSubpacket { .. }),
+                "{data:?}: {err}"
+            );
+            // The same subpacket NOT marked critical is ignorable and passes.
+            let sig = sign_with_hashed_subpackets(
+                &secret,
+                SUMS,
+                vec![
+                    creation_time_subpacket(false),
+                    issuer_subpacket(&secret),
+                    Subpacket::regular(data.clone()).unwrap(),
+                ],
+            );
+            verify_detached_signature(SUMS, &sig, &key)
+                .unwrap_or_else(|e| panic!("non-critical {data:?}: {e}"));
+        }
     }
 }
