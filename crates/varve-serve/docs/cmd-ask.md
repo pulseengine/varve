@@ -8,7 +8,7 @@ varve-serve ask Store type --format json --limit 3
 ```
 
 The question is words; no quoting is needed. Each hit carries a stable `id`, its
-kind, a title, the `layer`, the payload `digest` where there is one, and `read`:
+kind, a title (for a docs page, its path), the `layer`, the payload `digest` where there is one, and `read`:
 the exact command that shows the whole page or topic. It never returns the text
 that matched.
 
@@ -19,8 +19,20 @@ that matched.
   For HTML the markup, script and style are dropped, and where a page has a
   `<main>` element (rustdoc does) only its content is searched, not the sidebar.
   At most the first 512 KiB of a page is searched. A hit points at the page and
-  names the question's own words that one of its lines holds; no page text is
-  ever printed;
+  names the question's own words that one of its lines holds. For a docs-page
+  hit what is printed is only: the page's path inside its payload (shown where
+  other hits show a title), the score, the question's own words that a line
+  holds, and the `read` command. The page's own `<title>` or heading is NOT
+  shown, because a producer wrote it and a title is the line an injected
+  instruction would choose; it still counts when ranking. The hit's `title`
+  field in `--format json` is that same path. The path is a producer's choice
+  too, so it is printed (in the title, the `id` and the `read` command) only
+  when every character is one of `A-Z a-z 0-9 . _ / -` and it is at most 200
+  bytes; otherwise the page is shown as a handle, `page-` and 12 hex digits of
+  the SHA-256 of its path, which `varve-serve page` opens like the path. The
+  limit that remains: a safe path can still spell words
+  (`IGNORE_PREVIOUS_INSTRUCTIONS.md`). A pointer names the file; it does not
+  vouch for it. Read the page with `read` when you need its text;
 - every pinned tool's subcommands, and its one-line overview with its warning;
 - the text of each tool's built-in docs topics, where its `--help` advertised
   `docs`;
