@@ -3645,6 +3645,7 @@ mod tests {
             "tool-v1.2.3.tar.gz",
             "tool-11.2.tar.gz",
             "tool-1.2.30-old.tar.gz",
+            "tool-1.23.tar.gz",
             "tool-1.2.3",
             "tool-0.1.2.tar.gz",
         ] {
