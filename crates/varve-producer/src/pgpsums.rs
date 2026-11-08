@@ -728,18 +728,46 @@ fn subkey_standing(subkey: &pgp::composed::SignedPublicSubKey) -> Standing {
 
 /// May the primary key itself sign?
 ///
-/// Decided by ONE self-signature, the newest, exactly as for a subkey's binding
-/// (a stale signature that once granted SIGN must not outvote a newer one that
-/// took it away). Only these count: certifications (0x10 to 0x13) on user IDs
-/// that carry no revocation, and direct-key signatures (0x1F). Among them the
-/// primary user ID's are preferred, then the newest by creation time; the
-/// last in the file breaks a tie.
+/// Fail closed on any restriction a self-signature ever stated. The decision
+/// is taken from the two signatures that speak for the key NOW, as RFC 9580
+/// reads it:
 ///
-/// If the deciding signature states no key flags at all there is no
-/// restriction, which is Rust's case. If it states flags without SIGN, the
-/// primary is for certifying only.
+/// * `D`, the newest direct-key signature (0x1F); and
+/// * `C`, the newest certification (0x10 to 0x13) on the primary user ID, or
+///   failing that on any user ID, among user IDs that carry no revocation.
+///
+/// Both are "eligible". Then:
+///
+/// * no eligible signature at all (every user ID revoked, no direct-key
+///   signature): the primary may not sign;
+/// * an eligible signature stating key flags WITHOUT SIGN: refused, whatever
+///   the other one says;
+/// * an eligible signature stating SIGN, and none stating otherwise: allowed;
+/// * no eligible signature stating any flags: allowed only if NO self-signature
+///   anywhere in the certificate (older ones, revoked user IDs' included)
+///   stated flags either. A restriction stated once is not lifted by a newer
+///   signature that is merely silent, nor by revoking the user ID that stated it.
+///
+/// A certificate that states no flags anywhere (Rust's) has no restriction.
 fn primary_may_sign(cert: &SignedPublicKey) -> bool {
-    let certifications = cert
+    let is_certification = |s: &&pgp::packet::Signature| {
+        matches!(
+            s.typ(),
+            Some(
+                SignatureType::CertGeneric
+                    | SignatureType::CertPersona
+                    | SignatureType::CertCasual
+                    | SignatureType::CertPositive
+            )
+        )
+    };
+    fn newest(sigs: Vec<&pgp::packet::Signature>) -> Option<&pgp::packet::Signature> {
+        sigs.into_iter()
+            .enumerate()
+            .max_by_key(|(i, s)| (s.created(), *i))
+            .map(|(_, s)| s)
+    }
+    let live_users: Vec<_> = cert
         .details
         .users
         .iter()
@@ -748,32 +776,53 @@ fn primary_may_sign(cert: &SignedPublicKey) -> bool {
                 .iter()
                 .any(|s| s.typ() == Some(SignatureType::CertRevocation))
         })
-        .flat_map(|u| u.signatures.iter())
-        .filter(|s| {
-            matches!(
-                s.typ(),
-                Some(
-                    SignatureType::CertGeneric
-                        | SignatureType::CertPersona
-                        | SignatureType::CertCasual
-                        | SignatureType::CertPositive
-                )
-            )
-        });
-    let direct = cert
+        .collect();
+    fn certifications_of<'a>(
+        users: &[&'a pgp::types::SignedUser],
+        is_certification: &dyn Fn(&&pgp::packet::Signature) -> bool,
+    ) -> Vec<&'a pgp::packet::Signature> {
+        users
+            .iter()
+            .flat_map(|u| u.signatures.iter())
+            .filter(|s| is_certification(s))
+            .collect()
+    }
+    let primary_users: Vec<_> = live_users
+        .iter()
+        .copied()
+        .filter(|u| u.signatures.iter().any(|s| s.is_primary()))
+        .collect();
+    let certification = newest(certifications_of(&primary_users, &is_certification))
+        .or_else(|| newest(certifications_of(&live_users, &is_certification)));
+    let direct = newest(
+        cert.details
+            .direct_signatures
+            .iter()
+            .filter(|s| s.typ() == Some(SignatureType::Key))
+            .collect(),
+    );
+
+    let eligible: Vec<&pgp::packet::Signature> =
+        [direct, certification].into_iter().flatten().collect();
+    if eligible.is_empty() {
+        return false;
+    }
+    let stated: Vec<_> = eligible.iter().filter_map(|s| stated_flags(s)).collect();
+    if stated.iter().any(|f| !f.sign()) {
+        return false;
+    }
+    if !stated.is_empty() {
+        return true;
+    }
+    // Nothing eligible states flags. Silence only counts as "no restriction"
+    // when nothing anywhere ever stated one.
+    let anywhere = cert
         .details
         .direct_signatures
         .iter()
-        .filter(|s| s.typ() == Some(SignatureType::Key));
-    let deciding = certifications
-        .chain(direct)
-        .enumerate()
-        .max_by_key(|(i, s)| (s.is_primary(), s.created(), *i))
-        .map(|(_, s)| s);
-    match deciding.and_then(stated_flags) {
-        None => true,
-        Some(flags) => flags.sign(),
-    }
+        .chain(cert.details.users.iter().flat_map(|u| u.signatures.iter()))
+        .any(|s| stated_flags(s).is_some());
+    !anywhere
 }
 
 fn hex_fingerprint(key: &impl VerifyCandidate) -> String {
@@ -1197,12 +1246,9 @@ pub(crate) mod testkit {
     fn flags_subpackets(
         secret: &SignedSecretKey,
         created_secs: u32,
-        sign: bool,
+        sign: Option<bool>,
         primary_uid: bool,
     ) -> Vec<Subpacket> {
-        let mut flags = pgp::packet::KeyFlags::default();
-        flags.set_certify(true);
-        flags.set_sign(sign);
         let mut out = vec![
             Subpacket::regular(SubpacketData::SignatureCreationTime(Timestamp::from_secs(
                 created_secs,
@@ -1212,44 +1258,92 @@ pub(crate) mod testkit {
                 secret.primary_key.legacy_key_id(),
             ))
             .unwrap(),
-            Subpacket::regular(SubpacketData::KeyFlags(flags)).unwrap(),
         ];
+        // `None` states NO key flags at all, which is not the same as flags
+        // with nothing set.
+        if let Some(sign) = sign {
+            let mut flags = pgp::packet::KeyFlags::default();
+            flags.set_certify(true);
+            flags.set_sign(sign);
+            out.push(Subpacket::regular(SubpacketData::KeyFlags(flags)).unwrap());
+        }
         if primary_uid {
             out.push(Subpacket::regular(SubpacketData::IsPrimary(true)).unwrap());
         }
         out
     }
 
-    /// The certificate with the user ID's self-signatures REPLACED by one per
-    /// `(creation time in seconds, SIGN flag)` entry, each marked as the
-    /// primary user ID's. Which of them decides is the NEWEST.
-    pub(crate) fn primary_with_self_signatures(
+    /// The certificate with the self-signatures REPLACED: one certification
+    /// per `uid` entry and one direct-key signature per `direct` entry, each
+    /// `(creation time in seconds, SIGN flag or no flags at all)`; and, when
+    /// `revoke_uid`, a revocation of the user ID. Certifications are marked as
+    /// the primary user ID's.
+    pub(crate) fn primary_certified(
         secret: &SignedSecretKey,
-        signatures: &[(u32, bool)],
+        uid: &[(u32, Option<bool>)],
+        direct: &[(u32, Option<bool>)],
+        revoke_uid: bool,
     ) -> Vec<u8> {
         let mut public: SignedPublicKey = secret.clone().into();
         let user_id = public.details.users[0].id.clone();
-        public.details.users[0].signatures = signatures
+        let certify = |typ: SignatureType, subpackets: Vec<Subpacket>| {
+            let mut config =
+                SignatureConfig::v4(typ, PublicKeyAlgorithm::Ed25519, HashAlgorithm::Sha256);
+            config.hashed_subpackets = subpackets;
+            config
+                .sign_certification(
+                    &secret.primary_key,
+                    &secret.primary_key.public_key(),
+                    &Password::empty(),
+                    pgp::types::Tag::UserId,
+                    &user_id,
+                )
+                .unwrap()
+        };
+        let mut sigs: Vec<_> = uid
+            .iter()
+            .map(|(secs, sign)| {
+                certify(
+                    SignatureType::CertPositive,
+                    flags_subpackets(secret, *secs, *sign, true),
+                )
+            })
+            .collect();
+        if revoke_uid {
+            sigs.push(certify(
+                SignatureType::CertRevocation,
+                flags_subpackets(secret, 1_900_000_000, None, false),
+            ));
+        }
+        public.details.users[0].signatures = sigs;
+        public.details.direct_signatures = direct
             .iter()
             .map(|(secs, sign)| {
                 let mut config = SignatureConfig::v4(
-                    SignatureType::CertPositive,
+                    SignatureType::Key,
                     PublicKeyAlgorithm::Ed25519,
                     HashAlgorithm::Sha256,
                 );
-                config.hashed_subpackets = flags_subpackets(secret, *secs, *sign, true);
+                config.hashed_subpackets = flags_subpackets(secret, *secs, *sign, false);
                 config
-                    .sign_certification(
+                    .sign_key(
                         &secret.primary_key,
-                        &secret.primary_key.public_key(),
                         &Password::empty(),
-                        pgp::types::Tag::UserId,
-                        &user_id,
+                        &secret.primary_key.public_key(),
                     )
                     .unwrap()
             })
             .collect();
         public.to_armored_bytes(Default::default()).unwrap()
+    }
+
+    /// Just the user ID's certifications, as `(time, SIGN)` pairs.
+    pub(crate) fn primary_with_self_signatures(
+        secret: &SignedSecretKey,
+        signatures: &[(u32, bool)],
+    ) -> Vec<u8> {
+        let uid: Vec<_> = signatures.iter().map(|(t, s)| (*t, Some(*s))).collect();
+        primary_certified(secret, &uid, &[], false)
     }
 
     /// The certificate with one MORE binding on its signing subkey, a
@@ -1276,6 +1370,40 @@ pub(crate) mod testkit {
             ))
             .unwrap(),
             Subpacket::regular(SubpacketData::KeyFlags(flags)).unwrap(),
+        ];
+        let binding = config
+            .sign_subkey_binding(
+                &secret.primary_key,
+                &secret.primary_key.public_key(),
+                &Password::empty(),
+                &public.public_subkeys[0].key,
+            )
+            .unwrap();
+        public.public_subkeys[0].signatures.push(binding);
+        public.to_armored_bytes(Default::default()).unwrap()
+    }
+
+    /// The certificate with one MORE binding on its first subkey that states
+    /// NO key flags at all, created at `created_secs`.
+    pub(crate) fn subkey_with_extra_flagless_binding(
+        secret: &SignedSecretKey,
+        created_secs: u32,
+    ) -> Vec<u8> {
+        let mut public: SignedPublicKey = secret.clone().into();
+        let mut config = SignatureConfig::v4(
+            SignatureType::SubkeyBinding,
+            PublicKeyAlgorithm::Ed25519,
+            HashAlgorithm::Sha256,
+        );
+        config.hashed_subpackets = vec![
+            Subpacket::regular(SubpacketData::SignatureCreationTime(Timestamp::from_secs(
+                created_secs,
+            )))
+            .unwrap(),
+            Subpacket::regular(SubpacketData::IssuerKeyId(
+                secret.primary_key.legacy_key_id(),
+            ))
+            .unwrap(),
         ];
         let binding = config
             .sign_subkey_binding(
@@ -2361,5 +2489,76 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
         );
         let older = subkey_with_extra_unsigned_binding(&secret, 1_000_000_000);
         verify_detached_signature(SUMS, &signature, &older).unwrap();
+    }
+
+    // -------------------- a restriction anywhere in the self-signatures holds
+
+    fn refused_as_primary(key: &[u8], secret: &pgp::composed::SignedSecretKey) {
+        let err = verify_detached_signature(SUMS, &sign_binary(secret, SUMS), key).unwrap_err();
+        assert!(
+            matches!(err, PgpSumsError::PrimaryNotForSigning { .. }),
+            "{err}"
+        );
+    }
+
+    /// A newer certification that states NO flags does not lift a restriction
+    /// an older one stated.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_newer_certification_without_flags_does_not_lift_an_older_restriction() {
+        let (secret, _) = generated_key("p <p@example.invalid>");
+        let key = primary_certified(&secret, &[(OLD, Some(false)), (NEWER, None)], &[], false);
+        refused_as_primary(&key, &secret);
+        let key = primary_certified(&secret, &[(NEWER, None), (OLD, Some(false))], &[], false);
+        refused_as_primary(&key, &secret);
+    }
+
+    /// A direct-key signature without SIGN refuses even when the primary user
+    /// ID's certification states nothing.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_direct_key_signature_without_sign_refuses_over_a_silent_certification() {
+        let (secret, _) = generated_key("p <p@example.invalid>");
+        let key = primary_certified(&secret, &[(NEWER, None)], &[(OLD, Some(false))], false);
+        refused_as_primary(&key, &secret);
+        // And the converse holds: SIGN stated, nothing restricting, allowed.
+        let key = primary_certified(&secret, &[(NEWER, None)], &[(OLD, Some(true))], false);
+        verify_detached_signature(SUMS, &sign_binary(&secret, SUMS), &key).unwrap();
+    }
+
+    /// A revoked user ID does not take its restriction with it.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_revoked_user_id_does_not_drop_the_restriction_it_stated() {
+        let (secret, _) = generated_key("p <p@example.invalid>");
+        // The only certification that stated flags (no SIGN) is on the revoked
+        // user ID; the one remaining eligible signature states nothing.
+        let key = primary_certified(&secret, &[(OLD, Some(false))], &[(NEWER, None)], true);
+        refused_as_primary(&key, &secret);
+    }
+
+    /// Nothing eligible left to vouch for the primary: every user ID revoked,
+    /// and no direct-key signature.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_primary_with_every_user_id_revoked_and_no_direct_key_signature_may_not_sign() {
+        let (secret, _) = generated_key("p <p@example.invalid>");
+        let key = primary_certified(&secret, &[(OLD, Some(true))], &[], true);
+        refused_as_primary(&key, &secret);
+    }
+
+    /// The subkey rule, same shape: a newest binding that states no flags at
+    /// all does not keep a subkey a stale SIGN binding once allowed.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_newer_subkey_binding_stating_no_flags_refuses_the_subkey() {
+        let (secret, _) = generated_key_with_signing_subkey("s <s@example.invalid>");
+        let signature = sign_binary_with_subkey(&secret, SUMS);
+        let key = subkey_with_extra_flagless_binding(&secret, FAR_FUTURE);
+        let err = verify_detached_signature(SUMS, &signature, &key).unwrap_err();
+        assert!(
+            matches!(err, PgpSumsError::SubkeyNotForSigning { .. }),
+            "{err}"
+        );
     }
 }
