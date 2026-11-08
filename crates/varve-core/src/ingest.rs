@@ -65,22 +65,51 @@ pub const ANN_SBOM: &str = "eu.pulseengine.source.sbom";
 /// reader following the reference can tell it was not replaced afterwards.
 pub const ANN_SBOM_SHA256: &str = "eu.pulseengine.source.sbom.sha256";
 
-/// How the assembler established that an upstream artifact was genuine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum IngestProof {
+/// The ONE declaration of every mechanism: the enum, its wire spelling and
+/// [`IngestProof::VARIANTS`] are all emitted from this list, so a variant
+/// cannot exist without a spelling and without being listed. They drifted once
+/// (`upstream-sums` was written but not readable) while three hand-kept lists
+/// had to agree; there is now nothing to keep in step. Adding a mechanism is
+/// one line in the invocation below.
+///
+/// The spelling is also the serde `rename`, so deserialising a deposit spec
+/// and `as_str` come from the same literal.
+macro_rules! ingest_proofs {
+    ($( $(#[$meta:meta])* $variant:ident => $spelling:literal, )+) => {
+        /// How the assembler established that an upstream artifact was genuine.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
+        pub enum IngestProof {
+            $( $(#[$meta])* #[serde(rename = $spelling)] $variant, )+
+        }
+
+        impl IngestProof {
+            /// Every mechanism. The single production list that `FromStr`, the
+            /// unknown-mechanism error text and the tests all derive from, and
+            /// itself emitted from the same declaration as the enum and
+            /// `as_str`: a variant cannot be added without being listed.
+            pub const VARIANTS: &'static [IngestProof] = &[ $( IngestProof::$variant, )+ ];
+
+            /// The canonical wire string, as written in the signed annotation.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $( IngestProof::$variant => $spelling, )+
+                }
+            }
+        }
+    };
+}
+
+ingest_proofs! {
     /// A `SHA256SUMS.txt` verified by `cosign verify-blob` against the repo's
     /// release-workflow identity and the GitHub Actions OIDC issuer. Asserts
     /// that the holder of that identity published these digests.
-    CosignSums,
+    CosignSums => "cosign-sums",
     /// A GitHub build attestation (`gh attestation verify`), whose in-toto
     /// statement names the artifact's digest as a subject. Asserts the workflow,
     /// repository and source commit the artifact was built from — a strictly
     /// stronger claim than a sums file, since it covers WHERE the bytes came
     /// from and not merely WHAT they hash to.
-    BuildProvenance,
-    /// Nothing vouched for these bytes. Only reachable through an explicit,
-    /// recorded operator opt-in; the reason travels in `ANN_PROOF_ASSERTS`.
+    BuildProvenance => "build-provenance",
     /// A digest list the upstream published beside its assets and NOBODY
     /// SIGNED (REQ-UPSTREAMSUMS-001).
     ///
@@ -89,34 +118,13 @@ pub enum IngestProof {
     /// names — catching a corrupted or truncated download, which for a 90 MB
     /// toolchain is the failure that actually happens — and nothing about who
     /// produced them, because the same host serves the list and the bytes.
-    UpstreamSums,
-    Unverified,
+    UpstreamSums => "upstream-sums",
+    /// Nothing vouched for these bytes. Only reachable through an explicit,
+    /// recorded operator opt-in; the reason travels in `ANN_PROOF_ASSERTS`.
+    Unverified => "unverified",
 }
 
 impl IngestProof {
-    /// Every mechanism. The single production list that `FromStr`, the
-    /// unknown-mechanism error text and the tests all derive from, so the
-    /// spellings `as_str` writes and the ones `from_str` reads cannot diverge
-    /// (they did once: `upstream-sums` was written but not readable). A new
-    /// variant must be added here; the test `every_variant_is_listed` fails to
-    /// compile until it is matched there and fails if it is not listed.
-    pub const VARIANTS: &'static [IngestProof] = &[
-        IngestProof::CosignSums,
-        IngestProof::BuildProvenance,
-        IngestProof::UpstreamSums,
-        IngestProof::Unverified,
-    ];
-
-    /// The canonical wire string, as written in the signed annotation.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            IngestProof::CosignSums => "cosign-sums",
-            IngestProof::BuildProvenance => "build-provenance",
-            IngestProof::UpstreamSums => "upstream-sums",
-            IngestProof::Unverified => "unverified",
-        }
-    }
-
     /// Did anything at all vouch for these bytes?
     ///
     /// Note what this does NOT say: it does not rank `cosign-sums` against
@@ -184,32 +192,36 @@ impl FromStr for IngestProof {
 mod tests {
     use super::*;
 
-    use super::IngestProof as P;
-
     const ALL: &[IngestProof] = IngestProof::VARIANTS;
 
-    /// Drift guard. The `match` has NO wildcard arm, so adding a variant to
-    /// `IngestProof` stops this module compiling until the new variant gets an
-    /// arm here with the next free index; and `every_variant_is_listed` then
-    /// requires `VARIANTS` to hold exactly that many entries, each at the
-    /// index its arm claims. A variant cannot be added without being listed.
-    fn index(p: P) -> usize {
-        match p {
-            P::CosignSums => 0,
-            P::BuildProvenance => 1,
-            P::UpstreamSums => 2,
-            P::Unverified => 3,
-        }
-    }
-    const VARIANT_COUNT: usize = 4;
-
+    /// Drift guard. The enum, `as_str` and `VARIANTS` are emitted by one
+    /// macro invocation, so there is no second list to forget; this pins what
+    /// the macro promises: every variant is listed once, with its own distinct
+    /// spelling.
     // rivet: verifies REQ-INGEST-001
     #[test]
-    fn every_variant_is_listed() {
-        assert_eq!(IngestProof::VARIANTS.len(), VARIANT_COUNT);
-        for (i, p) in IngestProof::VARIANTS.iter().enumerate() {
-            assert_eq!(index(*p), i, "{p} is listed out of order");
+    fn every_variant_is_listed_once_with_its_own_spelling() {
+        let mut seen = std::collections::BTreeSet::new();
+        for p in IngestProof::VARIANTS {
+            assert!(seen.insert(p.as_str()), "{p} repeats a spelling");
         }
+        assert_eq!(seen.len(), IngestProof::VARIANTS.len());
+        assert!(!IngestProof::VARIANTS.is_empty());
+    }
+
+    /// Every spelling `as_str` writes is the one serde and `FromStr` read.
+    /// (`IngestProof` derives only `Deserialize`, so the serde side is the
+    /// reading direction, which is the one #339 broke.)
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn every_spelling_is_read_back_by_serde_and_from_str() {
+        for p in IngestProof::VARIANTS {
+            let s = p.as_str();
+            assert_eq!(s.parse::<IngestProof>().unwrap(), *p, "FromStr: {s}");
+            let via_serde: IngestProof = serde_json::from_str(&format!("\"{s}\"")).unwrap();
+            assert_eq!(via_serde, *p, "serde: {s}");
+        }
+        assert!(serde_json::from_str::<IngestProof>("\"not-a-proof\"").is_err());
     }
 
     // rivet: verifies REQ-INGEST-001

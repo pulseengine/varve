@@ -19,6 +19,7 @@
 - The install-shadow system test now also runs `install.sh`'s normal path, against a local archive served by a fake `curl`, and asserts the shadow warning in the installer's own output. Before, it ran only `check_shadow` through the check-only hook, so removing the installer's call to it left the gate green (#333).
 - `pr_gates_cannot_be_switched_off` checks every `if:` in a PR workflow against an allowlist of the four conditions in use, instead of flagging only `vars.`. A switch on `github.repository`, `github.actor` or anything else a setting or fork can change is now refused (#333).
 - `tools/trace-gate.py` no longer counts a `verifies` edge from a `draft` verification, or from one with no steps, as evidence for a `verified` requirement. An `inspection` or `review` record still counts without steps, since what it checked is outside this repository's CI (#333).
+- `IngestProof`, its wire spellings and its `VARIANTS` list are declared once, in one macro invocation, so a new proof mechanism cannot be written without also being readable (the `upstream-sums` defect); the hand-kept variant count in the test is gone.
 - Test scratch directories are per-run `tempfile::TempDir`s instead of fixed
   names in the shared temp directory that were wiped on entry, so two
   concurrent runs of one test binary (two mutation shards on one host) no
