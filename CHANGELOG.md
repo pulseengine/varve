@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `varve-serve ask` now searches the text of documentation pages (Markdown, HTML and rustdoc HTML) of a verified docs payload, not only their titles and paths, and ranks a page by its best line as it does topics. A hit still prints no page text, only the question's own words a line holds; the index is built at query time, offline, and the first 512 KiB of a page is searched (REQ-AGENTDOCS-005).
+
 ### Fixed
 
 - A realms file can now mark the fields an older varve may skip with `ignorable = [...]` (per realm, or at top level for top-level keys). An unknown field that is not marked is still refused, so a later security field cannot be dropped silently, and a field varve knows is always enforced even if listed. The refusal now names the running varve version and says the file may come from a newer varve. This takes effect from this release on: every varve before 0.47.0 refuses `ignorable` itself, so varve's published `varve-realms.toml` does not carry it (a test keeps it out), and already-released binaries, 0.29.0 included, are not helped (#234).

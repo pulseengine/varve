@@ -14,10 +14,55 @@ pub struct Page {
     /// The member path, without a leading `./`.
     pub path: String,
     pub title: String,
+    /// The page's text, for ranking only (REQ-AGENTDOCS-005): never printed.
+    pub text: String,
 }
 
 /// How much of a page is read to find its title.
 const TITLE_WINDOW: usize = 8192; // 8 KiB
+
+/// How many bytes of one page are searched. The payload does not cap a
+/// page, and a question must not cost more for a larger page without limit;
+/// the rest of a page past this is not searched (it is still readable with
+/// `page`).
+pub const TEXT_WINDOW: usize = 512 * 1024; // 512 KiB
+
+/// The text of one page that a question is matched against: Markdown as it
+/// is, HTML with markup, script and style removed and entities decoded. When
+/// an HTML page has a `<main>` element (rustdoc does) only its content is
+/// searched, so the sidebar listing every item of the crate, repeated on
+/// every page, does not make every page match every item name.
+pub fn search_text(path: &str, bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(TEXT_WINDOW)]).into_owned();
+    if path.to_ascii_lowercase().ends_with(".md") {
+        return text;
+    }
+    html_text(main_content(&text))
+}
+
+/// The inside of the first `<main ...>` element, to its close or the end of
+/// the text; the whole text when there is none.
+fn main_content(html: &str) -> &str {
+    let lower = html.to_ascii_lowercase();
+    for (at, _) in lower.match_indices("<main") {
+        // `<mainframe>` is not `<main>`
+        if !matches!(
+            lower.as_bytes().get(at + 5),
+            Some(b'>' | b' ' | b'\t' | b'\n' | b'\r')
+        ) {
+            continue;
+        }
+        let Some(open_end) = lower[at..].find('>') else {
+            return "";
+        };
+        let start = at + open_end + 1;
+        let end = lower[start..]
+            .find("</main")
+            .map_or(html.len(), |e| start + e);
+        return &html[start..end];
+    }
+    html
+}
 
 fn decode_entities(s: &str) -> String {
     s.replace("&lt;", "<")
@@ -76,6 +121,7 @@ pub fn pages(payload: &DocsPayload) -> anyhow::Result<Vec<Page>> {
         if is_page(&path) && !is_noise(&path) {
             out.push(Page {
                 title: title_of(&path, &bytes),
+                text: search_text(&path, &bytes),
                 path,
             });
         }
@@ -87,35 +133,36 @@ pub fn pages(payload: &DocsPayload) -> anyhow::Result<Vec<Page>> {
 
 /// Markup removed, scripts and styles dropped, entities decoded.
 pub fn html_text(html: &str) -> String {
+    // One lowercased copy, searched by offset. `to_ascii_lowercase` keeps
+    // every byte offset, so an index into `lower` is an index into `html`.
+    // Lowercasing the remainder at each `<script`/`<style` instead made a page
+    // of repeated `<script></script>` quadratic: 344 ms for one 512 KiB page.
+    let lower = html.to_ascii_lowercase();
     let mut out = String::new();
-    let mut rest = html;
-    while let Some(open) = rest.find('<') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open..];
-        let lower: String = after
-            .chars()
-            .take(8)
-            .collect::<String>()
-            .to_ascii_lowercase();
-        let skip_to = if lower.starts_with("<script") {
+    let mut at = 0;
+    while let Some(open) = html[at..].find('<').map(|o| at + o) {
+        out.push_str(&html[at..open]);
+        let skip_to = if lower[open..].starts_with("<script") {
             Some("</script>")
-        } else if lower.starts_with("<style") {
+        } else if lower[open..].starts_with("<style") {
             Some("</style>")
         } else {
             None
         };
         if let Some(end_tag) = skip_to {
-            let l = after.to_ascii_lowercase();
-            rest = l.find(end_tag).map_or("", |e| &after[e + end_tag.len()..]);
+            at = lower[open..]
+                .find(end_tag)
+                .map_or(html.len(), |e| open + e + end_tag.len());
             continue;
         }
-        let Some(close) = after.find('>') else {
-            rest = "";
+        let Some(close) = html[open..].find('>') else {
+            at = html.len();
             break;
         };
         out.push(' ');
-        rest = &after[close + 1..];
+        at = open + close + 1;
     }
+    let rest = &html[at..];
     out.push_str(rest);
     decode_entities(&out)
         .lines()
@@ -231,6 +278,81 @@ mod tests {
         assert_eq!(html_text("a < b"), "a");
         assert_eq!(html_text("plain"), "plain");
         assert_eq!(html_text("x<script>never closed"), "x");
+    }
+
+    /// A page made of many `<script>` elements is stripped in one pass.
+    /// Lowercasing the remainder at each one made this quadratic (344 ms for
+    /// one 512 KiB page, against ~3.5 ms now). Every element is still skipped
+    /// with its contents, case-insensitively, and the text after them is kept.
+    // rivet: verifies REQ-AGENTDOCS-005
+    #[test]
+    fn many_script_elements_are_skipped_in_one_pass() {
+        let mut page = "<SCRIPT>evil()</ScRiPt>".repeat(20_000);
+        page.push_str("<style>x{}</STYLE>kept <b>text</b>");
+        assert_eq!(html_text(&page), "kept text");
+        assert_eq!(html_text("a<script>never closed"), "a");
+        assert_eq!(html_text("a<b no close"), "a");
+    }
+
+    /// What a question is matched against: markdown as written; HTML as text
+    /// from its `<main>` when it has one; a bounded prefix of a huge page.
+    // rivet: verifies REQ-AGENTDOCS-005
+    #[test]
+    fn search_text_is_markdown_or_the_main_content_of_html_within_a_window() {
+        assert_eq!(search_text("a.md", b"# T\n<b>x</b>"), "# T\n<b>x</b>");
+        assert_eq!(search_text("A.MD", b"<i>"), "<i>");
+        assert_eq!(search_text("a.html", b"<p>a<b>b</b></p>"), "a b");
+        let rd = b"<nav>side</nav><MAIN id=x><p>body &amp; soul</p></MAIN><footer>foot</footer>";
+        assert_eq!(search_text("a.html", rd), "body & soul");
+        // newline and tab also end the tag name; an unclosed main runs to the end
+        assert_eq!(search_text("a.html", b"<nav>n</nav><main\n>in"), "in");
+        assert_eq!(search_text("a.html", b"<nav>n</nav><main\t>in"), "in");
+        assert_eq!(search_text("a.html", b"<nav>n</nav><main>in</main"), "in");
+        // `<mainframe>` is not main; a later real <main> is found
+        assert_eq!(search_text("a.html", b"<mainframe>x</mainframe>"), "x");
+        assert_eq!(
+            search_text("a.html", b"<mainframe>x</mainframe><main>y</main>"),
+            "y"
+        );
+        // a main that never closes its tag has no content
+        assert_eq!(search_text("a.html", b"<p>a</p><main id=x"), "");
+        // the window: bytes past it are not searched, and cutting inside a
+        // multi-byte character does not panic
+        let mut big = "a ".repeat(TEXT_WINDOW / 2).into_bytes();
+        big.extend_from_slice(b"beyondwindow");
+        assert!(!search_text("a.md", &big).contains("beyondwindow"));
+        let mut edge = vec![b'x'; TEXT_WINDOW - 2];
+        edge.extend_from_slice(" tail".as_bytes());
+        assert_eq!(search_text("a.md", &edge).len(), TEXT_WINDOW);
+        assert_eq!(TEXT_WINDOW, 524_288, "the documented 512 KiB cap");
+        let mut cut = vec![b'x'; TEXT_WINDOW - 1];
+        cut.extend_from_slice("é".as_bytes());
+        assert!(search_text("a.md", &cut).starts_with("xxx"));
+    }
+
+    /// Pages carry their text, so the index can rank by it.
+    // rivet: verifies REQ-AGENTDOCS-005
+    #[test]
+    fn pages_carry_their_search_text() {
+        let p = payload(
+            DocsFormat::Html,
+            &[
+                ("a.html", "<title>T</title><main>hello</main>"),
+                ("b.md", "# B\nworld"),
+            ],
+        );
+        let got: Vec<(String, String)> = pages(&p)
+            .unwrap()
+            .into_iter()
+            .map(|g| (g.path, g.text))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a.html".into(), "hello".into()),
+                ("b.md".into(), "# B\nworld".into())
+            ]
+        );
     }
 
     /// `page` shows a member, refuses everything else — `../` included.
