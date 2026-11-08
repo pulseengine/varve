@@ -89,6 +89,13 @@ class GateProbe(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(classify([path]), "false")
 
+    def test_the_probe_s_event_variables_do_not_change_the_answer(self):
+        # temper#87: the probe also sets EVENT_NAME / GITHUB_EVENT_NAME to
+        # pull_request, with no BASE_SHA. GATE_PROBE_FILES must still decide.
+        ev = {"EVENT_NAME": "pull_request", "GITHUB_EVENT_NAME": "pull_request"}
+        self.assertEqual(classify([NOT_CODE], ev), "false")
+        self.assertEqual(classify(["docs/gate-probe-control.rs"], ev), "true")
+
     def test_one_code_path_among_docs_runs_everything(self):
         self.assertEqual(classify([NOT_CODE, "Cargo.toml"]), "true")
 
