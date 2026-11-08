@@ -86,6 +86,11 @@ pub struct Unit {
     pub kind: Kind,
     pub id: String,
     pub title: String,
+    /// What is PRINTED in place of `title` when the title is text a producer
+    /// wrote inside a page (REQ-AGENTDOCS-005, the prompt-injection
+    /// boundary of REQ-AGENTDOCS-002): the page's path. `title` still feeds
+    /// ranking; it is never printed for a page.
+    pub shown: Option<String>,
     /// The words that NAME it (a path, a subcommand, a tool).
     pub name: String,
     /// A description of it.
@@ -326,7 +331,7 @@ pub fn search(units: &[Unit], query: &str, limit: usize) -> Vec<Hit> {
                 matched,
                 id: u.id.clone(),
                 kind: u.kind,
-                title: u.title.clone(),
+                title: u.shown.clone().unwrap_or_else(|| u.title.clone()),
                 score: s,
                 layer: u.layer.clone(),
                 digest: u.digest.clone(),
@@ -371,6 +376,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
             body: String::new(),
             tool: tool.clone(),
             item: None,
+            shown: None,
             layer: t.layer.clone(),
             digest: Some(t.digest.clone()),
             read: format!("{tw} --help"),
@@ -385,6 +391,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 body: String::new(),
                 tool: tool.clone(),
                 item: None,
+                shown: None,
                 layer: t.layer.clone(),
                 digest: Some(t.digest.clone()),
                 read: format!("{tw} {} --help", shell_word(&s.name)),
@@ -404,6 +411,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 body: topic.body.clone(),
                 tool: tool.clone(),
                 item: None,
+                shown: None,
                 layer: t.layer.clone(),
                 digest: Some(t.digest.clone()),
                 read: format!("{docs} {}", shell_word(&topic.name)),
@@ -420,6 +428,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
             body: String::new(),
             tool: Some("varve".into()),
             item: None,
+            shown: None,
             layer: layer.clone(),
             digest: None,
             read: format!("varve {name} --help"),
@@ -439,6 +448,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
             body: String::new(),
             tool: None,
             item: None,
+            shown: None,
             layer: layer.clone(),
             digest: None,
             read: get,
@@ -457,6 +467,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
             body: String::new(),
             tool: None,
             item: None,
+            shown: None,
             layer: layer.clone(),
             digest: None,
             read: format!("varve inspect{l}"),
@@ -474,6 +485,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                 body: String::new(),
                 tool: None,
                 item: None,
+                shown: None,
                 layer: d.layer.clone(),
                 digest: Some(d.digest.clone()),
                 read: format!(
@@ -484,15 +496,19 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
             continue;
         }
         for page in docpages::pages(p)? {
-            // A member path starting with `-` would be read as a flag by
-            // `page`; it is left out rather than handed over as a command.
-            if page.path.starts_with('-') {
+            // What is PRINTED for the page is its pointer: the path when it is
+            // plain, else a handle (a producer chose the path).
+            // A pointer starting with `-` would be read as a flag by `page`;
+            // the page is left out rather than handed over as a command.
+            let ptr = docpages::pointer(&page.path);
+            if ptr.starts_with('-') {
                 continue;
             }
             units.push(Unit {
                 kind: Kind::DocsPage,
-                id: format!("docs:{}:{}", p.name, page.path),
+                id: format!("docs:{}:{ptr}", p.name),
                 item: item_of(&page.path, &page.title),
+                shown: Some(ptr.clone()),
                 title: page.title.clone(),
                 name: page.path.clone(),
                 desc: String::new(),
@@ -505,7 +521,7 @@ pub fn index(ctx: &Context) -> anyhow::Result<Vec<Unit>> {
                     // never be read as a flag, quoted or not.
                     "varve-serve page{l} -- {} {}",
                     shell_word(&p.name),
-                    shell_word(&page.path)
+                    shell_word(&ptr)
                 ),
             });
         }
@@ -585,6 +601,7 @@ mod tests {
             body: String::new(),
             tool: None,
             item: None,
+            shown: None,
             layer: "L".into(),
             digest: None,
             read: format!("read {id}"),
@@ -1218,8 +1235,12 @@ mod tests {
             by("docs:site:a.html").read,
             "varve-serve page -- site a.html"
         );
+        // ranking keeps the page's own title; what is shown is its path
         assert_eq!(by("docs:site:a.html").title, "Alpha");
         assert_eq!(by("docs:site:b.md").title, "Beta");
+        assert_eq!(by("docs:site:a.html").shown.as_deref(), Some("a.html"));
+        assert_eq!(by("docs:site:b.md").shown.as_deref(), Some("b.md"));
+        assert_eq!(by("docs:manual").shown, None);
     }
 
     /// The Markdown and JSON forms carry the same hit, and say plainly when

@@ -93,14 +93,24 @@ echo "== building + installing the small layer (5 x 64 KiB)" >&2
 make_case small- 0 5
 SMALL_PROJECT="$CASE_PROJECT"; SMALL_ROOT="$CASE_ROOT"; SMALL_TRUST="$CASE_TRUST"
 
+# ── cache drop ───────────────────────────────────────────────────────────────
+# Explicit, because the call site of one_run is `if ! res="$(one_run ...)"`,
+# which disables `set -e` inside it: an unchecked failed write here would let a
+# WARM run be reported as large-cold. Returns non-zero when the drop failed.
+drop_caches() {
+  if ! { sync && echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null; }; then
+    echo "cache drop failed" >&2
+    return 1
+  fi
+}
+
 # ── one verify run ───────────────────────────────────────────────────────────
 # prints: read hash signature manifest wall   (seconds)
 one_run() { # project root trust cold?
   local project="$1" root="$2" trust="$3" cold="$4" t0 t1 err line wall
   err="$WORK/verify.err"
   if [ "$cold" = 1 ]; then
-    sync
-    echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null
+    drop_caches || return 1
   fi
   t0="$(now)"
   if ! (cd "$project" && VARVE_ROOT="$root" VARVE_TRUST_ROOT="$trust" "$VARVE" verify --timing) \
@@ -194,10 +204,12 @@ emit "=== ENVIRONMENT END"
 # ── cases ────────────────────────────────────────────────────────────────────
 run_case large-warm "$BIG_PROJECT" "$BIG_ROOT" "$BIG_TRUST" 0 1
 
-if [ "$(uname -s)" = Linux ] && sudo -n true 2>/dev/null; then
+# The pre-check performs one real drop: `sudo -n true` succeeding says nothing
+# about whether the write to drop_caches is permitted.
+if [ "$(uname -s)" = Linux ] && sudo -n true 2>/dev/null && drop_caches 2>/dev/null; then
   run_case large-cold "$BIG_PROJECT" "$BIG_ROOT" "$BIG_TRUST" 1 0
 else
-  emit "=== CASE large-cold SKIPPED: needs Linux and passwordless sudo to write /proc/sys/vm/drop_caches (uname=$(uname -s)); no cold figure was taken and none is implied"
+  emit "=== CASE large-cold SKIPPED: needs Linux and a drop_caches write that succeeds (sudo -n tee /proc/sys/vm/drop_caches) (uname=$(uname -s)); no cold figure was taken and none is implied"
 fi
 
 run_case small-warm "$SMALL_PROJECT" "$SMALL_ROOT" "$SMALL_TRUST" 0 1

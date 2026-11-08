@@ -40,26 +40,117 @@ const ALLOWED_CONDITIONS: &[&str] = &[
     "failure()",
 ];
 
-/// The condition of an `if:` line with its `${{ }}` wrapper stripped, or None
-/// when the line is not an `if:`.
-fn condition(line: &str) -> Option<String> {
-    let t = line.trim_start().trim_start_matches("- ");
-    let c = t.strip_prefix("if:")?.trim();
+/// `continue-on-error` values that are exempt, as (workflow, job, step name or
+/// None for the job level). EMPTY on purpose: no PR workflow uses it today (only
+/// `mutants.yml`, which is not a PR gate, does). A red step that cannot fail
+/// the job is the same hollow green as a skipped one; allow one here, with the
+/// reason, rather than weakening the rule.
+const CONTINUE_ON_ERROR_ALLOWED: &[(&str, &str, Option<&str>)] = &[];
+
+use yaml_rust2::{Yaml, YamlLoader};
+
+fn parse(workflow: &str, text: &str) -> Yaml {
+    let mut docs = YamlLoader::load_from_str(text)
+        .unwrap_or_else(|e| panic!("{workflow} is not parseable YAML: {e}"));
+    assert_eq!(
+        docs.len(),
+        1,
+        "{workflow}: expected exactly one YAML document"
+    );
+    docs.remove(0)
+}
+
+fn get<'a>(m: &'a Yaml, key: &str) -> Option<&'a Yaml> {
+    match m {
+        Yaml::Hash(h) => h.get(&Yaml::String(key.to_string())),
+        _ => None,
+    }
+}
+
+/// The scalar as text, `${{ }}` wrapper stripped.
+fn condition(v: &Yaml) -> String {
+    let raw = match v {
+        Yaml::String(s) | Yaml::Real(s) => s.clone(),
+        Yaml::Boolean(b) => b.to_string(),
+        Yaml::Integer(i) => i.to_string(),
+        other => format!("{other:?}"),
+    };
+    let c = raw.trim();
     let c = c
         .strip_prefix("${{")
         .and_then(|c| c.strip_suffix("}}"))
         .unwrap_or(c);
-    Some(c.trim().to_string())
+    c.trim().to_string()
 }
 
-/// Every `if:` line in `text` whose condition is not on the allowlist, as
-/// (line number, line).
-fn variable_switches(text: &str) -> Vec<(usize, String)> {
-    text.lines()
-        .enumerate()
-        .filter(|(_, l)| condition(l).is_some_and(|c| !ALLOWED_CONDITIONS.contains(&c.as_str())))
-        .map(|(i, l)| (i + 1, l.trim().to_string()))
-        .collect()
+fn is_literal_false(v: &Yaml) -> bool {
+    match v {
+        Yaml::Boolean(b) => !*b,
+        Yaml::String(s) => s.trim() == "false",
+        _ => false,
+    }
+}
+
+/// Whether the parsed workflow runs on pull requests, from its `on:` key. A
+/// YAML 1.1 parser reads that key as the boolean `true`; yaml-rust2 is 1.2 and
+/// keeps the string, but both spellings are handled.
+fn runs_on_pull_request(doc: &Yaml) -> bool {
+    let Yaml::Hash(map) = doc else {
+        return false;
+    };
+    let Some((_, on)) = map
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("on") || matches!(k, Yaml::Boolean(true)))
+    else {
+        return false;
+    };
+    let is_pr = |s: &str| s == "pull_request" || s == "pull_request_target";
+    match on {
+        Yaml::String(s) => is_pr(s),
+        Yaml::Array(q) => q.iter().any(|e| e.as_str().is_some_and(is_pr)),
+        Yaml::Hash(m) => m.keys().any(|k| k.as_str().is_some_and(is_pr)),
+        _ => false,
+    }
+}
+
+/// Every job and step in the parsed workflow `text` (named `workflow`) whose
+/// `if:` is outside the allowlist, or whose `continue-on-error` is anything but
+/// absent or `false`, as (location, what).
+fn variable_switches(workflow: &str, text: &str) -> Vec<(String, String)> {
+    let doc = parse(workflow, text);
+    let mut found = Vec::new();
+    let Some(Yaml::Hash(jobs)) = get(&doc, "jobs") else {
+        return found;
+    };
+    for (job_id, job) in jobs {
+        let job_id = job_id.as_str().unwrap_or("?");
+        let mut check = |loc: String, node: &Yaml, step: Option<&str>| {
+            if let Some(c) = get(node, "if") {
+                let c = condition(c);
+                if !ALLOWED_CONDITIONS.contains(&c.as_str()) {
+                    found.push((loc.clone(), format!("if: {c}")));
+                }
+            }
+            if let Some(v) = get(node, "continue-on-error") {
+                let allowed = CONTINUE_ON_ERROR_ALLOWED.contains(&(workflow, job_id, step));
+                if !is_literal_false(v) && !allowed {
+                    found.push((loc, format!("continue-on-error: {v:?}")));
+                }
+            }
+        };
+        check(format!("jobs.{job_id}"), job, None);
+        if let Some(Yaml::Array(steps)) = get(job, "steps") {
+            for (i, step) in steps.iter().enumerate() {
+                let name = get(step, "name").and_then(Yaml::as_str);
+                check(
+                    format!("jobs.{job_id}.steps[{i}]"),
+                    step,
+                    Some(name.unwrap_or("")),
+                );
+            }
+        }
+    }
+    found
 }
 
 // rivet: verifies REQ-SYSTEST-001
@@ -67,12 +158,13 @@ fn variable_switches(text: &str) -> Vec<(usize, String)> {
 fn no_pr_gate_is_switched_by_a_repository_variable() {
     for name in PR_WORKFLOWS {
         let w = workflow(name);
+        let doc = parse(name, &w);
         assert!(
-            w.contains("pull_request"),
+            runs_on_pull_request(&doc),
             "{name} is listed as a PR workflow but has no pull_request trigger; \
              update PR_WORKFLOWS rather than letting this test check nothing"
         );
-        let found = variable_switches(&w);
+        let found = variable_switches(name, &w);
         assert!(
             found.is_empty(),
             "{name} gates a job or step on a condition outside ALLOWED_CONDITIONS: {found:?}. A \
@@ -90,10 +182,10 @@ fn no_pr_gate_is_switched_by_a_repository_variable() {
 /// (#333 item 2) must both be flagged, and today's forms must not.
 #[test]
 fn the_scanner_flags_any_switch_outside_the_allowlist_at_job_and_step_level() {
-    let job = "  x:\n    if: ${{ !cancelled() && vars.FLAG == '1' }}\n";
-    let step = "    steps:\n      - if: vars.FLAG == '1'\n        run: true\n";
-    let repo = "  x:\n    if: ${{ github.repository == 'x/y' && !cancelled() && needs.changes.outputs.code != 'false' }}\n";
-    let actor = "    steps:\n      - if: github.actor != 'bot'\n        run: true\n";
+    let job = "jobs:\n  x:\n    if: ${{ !cancelled() && vars.FLAG == '1' }}\n";
+    let step = "jobs:\n  x:\n    steps:\n      - if: vars.FLAG == '1'\n        run: true\n";
+    let repo = "jobs:\n  x:\n    if: ${{ github.repository == 'x/y' && !cancelled() && needs.changes.outputs.code != 'false' }}\n";
+    let actor = "jobs:\n  x:\n    steps:\n      - if: github.actor != 'bot'\n        run: true\n";
     for (name, text) in [
         ("job", job),
         ("step", step),
@@ -101,21 +193,58 @@ fn the_scanner_flags_any_switch_outside_the_allowlist_at_job_and_step_level() {
         ("actor", actor),
     ] {
         assert_eq!(
-            variable_switches(text).len(),
+            variable_switches("t.yml", text).len(),
             1,
             "{name} switch not flagged"
         );
     }
     for ok in ALLOWED_CONDITIONS {
         for text in [
-            format!("    if: ${{{{ {ok} }}}}\n"),
-            format!("    if: {ok}\n"),
-            format!("      - if: {ok}\n"),
+            format!("jobs:\n  x:\n    if: ${{{{ {ok} }}}}\n"),
+            format!("jobs:\n  x:\n    if: \"{ok}\"\n"),
+            format!("jobs:\n  x:\n    steps:\n      - if: \"{ok}\"\n        run: true\n"),
         ] {
             assert!(
-                variable_switches(&text).is_empty(),
+                variable_switches("t.yml", &text).is_empty(),
                 "allowed form flagged: {text}"
             );
         }
     }
+}
+
+#[test]
+fn the_scanner_flags_valid_yaml_spellings_a_line_scanner_misses() {
+    let forms = [
+        (
+            "extra spaces",
+            "jobs:\n  x:\n    steps:\n      -   if: vars.SKIP_TEST != '1'\n          run: x\n",
+        ),
+        (
+            "flow mapping",
+            "jobs:\n  x:\n    steps:\n      - { name: t, if: \"vars.SKIP_TEST != '1'\", run: x }\n",
+        ),
+        (
+            "quoted key",
+            "jobs:\n  x:\n    steps:\n      - \"if\": vars.SKIP_TEST != '1'\n        run: x\n",
+        ),
+        (
+            "job continue-on-error",
+            "jobs:\n  x:\n    continue-on-error: true\n    steps:\n      - run: x\n",
+        ),
+        (
+            "step continue-on-error",
+            "jobs:\n  x:\n    steps:\n      - run: x\n        continue-on-error: ${{ vars.F }}\n",
+        ),
+    ];
+    let missed: Vec<&str> = forms
+        .iter()
+        .filter(|(_, text)| variable_switches("t.yml", text).len() != 1)
+        .map(|(name, _)| *name)
+        .collect();
+    assert!(missed.is_empty(), "not flagged exactly once: {missed:?}");
+    let ok = "jobs:\n  x:\n    steps:\n      - { name: t, if: \"${{ failure() }}\", run: x, continue-on-error: false }\n";
+    assert!(
+        variable_switches("t.yml", ok).is_empty(),
+        "allowed flow form flagged"
+    );
 }

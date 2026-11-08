@@ -367,9 +367,19 @@ fn parse_realms(text: &str) -> Result<RawRealmsFile, String> {
     let hint = |e: toml::de::Error| {
         let mut reason = e.to_string();
         if reason.contains("unknown field") {
+            // `ignorable` exists only on the top level and on a realm table,
+            // and serde lists the fields the table at fault expects: a table
+            // that does not list it (`retired-roots` entries) cannot mark
+            // anything, so offering it there would be advice that cannot work.
+            let marking = if reason.contains("`ignorable`") {
+                "Fields a newer file marks `ignorable` are skipped; an unknown field that is \
+                 not marked"
+            } else {
+                "A field inside a nested table cannot be marked `ignorable`, so an unknown one \
+                 there"
+            };
             reason.push_str(&format!(
-                "\nThis realms file may come from a newer varve; this is varve {}. Fields a \
-                 newer file marks `ignorable` are skipped; an unknown field that is not marked \
+                "\nThis realms file may come from a newer varve; this is varve {}. {marking} \
                  may carry a check this version cannot perform, so it is refused.",
                 env!("CARGO_PKG_VERSION")
             ));
@@ -998,6 +1008,52 @@ trust-root = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             );
             assert!(msg.contains("newer varve"), "names the likely cause: {msg}");
         }
+    }
+
+    /// The hint offers `ignorable` only where it can apply: a realm-level (or
+    /// top-level) unknown key may be marked, a key nested in a
+    /// `retired-roots` entry cannot be.
+    // rivet: verifies REQ-REALM-001
+    #[test]
+    fn the_hint_offers_ignorable_only_where_it_can_apply() {
+        let realm_level = load_err(&realm_with_extra("future-check = true"));
+        assert!(realm_level.contains("future-check"), "{realm_level}");
+        assert!(
+            realm_level.contains("marks `ignorable` are skipped"),
+            "realm level may be marked: {realm_level}"
+        );
+        assert!(!realm_level.contains("cannot be marked"), "{realm_level}");
+
+        let top_level = load_err(&format!("future-top = true\n{}", realm_with_extra("")));
+        assert!(top_level.contains("future-top"), "{top_level}");
+        assert!(
+            top_level.contains("marks `ignorable` are skipped"),
+            "top level may be marked: {top_level}"
+        );
+
+        let nested = load_err(&realm_with_extra(
+            "retired-roots = [{ key = \"aa\", retired = \"2026-01-01\", future-nested = 1 }]",
+        ));
+        assert!(
+            nested.contains("future-nested"),
+            "names the field: {nested}"
+        );
+        assert!(
+            nested.contains("cannot be marked `ignorable`"),
+            "says it cannot be marked: {nested}"
+        );
+        assert!(
+            !nested.contains("marks `ignorable` are skipped"),
+            "no advice that cannot work: {nested}"
+        );
+        assert!(
+            nested.contains("newer varve"),
+            "still names the cause: {nested}"
+        );
+        assert!(
+            nested.contains(&format!("varve {}", env!("CARGO_PKG_VERSION"))),
+            "{nested}"
+        );
     }
 
     /// A parse error that is NOT about an unknown field gets no skew hint.

@@ -172,16 +172,60 @@ pub fn html_text(html: &str) -> String {
         .join("\n")
 }
 
+/// The longest member path printed as it is.
+pub const POINTER_MAX: usize = 200;
+
+/// Is this member path safe to print as it is? A member path is written by a
+/// producer, so only plain path characters qualify: no space, control
+/// character, ESC, newline or non-ASCII (homoglyphs), and not unreasonably long.
+pub fn is_inert_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= POINTER_MAX
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
+}
+
+/// A handle that names a page without any of its path's text:
+/// `page-` and the first 12 hex digits of the path's SHA-256.
+pub fn handle_of(path: &str) -> String {
+    let digest = varve_core::store::manifest_digest(path.as_bytes());
+    let hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
+    format!("page-{}", &hex[..12])
+}
+
+/// What is printed for a page: its path when that is inert, else its handle.
+/// `read_page` resolves both.
+pub fn pointer(path: &str) -> String {
+    if is_inert_path(path) {
+        path.to_string()
+    } else {
+        handle_of(path)
+    }
+}
+
 /// One member of a verified payload, as text. `None` when the payload has no
 /// such member — including every `../` path, which can never equal a member
 /// name, so there is nothing to defend.
 pub fn read_page(payload: &DocsPayload, path: &str) -> anyhow::Result<Option<String>> {
     let want = path.trim_start_matches("./");
-    for m in members_of(payload).map_err(|e| anyhow::anyhow!(e.to_string()))? {
+    let members = members_of(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    // A member is found by its exact path, else by the handle `ask` printed
+    // for a path it would not print (an exact path always wins).
+    let exact = members
+        .iter()
+        .any(|m| m.path.trim_start_matches("./") == want);
+    for m in members {
         let MemberBody::File { bytes, .. } = m.body else {
             continue;
         };
-        if m.path.trim_start_matches("./") == want {
+        let member = m.path.trim_start_matches("./");
+        let hit = if exact {
+            member == want
+        } else {
+            !is_inert_path(member) && handle_of(member) == want
+        };
+        if hit {
             let text = String::from_utf8_lossy(&bytes).into_owned();
             return Ok(Some(if path.to_ascii_lowercase().ends_with(".md") {
                 text
@@ -389,5 +433,65 @@ mod tests {
         ] {
             assert_eq!(read_page(&p, bad).unwrap(), None, "{bad}");
         }
+    }
+
+    /// Only plain path characters up to 200 bytes are printed as they are.
+    // rivet: verifies REQ-AGENTDOCS-005
+    #[test]
+    fn only_a_plain_short_path_is_inert() {
+        for ok in [
+            "a.md",
+            "c/struct.Widget.html",
+            "A-b_c/d.1",
+            &"a".repeat(POINTER_MAX),
+        ] {
+            assert!(is_inert_path(ok), "{ok}");
+            assert_eq!(pointer(ok), ok);
+        }
+        for bad in [
+            "",
+            "a b.md",
+            "a\nb.md",
+            "a\rb",
+            "a\tb",
+            "a\u{1b}[0m",
+            "a\0b",
+            "\u{0455}.md",
+            "caf\u{e9}.md",
+            "a:b",
+            "a$b",
+            "a'b",
+            &"a".repeat(POINTER_MAX + 1),
+        ] {
+            assert!(!is_inert_path(bad), "{bad:?}");
+            let h = pointer(bad);
+            assert_eq!(h, handle_of(bad));
+            assert!(h.len() == 17 && h.starts_with("page-"), "{h}");
+            assert!(is_inert_path(&h));
+        }
+        assert_ne!(handle_of("a b"), handle_of("a  b"));
+    }
+
+    /// The handle printed for an odd path reads that page; a plain path
+    /// named like a handle wins over it; an unknown handle reads nothing.
+    // rivet: verifies REQ-AGENTDOCS-005
+    #[test]
+    fn a_handle_reads_the_page_it_names() {
+        let odd = "d/a b\n.md";
+        let h = handle_of(odd);
+        let p = payload(
+            DocsFormat::Html,
+            &[(odd, "odd body"), ("plain.md", "plain body")],
+        );
+        assert_eq!(read_page(&p, &h).unwrap().as_deref(), Some("odd body"));
+        assert_eq!(read_page(&p, odd).unwrap().as_deref(), Some("odd body"));
+        // a plain path has no handle: its handle names nothing
+        assert_eq!(read_page(&p, &handle_of("plain.md")).unwrap(), None);
+        assert_eq!(read_page(&p, "page-000000000000").unwrap(), None);
+        let q = payload(
+            DocsFormat::Html,
+            &[(odd, "odd body"), (h.as_str(), "squatter")],
+        );
+        assert_eq!(read_page(&q, &h).unwrap().as_deref(), Some("squatter"));
     }
 }

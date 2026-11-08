@@ -75,7 +75,17 @@ def counts_as_evidence(a):
     steps = fields.get("steps")
     if isinstance(steps, str):
         return bool(steps.strip())
-    return isinstance(steps, list) and len(steps) > 0
+    return isinstance(steps, list) and any(_nonblank(x) for x in steps)
+
+
+def _nonblank(x):
+    """A step entry that names something: a non-blank string, or a mapping with
+    at least one non-blank value. `""`, `None` and `{}` name nothing."""
+    if isinstance(x, str):
+        return bool(x.strip())
+    if isinstance(x, dict):
+        return any(_nonblank(v) for v in x.values())
+    return False
 
 
 def edges(artifacts):

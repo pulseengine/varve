@@ -3601,6 +3601,7 @@ artifacts:
     fields:
       baseline: "cold-cache attribution of varve verify --timing, run 42402881731 (measure-verify.yml at 513d224f, varve 0.46.0), 2026-11-07, GitHub-hosted ubuntu-latest: AMD EPYC 7763, 4 vCPU, sha_ni present, 15 GiB RAM, ext4 on /dev/root. Layer: one 2048 MiB random payload plus five 64 KiB payloads. Medians of 5 runs. WARM: read 0.180 s, hash 1.357 s, wall 1.573 s. COLD (sync; drop_caches 3 before each run): read 3.655 s, hash 1.376 s, wall 5.093 s, so reading is 72% of the cold wall and hashing 27%; the cold read is 2 GiB in 3.655 s, about 560 MiB/s, the throughput of the runner disk. Small layer (five 64 KiB payloads) warm: every stage 0.000 s, wall 0.016 s. FINDING for clause 1: on this runner reading dominates cold. LIMIT: the disk is the runner disk; a local NVMe disk reads cold at several GB/s, where hashing at about 1.5 GB/s would dominate again, so the verdict is substrate-dependent. Also, the measured shape has ONE large payload, so digesting payloads concurrently (clause 2) gains nearly nothing for it on any disk; overlapping read with hash would. This discharges clause 1 ONLY; clauses 2-5 are unverified and the requirement stays proposed."
       method: analysis
+      steps: Run .github/workflows/measure-verify.yml (push to a measure/** branch, or workflow_dispatch) and read the verify-cold-summary artifact it uploads.
     links:
       - type: verifies
         target: REQ-VERIFYPAR-001
@@ -3608,3 +3609,25 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-11-07T19:32:32Z
+
+  - id: VER-REVIEW-V0-47-0
+    type: verification
+    title: "Independent clean-room review of v0.47.0 (so far): #335-#341"
+    status: verified
+    release: v0.47.0
+    tags: [independence, review]
+    fields:
+      baseline: "Independent clean-room review (fresh context, refute-framed) of everything merged for v0.47.0 so far (#335, #336, #337, #338, #339, #340, #341) at 6175ab9c, 2026-11-08, by a fresh-context clean-room reviewer (Claude). cargo test --workspace: 1999 passed, 0 failed, 2 ignored. Negative controls, all restored: C4 ignorable allowed to drop a known key (red), C6 best line emitted in JSON (red), C6 page text scored as a word bag (red), C2c check_shadow silenced (red). VERDICTS: C1 #331 asset-for message CONFIRMED. C3 #246 per-run TempDir and the 12-requirement release move CONFIRMED (caveat: the ignored sdk_relocation_runs tests keep fixed /tmp paths deliberately, path length is what they test). C4 #234 ignorable CONFIRMED under an attack battery (every known key listed ignorable at file and realm level, a realm named ignorable, ignorable listing itself, case variants, four malformed forms, nested unknown keys, duplicate keys, inline tables). C2 #333 PARTIAL: (a) trace-gate draft/no-steps rule and (c) install-shadow normal path hold, but (b) the PR-gate if: scanner was a line scanner, bypassed by three valid-YAML forms (extra spaces after the dash, a flow mapping, a quoted key) with both tests green, and steps: [\"\"] counted as evidence. C5 #339 PARTIAL: upstream-sums round-trips and ingest.rs is gated, but the variant-drift guard rested on a hand-kept VARIANT_COUNT, so an added variant missing from VARIANTS compiled and passed. C6 #340 PARTIAL: page body text is searched and the best line is never printed, ranking is deterministic, html_text is linear (15 worst cases at 512 KiB, worst 8.9 ms), but the page TITLE (HTML title or first heading, producer-written) reached ask output in both formats, and cmd-ask.md claimed no page text is printed; pre-existing at v0.46.0, widened by body search. C7 #341 PARTIAL: the recorded medians match runs 42402881731 and 42438484840, the workflow cannot run on pull_request and holds no secrets, but a failed drop_caches write under if ! res=$(...) was ignored and a warm run labelled cold (published numbers unaffected: cold read 3.655 s against 0.180 s warm). DISPOSITION, all fixed in the review-fix PR: (1, high) the scanner parses PR workflows as YAML (yaml-rust2, dev-dependency; serde_yaml refused by cargo deny for unsafe-libyaml) and also flags continue-on-error; negative control: a -   if: vars step in ci.yml turns it red. (2, medium) a docs-page hit shows its path when it is in [A-Za-z0-9._/-] and at most 200 bytes, else a page-<12 hex of sha256> handle that varve-serve page resolves; hostile title and hostile member-path tests, both negative-controlled; the residual (a safe path can spell words) is stated in cmd-ask.md; the automated security review raised the member-path case. (3, medium) a failed cache drop fails or skips the cold case, never labels it. (4, low) IngestProof, its spellings and VARIANTS come from one macro. (5, low) an empty step is not evidence; VER-VERIFYPAR-001 gains steps. (6, low) the nested-key realms hint no longer offers ignorable. NOT CHECKED: two concurrent runs (code reading only), fork triggering of measure-verify. NOT YET IN SCOPE OF THIS RECORD: the REQ-SIGNEDSUMS-001 rung, which waits on the maintainer and will need its own review if it lands in v0.47.0. Producer-influenced titles of non-page hits (tool help descriptions, manifest title annotation, payload names) were left unchanged and are noted for the maintainer."
+      method: review
+      steps: cargo test --workspace; cargo test -p varve-serve --test ask_page_text; cargo test -p varve-producer --test pr_gates_cannot_be_switched_off; cargo test -p varve-core --lib realm; cargo test -p varve-core --lib ingest; python3 -m unittest discover -s tools -p test_*.py
+    links:
+      - type: verifies
+        target: REQ-AGENTDOCS-005
+      - type: verifies
+        target: REQ-REALM-001
+      - type: verifies
+        target: REQ-INGEST-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-08T06:44:27Z
