@@ -522,6 +522,7 @@ mod tests {
             plan: crate::plan::PayloadPlan {
                 release: "v1.0.0".into(),
                 upstream_sums: None,
+                pgp_sums: None,
                 title: None,
                 documents: None,
                 allow_pip: None,
@@ -1560,6 +1561,7 @@ mod tests {
         let p = |name: &str, plat: &str, asset: &str| crate::plan::PayloadPlan {
             release: "v1.0.0".into(),
             upstream_sums: None,
+            pgp_sums: None,
             title: None,
             documents: None,
             allow_pip: None,
@@ -1619,6 +1621,7 @@ mod tests {
         let p = |name: &str, plat: &str, asset: &str, named: bool| crate::plan::PayloadPlan {
             release: "v0.76.0".into(),
             upstream_sums: None,
+            pgp_sums: None,
             title: None,
             documents: None,
             allow_pip: None,

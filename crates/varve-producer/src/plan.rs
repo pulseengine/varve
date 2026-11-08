@@ -121,6 +121,10 @@ pub struct PayloadPlan {
     /// one (REQ-UPSTREAMSUMS-001). A property of the RELEASE, so every payload
     /// from one release carries the same value.
     pub upstream_sums: Option<String>,
+    /// The signed digest list this release is verified against, and the key
+    /// that must have signed it (REQ-SIGNEDSUMS-001). A property of the
+    /// RELEASE, like `upstream_sums`.
+    pub pgp_sums: Option<PgpSumsPlan>,
     /// The label a human reads when choosing between documents. `None` for
     /// every kind but `docs`.
     pub title: Option<String>,
@@ -132,8 +136,45 @@ pub struct PayloadPlan {
     pub allow_pip: Option<Vec<String>>,
 }
 
+/// A release's PGP-signed digest list, as declared in the producer's input
+/// (REQ-SIGNEDSUMS-001): where the list and its detached signature are, how
+/// to read the list, and the pinned certificate that must have signed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgpSumsPlan {
+    /// The release asset carrying the digest list, templates expanded.
+    pub list: String,
+    /// The release asset carrying the detached signature over `list`.
+    pub signature: String,
+    pub format: crate::pgpsums::ListFormat,
+    /// The OpenPGP certificate. Relative to the input file once
+    /// [`anchor_key_files`] has run; read from disk at ingestion, and its
+    /// absence is an error and never a weaker rung.
+    pub key_file: std::path::PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
+    /// `pgp-sums` without `pgp-key-file`: a signature with no pinned key to
+    /// check it against verifies nothing.
+    PgpSumsNeedsKey {
+        tool: String,
+    },
+    /// A `pgp-*` field on an entry that declares no `pgp-sums`: read by
+    /// nothing, and believed.
+    PgpFieldWithoutSums {
+        tool: String,
+        field: &'static str,
+    },
+    /// `pgp-sums-format` names a format this producer does not read.
+    PgpSumsFormatUnknown {
+        tool: String,
+        found: String,
+    },
+    /// Both a signed and an unsigned digest list: the unsigned one could never
+    /// be consulted, because the signed rung either accepts or aborts.
+    PgpSumsAndUpstreamSums {
+        tool: String,
+    },
     Template(TemplateError),
     /// Documentation describes the layer, not a machine, so a per-platform
     /// template would expand to several identical payloads under one name.
@@ -190,6 +231,33 @@ impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PlanError::Template(e) => write!(f, "{e}"),
+            PlanError::PgpSumsNeedsKey { tool } => write!(
+                f,
+                "tool {tool:?} declares `pgp-sums` but no `pgp-key-file`. A \
+                 signature is only evidence against a key the operator pinned: \
+                 name the OpenPGP certificate, as a path relative to this file, \
+                 e.g. pgp-key-file = \"keys/upstream.asc\". varve never fetches \
+                 the key and never reads one from beside the artifact."
+            ),
+            PlanError::PgpFieldWithoutSums { tool, field } => write!(
+                f,
+                "tool {tool:?} sets `{field}` but declares no `pgp-sums`. \
+                 Nothing would read it, and a pinned key that vouches for \
+                 nothing looks like a verified release. Declare `pgp-sums`, or \
+                 drop `{field}`."
+            ),
+            PlanError::PgpSumsFormatUnknown { tool, found } => write!(
+                f,
+                "tool {tool:?} declares pgp-sums-format = {found:?}. Known \
+                 formats are \"sha256sums\" (the default) and \"rust-channel\"."
+            ),
+            PlanError::PgpSumsAndUpstreamSums { tool } => write!(
+                f,
+                "tool {tool:?} declares both `pgp-sums` and `upstream-sums`. \
+                 The signed list either verifies or aborts the run; it never \
+                 falls through to an unsigned one, so `upstream-sums` could \
+                 never be consulted. Drop it."
+            ),
             PlanError::PlatformNotInLayer {
                 tool,
                 platform,
@@ -327,6 +395,83 @@ fn kind_of(t: &ManifestTool) -> Result<PayloadKind, PlanError> {
     }
 }
 
+/// The signed-digest-list declaration of one tool, validated (REQ-SIGNEDSUMS-001).
+///
+/// `pgp-sums`, `pgp-sums-signature`, `pgp-sums-format` and `pgp-key-file` are
+/// ONE declaration: the first and the last are required together, and the two
+/// in between are meaningless without them. Anything else is refused here, at
+/// plan time, because half of it is a proof nobody can check.
+///
+/// The signature defaults to the list's name plus `.asc`, which is the
+/// convention (`SHA256SUMS` / `SHA256SUMS.asc`, and Rust's
+/// `channel-rust-stable.toml` / `.toml.asc`). The format defaults to
+/// `sha256sums`.
+fn pgp_plan(t: &ManifestTool, release: &str) -> Result<Option<PgpSumsPlan>, PlanError> {
+    let Some(list) = &t.pgp_sums else {
+        let stray = [
+            ("pgp-sums-signature", t.pgp_sums_signature.is_some()),
+            ("pgp-sums-format", t.pgp_sums_format.is_some()),
+            ("pgp-key-file", t.pgp_key_file.is_some()),
+        ];
+        if let Some((field, _)) = stray.into_iter().find(|(_, set)| *set) {
+            return Err(PlanError::PgpFieldWithoutSums {
+                tool: t.name.clone(),
+                field,
+            });
+        }
+        return Ok(None);
+    };
+    let Some(key_file) = &t.pgp_key_file else {
+        return Err(PlanError::PgpSumsNeedsKey {
+            tool: t.name.clone(),
+        });
+    };
+    if t.upstream_sums.is_some() {
+        return Err(PlanError::PgpSumsAndUpstreamSums {
+            tool: t.name.clone(),
+        });
+    }
+    let format = match &t.pgp_sums_format {
+        None => crate::pgpsums::ListFormat::default(),
+        Some(f) => {
+            crate::pgpsums::ListFormat::parse(f).ok_or_else(|| PlanError::PgpSumsFormatUnknown {
+                tool: t.name.clone(),
+                found: f.clone(),
+            })?
+        }
+    };
+    let list = asset::expand(list, &t.version, release, None, None)?;
+    let signature = match &t.pgp_sums_signature {
+        Some(s) => asset::expand(s, &t.version, release, None, None)?,
+        None => format!("{list}.asc"),
+    };
+    Ok(Some(PgpSumsPlan {
+        list,
+        signature,
+        format,
+        key_file: std::path::PathBuf::from(key_file),
+    }))
+}
+
+/// Resolve every `pgp-key-file` against the input file that named it.
+///
+/// The path in the input is relative to THAT file, so the planner (which has no
+/// idea where the file lives) leaves it as written and the caller that read the
+/// file anchors it here, once, before anything is ingested. A relative path
+/// resolved against the working directory instead would make the same input
+/// verify against a different key depending on where it was run from.
+pub fn anchor_key_files(plans: &mut [PayloadPlan], input_file: &std::path::Path) {
+    let base = match input_file.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    for plan in plans {
+        if let Some(pgp) = &mut plan.pgp_sums {
+            pgp.key_file = base.join(&pgp.key_file);
+        }
+    }
+}
+
 /// Expand one tool into one plan item per platform.
 pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan>, PlanError> {
     let kind = kind_of(t)?;
@@ -372,6 +517,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
     let name = t.binary.clone().unwrap_or_else(|| t.name.clone());
     // Absent `release`, the version serves as the tag — the ordinary case.
     let release = t.release.clone().unwrap_or_else(|| t.version.clone());
+    let pgp_sums = pgp_plan(t, &release)?;
 
     let mut out = Vec::new();
     if !asset::is_per_platform(&template) {
@@ -389,6 +535,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: t.opt_in_reason(),
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
+            pgp_sums: pgp_sums.clone(),
             title: None,
             documents: None,
             allow_pip: t.allow_pip.clone(),
@@ -450,6 +597,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: t.opt_in_reason(),
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
+            pgp_sums: pgp_sums.clone(),
             title: None,
             documents: None,
             // A per-platform entry is never a module (refused above), so it
@@ -479,6 +627,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: None,
             contains: None,
             upstream_sums: None,
+            pgp_sums: None,
             title: None,
             documents: None,
             allow_pip: None,
@@ -500,6 +649,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: None,
             contains: None,
             upstream_sums: None,
+            pgp_sums: None,
             title: None,
             documents: None,
             allow_pip: None,
@@ -543,6 +693,7 @@ pub fn plan_docs(d: &ManifestDocs) -> Result<Vec<PayloadPlan>, PlanError> {
         // whose link 404s.
         contains: d.entry.clone(),
         upstream_sums: None,
+        pgp_sums: None,
         title: d.title.clone(),
         documents: d.documents.clone(),
         allow_pip: None,
@@ -579,6 +730,7 @@ pub fn plan_crate(c: &ManifestCrate) -> Result<Vec<PayloadPlan>, PlanError> {
         unverified_reason: None,
         contains: None,
         upstream_sums: None,
+        pgp_sums: None,
         title: None,
         documents: None,
         allow_pip: None,
@@ -1421,5 +1573,156 @@ mod tests {
             "every platform fetched the same asset"
         );
         assert_eq!(p[0].asset, "thing-aarch64-apple-darwin");
+    }
+
+    // ------------------------------------------ pgp-sums (REQ-SIGNEDSUMS-001)
+
+    const SIGNED_TOOL: &str = "[[tool]]\nname = \"t\"\nversion = \"v1\"\n\
+         asset = \"t-%V.tar.gz\"\n";
+
+    fn signed(extra: &str) -> Result<Vec<PayloadPlan>, PlanError> {
+        plan(&manifest(&format!("{SIGNED_TOOL}{extra}")), PLATFORMS)
+    }
+
+    /// Defaults: the signature is the list's name plus `.asc`, the format is
+    /// sha256sums, and the key path is carried as written.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_pgp_sums_entry_plans_with_its_defaults() {
+        let p = signed("pgp-sums = \"SHA256SUMS\"\npgp-key-file = \"keys/up.asc\"\n").unwrap();
+        let spec = p[0].pgp_sums.as_ref().expect("declared");
+        assert_eq!(spec.list, "SHA256SUMS");
+        assert_eq!(spec.signature, "SHA256SUMS.asc");
+        assert_eq!(spec.format, crate::pgpsums::ListFormat::Sha256Sums);
+        assert_eq!(spec.key_file, std::path::PathBuf::from("keys/up.asc"));
+        // A property of the release: every platform's payload carries it.
+        assert!(p.iter().all(|x| x.pgp_sums == p[0].pgp_sums));
+    }
+
+    /// Templates expand in the list and signature names; a stated signature
+    /// and format are honoured.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_list_and_signature_names_are_templates_and_overridable() {
+        let p = signed(
+            "pgp-sums = \"sums-%V.txt\"\npgp-sums-signature = \"sums-%R.sig\"\n\
+             pgp-sums-format = \"rust-channel\"\npgp-key-file = \"k.asc\"\n",
+        )
+        .unwrap();
+        let spec = p[0].pgp_sums.as_ref().unwrap();
+        // %V is the bare version, %R the release tag.
+        assert_eq!(spec.list, "sums-1.txt");
+        assert_eq!(spec.signature, "sums-v1.sig");
+        assert_eq!(spec.format, crate::pgpsums::ListFormat::RustChannel);
+
+        // Not stated: the default signature follows the EXPANDED list name.
+        let p = signed("pgp-sums = \"sums-%V.txt\"\npgp-key-file = \"k.asc\"\n").unwrap();
+        assert_eq!(p[0].pgp_sums.as_ref().unwrap().signature, "sums-1.txt.asc");
+    }
+
+    /// `pgp-sums` without a key is a signature checked against nothing.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn pgp_sums_without_a_key_file_is_a_plan_error() {
+        let err = signed("pgp-sums = \"SHA256SUMS\"\n").expect_err("refuses");
+        assert_eq!(
+            err,
+            PlanError::PgpSumsNeedsKey { tool: "t".into() },
+            "{err}"
+        );
+        assert!(err.to_string().contains("pgp-key-file"), "{err}");
+    }
+
+    /// A key, a format or a signature with no list is read by nothing.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_pgp_field_without_pgp_sums_is_a_plan_error() {
+        for (line, field) in [
+            ("pgp-key-file = \"k.asc\"", "pgp-key-file"),
+            ("pgp-sums-signature = \"x.sig\"", "pgp-sums-signature"),
+            ("pgp-sums-format = \"rust-channel\"", "pgp-sums-format"),
+        ] {
+            let err = signed(&format!("{line}\n")).expect_err("refuses");
+            assert_eq!(
+                err,
+                PlanError::PgpFieldWithoutSums {
+                    tool: "t".into(),
+                    field
+                },
+                "{line}"
+            );
+            assert!(err.to_string().contains(field), "{err}");
+        }
+    }
+
+    /// An unknown format is refused, naming the ones that work.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_unknown_pgp_sums_format_is_a_plan_error() {
+        let err =
+            signed("pgp-sums = \"S\"\npgp-key-file = \"k.asc\"\npgp-sums-format = \"yaml\"\n")
+                .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::PgpSumsFormatUnknown { found, .. } if found == "yaml"),
+            "{err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sha256sums") && msg.contains("rust-channel"),
+            "{msg}"
+        );
+    }
+
+    /// Both lists on one entry: the unsigned one could never be consulted.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_signed_and_an_unsigned_list_on_one_entry_is_a_plan_error() {
+        let err =
+            signed("pgp-sums = \"S\"\npgp-key-file = \"k.asc\"\nupstream-sums = \"sha256.sum\"\n")
+                .expect_err("refuses");
+        assert_eq!(err, PlanError::PgpSumsAndUpstreamSums { tool: "t".into() });
+        assert!(err.to_string().contains("upstream-sums"), "{err}");
+    }
+
+    /// A per-platform list name would not be one list.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_per_platform_list_name_is_refused() {
+        let err =
+            signed("pgp-sums = \"sums-%T.txt\"\npgp-key-file = \"k.asc\"\n").expect_err("refuses");
+        assert!(matches!(err, PlanError::Template(_)), "{err}");
+    }
+
+    /// An entry with only `upstream-sums` is untouched by the new fields.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_upstream_sums_entry_declares_no_pgp_plan() {
+        let p = signed("upstream-sums = \"sha256.sum\"\n").unwrap();
+        assert_eq!(p[0].pgp_sums, None);
+        assert_eq!(p[0].upstream_sums.as_deref(), Some("sha256.sum"));
+    }
+
+    /// The key path is relative to the input file, not to where the producer
+    /// was started.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn key_files_are_anchored_to_the_input_file() {
+        let mut p = signed("pgp-sums = \"S\"\npgp-key-file = \"keys/up.asc\"\n").unwrap();
+        anchor_key_files(&mut p, std::path::Path::new("realm/layer.toml"));
+        assert_eq!(
+            p[0].pgp_sums.as_ref().unwrap().key_file,
+            std::path::PathBuf::from("realm/keys/up.asc")
+        );
+        // A bare file name has no directory to anchor to: the current one.
+        let mut p = signed("pgp-sums = \"S\"\npgp-key-file = \"up.asc\"\n").unwrap();
+        anchor_key_files(&mut p, std::path::Path::new("layer.toml"));
+        assert_eq!(
+            p[0].pgp_sums.as_ref().unwrap().key_file,
+            std::path::PathBuf::from("./up.asc")
+        );
+        // Plans that declare nothing are left alone.
+        let mut p = signed("").unwrap();
+        anchor_key_files(&mut p, std::path::Path::new("realm/layer.toml"));
+        assert_eq!(p[0].pgp_sums, None);
     }
 }

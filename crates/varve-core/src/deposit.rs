@@ -580,7 +580,7 @@ pub enum DepositError {
         "payload '{name}' from {repo} carries ingestion-proof detail ({detail}) but declares no \
          `proof` mechanism — the detail would be signed into the layer with nothing saying HOW \
          it was established, which makes it attributable and believed rather than checkable. \
-         Declare `proof = \"cosign-sums\" | \"build-provenance\" | \"upstream-sums\" | \"unverified\"`, or drop the \
+         Declare `proof = \"cosign-sums\" | \"build-provenance\" | \"pgp-sums\" | \"upstream-sums\" | \"unverified\"`, or drop the \
          detail."
     )]
     ProofDetailWithoutMechanism {
@@ -1687,6 +1687,9 @@ mod tests {
                 crate::ingest::IngestProof::BuildProvenance => {
                     "built from source commit deadbeef".to_string()
                 }
+                crate::ingest::IngestProof::PgpSums => {
+                    "the publisher holding OpenPGP key 0123 signed the digest list".to_string()
+                }
                 crate::ingest::IngestProof::UpstreamSums => {
                     "transcribed from sha256.sum, which upstream publishes and                      does not sign"
                         .to_string()
@@ -1846,6 +1849,7 @@ mod tests {
         for (n, (proof, blank)) in [
             (crate::ingest::IngestProof::CosignSums, ""),
             (crate::ingest::IngestProof::BuildProvenance, "   "),
+            (crate::ingest::IngestProof::PgpSums, " "),
             (crate::ingest::IngestProof::UpstreamSums, "\t"),
         ]
         .into_iter()
@@ -1914,6 +1918,11 @@ mod tests {
             .annotations
             .insert(crate::ingest::ANN_PROOF.into(), "upstream-sums".into());
         assert_eq!(entry.ingest_proof(), Ok(Some(IngestProof::UpstreamSums)));
+        // And the signed digest list (REQ-SIGNEDSUMS-001), likewise.
+        entry
+            .annotations
+            .insert(crate::ingest::ANN_PROOF.into(), "pgp-sums".into());
+        assert_eq!(entry.ingest_proof(), Ok(Some(IngestProof::PgpSums)));
         // An unknown mechanism is reported verbatim, never guessed into a
         // known one — a newer varve may mint mechanisms this build has not
         // heard of, and quietly reading one as `cosign-sums` would be a lie.

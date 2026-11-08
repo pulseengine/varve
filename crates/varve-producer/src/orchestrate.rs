@@ -35,8 +35,8 @@
 
 use crate::carryforward::{self, Decision, PreviousEntry};
 use crate::forge::Forge;
-use crate::ingest::{self, Accepted, IngestError, Mechanism, ReleaseProbe};
-use crate::plan::PayloadPlan;
+use crate::ingest::{self, Accepted, IngestError, Mechanism, PgpSumsProbe, ReleaseProbe};
+use crate::plan::{PayloadPlan, PgpSumsPlan};
 use crate::sums::Sums;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -278,6 +278,74 @@ pub fn sbom_declared_license(bytes: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Fetch an entry's signed digest list and its detached signature, and verify
+/// the one against the key the operator pinned (REQ-SIGNEDSUMS-001).
+///
+/// Every failure is `Rejected`, which the ladder turns into a refusal: the entry
+/// declared a signed list, so a list that is not published, cannot be fetched,
+/// or does not verify is a finding and never an absent mechanism.
+fn probe_pgp_sums<S: Source>(
+    src: &S,
+    repo: &str,
+    version: &str,
+    spec: &PgpSumsPlan,
+    key: &[u8],
+    published: &[String],
+) -> PgpSumsProbe {
+    for asset in [&spec.list, &spec.signature] {
+        if !published.contains(asset) {
+            return PgpSumsProbe::Rejected(format!(
+                "the manifest names {asset:?} as part of this release's signed digest list, \
+                 and {repo} does not publish it"
+            ));
+        }
+    }
+    let fetch = |asset: &str| {
+        src.asset_bytes(repo, version, asset)
+            .map_err(|e| PgpSumsProbe::Rejected(format!("could not fetch {asset}: {e}")))
+    };
+    let (list, signature) = match (fetch(&spec.list), fetch(&spec.signature)) {
+        (Ok(l), Ok(s)) => (l, s),
+        (Err(rejected), _) | (_, Err(rejected)) => return rejected,
+    };
+    match crate::pgpsums::verify_digest_list(spec.format, &list, &signature, key) {
+        Err(e) => PgpSumsProbe::Rejected(format!(
+            "{} does not verify against the pinned key {}: {e}",
+            spec.list,
+            spec.key_file.display()
+        )),
+        Ok(verified) => {
+            let (vouched, sums) = verified.into_parts();
+            let signing = if vouched.signing_fingerprint == vouched.primary_fingerprint {
+                String::new()
+            } else {
+                format!(", signing subkey {}", vouched.signing_fingerprint)
+            };
+            PgpSumsProbe::Verified {
+                signer: vouched.signer_annotation(),
+                asserts: format!(
+                    "the publisher holding OpenPGP key {} signed the digest list naming these \
+                     bytes (binary signature, SHA-256 or stronger{signing}); this says who \
+                     published the digests, not that they are trustworthy",
+                    vouched.primary_fingerprint
+                ),
+                sums,
+            }
+        }
+    }
+}
+
+/// The digest lists an entry DECLARES for its release: what the producer's
+/// input says the release carries, as opposed to what the release was observed
+/// to offer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Declared<'a> {
+    /// The asset carrying an UNSIGNED digest list (REQ-UPSTREAMSUMS-001).
+    pub upstream_sums: Option<&'a str>,
+    /// The signed digest list and the key pinned for it (REQ-SIGNEDSUMS-001).
+    pub pgp_sums: Option<&'a PgpSumsPlan>,
+}
+
 /// Verify one release, once.
 pub fn verify_release<S: Source>(
     src: &S,
@@ -285,7 +353,7 @@ pub fn verify_release<S: Source>(
     repo: &str,
     version: &str,
     optins: &BTreeMap<String, String>,
-    upstream_sums_asset: Option<&str>,
+    declared: &Declared<'_>,
     // The assets this layer actually plans to ingest from the release.
     //
     // Needed because build provenance may arrive per asset, and the covered
@@ -295,8 +363,30 @@ pub fn verify_release<S: Source>(
     // (DD-037).
     wanted: &[String],
 ) -> Result<Verified, RunError> {
-    let probe = src.probe(forge, repo, version)?;
-    let accepted = ingest::choose(forge, repo, version, &probe, optins, upstream_sums_asset)?;
+    // The pinned key is read BEFORE anything is fetched, and a file that is
+    // missing or unreadable stops the run. Falling back to a weaker rung here
+    // would make "the operator pinned a key" something a deleted file undoes.
+    let pinned_key = match declared.pgp_sums {
+        Some(spec) => Some(std::fs::read(&spec.key_file).map_err(|e| RunError::Io {
+            context: format!(
+                "{repo} {version}: reading pgp-key-file {}",
+                spec.key_file.display()
+            ),
+            detail: e.to_string(),
+        })?),
+        None => None,
+    };
+    let mut probe = src.probe(forge, repo, version)?;
+    if let (Some(spec), Some(key)) = (declared.pgp_sums, &pinned_key) {
+        // Verified only when the ladder can reach it: when cosign or build
+        // provenance decides first, the signed list is never consulted.
+        probe.pgp_sums = if ingest::pgp_rung_is_reachable(&probe) {
+            probe_pgp_sums(src, repo, version, spec, key, &probe.published)
+        } else {
+            PgpSumsProbe::NotProbed
+        };
+    }
+    let accepted = ingest::choose(forge, repo, version, &probe, optins, declared.upstream_sums)?;
     let sums = match accepted.mechanism {
         Mechanism::CosignSums => {
             let text = src.sums_text(repo, version)?;
@@ -312,7 +402,7 @@ pub fn verify_release<S: Source>(
         // download still fails; what is absent is any claim about who made
         // them.
         Mechanism::UpstreamSums => {
-            let asset = upstream_sums_asset.ok_or_else(|| RunError::Io {
+            let asset = declared.upstream_sums.ok_or_else(|| RunError::Io {
                 context: format!("{repo} {version}"),
                 detail: "the upstream-sums mechanism was accepted without an                          asset naming the digest list — a caller ordering error"
                     .into(),
@@ -327,6 +417,19 @@ pub fn verify_release<S: Source>(
                 detail: e.to_string(),
             })?)
         }
+        // The digests of the list whose signature the probe verified. They are
+        // read out of the probe's `Verified` state, the only place they exist.
+        Mechanism::PgpSums => match &probe.pgp_sums {
+            PgpSumsProbe::Verified { sums, .. } => Some(sums.clone()),
+            _ => {
+                return Err(RunError::Io {
+                    context: format!("{repo} {version}"),
+                    detail: "the pgp-sums mechanism was accepted without a verified digest \
+                             list — a caller ordering error"
+                        .into(),
+                });
+            }
+        },
         Mechanism::BuildProvenance => {
             // The statement the probe already verified. An upstream that
             // batches its release names every asset here, and this is the
@@ -482,7 +585,15 @@ pub fn release_sbom_outcome<S: Source>(
     release: &str,
     version: &str,
 ) -> ReleaseSbomOutcome {
-    let verified = match verify_release(src, forge, repo, release, &BTreeMap::new(), None, &[]) {
+    let verified = match verify_release(
+        src,
+        forge,
+        repo,
+        release,
+        &BTreeMap::new(),
+        &Declared::default(),
+        &[],
+    ) {
         Ok(v) => v,
         Err(e) => return ReleaseSbomOutcome::VerifyFailed(e.to_string()),
     };
@@ -615,7 +726,11 @@ pub fn run<S: Source>(
             .first()
             .and_then(|i| plans[*i].upstream_sums.as_deref());
         let wanted: Vec<String> = idxs.iter().map(|i| plans[*i].asset.clone()).collect();
-        let v = verify_release(src, forge, &repo, &version, optins, sums_asset, &wanted)?;
+        let declared = Declared {
+            upstream_sums: sums_asset,
+            pgp_sums: idxs.first().and_then(|i| plans[*i].pgp_sums.as_ref()),
+        };
+        let v = verify_release(src, forge, &repo, &version, optins, &declared, &wanted)?;
         seen.record(&repo, &version, v.accepted.clone())?;
 
         // Clause 4: a property of the RELEASE, ADMITTED through the same
@@ -794,6 +909,7 @@ mod tests {
             unverified_reason: None,
             contains: None,
             upstream_sums: None,
+            pgp_sums: None,
             title: None,
             documents: None,
             allow_pip: None,
@@ -835,6 +951,7 @@ mod tests {
         PayloadPlan {
             release: version.to_string(),
             upstream_sums: None,
+            pgp_sums: None,
             title: None,
             documents: None,
             allow_pip: None,
@@ -943,6 +1060,7 @@ mod tests {
                         signer: "https://github.com/up/stream/.github/workflows/release.yml@refs/tags/v1".into(),
                         commit: "cafebabe".into(),
                     },
+                    pgp_sums: crate::ingest::PgpSumsProbe::NotDeclared,
                 },
             );
             f
@@ -2293,6 +2411,7 @@ mod tests {
                 has_cosign_bundle: false,
                 cosign: None,
                 attestation: crate::ingest::AttestationProbe::NotAttested,
+                pgp_sums: crate::ingest::PgpSumsProbe::NotDeclared,
             },
         );
         assert!(matches!(
@@ -2381,5 +2500,433 @@ mod tests {
             release_sbom_outcome(&f, &Forge::github_com(), "o/r", "v1", "1.0.0"),
             ReleaseSbomOutcome::Ambiguous
         );
+    }
+
+    // ------------------------------------------------ pgp-sums (REQ-SIGNEDSUMS-001)
+
+    use crate::pgpsums::testkit;
+
+    const LIST: &str = "SHA256SUMS";
+    const LIST_SIG: &str = "SHA256SUMS.asc";
+
+    /// A release whose assets are covered by a digest list signed with a
+    /// generated key, plus the pinned-key file an operator would commit.
+    struct Pgp {
+        dir: tempfile::TempDir,
+        fingerprint: String,
+    }
+
+    impl Pgp {
+        fn key_path(&self) -> std::path::PathBuf {
+            self.dir.path().join("upstream.asc")
+        }
+        fn write_key(&self, bytes: &[u8]) {
+            std::fs::write(self.key_path(), bytes).unwrap();
+        }
+    }
+
+    fn list_for(pairs: &[(&str, &[u8])]) -> String {
+        pairs
+            .iter()
+            .map(|(n, b)| format!("{}  {n}\n", sha256_hex(b)))
+            .collect()
+    }
+
+    /// Publish `pairs` plus a list and its signature, no cosign, no attestation.
+    fn pgp_release(
+        repo: &str,
+        version: &str,
+        pairs: &[(&str, &[u8])],
+        list: &str,
+        signature: Vec<u8>,
+        key: &[u8],
+        fingerprint: &str,
+    ) -> (Fixture, Pgp) {
+        let mut f = Fixture::default();
+        let k = format!("{repo}@{version}");
+        let mut published: Vec<String> = pairs.iter().map(|(n, _)| n.to_string()).collect();
+        published.push(LIST.into());
+        published.push(LIST_SIG.into());
+        for (n, b) in pairs {
+            f.blobs.insert(format!("{k}/{n}"), b.to_vec());
+        }
+        f.blobs
+            .insert(format!("{k}/{LIST}"), list.as_bytes().to_vec());
+        f.blobs.insert(format!("{k}/{LIST_SIG}"), signature);
+        f.probes.insert(
+            k,
+            ReleaseProbe {
+                published,
+                ..Default::default()
+            },
+        );
+        let pgp = Pgp {
+            dir: tempfile::tempdir().unwrap(),
+            fingerprint: fingerprint.to_string(),
+        };
+        pgp.write_key(key);
+        (f, pgp)
+    }
+
+    /// The ordinary good case, with a key generated for `uid`.
+    fn good_pgp_release(pairs: &[(&str, &[u8])]) -> (Fixture, Pgp, String) {
+        let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
+        let list = list_for(pairs);
+        let sig = testkit::sign_binary(&secret, list.as_bytes());
+        let fpr = hex::encode(pgp::types::KeyDetails::fingerprint(&secret.primary_key).as_bytes());
+        let (f, pgp) = pgp_release("o/r", "v1", pairs, &list, sig, &key, &fpr);
+        (f, pgp, list)
+    }
+
+    fn pgp_spec(key_file: std::path::PathBuf) -> crate::plan::PgpSumsPlan {
+        crate::plan::PgpSumsPlan {
+            list: LIST.into(),
+            signature: LIST_SIG.into(),
+            format: crate::pgpsums::ListFormat::Sha256Sums,
+            key_file,
+        }
+    }
+
+    fn pgp_plan(asset: &str, key_file: std::path::PathBuf) -> PayloadPlan {
+        let mut p = plan("t", "o/r", "v1", asset);
+        p.pgp_sums = Some(pgp_spec(key_file));
+        p
+    }
+
+    fn run_pgp(
+        f: &Fixture,
+        plans: &[PayloadPlan],
+        optins: &BTreeMap<String, String>,
+    ) -> Result<Vec<Resolved>, RunError> {
+        run(
+            f,
+            &Forge::github_com(),
+            plans,
+            &BTreeMap::new(),
+            optins,
+            &never,
+            &no_reuse,
+        )
+    }
+
+    fn proof_rejected(e: &RunError) -> &str {
+        match e {
+            RunError::Ingest(IngestError::ProofRejected { detail, .. }) => detail,
+            other => panic!("expected ProofRejected, got {other:?}"),
+        }
+    }
+
+    /// The whole rung through `run`: the digest comes from the VERIFIED list,
+    /// the mechanism is `pgp-sums`, and the signer leads with the fingerprint.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_good_signature_is_recorded_as_pgp_sums_under_the_fingerprint() {
+        let (f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let got = run_pgp(
+            &f,
+            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].accepted.mechanism, Mechanism::PgpSums);
+        assert_eq!(got[0].digest, sha256_hex(A));
+        let signer = got[0].accepted.signer.as_deref().unwrap();
+        assert!(
+            signer.starts_with(&format!("openpgp:{}", pgp.fingerprint)),
+            "{signer}"
+        );
+        let asserts = &got[0].accepted.asserts;
+        assert!(
+            asserts.contains(&format!("OpenPGP key {}", pgp.fingerprint)),
+            "{asserts}"
+        );
+        assert!(asserts.contains("binary signature"), "{asserts}");
+        assert!(
+            asserts.contains("not that they are trustworthy"),
+            "{asserts}"
+        );
+        assert!(
+            !asserts.contains("signing subkey"),
+            "a primary-key signature names no subkey: {asserts}"
+        );
+    }
+
+    /// A subkey signature names the subkey separately from the identity.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_subkey_signature_records_the_signing_subkey_beside_the_identity() {
+        let (secret, key) = testkit::generated_key_with_signing_subkey("Sub <sub@example.invalid>");
+        let list = list_for(&[("a.tar.gz", A)]);
+        let sig = testkit::sign_binary_with_subkey(&secret, list.as_bytes());
+        let primary =
+            hex::encode(pgp::types::KeyDetails::fingerprint(&secret.primary_key).as_bytes());
+        let sub = hex::encode(
+            pgp::types::KeyDetails::fingerprint(&secret.secret_subkeys[0].key).as_bytes(),
+        );
+        let (f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &key, &primary);
+        let got = run_pgp(
+            &f,
+            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let signer = got[0].accepted.signer.as_deref().unwrap();
+        assert!(
+            signer.starts_with(&format!("openpgp:{primary}")),
+            "{signer}"
+        );
+        assert!(
+            got[0]
+                .accepted
+                .asserts
+                .contains(&format!("signing subkey {sub}")),
+            "{}",
+            got[0].accepted.asserts
+        );
+    }
+
+    /// A signature over DIFFERENT bytes is refused, and an operator's opt-in
+    /// to ingest unverified does not turn the refusal into an acceptance.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_bad_signature_is_rejected_and_is_neither_upstream_sums_nor_unverified() {
+        let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
+        let list = list_for(&[("a.tar.gz", A)]);
+        let sig = testkit::sign_binary(&secret, b"a different list");
+        let (f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &key, "-");
+        let mut optins = BTreeMap::new();
+        optins.insert("o/r".to_string(), "carry it anyway".to_string());
+        let mut p = pgp_plan("a.tar.gz", pgp.key_path());
+        let e = run_pgp(&f, std::slice::from_ref(&p), &optins).expect_err("must refuse");
+        assert!(proof_rejected(&e).contains("does not verify"), "{e}");
+        // And the bytes were never fetched on the strength of anything.
+        assert!(!f.log().iter().any(|c| c == "fetch o/r@v1/a.tar.gz"));
+        // A declared unsigned list is no way around it either.
+        p.upstream_sums = Some(LIST.into());
+        let e = run_pgp(&f, &[p], &optins).expect_err("must refuse");
+        proof_rejected(&e);
+    }
+
+    /// A valid signature by some OTHER key is not the pinned key's.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_signature_by_a_different_key_is_rejected() {
+        let (_, pinned) = testkit::generated_key("Pinned <pinned@example.invalid>");
+        let (other, _) = testkit::generated_key("Other <other@example.invalid>");
+        let list = list_for(&[("a.tar.gz", A)]);
+        let sig = testkit::sign_binary(&other, list.as_bytes());
+        let (f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &pinned, "-");
+        let e = run_pgp(
+            &f,
+            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .expect_err("must refuse");
+        assert!(proof_rejected(&e).contains("does not verify"), "{e}");
+    }
+
+    /// An operator re-pinning an export the upstream has since revoked.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_revoked_pinned_certificate_is_rejected() {
+        let (secret, _) = testkit::generated_key("Up Stream <up@example.invalid>");
+        let revoked = testkit::revoked_export(&secret);
+        let list = list_for(&[("a.tar.gz", A)]);
+        let sig = testkit::sign_binary(&secret, list.as_bytes());
+        let (f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &revoked, "-");
+        let e = run_pgp(
+            &f,
+            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .expect_err("must refuse");
+        assert!(proof_rejected(&e).contains("revocation"), "{e}");
+    }
+
+    /// A TEXT signature binds the line-ending-normalised form, not the bytes.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_text_type_signature_is_rejected() {
+        let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
+        let list = list_for(&[("a.tar.gz", A)]);
+        let sig = testkit::sign_text(&secret, list.as_bytes());
+        let (f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &key, "-");
+        let e = run_pgp(
+            &f,
+            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .expect_err("must refuse");
+        assert!(proof_rejected(&e).contains("binary-document"), "{e}");
+    }
+
+    /// Being absent from the verified list is being outside the proof.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_asset_the_verified_list_does_not_name_is_a_failure() {
+        let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
+        let list = list_for(&[("a.tar.gz", A)]);
+        let sig = testkit::sign_binary(&secret, list.as_bytes());
+        let (f, pgp) = pgp_release(
+            "o/r",
+            "v1",
+            &[("a.tar.gz", A), ("b.tar.gz", B)],
+            &list,
+            sig,
+            &key,
+            "-",
+        );
+        let e = run_pgp(
+            &f,
+            &[pgp_plan("b.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .expect_err("must refuse");
+        assert!(
+            matches!(&e, RunError::NotCoveredByProof { asset, mechanism, .. }
+                if asset == "b.tar.gz" && *mechanism == "pgp-sums"),
+            "{e:?}"
+        );
+    }
+
+    /// The list verified and the downloaded bytes are not the bytes it names.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_asset_whose_bytes_differ_from_the_verified_list_is_a_failure() {
+        let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
+        let list = list_for(&[("a.tar.gz", A)]);
+        let sig = testkit::sign_binary(&secret, list.as_bytes());
+        let (mut f, pgp) = pgp_release("o/r", "v1", &[("a.tar.gz", A)], &list, sig, &key, "-");
+        f.blobs.insert("o/r@v1/a.tar.gz".into(), B.to_vec());
+        let e = run_pgp(
+            &f,
+            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .expect_err("must refuse");
+        assert!(matches!(e, RunError::DigestMismatch { .. }), "{e:?}");
+    }
+
+    /// The key file is read from disk, and its absence is an error — not a
+    /// quiet descent to a weaker rung, even with an opt-in standing by.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_missing_key_file_is_an_error_and_not_a_fallback() {
+        let (f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let mut optins = BTreeMap::new();
+        optins.insert("o/r".to_string(), "carry it anyway".to_string());
+        let missing = pgp.dir.path().join("not-there.asc");
+        let e = run_pgp(&f, &[pgp_plan("a.tar.gz", missing)], &optins).expect_err("must refuse");
+        match &e {
+            RunError::Io { context, .. } => {
+                assert!(context.contains("pgp-key-file"), "{context}");
+                assert!(context.contains("not-there.asc"), "{context}");
+            }
+            other => panic!("expected an Io error, got {other:?}"),
+        }
+        assert!(
+            f.log().iter().all(|c| !c.starts_with("fetch")),
+            "nothing may be fetched before the pinned key is in hand: {:?}",
+            f.log()
+        );
+    }
+
+    /// The entry declared a signed list the release does not publish.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_declared_list_the_release_does_not_publish_is_rejected() {
+        let (mut f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        f.probes
+            .get_mut("o/r@v1")
+            .unwrap()
+            .published
+            .retain(|n| n != LIST_SIG);
+        let e = run_pgp(
+            &f,
+            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .expect_err("must refuse");
+        let d = proof_rejected(&e);
+        assert!(
+            d.contains(LIST_SIG) && d.contains("does not publish"),
+            "{d}"
+        );
+    }
+
+    /// A list that is published and cannot be fetched is a refusal too.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_list_that_cannot_be_fetched_is_rejected() {
+        let (mut f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        f.blobs.remove(&format!("o/r@v1/{LIST}"));
+        let e = run_pgp(
+            &f,
+            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .expect_err("must refuse");
+        assert!(proof_rejected(&e).contains("could not fetch"), "{e}");
+    }
+
+    /// Ladder order through the real orchestration: cosign wins, and the
+    /// signed list is not even fetched.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_cosign_capable_release_still_picks_cosign_when_pgp_sums_is_declared() {
+        let (_, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let f = Fixture::signed("o/r", "v1", &[("a.tar.gz", A)]);
+        let got = run_pgp(
+            &f,
+            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(got[0].accepted.mechanism, Mechanism::CosignSums);
+        assert!(
+            !f.log().iter().any(|c| c.contains(LIST)),
+            "cosign decided first; the signed list is never consulted: {:?}",
+            f.log()
+        );
+    }
+
+    /// Likewise build provenance.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_attested_release_still_picks_build_provenance_when_pgp_sums_is_declared() {
+        let (_, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let f = Fixture::attested_as_one_batch("o/r", "v1", &[("a.tar.gz", A)]);
+        let got = run_pgp(
+            &f,
+            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(got[0].accepted.mechanism, Mechanism::BuildProvenance);
+        assert!(!f.log().iter().any(|c| c.contains(LIST)), "{:?}", f.log());
+    }
+
+    /// No regression: an entry with only `upstream-sums` is still upstream-sums.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_entry_with_only_upstream_sums_still_yields_upstream_sums() {
+        let mut f = Fixture::default();
+        let list = list_for(&[("a.tar.gz", A)]);
+        f.blobs.insert("o/r@v1/a.tar.gz".into(), A.to_vec());
+        f.blobs
+            .insert("o/r@v1/sha256.sum".into(), list.as_bytes().to_vec());
+        f.probes.insert(
+            "o/r@v1".into(),
+            ReleaseProbe {
+                published: vec!["a.tar.gz".into(), "sha256.sum".into()],
+                ..Default::default()
+            },
+        );
+        let mut p = plan("t", "o/r", "v1", "a.tar.gz");
+        p.upstream_sums = Some("sha256.sum".into());
+        let got = run_pgp(&f, &[p], &BTreeMap::new()).unwrap();
+        assert_eq!(got[0].accepted.mechanism, Mechanism::UpstreamSums);
+        assert_eq!(got[0].digest, sha256_hex(A));
     }
 }

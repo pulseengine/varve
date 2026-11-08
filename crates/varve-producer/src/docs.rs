@@ -255,10 +255,19 @@ mod tests {
         for rung in [
             "cosign-sums",
             "build-provenance",
+            "pgp-sums",
             "upstream-sums",
             "unverified",
         ] {
             assert!(ladder.body.contains(rung), "the ladder omits {rung}");
+        }
+        for field in [
+            "pgp-sums-signature",
+            "pgp-sums-format",
+            "pgp-key-file",
+            "rust-channel",
+        ] {
+            assert!(ladder.body.contains(field), "the ladder omits {field}");
         }
     }
 

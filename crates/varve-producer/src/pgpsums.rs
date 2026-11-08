@@ -8,9 +8,10 @@
 //! reports the identity that vouched so the rung can name it.
 //!
 //! The key arrives here as bytes and is never fetched. Where those bytes come
-//! from is the realm's problem (clause 3, DD-023): a key discovered beside the
-//! artifact it vouches for is not a proof, and a keyserver lookup at deposit
-//! time makes the network an authority. This module cannot reach the network and
+//! from is the OPERATOR's committed producer input (`pgp-key-file`, clause 3,
+//! decided by the maintainer 2026-11-08): a key discovered beside the artifact
+//! it vouches for is not a proof, and a keyserver lookup at deposit time makes
+//! the network an authority. This module cannot reach the network and
 //! must not grow the ability.
 //!
 //! # Why `pgp` (rPGP) 0.20 and not `sequoia-openpgp`
@@ -132,6 +133,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::sums::Sums;
+
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
 use pgp::packet::SignatureType;
 use pgp::types::KeyDetails;
@@ -186,6 +189,10 @@ pub enum PgpSumsError {
         keys: usize,
         last: String,
     },
+    #[error("the digest list is not UTF-8 text")]
+    ListNotText,
+    #[error("the digest list is not readable: {0}")]
+    ListUnreadable(String),
     #[error("the channel manifest is not UTF-8 text")]
     ManifestNotText,
     #[error("the channel manifest is not readable TOML: {0}")]
@@ -344,7 +351,11 @@ pub struct RustChannel {
 /// incomplete. A table that NAMES a url and omits the digest (or the reverse)
 /// is refused, because silently dropping it would turn a broken manifest into a
 /// shorter valid one (varve#217).
-pub fn parse_rust_channel(manifest: &[u8]) -> Result<RustChannel, PgpSumsError> {
+///
+/// PRIVATE, deliberately (clause 5): a parser that is `pub` is a door to
+/// digests nobody verified. The only way out of this module with entries is
+/// through a function that also takes the signature and the key.
+fn parse_rust_channel(manifest: &[u8]) -> Result<RustChannel, PgpSumsError> {
     let text = std::str::from_utf8(manifest).map_err(|_| PgpSumsError::ManifestNotText)?;
     let raw: RawChannel =
         toml::from_str(text).map_err(|e| PgpSumsError::ManifestUnreadable(e.to_string()))?;
@@ -415,6 +426,106 @@ pub fn verify_and_parse_rust_channel(
     let vouched = verify_detached_signature(manifest, detached_signature, public_key)?;
     let channel = parse_rust_channel(manifest)?;
     Ok((vouched, channel))
+}
+
+/// How a verified digest list is to be read. DECLARED by the operator
+/// (`pgp-sums-format`), never sniffed from content: a parser chosen by guessing
+/// is a parser an attacker's list can steer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListFormat {
+    /// The `sha256sum` format: `<64 hex>  <name>` per line. The default.
+    #[default]
+    Sha256Sums,
+    /// A Rust `channel-rust-<channel>.toml`. Entries are keyed by the BASENAME
+    /// of their `url`, because that is the name the asset carries on a release.
+    RustChannel,
+}
+
+impl ListFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ListFormat::Sha256Sums => "sha256sums",
+            ListFormat::RustChannel => "rust-channel",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ListFormat> {
+        [ListFormat::Sha256Sums, ListFormat::RustChannel]
+            .into_iter()
+            .find(|f| f.as_str() == s)
+    }
+}
+
+/// A digest list whose signature verified, and the identity that vouched for
+/// it. The fields are private: the only constructor is
+/// [`verify_digest_list`], so a `VerifiedList` IS the proof that verification
+/// ran, and no code path holds its digests without it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedList {
+    vouched: VouchedBy,
+    sums: Sums,
+}
+
+impl VerifiedList {
+    pub fn vouched(&self) -> &VouchedBy {
+        &self.vouched
+    }
+
+    pub fn sums(&self) -> &Sums {
+        &self.sums
+    }
+
+    pub fn into_parts(self) -> (VouchedBy, Sums) {
+        (self.vouched, self.sums)
+    }
+}
+
+/// Verify the signature FIRST, then read the list in the declared format.
+/// The digests come back keyed by asset name, together with who vouched — or
+/// not at all (clause 5).
+pub fn verify_digest_list(
+    format: ListFormat,
+    list: &[u8],
+    detached_signature: &[u8],
+    public_key: &[u8],
+) -> Result<VerifiedList, PgpSumsError> {
+    let (vouched, sums) = match format {
+        ListFormat::Sha256Sums => {
+            verify_and_parse_sha256sums(list, detached_signature, public_key)?
+        }
+        ListFormat::RustChannel => {
+            let (vouched, channel) =
+                verify_and_parse_rust_channel(list, detached_signature, public_key)?;
+            let sums = Sums::from_pairs(
+                channel
+                    .entries
+                    .iter()
+                    .map(|e| (url_basename(&e.url), e.sha256.as_str())),
+            )
+            .map_err(|e| PgpSumsError::ListUnreadable(e.to_string()))?;
+            (vouched, sums)
+        }
+    };
+    Ok(VerifiedList { vouched, sums })
+}
+
+/// The `SHA256SUMS`-style counterpart of [`verify_and_parse_rust_channel`]:
+/// verify, then parse, returned together. [`Sums::parse`] is called only here,
+/// after the signature has verified.
+pub fn verify_and_parse_sha256sums(
+    list: &[u8],
+    detached_signature: &[u8],
+    public_key: &[u8],
+) -> Result<(VouchedBy, Sums), PgpSumsError> {
+    let vouched = verify_detached_signature(list, detached_signature, public_key)?;
+    let text = std::str::from_utf8(list).map_err(|_| PgpSumsError::ListNotText)?;
+    let sums = Sums::parse(text).map_err(|e| PgpSumsError::ListUnreadable(e.to_string()))?;
+    Ok((vouched, sums))
+}
+
+/// What a release asset is called, from the `url` that names it.
+fn url_basename(url: &str) -> &str {
+    url.rsplit('/').next().unwrap_or(url)
 }
 
 // ---------------------------------------------------------------- internals
@@ -592,14 +703,15 @@ struct RawArtifact {
     hash_sha256: String,
 }
 
+/// Keys, signatures and the real Rust artifacts the tests of this module and of
+/// the ladder (`ingest`, `orchestrate`) share.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testkit {
     use super::*;
     use pgp::composed::{KeyType, SecretKeyParamsBuilder, SignedSecretKey, SubkeyParamsBuilder};
     use pgp::crypto::hash::HashAlgorithm;
     use pgp::crypto::public_key::PublicKeyAlgorithm;
     use pgp::packet::{SignatureConfig, Subpacket, SubpacketData};
-    use pgp::ser::Serialize as _;
     use pgp::types::{Password, Timestamp};
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
@@ -618,20 +730,21 @@ mod tests {
     // tested against keys generated below, because no upstream publishes the
     // signatures a verifier must refuse.
 
-    const RUST_KEY_ASC: &[u8] = include_bytes!("../tests/fixtures/pgpsums/rust-release-key.asc");
-    const RUST_SIG_ASC: &[u8] =
+    pub(crate) const RUST_KEY_ASC: &[u8] =
+        include_bytes!("../tests/fixtures/pgpsums/rust-release-key.asc");
+    pub(crate) const RUST_SIG_ASC: &[u8] =
         include_bytes!("../tests/fixtures/pgpsums/channel-rust-stable-2026-09-03.toml.asc");
-    const RUST_MANIFEST_GZ: &[u8] =
+    pub(crate) const RUST_MANIFEST_GZ: &[u8] =
         include_bytes!("../tests/fixtures/pgpsums/channel-rust-stable-2026-09-03.toml.gz");
 
     /// Measured with `wc -c` and `shasum -a 256` on the file as downloaded,
     /// before it was compressed.
-    const RUST_MANIFEST_LEN: usize = 898_637;
-    const RUST_MANIFEST_SHA256: &str =
+    pub(crate) const RUST_MANIFEST_LEN: usize = 898_637;
+    pub(crate) const RUST_MANIFEST_SHA256: &str =
         "a7c8774a5fd8441c997d94c029776cbc5eb111e9d72ab5d256fa69866644347e";
-    const RUST_PRIMARY_FPR: &str = "108f66205eaeb0aaa8dd5e1c85ab96e6fa1be5fe";
+    pub(crate) const RUST_PRIMARY_FPR: &str = "108f66205eaeb0aaa8dd5e1c85ab96e6fa1be5fe";
 
-    fn rust_manifest() -> Vec<u8> {
+    pub(crate) fn rust_manifest() -> Vec<u8> {
         use std::io::Read as _;
         let mut out = Vec::new();
         flate2::read::GzDecoder::new(RUST_MANIFEST_GZ)
@@ -649,7 +762,7 @@ mod tests {
         out
     }
 
-    fn rng() -> ChaCha20Rng {
+    pub(crate) fn rng() -> ChaCha20Rng {
         ChaCha20Rng::seed_from_u64(0x5164_5645)
     }
 
@@ -658,7 +771,7 @@ mod tests {
     /// constant produced two IDENTICAL keypairs and quietly turned the
     /// broken-bindings test into a test of nothing, which is exactly the
     /// failure shape a negative control exists to catch.
-    fn rng_for(uid: &str) -> ChaCha20Rng {
+    pub(crate) fn rng_for(uid: &str) -> ChaCha20Rng {
         let mut seed = 0xcbf2_9ce4_8422_2325u64;
         for b in uid.bytes() {
             seed ^= u64::from(b);
@@ -668,7 +781,7 @@ mod tests {
     }
 
     /// A certificate whose PRIMARY key signs — the shape Rust uses.
-    fn generated_key(uid: &str) -> (SignedSecretKey, Vec<u8>) {
+    pub(crate) fn generated_key(uid: &str) -> (SignedSecretKey, Vec<u8>) {
         let params = SecretKeyParamsBuilder::default()
             .key_type(KeyType::Ed25519)
             .can_sign(true)
@@ -683,7 +796,7 @@ mod tests {
 
     /// A certificate whose signing SUBKEY signs — the shape most non-Rust
     /// upstreams use.
-    fn generated_key_with_signing_subkey(uid: &str) -> (SignedSecretKey, Vec<u8>) {
+    pub(crate) fn generated_key_with_signing_subkey(uid: &str) -> (SignedSecretKey, Vec<u8>) {
         let params = SecretKeyParamsBuilder::default()
             .key_type(KeyType::Ed25519)
             .can_sign(true)
@@ -703,7 +816,7 @@ mod tests {
         (secret, armored)
     }
 
-    fn sign_binary(secret: &SignedSecretKey, data: &[u8]) -> Vec<u8> {
+    pub(crate) fn sign_binary(secret: &SignedSecretKey, data: &[u8]) -> Vec<u8> {
         DetachedSignature::sign_binary_data(
             rng(),
             &secret.primary_key,
@@ -716,8 +829,83 @@ mod tests {
         .unwrap()
     }
 
-    const SUMS: &[u8] =
+    pub(crate) const SUMS: &[u8] =
         b"3b1f0e4b1b2c0d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6  tool.tar.gz\n";
+
+    /// The same certificate exported WITH a revocation signature attached —
+    /// an operator re-pinning a key export after the upstream revoked it.
+    pub(crate) fn revoked_export(secret: &SignedSecretKey) -> Vec<u8> {
+        let mut config = SignatureConfig::v4(
+            SignatureType::KeyRevocation,
+            PublicKeyAlgorithm::Ed25519,
+            HashAlgorithm::Sha256,
+        );
+        config.hashed_subpackets = vec![
+            Subpacket::regular(SubpacketData::SignatureCreationTime(
+                Timestamp::try_from(std::time::SystemTime::now()).unwrap(),
+            ))
+            .unwrap(),
+            Subpacket::regular(SubpacketData::IssuerKeyId(
+                secret.primary_key.legacy_key_id(),
+            ))
+            .unwrap(),
+        ];
+        let revocation = config
+            .sign_key(
+                &secret.primary_key,
+                &Password::empty(),
+                &secret.primary_key.public_key(),
+            )
+            .unwrap();
+        let mut public: SignedPublicKey = secret.clone().into();
+        public.details.revocation_signatures.push(revocation);
+        public.to_armored_bytes(Default::default()).unwrap()
+    }
+
+    /// A binary detached signature made by the certificate's first signing
+    /// SUBKEY, the shape most non-Rust upstreams use.
+    pub(crate) fn sign_binary_with_subkey(secret: &SignedSecretKey, data: &[u8]) -> Vec<u8> {
+        let subkey = secret
+            .secret_subkeys
+            .first()
+            .expect("generated certificate should carry a subkey");
+        DetachedSignature::sign_binary_data(
+            rng(),
+            &subkey.key,
+            &Password::empty(),
+            HashAlgorithm::Sha256,
+            data,
+        )
+        .unwrap()
+        .to_armored_bytes(Default::default())
+        .unwrap()
+    }
+
+    /// A TEXT-type detached signature, which a digest list must refuse.
+    pub(crate) fn sign_text(secret: &SignedSecretKey, data: &[u8]) -> Vec<u8> {
+        DetachedSignature::sign_text_data(
+            rng(),
+            &secret.primary_key,
+            &Password::empty(),
+            HashAlgorithm::Sha256,
+            data,
+        )
+        .unwrap()
+        .to_armored_bytes(Default::default())
+        .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pgp::crypto::hash::HashAlgorithm;
+    use pgp::crypto::public_key::PublicKeyAlgorithm;
+    use pgp::packet::{SignatureConfig, Subpacket, SubpacketData};
+    use pgp::ser::Serialize as _;
+    use pgp::types::{Password, Timestamp};
+
+    use super::testkit::*;
 
     // ------------------------------------------------- the real Rust artifact
 
@@ -1293,5 +1481,183 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
             verify_and_parse_rust_channel(&rust_manifest(), RUST_SIG_ASC, RUST_KEY_ASC).unwrap();
         assert_eq!(vouched.primary_fingerprint, RUST_PRIMARY_FPR);
         assert_eq!(channel.entries.len(), 601 * 2 + 11);
+    }
+
+    // ------------------------------------------- the verified digest list
+
+    fn digest_of(bytes: &[u8]) -> String {
+        varve_core::store::manifest_digest(bytes)
+            .trim_start_matches("sha256:")
+            .to_string()
+    }
+
+    fn sums_for(name: &str, bytes: &[u8]) -> String {
+        format!("{}  {name}\n", digest_of(bytes))
+    }
+
+    /// Clause 5: the digests and the identity come back TOGETHER, and the
+    /// identity is the fingerprint.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_verified_sha256sums_list_returns_its_digests_with_who_vouched() {
+        let (secret, key) = generated_key("p <p@example.invalid>");
+        let list = sums_for("tool.tar.gz", b"payload");
+        let signature = sign_binary(&secret, list.as_bytes());
+        let verified =
+            verify_digest_list(ListFormat::Sha256Sums, list.as_bytes(), &signature, &key).unwrap();
+        let primary = hex::encode(secret.primary_key.public_key().fingerprint().as_bytes());
+        assert_eq!(verified.vouched().primary_fingerprint, primary);
+        assert_eq!(
+            verified.sums().digest_of("tool.tar.gz"),
+            Some(digest_of(b"payload").as_str())
+        );
+        let (vouched, sums) = verified.into_parts();
+        assert_eq!(vouched.primary_fingerprint, primary);
+        assert_eq!(sums.names().collect::<Vec<_>>(), ["tool.tar.gz"]);
+    }
+
+    /// Clause 5, the ordering half: an unsigned list that is ALSO malformed is
+    /// refused for its signature, which proves the parser never saw it.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_list_is_verified_before_it_is_read() {
+        let (secret, key) = generated_key("p <p@example.invalid>");
+        let list = b"this is not a checksum line\n";
+        let other = sign_binary(&secret, b"something else entirely");
+        let err = verify_digest_list(ListFormat::Sha256Sums, list, &other, &key).unwrap_err();
+        assert!(matches!(err, PgpSumsError::DoesNotVerify { .. }), "{err}");
+        let err = verify_digest_list(ListFormat::RustChannel, list, &other, &key).unwrap_err();
+        assert!(matches!(err, PgpSumsError::DoesNotVerify { .. }), "{err}");
+    }
+
+    /// A list somebody signed and that is nonetheless not a digest list is an
+    /// error, not an empty list.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_signed_list_that_is_not_readable_is_refused() {
+        let (secret, key) = generated_key("p <p@example.invalid>");
+        let junk = b"not a checksum line\n";
+        let err = verify_digest_list(
+            ListFormat::Sha256Sums,
+            junk,
+            &sign_binary(&secret, junk),
+            &key,
+        )
+        .unwrap_err();
+        assert!(matches!(err, PgpSumsError::ListUnreadable(_)), "{err}");
+
+        let binary = [0xff, 0xfe, 0x00, 0x9f];
+        let err = verify_digest_list(
+            ListFormat::Sha256Sums,
+            &binary,
+            &sign_binary(&secret, &binary),
+            &key,
+        )
+        .unwrap_err();
+        assert!(matches!(err, PgpSumsError::ListNotText), "{err}");
+    }
+
+    /// The verification refusals apply through the combined entry point, not
+    /// only through `verify_detached_signature`.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_combined_entry_point_keeps_every_verification_refusal() {
+        let (secret, key) = generated_key("p <p@example.invalid>");
+        let (_, other_key) = generated_key("q <q@example.invalid>");
+        let list = sums_for("tool.tar.gz", b"payload");
+        let good = sign_binary(&secret, list.as_bytes());
+        let run = |sig: &[u8], key: &[u8]| {
+            verify_digest_list(ListFormat::Sha256Sums, list.as_bytes(), sig, key).unwrap_err()
+        };
+        assert!(matches!(
+            run(&good, &other_key),
+            PgpSumsError::DoesNotVerify { .. }
+        ));
+        assert!(matches!(
+            run(&sign_text(&secret, list.as_bytes()), &key),
+            PgpSumsError::NotBinarySignature { .. }
+        ));
+        assert!(matches!(
+            run(&good, &revoked_export(&secret)),
+            PgpSumsError::KeyRevoked { .. }
+        ));
+    }
+
+    /// The real artifact, end to end through the combined entry point: the
+    /// documented 1213 `(url, digest)` pairs survive, keyed by the name the
+    /// asset carries on a release.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_real_rust_channel_yields_1213_pairs_keyed_by_asset_name() {
+        let manifest = rust_manifest();
+        let (vouched, channel) =
+            verify_and_parse_rust_channel(&manifest, RUST_SIG_ASC, RUST_KEY_ASC).unwrap();
+        assert_eq!(vouched.primary_fingerprint, RUST_PRIMARY_FPR);
+        assert_eq!(channel.entries.len(), 1213);
+
+        let verified = verify_digest_list(
+            ListFormat::RustChannel,
+            &manifest,
+            RUST_SIG_ASC,
+            RUST_KEY_ASC,
+        )
+        .unwrap();
+        assert_eq!(verified.vouched().primary_fingerprint, RUST_PRIMARY_FPR);
+        for entry in &channel.entries {
+            let name = entry.url.rsplit('/').next().unwrap();
+            assert_eq!(
+                verified.sums().digest_of(name),
+                Some(entry.sha256.as_str()),
+                "{} lost in the conversion",
+                entry.url
+            );
+        }
+        assert!(verified.sums().names().count() <= 1213);
+    }
+
+    /// Fails if a Rust list is ever read as a sha256sums list or the reverse:
+    /// the format is declared, not sniffed.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_declared_format_decides_the_parser() {
+        let manifest = rust_manifest();
+        let err = verify_digest_list(
+            ListFormat::Sha256Sums,
+            &manifest,
+            RUST_SIG_ASC,
+            RUST_KEY_ASC,
+        )
+        .unwrap_err();
+        assert!(matches!(err, PgpSumsError::ListUnreadable(_)), "{err}");
+
+        let (secret, key) = generated_key("p <p@example.invalid>");
+        let list = sums_for("tool.tar.gz", b"payload");
+        let err = verify_digest_list(
+            ListFormat::RustChannel,
+            list.as_bytes(),
+            &sign_binary(&secret, list.as_bytes()),
+            &key,
+        )
+        .unwrap_err();
+        assert!(matches!(err, PgpSumsError::ManifestUnreadable(_)), "{err}");
+    }
+
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn list_formats_round_trip_and_default_to_sha256sums() {
+        assert_eq!(ListFormat::default(), ListFormat::Sha256Sums);
+        assert_eq!(ListFormat::Sha256Sums.as_str(), "sha256sums");
+        assert_eq!(ListFormat::RustChannel.as_str(), "rust-channel");
+        for f in [ListFormat::Sha256Sums, ListFormat::RustChannel] {
+            assert_eq!(ListFormat::parse(f.as_str()), Some(f));
+        }
+        assert_eq!(ListFormat::parse("SHA256SUMS"), None);
+        assert_eq!(ListFormat::parse(""), None);
+    }
+
+    #[test]
+    fn a_url_is_named_by_its_last_path_segment() {
+        assert_eq!(url_basename("https://h/dist/2026/a-1.tar.xz"), "a-1.tar.xz");
+        assert_eq!(url_basename("bare.tar.gz"), "bare.tar.gz");
     }
 }

@@ -45,6 +45,11 @@ pub enum Mechanism {
     UpstreamSums,
     CosignSums,
     BuildProvenance,
+    /// A digest list somebody SIGNED with OpenPGP, verified against a
+    /// certificate the operator pinned in the producer's committed input
+    /// (REQ-SIGNEDSUMS-001, DD-034). Below cosign and build provenance, above
+    /// the unsigned list.
+    PgpSums,
     Unverified,
 }
 
@@ -57,7 +62,7 @@ impl Mechanism {
     /// caller has to remember which of four names are signatures.
     pub fn is_signed(self) -> bool {
         match self {
-            Mechanism::CosignSums | Mechanism::BuildProvenance => true,
+            Mechanism::CosignSums | Mechanism::BuildProvenance | Mechanism::PgpSums => true,
             Mechanism::UpstreamSums | Mechanism::Unverified => false,
         }
     }
@@ -66,6 +71,7 @@ impl Mechanism {
         match self {
             Mechanism::CosignSums => "cosign-sums",
             Mechanism::BuildProvenance => "build-provenance",
+            Mechanism::PgpSums => "pgp-sums",
             // Named so it cannot be mistaken for a signature by someone
             // skimming a manifest. "upstream-sums" says who vouched (upstream)
             // and what with (a digest list) — and conspicuously does not say
@@ -125,6 +131,48 @@ pub struct ReleaseProbe {
     /// The shell has the same hole: `if gh attestation verify … 2>/dev/null`
     /// reads a verification FAILURE as "not attested" and carries on.
     pub attestation: AttestationProbe,
+    /// What verifying the entry's DECLARED signed digest list established
+    /// (REQ-SIGNEDSUMS-001). More than two states for the reason `attestation`
+    /// has them: a list that was offered and did not verify is not a list that
+    /// was never offered.
+    pub pgp_sums: PgpSumsProbe,
+}
+
+/// What was observed about an entry's declared PGP-signed digest list.
+///
+/// `Verified` is the only variant that carries digests, and it is only ever
+/// built from [`crate::pgpsums::VerifiedList`]: there is no way to hold the
+/// entries of a list whose signature did not verify (clause 5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PgpSumsProbe {
+    /// The entry declares no `pgp-sums`.
+    #[default]
+    NotDeclared,
+    /// The entry declares one and nobody looked, because an earlier rung
+    /// decides first. Reaching the rung in this state is a caller ordering
+    /// error and fails closed.
+    NotProbed,
+    /// The signature verified. The digests come from the verified list.
+    Verified {
+        signer: String,
+        asserts: String,
+        sums: crate::sums::Sums,
+    },
+    /// The entry declares a list and it could not be fetched, read, or
+    /// verified. Never a fall-through.
+    Rejected(String),
+}
+
+/// Can the `pgp-sums` rung be reached for this probe? Only when neither
+/// cosign-sums nor build-provenance decides first: each of those returns
+/// (accepted OR failed) before the ladder gets here, so verifying the signed
+/// list when one of them applies would be a download that cannot matter.
+///
+/// Coupled to [`rung_cosign_sums`] and [`rung_build_provenance`]: it must say
+/// "reachable" exactly when both return `NotOffered`.
+pub fn pgp_rung_is_reachable(probe: &ReleaseProbe) -> bool {
+    !(probe.has_sums && probe.has_cosign_bundle)
+        && probe.attestation == AttestationProbe::NotAttested
 }
 
 /// What was observed about a release's build attestation.
@@ -277,7 +325,33 @@ pub fn rung_build_provenance(probe: &ReleaseProbe) -> Rung {
     }
 }
 
-/// Rung 3 — a digest manifest the upstream publishes and nobody signed.
+/// Rung 3 — a digest list somebody signed with OpenPGP, verified against the
+/// certificate the operator pinned.
+///
+/// `Failed` for every way a DECLARED list can be unusable. The entry said this
+/// release carries a signed list; a list that is missing, unreadable or signed
+/// by the wrong key is evidence of a problem, and continuing to the unsigned
+/// rung would turn a detected forgery into a quiet downgrade.
+pub fn rung_pgp_sums(probe: &ReleaseProbe) -> Rung {
+    match &probe.pgp_sums {
+        PgpSumsProbe::NotDeclared => Rung::NotOffered,
+        PgpSumsProbe::NotProbed => Rung::Failed(
+            "this release's signed digest list was never probed, so the pgp-sums rung \
+             cannot be decided; reaching it in this state is an ordering error in the \
+             caller, not an absent list"
+                .into(),
+        ),
+        PgpSumsProbe::Rejected(detail) => Rung::Failed(detail.clone()),
+        PgpSumsProbe::Verified {
+            signer, asserts, ..
+        } => Rung::Accepted {
+            signer: signer.clone(),
+            asserts: asserts.clone(),
+        },
+    }
+}
+
+/// Rung 4 — a digest manifest the upstream publishes and nobody signed.
 ///
 /// `manifest_asset` is the asset that carries the digests; upstreams do not
 /// agree on a name (`sha256.sum` for zephyrproject-rtos/sdk-ng), so the realm
@@ -400,7 +474,28 @@ pub fn choose(
         Rung::NotOffered => {}
     }
 
-    // Rung 3 — an unsigned upstream digest list. Below both signatures and
+    // Rung 3 — a digest list somebody signed, against a key the operator
+    // pinned. A verification failure is fatal here and never reaches the
+    // unsigned list below, which would accept the same bytes with no
+    // signature at all.
+    match rung_pgp_sums(probe) {
+        Rung::Accepted { signer, asserts } => {
+            return Ok(Accepted {
+                mechanism: Mechanism::PgpSums,
+                signer: Some(signer),
+                asserts,
+            });
+        }
+        Rung::Failed(detail) => {
+            return Err(IngestError::ProofRejected {
+                repo: repo.to_string(),
+                detail,
+            });
+        }
+        Rung::NotOffered => {}
+    }
+
+    // Rung 4 — an unsigned upstream digest list. Below every signature and
     // above nothing, which is exactly where it belongs: it catches the
     // corrupted 90 MB download and stops nobody who can replace the list and
     // the bytes together.
@@ -499,6 +594,7 @@ mod tests {
             has_cosign_bundle: true,
             cosign: Some(Ok(())),
             attestation: AttestationProbe::NotAttested,
+            pgp_sums: PgpSumsProbe::NotDeclared,
         }
     }
 
@@ -706,6 +802,7 @@ mod tests {
             has_cosign_bundle: false,
             cosign: Some(Ok(())),
             attestation: AttestationProbe::NotAttested,
+            pgp_sums: crate::ingest::PgpSumsProbe::NotDeclared,
         };
         assert_eq!(
             rung_cosign_sums(&Forge::github_com(), "r", &probe),
@@ -1022,5 +1119,169 @@ mod upstream_sums_tests {
             Some("the manifest's reason"),
             "an unreviewable environment variable overrode the realm's committed record"
         );
+    }
+}
+
+#[cfg(test)]
+mod pgp_sums_tests {
+    use super::*;
+    use crate::sums::Sums;
+
+    fn verified() -> PgpSumsProbe {
+        PgpSumsProbe::Verified {
+            signer: "openpgp:abcd (Up Stream <up@example.invalid>)".into(),
+            asserts: "the publisher holding OpenPGP key abcd signed the digest list".into(),
+            sums: Sums::default(),
+        }
+    }
+
+    fn probe(pgp: PgpSumsProbe) -> ReleaseProbe {
+        ReleaseProbe {
+            published: vec!["SHA256SUMS".into(), "SHA256SUMS.asc".into()],
+            pgp_sums: pgp,
+            ..Default::default()
+        }
+    }
+
+    fn pick(p: &ReleaseProbe, upstream: Option<&str>) -> Result<Accepted, IngestError> {
+        choose(
+            &Forge::github_com(),
+            "up/stream",
+            "v1",
+            p,
+            &BTreeMap::new(),
+            upstream,
+        )
+    }
+
+    /// The mechanism is named, counts as a signature, and is recorded under the
+    /// spelling core reads back.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn pgp_sums_is_a_signed_mechanism_with_its_own_name() {
+        assert_eq!(Mechanism::PgpSums.as_str(), "pgp-sums");
+        assert!(Mechanism::PgpSums.is_signed());
+        assert_eq!(
+            Mechanism::PgpSums
+                .as_str()
+                .parse::<varve_core::IngestProof>(),
+            Ok(varve_core::IngestProof::PgpSums)
+        );
+    }
+
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_verified_signed_list_is_accepted_under_its_own_mechanism() {
+        let a = pick(&probe(verified()), None).expect("accepts");
+        assert_eq!(a.mechanism, Mechanism::PgpSums);
+        assert_eq!(
+            a.signer.as_deref(),
+            Some("openpgp:abcd (Up Stream <up@example.invalid>)")
+        );
+        assert!(a.asserts.contains("OpenPGP key abcd"), "{}", a.asserts);
+    }
+
+    /// A rejected signature is a refusal. It must NOT land on the unsigned
+    /// list the entry may also name, which would accept the same bytes with no
+    /// signature at all.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_rejected_signature_aborts_and_never_falls_to_upstream_sums() {
+        let p = probe(PgpSumsProbe::Rejected("no signature verifies".into()));
+        for upstream in [None, Some("SHA256SUMS")] {
+            let err = pick(&p, upstream).expect_err("must refuse");
+            assert!(
+                matches!(&err, IngestError::ProofRejected { detail, .. } if detail == "no signature verifies"),
+                "{err:?}"
+            );
+        }
+    }
+
+    /// Declared and never probed is an ordering error, which fails closed.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_declared_but_never_probed_list_fails_closed() {
+        let err = pick(&probe(PgpSumsProbe::NotProbed), Some("SHA256SUMS")).expect_err("refuses");
+        assert!(matches!(err, IngestError::ProofRejected { .. }), "{err:?}");
+    }
+
+    /// Not declared: the rung is not offered and the ladder continues.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_entry_that_declares_nothing_is_unaffected() {
+        assert_eq!(
+            rung_pgp_sums(&probe(PgpSumsProbe::NotDeclared)),
+            Rung::NotOffered
+        );
+        let a = pick(&probe(PgpSumsProbe::NotDeclared), Some("SHA256SUMS")).expect("accepts");
+        assert_eq!(a.mechanism, Mechanism::UpstreamSums);
+    }
+
+    /// Ladder order: cosign and build provenance both outrank the signed list,
+    /// and the signed list outranks the unsigned one.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_signed_list_sits_below_cosign_and_provenance_and_above_the_unsigned_list() {
+        let mut p = probe(verified());
+        p.has_sums = true;
+        p.has_cosign_bundle = true;
+        p.cosign = Some(Ok(()));
+        let a = pick(&p, Some("SHA256SUMS")).unwrap();
+        assert_eq!(a.mechanism, Mechanism::CosignSums);
+
+        let mut p = probe(verified());
+        p.attestation = AttestationProbe::Verified {
+            signer: "wf".into(),
+            commit: "c0ffee".into(),
+        };
+        let a = pick(&p, Some("SHA256SUMS")).unwrap();
+        assert_eq!(a.mechanism, Mechanism::BuildProvenance);
+
+        let a = pick(&probe(verified()), Some("SHA256SUMS")).unwrap();
+        assert_eq!(a.mechanism, Mechanism::PgpSums);
+    }
+
+    /// The reachability test must agree with the rungs it summarises.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_pgp_rung_is_reachable_exactly_when_both_earlier_rungs_are_not_offered() {
+        let forge = Forge::github_com();
+        let plain = probe(PgpSumsProbe::NotProbed);
+        assert!(pgp_rung_is_reachable(&plain));
+        assert_eq!(
+            rung_cosign_sums(&forge, "up/stream", &plain),
+            Rung::NotOffered
+        );
+        assert_eq!(rung_build_provenance(&plain), Rung::NotOffered);
+
+        let mut sums_only = plain.clone();
+        sums_only.has_sums = true;
+        assert!(pgp_rung_is_reachable(&sums_only));
+        assert_eq!(
+            rung_cosign_sums(&forge, "up/stream", &sums_only),
+            Rung::NotOffered
+        );
+        let mut bundle_only = plain.clone();
+        bundle_only.has_cosign_bundle = true;
+        assert!(pgp_rung_is_reachable(&bundle_only));
+
+        let mut cosign = plain.clone();
+        cosign.has_sums = true;
+        cosign.has_cosign_bundle = true;
+        assert!(!pgp_rung_is_reachable(&cosign));
+
+        for attestation in [
+            AttestationProbe::Verified {
+                signer: "s".into(),
+                commit: "c".into(),
+            },
+            AttestationProbe::Rejected("bad".into()),
+            AttestationProbe::NotProbed,
+        ] {
+            let mut p = plain.clone();
+            p.attestation = attestation;
+            assert!(!pgp_rung_is_reachable(&p), "{:?}", p.attestation);
+            assert_ne!(rung_build_provenance(&p), Rung::NotOffered);
+        }
     }
 }

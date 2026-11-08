@@ -8,6 +8,7 @@ assuming they were.
 |---|---|---|
 | `cosign-sums` | a signed digest list, verified against the repository's own workflow identity | — |
 | `build-provenance` | a SLSA attestation binding the bytes to the build that made them | — |
+| `pgp-sums` | a digest list signed with OpenPGP, verified against a certificate **you pinned in the producer input**: the holder of that key published these digests | that the publisher is trustworthy; key expiry |
 | `upstream-sums` | the bytes are the bytes that list names | **anything about who produced them** |
 | `unverified` | nothing | everything |
 
@@ -15,6 +16,56 @@ The ladder is ordered, and the producer takes the highest rung a release
 actually offers. It never silently descends: a release that offered
 `cosign-sums` yesterday and offers nothing today stops the run rather than
 quietly entering on a weaker rung.
+
+## `pgp-sums` — a digest list somebody signed
+
+Some upstreams sign their digest list with OpenPGP: Rust publishes
+`channel-rust-stable.toml` with a detached `.asc`. That is the claim
+`cosign-sums` makes, reached by a different mechanism, and it has its own rung
+between `build-provenance` and `upstream-sums`. The ladder order is
+`cosign-sums`, `build-provenance`, `pgp-sums`, `upstream-sums`, `unverified`;
+the producer takes the highest rung the release offers, and a release that
+offers `cosign-sums` or `build-provenance` never consults the signed list.
+
+It is declared on the `[[tool]]` entry of the producer's input (`layer.toml`):
+
+| field | meaning |
+|---|---|
+| `pgp-sums` | the release asset carrying the digest list. A name or a template (`%V`, `%R`; not `%T`: one list per release). |
+| `pgp-sums-signature` | the asset carrying the **detached** signature. Default: the list's name plus `.asc`. |
+| `pgp-sums-format` | how to read the list once it verified: `sha256sums` (the `sha256sum` format; the default) or `rust-channel` (a `channel-rust-*.toml`, whose entries are keyed by the basename of their `url`). Declared, never guessed from the content. |
+| `pgp-key-file` | the OpenPGP certificate, armored or binary, as a path **relative to the input file**. |
+
+`pgp-sums` and `pgp-key-file` go together: either without the other is refused
+at plan time, as are `pgp-sums-signature` or `pgp-sums-format` without
+`pgp-sums`, and `pgp-sums` on an entry that also names `upstream-sums` (the
+unsigned list could never be consulted). The key file is read from disk at
+ingestion, before anything is fetched. A file that is missing or unreadable
+stops the run; it never falls back to a weaker rung. The key is never fetched
+and never read from beside the artifact: a key found next to the thing it
+vouches for is not a proof.
+
+A signature that does not verify aborts the run. It is never read as "no
+signed list" and never descends to `upstream-sums` or `unverified`. These are
+all refusals: a signature by another key, a certificate carrying its own
+revocation, a text-type signature (it covers the line-ending-normalised form,
+not the bytes), a digest below SHA-256, a list that is not published or cannot
+be fetched. A payload the verified list does not name, or whose bytes differ
+from the digest it names, is refused like any other.
+
+The manifest records `pgp-sums` as the proof, the **primary key's
+fingerprint** as the signer (a user ID is text the key's own holder typed, so
+it is shown as a label after the fingerprint and never as the identity), and a
+one-line assertion; a signature made by a subkey names that subkey as well.
+
+What it proves: the holder of that key published a list naming these bytes.
+What it does **not** prove: that the upstream is trustworthy, or that the key
+was valid when it signed. Key **expiry is deliberately not checked**, because
+deciding it needs a clock and none is available that is not absent, wrong, or
+attested by the key in question.
+
+`pgp-sums` can only be written in `layer.toml`; the shell assembler's
+environment encoding has no field for it and refuses an entry that uses one.
 
 ## `upstream-sums` is deliberately named, not promoted
 

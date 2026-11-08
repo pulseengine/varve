@@ -79,6 +79,7 @@ pub fn vouch(label: &str) -> Vouch {
     match label {
         l if l == P::CosignSums.as_str()
             || l == P::BuildProvenance.as_str()
+            || l == P::PgpSums.as_str()
             || l == P::UpstreamSums.as_str() =>
         {
             Vouch::Verified
@@ -419,7 +420,12 @@ mod tests {
     // rivet: verifies REQ-LAYERDIFF-001
     #[test]
     fn every_proof_label_classifies_on_its_own() {
-        for l in ["cosign-sums", "build-provenance", "upstream-sums"] {
+        for l in [
+            "cosign-sums",
+            "build-provenance",
+            "pgp-sums",
+            "upstream-sums",
+        ] {
             assert_eq!(vouch(l), Vouch::Verified, "{l} must count as vouched for");
         }
         assert_eq!(vouch("unverified"), Vouch::Unverified);
