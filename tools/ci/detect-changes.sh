@@ -19,12 +19,22 @@ set -uo pipefail
 out="${GITHUB_OUTPUT:-/dev/stdout}"
 run_all() { echo "code=true" >> "$out"; echo "-> $1; running everything"; exit 0; }
 
-case "${EVENT_NAME:-}" in
-  pull_request|merge_group) ;;
-  *) run_all "event ${EVENT_NAME:-<none>}" ;;
-esac
-[ -n "${BASE_SHA:-}" ] || run_all "no base sha"
-changed="$(git diff --name-only "$BASE_SHA"...HEAD)" || run_all "git diff failed against $BASE_SHA"
+# temper's gate probe (temper docs/gate-probe.md, .github/gate-probe.json)
+# hands the changed paths in GATE_PROBE_FILES, one per line, with no other
+# environment. Read them BEFORE the event check: with no EVENT_NAME the event
+# check runs everything, so a probe that reached it would pass without testing
+# the classification at all.
+if [ -n "${GATE_PROBE_FILES:-}" ]; then
+  [ -r "$GATE_PROBE_FILES" ] || run_all "GATE_PROBE_FILES $GATE_PROBE_FILES is not readable"
+  changed="$(grep -v '^[[:space:]]*$' "$GATE_PROBE_FILES")" || changed=""
+else
+  case "${EVENT_NAME:-}" in
+    pull_request|merge_group) ;;
+    *) run_all "event ${EVENT_NAME:-<none>}" ;;
+  esac
+  [ -n "${BASE_SHA:-}" ] || run_all "no base sha"
+  changed="$(git diff --name-only "$BASE_SHA"...HEAD)" || run_all "git diff failed against $BASE_SHA"
+fi
 [ -n "$changed" ] || run_all "git diff returned no paths"
 echo "changed files:"; echo "$changed"
 while IFS= read -r f; do

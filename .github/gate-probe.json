@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "detectors": [
+    {
+      "command": ["tools/ci/detect-changes.sh"],
+      "outputs": ["code"],
+      "controls": [
+        "crates/varve/docs/gate-probe-control.md",
+        "tools/gate-probe-control.py",
+        "artifacts/gate-probe-control.yaml"
+      ]
+    }
+  ]
+}
