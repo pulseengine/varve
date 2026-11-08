@@ -34,10 +34,11 @@
 //!   feature flags Sequoia named `allow-experimental-crypto` and
 //!   `allow-variable-time-crypto`; a flag whose name is a warning is a warning.
 //!
-//! `pgp` 0.20.0 (the rPGP project) is `MIT OR Apache-2.0`, and measured with
-//! `cargo tree -e build` it has **zero build dependencies** — no `cc`, no
-//! `-sys` crate, nothing to cross-compile. With `default-features = false` its
-//! tree is 181 crates, all pure Rust; the RustCrypto stack it uses
+//! `pgp` (the rPGP project; 0.21.0 is what `Cargo.lock` resolves today) is
+//! `MIT OR Apache-2.0`. Measured with `cargo tree -e build` on 0.20.0 on
+//! 2026-09-30 and NOT re-measured on 0.21.0: it had **zero build dependencies**
+//! — no `cc`, no `-sys` crate, nothing to cross-compile. With
+//! `default-features = false` its tree was 181 crates, all pure Rust; the RustCrypto stack it uses
 //! (`rsa`, `sha2`, `ed25519-dalek`, …) is already most of what this workspace
 //! links. It has been audited (Radically Open Security 2024-12, ETH Zurich
 //! 2024-03) and is the OpenPGP implementation under Delta Chat and the `rpm`
@@ -56,23 +57,24 @@
 //! of speaking OpenPGP at all.
 //!
 //! **The cost we are taking on, stated plainly.** `pgp` pulls `rsa` 0.9, which
-//! carries RUSTSEC-2023-0071 (Marvin attack) with no fixed version — verified
-//! by running `cargo deny check advisories` on this workspace, which FAILS.
-//! The advisory is about non-constant-time RSA *private-key* operations leaking
+//! carries RUSTSEC-2023-0071 (Marvin attack) with no fixed version, and (at
+//! 0.21.0) `elliptic-curve` 0.13, which carries RUSTSEC-2026-0387. The first
+//! advisory is about non-constant-time RSA *private-key* operations leaking
 //! the key to an attacker who can time them. This module performs public-key
 //! verification only; no OpenPGP secret key ever exists in this process, so
 //! there is no secret for the side channel to leak. That reasoning is a
-//! judgement, not a fact about the crate, so it belongs in `deny.toml` as an
-//! explicit `[advisories] ignore` with this rationale — NOT silently. Until
-//! that entry exists, this crate's advisory gate is red, and that is correct
-//! behaviour from the gate.
+//! judgement, not a fact about the crate, so it is recorded in `deny.toml` as
+//! an explicit `[advisories] ignore` with its rationale rather than left
+//! silent. With those entries `cargo deny check` passes; before the first one
+//! existed it failed, which was the gate behaving correctly.
 //!
 //! # What this module checks, and why each check is here
 //!
 //! `pgp` is deliberately a low-level library: its README says it implements
 //! OpenPGP layers 1–3 and explicitly not layer 4 (expiry, revocation, key
-//! flags). Everything below is policy this module owns, confirmed by reading
-//! rPGP 0.20.0's source rather than assuming:
+//! flags in the sense of a policy engine). Everything below is policy this
+//! module owns, confirmed by reading rPGP's source (0.21.0 for the key-standing
+//! rules, 0.20.0 for the rest) rather than assuming:
 //!
 //! * **Binary-document signatures only.** `src/composed/signature.rs` documents
 //!   that a `DetachedSignature` "is either of type Binary or Text" but its
@@ -84,7 +86,7 @@
 //!   be byte-exact or the digests in it are not the digests that were vouched
 //!   for.
 //! * **A 256-bit digest floor.** rPGP's `check_signature_hash_strength`
-//!   (`src/packet/signature/types.rs:437`) only enforces a floor when the
+//!   (in `src/packet/signature/types.rs`) only enforces a floor when the
 //!   public-key algorithm `is_pqc()`. An RSA signature over a SHA-1 hash
 //!   verifies happily. SHA-1 is collision-broken, and a digest list is exactly
 //!   the kind of structured, attacker-influenceable text a chosen-prefix
@@ -94,6 +96,19 @@
 //!   realistic failure is an operator re-pinning an upstream key export that
 //!   now carries the upstream's own revocation certificate. Refusing it is the
 //!   difference between "we noticed" and "we kept verifying with a dead key".
+//! * **A key must still be standing to sign.** rPGP keeps a subkey's
+//!   revocation among that subkey's own signatures, and `verify_bindings`
+//!   accepts it as a valid signature, so a revoked signing subkey otherwise
+//!   verifies. A subkey vouches only while no `SubkeyRevocation` exists and its
+//!   NEWEST binding states the SIGN key flag (0x02); an encryption-only subkey
+//!   never does. The primary is held to the same rule by its self-signatures:
+//!   the newest direct-key signature and the newest certification on the
+//!   primary (else any live) user ID decide, a stated flag set without SIGN
+//!   refuses, and a restriction stated anywhere in the certificate (a revoked
+//!   user ID's included) is not lifted by a newer signature that is merely
+//!   silent. A certificate that states no flags at all, like Rust's, is
+//!   unrestricted. A refused key is still tried, only so the refusal can name
+//!   it: a signature only such a key could have made is reported as that.
 //! * **Subkeys are candidates too.** Rust signs with its PRIMARY key —
 //!   measured: issuer `85ab96e6fa1be5fe`, which is the primary, and
 //!   `SignedPublicKey`'s own `VerifyingKey` impl only ever tries the primary.
@@ -114,10 +129,9 @@
 //! should no longer be pinned. If this is ever wanted, it needs the same
 //! trusted-time story as anti-rollback, not a `SystemTime::now()`.
 //!
-//! **Key flags.** A certificate may mark a key as not-for-signing. This module
-//! does not consult those flags; a signature that verifies under a key in the
-//! pinned certificate is accepted. Worth revisiting if a pinned certificate
-//! ever carries an encryption-only subkey an attacker could confuse it with.
+//! **Key flags** are consulted, as set out above; what is NOT done is trusting a
+//! flag subpacket that lies in an unhashed area, or any third party's
+//! certification of the key.
 //!
 //! # The measured artifact
 //!

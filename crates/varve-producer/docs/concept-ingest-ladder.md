@@ -72,11 +72,34 @@ the older assets. So the list is bound to the release the entry declares:
   or the manifest's `date` must equal the declared version or release tag as
   written. Anything else is refused as a different release.
 
+The version or release a `sha256sums` template expands from must name exactly
+ONE release: after one leading `v`, `MAJOR.MINOR[.PATCH]` with an optional
+`-prerelease` or `+build` suffix, or a full date `YYYY-MM-DD`. A moving tag
+(`latest`, `nightly`, `main`), a bare number, a wildcard (`3.x`) or a fused word
+(`3lts`) is refused, because the expanded names would be the same for every
+release. This is a name heuristic, not a cryptographic binding: a publisher who
+reuses a numbered tag defeats it. The list or its signature name must carry
+`%V` or `%R` too, and ingestion re-checks that every asset name contains the
+concrete version or release it is bound to. A Rust channel whose version has a
+prerelease part (`1.99.0-nightly`, `-beta.2`) binds by its `date` only, since
+every build of the cycle carries the same version.
+
+The signing key is recorded as its own annotation, `proof-signing-key`, beside
+the signer: the primary's fingerprint when the primary signed, the subkey's
+otherwise. A subkey the primary has revoked, an encryption-only subkey, and a
+primary whose newest self-signatures state flags without SIGN do not vouch.
+
 The recorded assertion names that release. Every entry that ingests from one
 repository release must declare the same `pgp-sums` (and the same
 `upstream-sums`); entries that disagree are refused before anything is fetched,
 because a release is verified once and one entry's declared verification would
 otherwise silently not run.
+
+**Known limit, fails closed:** the declaration includes the payload version, so
+a hub repository whose payloads carry different versions under one release tag
+(`pulseengine/jess`: `with-device` 0.2.2 under `v0.7.2`) is always refused as a
+disagreement when those entries use `pgp-sums`. Give each such entry its own
+release, or leave `pgp-sums` off the hub.
 
 What it proves: the holder of that key published a list naming these bytes.
 What it does **not** prove: that the upstream is trustworthy, or that the key
