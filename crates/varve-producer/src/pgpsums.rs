@@ -334,11 +334,24 @@ pub fn verify_detached_signature(
         primary_fingerprint.clone(),
         primary_standing(&cert),
     )];
+    // A subkey is revoked if ANY entry carrying its fingerprint holds a valid
+    // revocation (`verify_bindings` has already checked each was made by the
+    // primary): a duplicated entry without one must not slip through.
+    let revoked: std::collections::BTreeSet<String> = cert
+        .public_subkeys
+        .iter()
+        .filter(|k| {
+            k.signatures
+                .iter()
+                .any(|s| s.typ() == Some(SignatureType::SubkeyRevocation))
+        })
+        .map(|k| hex_fingerprint(&k.key))
+        .collect();
     for subkey in &cert.public_subkeys {
         candidates.push((
             &subkey.key,
             hex_fingerprint(&subkey.key),
-            subkey_standing(subkey),
+            subkey_standing(subkey, &revoked),
         ));
     }
 
@@ -761,12 +774,11 @@ fn weak_hash(signature: &pgp::packet::Signature) -> Option<Standing> {
     })
 }
 
-fn subkey_standing(subkey: &pgp::composed::SignedPublicSubKey) -> Standing {
-    if subkey
-        .signatures
-        .iter()
-        .any(|s| s.typ() == Some(SignatureType::SubkeyRevocation))
-    {
+fn subkey_standing(
+    subkey: &pgp::composed::SignedPublicSubKey,
+    revoked: &std::collections::BTreeSet<String>,
+) -> Standing {
+    if revoked.contains(&hex_fingerprint(&subkey.key)) {
         return Standing::Revoked;
     }
     let latest = subkey
@@ -774,7 +786,9 @@ fn subkey_standing(subkey: &pgp::composed::SignedPublicSubKey) -> Standing {
         .iter()
         .filter(|s| s.typ() == Some(SignatureType::SubkeyBinding))
         .enumerate()
-        .max_by_key(|(i, s)| (s.created(), *i))
+        // Newest wins; in a same-second tie the binding WITHOUT sign wins (the
+        // restriction is the safe reading), then the later in the file.
+        .max_by_key(|(i, s)| (s.created(), !s.key_flags().sign(), *i))
         .map(|(_, s)| s);
     match latest {
         // The binding that lets the subkey sign, and the back-signature the
@@ -1651,6 +1665,85 @@ pub(crate) mod testkit {
             secret.primary_key.legacy_key_id(),
         ))
         .unwrap()
+    }
+
+    /// The certificate with its first subkey listed TWICE: once carrying a
+    /// primary-signed revocation, once without. `revoked_first` picks the order.
+    pub(crate) fn subkey_listed_twice_one_revoked(
+        secret: &SignedSecretKey,
+        revoked_first: bool,
+    ) -> Vec<u8> {
+        let plain: SignedPublicKey = secret.clone().into();
+        let revoked: SignedPublicKey =
+            SignedPublicKey::from_reader_single(&subkey_revoked_export(secret)[..])
+                .unwrap()
+                .0;
+        let mut public = plain.clone();
+        let (a, b) = (
+            revoked.public_subkeys[0].clone(),
+            plain.public_subkeys[0].clone(),
+        );
+        public.public_subkeys = if revoked_first {
+            vec![a, b]
+        } else {
+            vec![b, a]
+        };
+        public.to_armored_bytes(Default::default()).unwrap()
+    }
+
+    /// The first subkey with TWO bindings created in the same second, one with
+    /// SIGN and one without, in the order asked for.
+    pub(crate) fn subkey_with_tied_bindings(
+        secret: &SignedSecretKey,
+        created_secs: u32,
+        sign_first: bool,
+    ) -> Vec<u8> {
+        let mut public: SignedPublicKey = secret.clone().into();
+        let original = public.public_subkeys[0].signatures[0].clone();
+        let at = |sub: &Subpacket| match &sub.data {
+            SubpacketData::SignatureCreationTime(_) => Subpacket::regular(
+                SubpacketData::SignatureCreationTime(Timestamp::from_secs(created_secs)),
+            )
+            .unwrap(),
+            _ => sub.clone(),
+        };
+        let signing: Vec<Subpacket> = original
+            .config()
+            .unwrap()
+            .hashed_subpackets()
+            .map(at)
+            .collect();
+        let mut flags = pgp::packet::KeyFlags::default();
+        flags.set_encrypt_comms(true);
+        let not_signing: Vec<Subpacket> = signing
+            .iter()
+            .map(|sub| match &sub.data {
+                SubpacketData::KeyFlags(_) => {
+                    Subpacket::regular(SubpacketData::KeyFlags(flags.clone())).unwrap()
+                }
+                _ => sub.clone(),
+            })
+            .filter(|sub| !matches!(sub.data, SubpacketData::EmbeddedSignature(_)))
+            .collect();
+        let bind = |hashed: Vec<Subpacket>| {
+            let mut config = SignatureConfig::v4(
+                SignatureType::SubkeyBinding,
+                PublicKeyAlgorithm::Ed25519,
+                HashAlgorithm::Sha256,
+            );
+            config.hashed_subpackets = hashed;
+            config
+                .sign_subkey_binding(
+                    &secret.primary_key,
+                    &secret.primary_key.public_key(),
+                    &Password::empty(),
+                    &public.public_subkeys[0].key,
+                )
+                .unwrap()
+        };
+        let (a, b) = (bind(signing), bind(not_signing));
+        public.public_subkeys[0].signatures = if sign_first { vec![a, b] } else { vec![b, a] };
+        public.to_armored_bytes(Default::default()).unwrap()
     }
 
     /// A TEXT-type detached signature, which a digest list must refuse.
@@ -2902,6 +2995,42 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
             );
             verify_detached_signature(SUMS, &sig, &key)
                 .unwrap_or_else(|e| panic!("non-critical {data:?}: {e}"));
+        }
+    }
+
+    // ----------------------------------------- subkey duplicates and ties
+
+    /// A subkey is revoked if ANY entry with its fingerprint carries a valid
+    /// revocation: a duplicated entry without one must not slip through.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_subkey_listed_twice_with_one_revocation_is_revoked() {
+        let (secret, _) = generated_key_with_signing_subkey("d <d@example.invalid>");
+        let signature = sign_binary_with_subkey(&secret, SUMS);
+        for revoked_first in [true, false] {
+            let key = subkey_listed_twice_one_revoked(&secret, revoked_first);
+            let err = verify_detached_signature(SUMS, &signature, &key).unwrap_err();
+            assert!(
+                matches!(err, PgpSumsError::SubkeyRevoked { .. }),
+                "revoked_first={revoked_first}: {err}"
+            );
+        }
+    }
+
+    /// Two bindings made in the same second: the one WITHOUT sign wins, in
+    /// either order in the file.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_same_second_tie_between_bindings_goes_to_the_one_without_sign() {
+        let (secret, _) = generated_key_with_signing_subkey("t <t@example.invalid>");
+        let signature = sign_binary_with_subkey(&secret, SUMS);
+        for sign_first in [true, false] {
+            let key = subkey_with_tied_bindings(&secret, OLD, sign_first);
+            let err = verify_detached_signature(SUMS, &signature, &key).unwrap_err();
+            assert!(
+                matches!(err, PgpSumsError::SubkeyNotForSigning { .. }),
+                "sign_first={sign_first}: {err}"
+            );
         }
     }
 }
