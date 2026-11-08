@@ -350,40 +350,17 @@ fn probe_pgp_sums<S: Source>(
         (Ok(l), Ok(s)) => (l, s),
         (Err(rejected), _) | (_, Err(rejected)) => return rejected,
     };
-    match crate::pgpsums::verify_digest_list(
-        spec.format,
-        &list,
-        &signature,
-        key,
-        &crate::pgpsums::BoundRelease {
-            version: &spec.version,
-            release: &spec.release,
-        },
-    ) {
+    let bound = crate::pgpsums::BoundRelease {
+        version: &spec.version,
+        release: &spec.release,
+    };
+    match crate::pgpsums::verify_digest_list(spec.format, &list, &signature, key, &bound) {
         Err(e) => PgpSumsProbe::Rejected(format!(
             "{} does not verify against the pinned key {}: {e}",
             spec.list,
             spec.key_file.display()
         )),
-        Ok(verified) => {
-            let (vouched, sums) = verified.into_parts();
-            let signing = if vouched.signing_fingerprint == vouched.primary_fingerprint {
-                String::new()
-            } else {
-                format!(", signing subkey {}", vouched.signing_fingerprint)
-            };
-            PgpSumsProbe::Verified {
-                signer: vouched.signer_annotation(),
-                asserts: format!(
-                    "the publisher holding OpenPGP key {} signed the digest list for release {} \
-                     (version {}) naming these bytes (binary signature, SHA-256 or \
-                     stronger{signing}); this says who published the digests, not that they \
-                     are trustworthy",
-                    vouched.primary_fingerprint, spec.release, spec.version
-                ),
-                sums,
-            }
-        }
+        Ok(verified) => PgpSumsProbe::from_verified(verified, &bound),
     }
 }
 
@@ -429,6 +406,9 @@ pub fn verify_release<S: Source>(
         None => None,
     };
     let mut probe = src.probe(forge, repo, version)?;
+    // What the probe says about a signed list is not evidence: only THIS
+    // function decides it, from the entry's own declaration.
+    probe.pgp_sums = PgpSumsProbe::NotDeclared;
     if let (Some(spec), Some(key)) = (declared.pgp_sums, &pinned_key) {
         // Verified only when the ladder can reach it: when cosign or build
         // provenance decides first, the signed list is never consulted.
@@ -472,7 +452,7 @@ pub fn verify_release<S: Source>(
         // The digests of the list whose signature the probe verified. They are
         // read out of the probe's `Verified` state, the only place they exist.
         Mechanism::PgpSums => match &probe.pgp_sums {
-            PgpSumsProbe::Verified { sums, .. } => Some(sums.clone()),
+            PgpSumsProbe::Verified(v) => Some(v.sums().clone()),
             _ => {
                 return Err(RunError::Io {
                     context: format!("{repo} {version}"),
@@ -3576,6 +3556,36 @@ mod tests {
             spec.release = release.into();
             run_pgp(&f, &[p], &BTreeMap::new())
                 .unwrap_or_else(|e| panic!("{asset} {version} {release}: {e}"));
+        }
+    }
+
+    /// `Source::probe` has no business reporting a pgp-sums state for an entry
+    /// that declared none. Whatever it says is overwritten with NotDeclared,
+    /// so a stale or hostile probe can neither fail a run nor vouch for one.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_probe_that_reports_a_pgp_state_for_an_undeclared_entry_is_ignored() {
+        for state in [
+            PgpSumsProbe::Rejected("a probe's own opinion".into()),
+            PgpSumsProbe::NotProbed,
+        ] {
+            let mut f = Fixture::default();
+            let list = list_for(&[("a-1.0.tar.gz", A)]);
+            f.blobs.insert("o/r@v1/a-1.0.tar.gz".into(), A.to_vec());
+            f.blobs
+                .insert("o/r@v1/sha256.sum".into(), list.as_bytes().to_vec());
+            f.probes.insert(
+                "o/r@v1".into(),
+                ReleaseProbe {
+                    published: vec!["a-1.0.tar.gz".into(), "sha256.sum".into()],
+                    pgp_sums: state,
+                    ..Default::default()
+                },
+            );
+            let mut p = plan("t", "o/r", "v1", "a-1.0.tar.gz");
+            p.upstream_sums = Some("sha256.sum".into());
+            let got = run_pgp(&f, &[p], &BTreeMap::new()).expect("the probe's value is ignored");
+            assert_eq!(got[0].accepted.mechanism, Mechanism::UpstreamSums);
         }
     }
 }

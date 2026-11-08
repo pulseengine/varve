@@ -153,14 +153,67 @@ pub enum PgpSumsProbe {
     /// error and fails closed.
     NotProbed,
     /// The signature verified. The digests come from the verified list.
-    Verified {
-        signer: String,
-        asserts: String,
-        sums: crate::sums::Sums,
-    },
+    ///
+    /// The payload has private fields and one constructor,
+    /// [`PgpSumsProbe::from_verified`], which takes a
+    /// [`crate::pgpsums::VerifiedList`]: no code outside this module can hold
+    /// digests that did not come out of a verification (clause 5).
+    Verified(VerifiedPgpSums),
     /// The entry declares a list and it could not be fetched, read, or
     /// verified. Never a fall-through.
     Rejected(String),
+}
+
+/// What a verified signed digest list established. Fields are private; the
+/// only way to make one is [`PgpSumsProbe::from_verified`].
+///
+/// ```compile_fail
+/// use varve_producer::ingest::{PgpSumsProbe, VerifiedPgpSums};
+/// let _ = PgpSumsProbe::Verified(VerifiedPgpSums {
+///     signer: String::new(),
+///     asserts: String::new(),
+///     sums: Default::default(),
+/// });
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedPgpSums {
+    signer: String,
+    asserts: String,
+    sums: crate::sums::Sums,
+}
+
+impl VerifiedPgpSums {
+    /// The verified list's digests, keyed by asset name.
+    pub fn sums(&self) -> &crate::sums::Sums {
+        &self.sums
+    }
+}
+
+impl PgpSumsProbe {
+    /// The ONLY constructor of the verified state: a list that passed
+    /// [`crate::pgpsums::verify_digest_list`], and the release it was bound to.
+    pub fn from_verified(
+        verified: crate::pgpsums::VerifiedList,
+        bound: &crate::pgpsums::BoundRelease<'_>,
+    ) -> PgpSumsProbe {
+        let (vouched, sums) = verified.into_parts();
+        let signing = if vouched.signing_fingerprint == vouched.primary_fingerprint {
+            String::new()
+        } else {
+            format!(", signing subkey {}", vouched.signing_fingerprint)
+        };
+        PgpSumsProbe::Verified(VerifiedPgpSums {
+            signer: vouched.signer_annotation(),
+            asserts: format!(
+                "the publisher holding OpenPGP key {} signed the digest list for release {} \
+                 (version {}) naming these bytes (binary signature, SHA-256 or \
+                 stronger{signing}); this says who published the digests, not that they \
+                 are trustworthy",
+                vouched.primary_fingerprint, bound.release, bound.version
+            ),
+            sums,
+        })
+    }
 }
 
 /// Can the `pgp-sums` rung be reached for this probe? Only when neither
@@ -342,11 +395,9 @@ pub fn rung_pgp_sums(probe: &ReleaseProbe) -> Rung {
                 .into(),
         ),
         PgpSumsProbe::Rejected(detail) => Rung::Failed(detail.clone()),
-        PgpSumsProbe::Verified {
-            signer, asserts, ..
-        } => Rung::Accepted {
-            signer: signer.clone(),
-            asserts: asserts.clone(),
+        PgpSumsProbe::Verified(v) => Rung::Accepted {
+            signer: v.signer.clone(),
+            asserts: v.asserts.clone(),
         },
     }
 }
@@ -1128,11 +1179,11 @@ mod pgp_sums_tests {
     use crate::sums::Sums;
 
     fn verified() -> PgpSumsProbe {
-        PgpSumsProbe::Verified {
+        PgpSumsProbe::Verified(VerifiedPgpSums {
             signer: "openpgp:abcd (Up Stream <up@example.invalid>)".into(),
             asserts: "the publisher holding OpenPGP key abcd signed the digest list".into(),
             sums: Sums::default(),
-        }
+        })
     }
 
     fn probe(pgp: PgpSumsProbe) -> ReleaseProbe {
