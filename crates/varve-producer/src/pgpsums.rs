@@ -3033,4 +3033,28 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
             );
         }
     }
+
+    /// The allowlist: creation time and the issuer may be marked critical
+    /// (the usual spelling), and do not refuse the signature.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_critical_creation_time_and_issuer_are_understood() {
+        let (secret, key) = generated_key("s <s@example.invalid>");
+        let id = Subpacket::critical(SubpacketData::IssuerKeyId(
+            secret.primary_key.legacy_key_id(),
+        ))
+        .unwrap();
+        let fp = Subpacket::critical(SubpacketData::IssuerFingerprint(
+            secret.primary_key.public_key().fingerprint(),
+        ))
+        .unwrap();
+        for issuer in [id, fp] {
+            let sig = sign_with_hashed_subpackets(
+                &secret,
+                SUMS,
+                vec![creation_time_subpacket(true), issuer],
+            );
+            verify_detached_signature(SUMS, &sig, &key).unwrap();
+        }
+    }
 }
