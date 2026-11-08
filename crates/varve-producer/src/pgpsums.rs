@@ -136,7 +136,7 @@ use std::collections::BTreeMap;
 use crate::sums::Sums;
 
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
-use pgp::packet::SignatureType;
+use pgp::packet::{SignatureType, SubpacketData};
 use pgp::types::KeyDetails;
 
 /// The only `manifest-version` of the Rust channel manifest this parser claims
@@ -159,6 +159,21 @@ pub enum PgpSumsError {
         "the supplied certificate carries {count} revocation signature(s) — a revoked key vouches for nothing"
     )]
     KeyRevoked { count: usize },
+    #[error(
+        "the signature was made by subkey {fingerprint}, which the certificate's primary key \
+         has REVOKED — a revoked subkey vouches for nothing"
+    )]
+    SubkeyRevoked { fingerprint: String },
+    #[error(
+        "the signature was made by subkey {fingerprint}, whose binding signature does not allow \
+         it to sign (key flags without 0x02) — an encryption-only subkey vouches for nothing"
+    )]
+    SubkeyNotForSigning { fingerprint: String },
+    #[error(
+        "the signature was made by the primary key {fingerprint}, whose own self-signatures \
+         state key flags that do not allow signing"
+    )]
+    PrimaryNotForSigning { fingerprint: String },
     #[error("the detached signature is not readable OpenPGP, armored or binary: {0}")]
     SignatureUnreadable(String),
     #[error("the detached signature file carries no signature packet")]
@@ -275,19 +290,41 @@ pub fn verify_detached_signature(
     // impl for `SignedPublicKey` tries the primary and stops, which is right
     // for Rust (measured: it signs with the primary) and wrong for the general
     // upstream clause 2 promises to serve.
-    let mut candidates: Vec<(&dyn VerifyCandidate, String)> =
-        vec![(&cert.primary_key, hex_fingerprint(&cert.primary_key))];
+    //
+    // A key's STANDING is part of the question, not a detail after it: a
+    // subkey the primary has revoked, or one bound for encryption only, still
+    // produces signatures that verify mathematically. Such a key is tried so
+    // that its refusal can be named, but a signature it makes never vouches.
+    let primary_fingerprint = hex_fingerprint(&cert.primary_key);
+    let mut candidates: Vec<(&dyn VerifyCandidate, String, Standing)> = vec![(
+        &cert.primary_key,
+        primary_fingerprint.clone(),
+        if primary_may_sign(&cert) {
+            Standing::Good
+        } else {
+            Standing::PrimaryNotForSigning
+        },
+    )];
     for subkey in &cert.public_subkeys {
-        candidates.push((&subkey.key, hex_fingerprint(&subkey.key)));
+        candidates.push((
+            &subkey.key,
+            hex_fingerprint(&subkey.key),
+            subkey_standing(subkey),
+        ));
     }
 
-    let primary_fingerprint = hex_fingerprint(&cert.primary_key);
     let mut last = String::from("no candidate key was tried");
+    // The first verifying-but-disqualified key, so that a signature only such
+    // a key could have made is reported as THAT, not as a generic mismatch.
+    let mut refusal: Option<PgpSumsError> = None;
 
     for (index, signature) in signatures.iter().enumerate() {
         check_signature_shape(index, signature)?;
-        for (key, fingerprint) in &candidates {
+        for (key, fingerprint, standing) in &candidates {
             match key.try_verify(signature, digest_list) {
+                Ok(()) if *standing != Standing::Good => {
+                    refusal.get_or_insert_with(|| standing.refusal(fingerprint));
+                }
                 Ok(()) => {
                     return Ok(VouchedBy {
                         primary_fingerprint,
@@ -305,6 +342,9 @@ pub fn verify_detached_signature(
         }
     }
 
+    if let Some(refusal) = refusal {
+        return Err(refusal);
+    }
     Err(PgpSumsError::DoesNotVerify {
         fingerprint: primary_fingerprint,
         signatures: signatures.len(),
@@ -617,6 +657,82 @@ impl VerifyCandidate for pgp::packet::PublicSubkey {
     fn fingerprint_hex(&self) -> String {
         hex::encode(self.fingerprint().as_bytes())
     }
+}
+
+/// Whether a key in the certificate may stand behind a signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    Good,
+    /// The primary has revoked this subkey.
+    Revoked,
+    /// The subkey's latest binding does not carry the SIGN flag (0x02), or it
+    /// has no binding at all.
+    NotForSigning,
+    /// The primary's own self-signatures state flags without SIGN.
+    PrimaryNotForSigning,
+}
+
+impl Standing {
+    fn refusal(self, fingerprint: &str) -> PgpSumsError {
+        let fingerprint = fingerprint.to_string();
+        match self {
+            Standing::Revoked => PgpSumsError::SubkeyRevoked { fingerprint },
+            Standing::NotForSigning => PgpSumsError::SubkeyNotForSigning { fingerprint },
+            Standing::PrimaryNotForSigning => PgpSumsError::PrimaryNotForSigning { fingerprint },
+            Standing::Good => unreachable!("a good key is never refused"),
+        }
+    }
+}
+
+/// The key flags a signature states, `None` when it states none. rPGP's own
+/// accessor cannot tell "no flags" from "flags with nothing set".
+fn stated_flags(signature: &pgp::packet::Signature) -> Option<pgp::packet::KeyFlags> {
+    signature
+        .config()?
+        .hashed_subpackets()
+        .find_map(|p| match &p.data {
+            SubpacketData::KeyFlags(flags) => Some(flags.clone()),
+            _ => None,
+        })
+}
+
+/// Subkey standing. `verify_bindings` has already shown every signature on the
+/// subkey was made by the primary, so what is read here is trusted as the
+/// primary's word: any SubkeyRevocation retires the subkey for good, and
+/// otherwise the LATEST binding decides whether it may sign.
+fn subkey_standing(subkey: &pgp::composed::SignedPublicSubKey) -> Standing {
+    if subkey
+        .signatures
+        .iter()
+        .any(|s| s.typ() == Some(SignatureType::SubkeyRevocation))
+    {
+        return Standing::Revoked;
+    }
+    let latest = subkey
+        .signatures
+        .iter()
+        .filter(|s| s.typ() == Some(SignatureType::SubkeyBinding))
+        .enumerate()
+        .max_by_key(|(i, s)| (s.created(), *i))
+        .map(|(_, s)| s);
+    match latest {
+        Some(binding) if binding.key_flags().sign() => Standing::Good,
+        _ => Standing::NotForSigning,
+    }
+}
+
+/// May the primary key itself sign? Rust's does, and states no flags at all,
+/// which is read as "no restriction". A primary whose self-signatures DO state
+/// flags, none of them with SIGN, has said it is for certifying only.
+fn primary_may_sign(cert: &SignedPublicKey) -> bool {
+    let stated: Vec<_> = cert
+        .details
+        .direct_signatures
+        .iter()
+        .chain(cert.details.users.iter().flat_map(|u| u.signatures.iter()))
+        .filter_map(stated_flags)
+        .collect();
+    stated.is_empty() || stated.iter().any(|f| f.sign())
 }
 
 fn hex_fingerprint(key: &impl VerifyCandidate) -> String {
@@ -944,6 +1060,97 @@ pub(crate) mod testkit {
         .unwrap()
         .to_armored_bytes(Default::default())
         .unwrap()
+    }
+
+    /// The certificate with a primary-signed SUBKEY REVOCATION attached to its
+    /// first subkey, the way an upstream retires a compromised signing subkey.
+    pub(crate) fn subkey_revoked_export(secret: &SignedSecretKey) -> Vec<u8> {
+        let mut public: SignedPublicKey = secret.clone().into();
+        let mut config = SignatureConfig::v4(
+            SignatureType::SubkeyRevocation,
+            PublicKeyAlgorithm::Ed25519,
+            HashAlgorithm::Sha256,
+        );
+        config.hashed_subpackets = vec![
+            Subpacket::regular(SubpacketData::SignatureCreationTime(
+                Timestamp::try_from(std::time::SystemTime::now()).unwrap(),
+            ))
+            .unwrap(),
+            Subpacket::regular(SubpacketData::IssuerKeyId(
+                secret.primary_key.legacy_key_id(),
+            ))
+            .unwrap(),
+        ];
+        let revocation = config
+            .sign_subkey_binding(
+                &secret.primary_key,
+                &secret.primary_key.public_key(),
+                &Password::empty(),
+                &public.public_subkeys[0].key,
+            )
+            .unwrap();
+        public.public_subkeys[0].signatures.push(revocation);
+        public.to_armored_bytes(Default::default()).unwrap()
+    }
+
+    /// The certificate with its first subkey RE-BOUND as encryption-only: the
+    /// same key material, a binding whose flags omit SIGN.
+    pub(crate) fn encryption_only_subkey_export(secret: &SignedSecretKey) -> Vec<u8> {
+        let mut public: SignedPublicKey = secret.clone().into();
+        let mut flags = pgp::packet::KeyFlags::default();
+        flags.set_encrypt_comms(true);
+        flags.set_encrypt_storage(true);
+        let mut config = SignatureConfig::v4(
+            SignatureType::SubkeyBinding,
+            PublicKeyAlgorithm::Ed25519,
+            HashAlgorithm::Sha256,
+        );
+        config.hashed_subpackets = vec![
+            Subpacket::regular(SubpacketData::SignatureCreationTime(
+                Timestamp::try_from(std::time::SystemTime::now()).unwrap(),
+            ))
+            .unwrap(),
+            Subpacket::regular(SubpacketData::IssuerKeyId(
+                secret.primary_key.legacy_key_id(),
+            ))
+            .unwrap(),
+            Subpacket::regular(SubpacketData::KeyFlags(flags)).unwrap(),
+        ];
+        let binding = config
+            .sign_subkey_binding(
+                &secret.primary_key,
+                &secret.primary_key.public_key(),
+                &Password::empty(),
+                &public.public_subkeys[0].key,
+            )
+            .unwrap();
+        public.public_subkeys[0].signatures = vec![binding];
+        public.to_armored_bytes(Default::default()).unwrap()
+    }
+
+    /// A certificate whose PRIMARY is certify-only (its self-signatures state
+    /// flags without SIGN) and which carries a signing subkey.
+    pub(crate) fn certify_only_primary_with_signing_subkey(
+        uid: &str,
+    ) -> (SignedSecretKey, Vec<u8>) {
+        let params = SecretKeyParamsBuilder::default()
+            .key_type(KeyType::Ed25519)
+            .can_sign(false)
+            .can_certify(true)
+            .primary_user_id(uid.to_string())
+            .subkey(
+                SubkeyParamsBuilder::default()
+                    .key_type(KeyType::Ed25519)
+                    .can_sign(true)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let secret = params.generate(rng_for(uid)).unwrap();
+        let public: SignedPublicKey = secret.clone().into();
+        let armored = public.to_armored_bytes(Default::default()).unwrap();
+        (secret, armored)
     }
 
     /// A TEXT-type detached signature, which a digest list must refuse.
@@ -1818,5 +2025,85 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
         )
         .unwrap_err();
         assert!(matches!(err, PgpSumsError::DoesNotVerify { .. }), "{err}");
+    }
+
+    // ------------------------------------------------ subkey standing (clause 1)
+
+    fn fpr_of(key: &impl KeyDetails) -> String {
+        hex::encode(key.fingerprint().as_bytes())
+    }
+
+    /// A signing subkey the primary has REVOKED must not vouch, however well
+    /// its signature checks out, and the refusal names the subkey.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_revoked_signing_subkey_is_refused_and_named() {
+        let (secret, live) = generated_key_with_signing_subkey("r <r@example.invalid>");
+        let signature = sign_binary_with_subkey(&secret, SUMS);
+        // The same signature verifies against the un-revoked export …
+        verify_detached_signature(SUMS, &signature, &live).unwrap();
+        // … and is refused once the primary has revoked that subkey.
+        let revoked = subkey_revoked_export(&secret);
+        let err = verify_detached_signature(SUMS, &signature, &revoked).unwrap_err();
+        let sub = fpr_of(&secret.secret_subkeys[0].key.public_key());
+        match &err {
+            PgpSumsError::SubkeyRevoked { fingerprint } => assert_eq!(*fingerprint, sub),
+            other => panic!("expected SubkeyRevoked, got {other}"),
+        }
+        assert!(err.to_string().contains(&sub), "{err}");
+    }
+
+    /// Revoking the subkey does not condemn the identity: the primary's own
+    /// signature still verifies against the same certificate.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_revoked_subkey_does_not_revoke_the_primary() {
+        let (secret, _) = generated_key_with_signing_subkey("r <r@example.invalid>");
+        let revoked = subkey_revoked_export(&secret);
+        let signature = sign_binary(&secret, SUMS);
+        let vouched = verify_detached_signature(SUMS, &signature, &revoked).unwrap();
+        assert_eq!(vouched.signing_fingerprint, vouched.primary_fingerprint);
+    }
+
+    /// A subkey bound for encryption only must not vouch for a digest list.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_encryption_only_subkey_is_refused() {
+        let (secret, _) = generated_key_with_signing_subkey("e <e@example.invalid>");
+        let rebound = encryption_only_subkey_export(&secret);
+        let signature = sign_binary_with_subkey(&secret, SUMS);
+        let err = verify_detached_signature(SUMS, &signature, &rebound).unwrap_err();
+        let sub = fpr_of(&secret.secret_subkeys[0].key.public_key());
+        match &err {
+            PgpSumsError::SubkeyNotForSigning { fingerprint } => assert_eq!(*fingerprint, sub),
+            other => panic!("expected SubkeyNotForSigning, got {other}"),
+        }
+    }
+
+    /// The decision on the primary: a primary whose own self-signatures state
+    /// key flags WITHOUT sign may not sign; a signing subkey of the same
+    /// certificate still may.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_certify_only_primary_may_not_sign_but_its_signing_subkey_may() {
+        let (secret, key) = certify_only_primary_with_signing_subkey("c <c@example.invalid>");
+        let by_primary = sign_binary(&secret, SUMS);
+        let err = verify_detached_signature(SUMS, &by_primary, &key).unwrap_err();
+        assert!(
+            matches!(&err, PgpSumsError::PrimaryNotForSigning { fingerprint }
+                if *fingerprint == fpr_of(&secret.primary_key.public_key())),
+            "{err}"
+        );
+        let by_subkey = sign_binary_with_subkey(&secret, SUMS);
+        let vouched = verify_detached_signature(SUMS, &by_subkey, &key).unwrap();
+        assert_ne!(vouched.signing_fingerprint, vouched.primary_fingerprint);
+    }
+
+    /// The real Rust key has no flags that forbid signing, and still verifies.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_real_rust_key_still_verifies_under_the_flag_rules() {
+        let v = verify_detached_signature(&rust_manifest(), RUST_SIG_ASC, RUST_KEY_ASC).unwrap();
+        assert_eq!(v.signing_fingerprint, RUST_PRIMARY_FPR);
     }
 }
