@@ -48,7 +48,6 @@
 "crates/varve-core/src/referrers.rs" = "referrer attachment; trust-relevant"
 "crates/varve-core/src/update.rs" = "self-update trust path; trust-relevant"
 "crates/varve-core/src/source.rs" = "the source trait contract; trust-relevant"
-"crates/varve-core/src/ingest.rs" = "the ingest ladder; trust-relevant"
 "crates/varve-core/src/kind.rs" = "payload kinds; trust-relevant"
 "crates/varve-core/src/shadow.rs" = "PATH shadowing detection"
 "crates/varve-core/src/lockpin.rs" = "Cargo lockfile comparison"

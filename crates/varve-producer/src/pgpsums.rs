@@ -726,6 +726,7 @@ mod tests {
     /// the binary-type or digest-floor gates backwards. This is the only test
     /// that runs the whole path over the artifact REQ-SIGNEDSUMS-001 was
     /// written from.
+    // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn the_real_rust_channel_signature_verifies_against_the_real_rust_key() {
         let vouched =
@@ -750,6 +751,7 @@ mod tests {
     /// Clause 5. Fails if a byte-level difference in the digest list is ever
     /// answered with anything but an error — the exact shape a tampered digest
     /// list has.
+    // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn one_flipped_byte_in_the_digest_list_is_refused() {
         let mut manifest = rust_manifest();
@@ -794,6 +796,7 @@ mod tests {
     /// Both encodings are accepted, so both are tested (the realm decides which
     /// form its custody process pins). Fails if `read_certificate` or
     /// `read_signatures` is narrowed to one encoding.
+    // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn a_binary_key_and_a_binary_signature_are_accepted_as_well_as_armored() {
         let manifest = rust_manifest();
@@ -900,6 +903,7 @@ mod tests {
     /// Fails if `check_signature_shape` stops refusing text signatures. rPGP's
     /// own parser does not enforce this — its doc-comment claims it and its
     /// code does not — so removing this check would otherwise be silent.
+    // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn a_text_type_signature_over_a_digest_list_is_refused() {
         let (secret, key) = generated_key("t <t@example.invalid>");
@@ -930,6 +934,7 @@ mod tests {
     /// be `WeakDigest`, not `DoesNotVerify`. Fails if the floor is removed, or
     /// if it is moved to AFTER the crypto, where it could no longer tell an
     /// operator which problem they have.
+    // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn a_signature_hashed_below_the_floor_is_refused_before_the_crypto_runs() {
         let (secret, key) = generated_key("t <t@example.invalid>");
@@ -960,6 +965,7 @@ mod tests {
 
     /// Fails if the floor is set so high the real artifact stops verifying —
     /// the other direction of the same knob. Rust signs with SHA-512.
+    // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn the_hash_floor_admits_the_algorithm_rust_actually_uses() {
         let (sig, _) = DetachedSignature::from_reader_single(RUST_SIG_ASC).unwrap();
@@ -973,6 +979,7 @@ mod tests {
     /// case is an operator re-pinning an upstream key export AFTER the upstream
     /// revoked it: every old signature still verifies cryptographically, and
     /// without this check varve would keep accepting them.
+    // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn a_certificate_that_carries_its_own_revocation_vouches_for_nothing() {
         let (secret, live) = generated_key("t <t@example.invalid>");
@@ -1049,6 +1056,7 @@ mod tests {
     /// sign with a subkey. Fails if the candidate loop stops after the primary
     /// key, which is exactly what rPGP's own `VerifyingKey for SignedPublicKey`
     /// does.
+    // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn a_signature_made_by_a_bound_signing_subkey_verifies_and_is_named() {
         let (secret, key) = generated_key_with_signing_subkey("s <s@example.invalid>");
@@ -1273,6 +1281,7 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
     /// way to obtain a `RustChannel` from `verify_and_parse_rust_channel`
     /// without a `VouchedBy`. Fails if that function is ever changed to return
     /// entries alongside a warning, which is the downgrade the clause forbids.
+    // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn entries_are_unreachable_when_the_signature_does_not_verify() {
         let (_, other) = generated_key("nobody <nobody@example.invalid>");

@@ -5,6 +5,7 @@
 ### Fixed
 
 - A realms file can now mark the fields an older varve may skip with `ignorable = [...]` (per realm, or at top level for top-level keys). An unknown field that is not marked is still refused, so a later security field cannot be dropped silently, and a field varve knows is always enforced even if listed. The refusal now names the running varve version and says the file may come from a newer varve. This takes effect from this release on: every varve before 0.47.0 refuses `ignorable` itself, so varve's published `varve-realms.toml` does not carry it (a test keeps it out), and already-released binaries, 0.29.0 included, are not helped (#234).
+- `varve inspect` and the manifest reader now recognise the `upstream-sums` proof they write, instead of reporting it as an unknown mechanism.
 - `varve-producer plan`: an `sdk` or `toolchain` entry that names its files through `asset-for` but sets no `asset` is still refused, but the error now says `asset-for` does not substitute for `asset` on those layouts and an `asset` template is required, instead of claiming the entry names no files (#331).
 
 ### CI and release machinery
