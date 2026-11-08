@@ -602,6 +602,21 @@ const MOVING_SUFFIXES: &[&str] = &[
     "canary",
 ];
 
+/// Prerelease labels that name a CYCLE, not a build: every nightly of a cycle
+/// carries the same version. They pass only when a numeric segment follows
+/// (`1.2.3-nightly.20261108`, `-dev.5`), fused with a digit or not.
+const CHANNEL_LABELS: &[&str] = &[
+    "nightly", "snapshot", "dev", "daily", "weekly", "tip", "trunk", "develop", "unstable",
+];
+
+/// Is this suffix segment a channel-wide label (`nightly`, `nightly2`,
+/// `latestbuild`)?
+fn is_channel_label(segment: &str) -> bool {
+    let lower = segment.to_ascii_lowercase();
+    lower.starts_with("latest")
+        || CHANNEL_LABELS.contains(&lower.trim_end_matches(|c: char| c.is_ascii_digit()))
+}
+
 fn is_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
@@ -630,10 +645,17 @@ fn is_wildcard_or_fused(segment: &str) -> bool {
 /// Refused: a bare number (`1`, `2026`, `v4`), any `x`, `X` or `*` segment
 /// (`3.x`, `1.*`), a component that is not all digits (`3lts`), an empty
 /// suffix, and a suffix segment that is a moving word (`1.2.3-latest`,
-/// `1.0-rolling`) or fuses one with digits (`1.2.3-3lts`). `beta`, `alpha`,
-/// `rc` and `nightly` are prerelease labels and pass as a suffix of a full
-/// version, never as the version.
+/// `1.0-rolling`) or fuses one with digits (`1.2.3-3lts`). `beta`, `alpha` and
+/// `rc` are prerelease labels and pass as a suffix of a full version, never as
+/// the version. Cycle labels (`nightly`, `snapshot`, `dev`, `daily`, `weekly`,
+/// `tip`, `trunk`, `develop`, `unstable`, `latest*`, fused with a digit or not)
+/// pass only when a numeric segment follows (`1.2.3-nightly.20261108`). `/`, `%`
+/// and whitespace are refused anywhere.
 pub fn names_a_release(token: &str) -> bool {
+    // A name must not smuggle in a path, an escape or a gap.
+    if token.contains(['/', '%']) || token.chars().any(char::is_whitespace) {
+        return false;
+    }
     let bare = token.strip_prefix('v').unwrap_or(token);
     if is_full_date(bare) {
         return true;
@@ -649,11 +671,15 @@ pub fn names_a_release(token: &str) -> bool {
     match suffix {
         None => true,
         Some(suffix) => {
+            let segments: Vec<&str> = suffix.split(['-', '.', '+', '_']).collect();
             !suffix.is_empty()
-                && suffix.split(['-', '.', '+', '_']).all(|segment| {
+                && segments.iter().enumerate().all(|(i, segment)| {
                     !segment.is_empty()
                         && !is_wildcard_or_fused(segment)
                         && !MOVING_SUFFIXES.contains(&segment.to_ascii_lowercase().as_str())
+                        // A cycle label needs a build number after it.
+                        && (!is_channel_label(segment)
+                            || segments[i + 1..].iter().any(|s| is_digits(s)))
                 })
         }
     }
@@ -2267,6 +2293,59 @@ mod tests {
             "rolling",
         ] {
             assert!(!names_a_release(bad), "{bad:?} must not pass");
+        }
+    }
+
+    /// A channel-wide prerelease label names no release: every build of the
+    /// cycle expands to the same names. A numeric or date segment AFTER it
+    /// names one build, so those pass.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn channel_wide_prerelease_labels_do_not_name_one_release() {
+        for bad in [
+            "1.2.3-nightly",
+            "1.2.3-nightly2",
+            "0.5.0-SNAPSHOT",
+            "1.2.3-dev",
+            "1.2.3-unstable",
+            "1.2.3-tip",
+            "1.2.3-trunk",
+            "1.2.3-develop",
+            "1.2.3-daily",
+            "1.2.3-weekly",
+            "1.2.3-latestbuild",
+            "1.2.3-latest2",
+            "1.2.3-rc.1-nightly",
+            "1.2.3+snapshot",
+            "1.2.3-dev.foo",
+            "1.2.3-Nightly",
+            "1.2.3-daily7",
+            // characters a name must not smuggle in
+            "1.2.3/..",
+            "1.2/3",
+            "1.2.3%2f",
+            "1.2.3 ",
+            " 1.2.3",
+            "1.2.3\t",
+            "1.2.3-rc 1",
+            "2026-11-08/x",
+        ] {
+            assert!(!names_a_release(bad), "{bad:?} must not pass");
+        }
+        for ok in [
+            "1.2.3-nightly.20261108",
+            "1.2.3-dev.5",
+            "1.2.3-nightly.2026-11-08",
+            "1.2.3-snapshot.7",
+            "1.2.3-rc.1",
+            "1.2.3-beta.2",
+            "1.0.0-alpha1",
+            "1.2.3-20261108",
+            "1.2.3-weekly.45",
+            "1.2.3-devel",
+            "1.2.3-tipsy",
+        ] {
+            assert!(names_a_release(ok), "{ok:?} names one release");
         }
     }
 }
