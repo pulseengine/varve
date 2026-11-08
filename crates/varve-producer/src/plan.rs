@@ -671,16 +671,23 @@ pub fn names_a_release(token: &str) -> bool {
     match suffix {
         None => true,
         Some(suffix) => {
-            let segments: Vec<&str> = suffix.split(['-', '.', '+', '_']).collect();
-            !suffix.is_empty()
-                && segments.iter().enumerate().all(|(i, segment)| {
-                    !segment.is_empty()
-                        && !is_wildcard_or_fused(segment)
-                        && !MOVING_SUFFIXES.contains(&segment.to_ascii_lowercase().as_str())
-                        // A cycle label needs a build number after it.
-                        && (!is_channel_label(segment)
-                            || segments[i + 1..].iter().any(|s| is_digits(s)))
-                })
+            // Walked from the END so "is a build number after me" is a flag and
+            // not index arithmetic: a cycle label passes only if a numeric
+            // segment follows it.
+            let mut build_number_after = false;
+            for segment in suffix.split(['-', '.', '+', '_']).rev() {
+                if segment.is_empty()
+                    || is_wildcard_or_fused(segment)
+                    || MOVING_SUFFIXES.contains(&segment.to_ascii_lowercase().as_str())
+                    || (is_channel_label(segment) && !build_number_after)
+                {
+                    return false;
+                }
+                if is_digits(segment) {
+                    build_number_after = true;
+                }
+            }
+            true
         }
     }
 }
