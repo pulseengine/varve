@@ -46,6 +46,14 @@ class EvidenceRule(unittest.TestCase):
         self.assertFalse(counted(ver(method="test"))[0])
         self.assertFalse(counted(ver(method="test", steps="   "))[0])
 
+    def test_a_list_of_only_empty_entries_does_not_count(self):
+        for steps in ([""], [None], [{}], [{"run": ""}], ["  ", None, {"run": " "}]):
+            self.assertFalse(counted(ver(method="test", steps=steps))[0], steps)
+
+    def test_a_list_with_one_real_entry_counts(self):
+        self.assertTrue(counted(ver(method="test", steps=[{"run": "x"}]))[0])
+        self.assertTrue(counted(ver(method="test", steps=["", "x"]))[0])
+
     def test_steps_as_a_list_count(self):
         self.assertTrue(counted(ver(method="test", steps=[{"run": "cargo test"}]))[0])
 

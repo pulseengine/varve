@@ -3601,6 +3601,7 @@ artifacts:
     fields:
       baseline: "cold-cache attribution of varve verify --timing, run 42402881731 (measure-verify.yml at 513d224f, varve 0.46.0), 2026-11-07, GitHub-hosted ubuntu-latest: AMD EPYC 7763, 4 vCPU, sha_ni present, 15 GiB RAM, ext4 on /dev/root. Layer: one 2048 MiB random payload plus five 64 KiB payloads. Medians of 5 runs. WARM: read 0.180 s, hash 1.357 s, wall 1.573 s. COLD (sync; drop_caches 3 before each run): read 3.655 s, hash 1.376 s, wall 5.093 s, so reading is 72% of the cold wall and hashing 27%; the cold read is 2 GiB in 3.655 s, about 560 MiB/s, the throughput of the runner disk. Small layer (five 64 KiB payloads) warm: every stage 0.000 s, wall 0.016 s. FINDING for clause 1: on this runner reading dominates cold. LIMIT: the disk is the runner disk; a local NVMe disk reads cold at several GB/s, where hashing at about 1.5 GB/s would dominate again, so the verdict is substrate-dependent. Also, the measured shape has ONE large payload, so digesting payloads concurrently (clause 2) gains nearly nothing for it on any disk; overlapping read with hash would. This discharges clause 1 ONLY; clauses 2-5 are unverified and the requirement stays proposed."
       method: analysis
+      steps: Run .github/workflows/measure-verify.yml (push to a measure/** branch, or workflow_dispatch) and read the verify-cold-summary artifact it uploads.
     links:
       - type: verifies
         target: REQ-VERIFYPAR-001
