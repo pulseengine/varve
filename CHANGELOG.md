@@ -14,6 +14,7 @@
 
 ### CI and release machinery
 
+- `tools/measure/verify-cold.sh` and the `measure-verify` workflow (pushes to `measure/**` and manual dispatch only, GitHub-hosted, never a PR gate) measure `varve verify --timing` with a cold page cache. The first run, recorded as VER-VERIFYPAR-001, put a 2 GiB payload at read 3.655 s and hash 1.376 s cold, and read 0.180 s and hash 1.357 s warm, on a runner disk that reads cold at about 560 MiB/s (REQ-VERIFYPAR-001 clause 1).
 - The install-shadow system test now also runs `install.sh`'s normal path, against a local archive served by a fake `curl`, and asserts the shadow warning in the installer's own output. Before, it ran only `check_shadow` through the check-only hook, so removing the installer's call to it left the gate green (#333).
 - `pr_gates_cannot_be_switched_off` checks every `if:` in a PR workflow against an allowlist of the four conditions in use, instead of flagging only `vars.`. A switch on `github.repository`, `github.actor` or anything else a setting or fork can change is now refused (#333).
 - `tools/trace-gate.py` no longer counts a `verifies` edge from a `draft` verification, or from one with no steps, as evidence for a `verified` requirement. An `inspection` or `review` record still counts without steps, since what it checked is outside this repository's CI (#333).
