@@ -2929,4 +2929,176 @@ mod tests {
         assert_eq!(got[0].accepted.mechanism, Mechanism::UpstreamSums);
         assert_eq!(got[0].digest, sha256_hex(A));
     }
+
+    // --------------------- the Rust channel, end to end (REQ-SIGNEDSUMS-001, DD-034)
+
+    const CHANNEL: &str = "channel-rust-stable.toml";
+    const CHANNEL_SIG: &str = "channel-rust-stable.toml.asc";
+
+    fn rust_spec(key_file: std::path::PathBuf) -> crate::plan::PgpSumsPlan {
+        crate::plan::PgpSumsPlan {
+            list: CHANNEL.into(),
+            signature: CHANNEL_SIG.into(),
+            format: crate::pgpsums::ListFormat::RustChannel,
+            key_file,
+        }
+    }
+
+    /// One real `(asset name, digest)` pair out of the real manifest, picked
+    /// by looking at the verified entries rather than by writing a digest down.
+    fn a_real_rust_asset() -> (String, String) {
+        let (_, channel) = crate::pgpsums::verify_and_parse_rust_channel(
+            &testkit::rust_manifest(),
+            testkit::RUST_SIG_ASC,
+            testkit::RUST_KEY_ASC,
+        )
+        .unwrap();
+        let e = channel
+            .entries
+            .iter()
+            .find(|e| {
+                e.url
+                    .ends_with("/rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz")
+            })
+            .expect("the 2026-09-03 stable channel carries rustc for x86_64 linux");
+        (
+            e.url.rsplit('/').next().unwrap().to_string(),
+            e.sha256.clone(),
+        )
+    }
+
+    /// A release of the real channel manifest, its real signature, and one
+    /// asset whose bytes are NOT the real toolchain (the real one is 90 MB).
+    fn rust_release(asset: &str, key: &[u8]) -> (Fixture, Pgp) {
+        let mut f = Fixture::default();
+        let k = "o/r@v1";
+        f.blobs
+            .insert(format!("{k}/{CHANNEL}"), testkit::rust_manifest());
+        f.blobs
+            .insert(format!("{k}/{CHANNEL_SIG}"), testkit::RUST_SIG_ASC.to_vec());
+        f.blobs.insert(format!("{k}/{asset}"), A.to_vec());
+        f.probes.insert(
+            k.into(),
+            ReleaseProbe {
+                published: vec![asset.into(), CHANNEL.into(), CHANNEL_SIG.into()],
+                ..Default::default()
+            },
+        );
+        let pgp = Pgp {
+            dir: tempfile::tempdir().unwrap(),
+            fingerprint: testkit::RUST_PRIMARY_FPR.into(),
+        };
+        pgp.write_key(key);
+        (f, pgp)
+    }
+
+    /// The real channel manifest verifies against Rust's real key through the
+    /// ladder, an asset named by one of its urls takes its digest from the
+    /// VERIFIED list, and the signer leads with Rust's key fingerprint.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_real_rust_channel_vouches_for_an_asset_it_names() {
+        let (asset, digest) = a_real_rust_asset();
+        let (f, pgp) = rust_release(&asset, testkit::RUST_KEY_ASC);
+        let spec = rust_spec(pgp.key_path());
+        let v = verify_release(
+            &f,
+            &Forge::github_com(),
+            "o/r",
+            "v1",
+            &BTreeMap::new(),
+            &Declared {
+                upstream_sums: None,
+                pgp_sums: Some(&spec),
+            },
+            std::slice::from_ref(&asset),
+        )
+        .expect("the real signature verifies against the real key");
+        assert_eq!(v.accepted.mechanism, Mechanism::PgpSums);
+        let signer = v.accepted.signer.as_deref().unwrap();
+        assert!(
+            signer.starts_with(&format!("openpgp:{}", testkit::RUST_PRIMARY_FPR)),
+            "{signer}"
+        );
+        assert!(signer.contains("rust-key@rust-lang.org"), "{signer}");
+        assert_eq!(
+            v.sums.as_ref().unwrap().digest_of(&asset),
+            Some(digest.as_str()),
+            "the digest must come from the verified list"
+        );
+    }
+
+    /// Through `run`: the digest the proof states is the real one, so bytes
+    /// that are not the real toolchain are refused AGAINST THAT DIGEST — the
+    /// refusal quotes the digest from the verified manifest.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn bytes_that_are_not_the_ones_the_real_channel_names_are_refused() {
+        let (asset, digest) = a_real_rust_asset();
+        let (f, pgp) = rust_release(&asset, testkit::RUST_KEY_ASC);
+        let mut p = plan("rust", "o/r", "v1", &asset);
+        p.pgp_sums = Some(rust_spec(pgp.key_path()));
+        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
+        match e {
+            RunError::DigestMismatch {
+                expected, actual, ..
+            } => {
+                assert_eq!(expected, digest);
+                assert_eq!(actual, sha256_hex(A));
+            }
+            other => panic!("expected a digest mismatch, got {other:?}"),
+        }
+    }
+
+    /// An asset no url of the verified manifest names is outside the proof.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_asset_the_real_channel_does_not_name_is_not_covered() {
+        let (asset, _) = a_real_rust_asset();
+        let (mut f, pgp) = rust_release(&asset, testkit::RUST_KEY_ASC);
+        f.probes
+            .get_mut("o/r@v1")
+            .unwrap()
+            .published
+            .push("not-in-the-channel.tar.xz".into());
+        f.blobs
+            .insert("o/r@v1/not-in-the-channel.tar.xz".into(), A.to_vec());
+        let mut p = plan("rust", "o/r", "v1", "not-in-the-channel.tar.xz");
+        p.pgp_sums = Some(rust_spec(pgp.key_path()));
+        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
+        assert!(
+            matches!(&e, RunError::NotCoveredByProof { mechanism, .. } if *mechanism == "pgp-sums"),
+            "{e:?}"
+        );
+    }
+
+    /// A manifest changed after signing is refused, not read.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_tampered_channel_manifest_is_rejected() {
+        let (asset, _) = a_real_rust_asset();
+        let (mut f, pgp) = rust_release(&asset, testkit::RUST_KEY_ASC);
+        let mut manifest = testkit::rust_manifest();
+        manifest.extend_from_slice(b"\n# one more line\n");
+        f.blobs.insert(format!("o/r@v1/{CHANNEL}"), manifest);
+        let mut p = plan("rust", "o/r", "v1", &asset);
+        p.pgp_sums = Some(rust_spec(pgp.key_path()));
+        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
+        assert!(proof_rejected(&e).contains("does not verify"), "{e}");
+    }
+
+    /// The format is the operator's declaration: a Rust manifest read as a
+    /// `sha256sums` list is refused, never half-read.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_channel_read_as_the_wrong_format_is_rejected() {
+        let (asset, _) = a_real_rust_asset();
+        let (f, pgp) = rust_release(&asset, testkit::RUST_KEY_ASC);
+        let mut p = plan("rust", "o/r", "v1", &asset);
+        let mut spec = rust_spec(pgp.key_path());
+        spec.format = crate::pgpsums::ListFormat::Sha256Sums;
+        p.pgp_sums = Some(spec);
+        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
+        assert!(proof_rejected(&e).contains("not readable"), "{e}");
+    }
 }

@@ -1725,4 +1725,27 @@ mod tests {
         anchor_key_files(&mut p, std::path::Path::new("realm/layer.toml"));
         assert_eq!(p[0].pgp_sums, None);
     }
+
+    /// A toolchain entry for the Rust channel plans with the channel format,
+    /// one asset per platform, and the one list shared by all of them.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_rust_toolchain_entry_plans_with_the_rust_channel_format() {
+        let m = manifest(
+            "[[tool]]\nname = \"rust\"\nrepo = \"o/rust-mirror\"\nversion = \"1.98.1\"\n\
+             layout = \"toolchain\"\nasset = \"rustc-%V-%T.tar.xz\"\n\
+             pgp-sums = \"channel-rust-stable.toml\"\n\
+             pgp-sums-format = \"rust-channel\"\n\
+             pgp-key-file = \"keys/rust-release.asc\"\n",
+        );
+        let p = plan(&m, PLATFORMS).unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].kind, PayloadKind::Toolchain);
+        let spec = p[0].pgp_sums.as_ref().expect("declared");
+        assert_eq!(spec.format, crate::pgpsums::ListFormat::RustChannel);
+        assert_eq!(spec.list, "channel-rust-stable.toml");
+        assert_eq!(spec.signature, "channel-rust-stable.toml.asc");
+        assert_eq!(p[0].pgp_sums, p[1].pgp_sums);
+        assert_ne!(p[0].asset, p[1].asset);
+    }
 }
