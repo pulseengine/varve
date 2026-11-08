@@ -769,6 +769,28 @@ fn check_group_agrees(
     disagree("upstream-sums", &|p| p.upstream_sums != first.upstream_sums)
 }
 
+/// Does `asset` contain `token` as a whole version, not as a piece of a longer
+/// one? The character before it must not be a digit or `.`, and the one after
+/// it must not be a digit nor a `.` followed by a digit, so `1.2` is found in
+/// `tool-v1.2.tar.gz` and `tool-1.2-x86_64.tar.gz` and not in `tool-v1.2.3.tar.gz`,
+/// `tool-11.2.tar.gz` or `tool-1.2.30-old.tar.gz`. One bounded occurrence is
+/// enough.
+fn carries_at_a_boundary(asset: &str, token: &str) -> bool {
+    asset.match_indices(token).any(|(at, _)| {
+        let before = asset[..at].chars().next_back();
+        let mut after = asset[at + token.len()..].chars();
+        let next = after.next();
+        let next_next = after.next();
+        let clean_before = !before.is_some_and(|c| c.is_ascii_digit() || c == '.');
+        let clean_after = match next {
+            Some(c) if c.is_ascii_digit() => false,
+            Some('.') => !next_next.is_some_and(|c| c.is_ascii_digit()),
+            _ => true,
+        };
+        clean_before && clean_after
+    })
+}
+
 /// Ingestion's own check that a sha256sums-verified asset is bound to a release.
 ///
 /// The plan refuses versionless and moving names, but the plan is not the only
@@ -787,7 +809,10 @@ fn check_assets_are_bound(plans: &[PayloadPlan], idxs: &[usize]) -> Result<(), R
             .into_iter()
             .filter(|v| crate::plan::names_a_release(v))
             .map(|v| v.strip_prefix('v').unwrap_or(v));
-        if !bound.into_iter().any(|b| p.asset.contains(b)) {
+        if !bound
+            .into_iter()
+            .any(|b| carries_at_a_boundary(&p.asset, b))
+        {
             return Err(RunError::AssetNotBoundToRelease {
                 tool: p.name.clone(),
                 asset: p.asset.clone(),
@@ -3601,5 +3626,51 @@ mod tests {
             let got = run_pgp(&f, &[p], &BTreeMap::new()).expect("the probe's value is ignored");
             assert_eq!(got[0].accepted.mechanism, Mechanism::UpstreamSums);
         }
+    }
+
+    /// The version must sit on a token boundary in the asset name: declared
+    /// `1.2` is not `1.2.3`, `11.2` or `1.2.30`.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_version_must_sit_on_a_token_boundary_in_the_asset_name() {
+        let bound = |asset: &str, version: &str| {
+            let mut p = plan("t", "o/r", "v1", asset);
+            let mut spec = pgp_spec("k.asc".into());
+            spec.version = version.into();
+            spec.release = "v1".into();
+            p.pgp_sums = Some(spec);
+            check_assets_are_bound(&[p], &[0])
+        };
+        for refused in [
+            "tool-v1.2.3.tar.gz",
+            "tool-11.2.tar.gz",
+            "tool-1.2.30-old.tar.gz",
+            "tool-1.2.3",
+            "tool-0.1.2.tar.gz",
+        ] {
+            let e = bound(refused, "1.2").expect_err(refused);
+            assert!(
+                matches!(&e, RunError::AssetNotBoundToRelease { asset, .. } if asset == refused),
+                "{refused}: {e:?}"
+            );
+        }
+        for accepted in [
+            "tool-v1.2.tar.gz",
+            "tool-1.2-x86_64.tar.gz",
+            "tool-1.2.tar.gz",
+            "1.2",
+            "tool_1.2_linux",
+        ] {
+            bound(accepted, "1.2").unwrap_or_else(|e| panic!("{accepted}: {e:?}"));
+        }
+        // One occurrence on a boundary is enough, wherever it is.
+        bound("tool-1.2.3-and-1.2.tar.gz", "1.2").expect("the second occurrence is bounded");
+        // The release is judged the same way.
+        let mut p = plan("t", "o/r", "v1", "tool-v1.2.3.tar.gz");
+        let mut spec = pgp_spec("k.asc".into());
+        spec.version = "other".into();
+        spec.release = "1.2".into();
+        p.pgp_sums = Some(spec);
+        check_assets_are_bound(&[p], &[0]).expect_err("release 1.2 is not 1.2.3");
     }
 }
