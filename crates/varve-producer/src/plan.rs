@@ -146,6 +146,10 @@ pub struct PgpSumsPlan {
     /// The release asset carrying the detached signature over `list`.
     pub signature: String,
     pub format: crate::pgpsums::ListFormat,
+    /// The payload version and release tag the list must belong to. A
+    /// signature says who published a list, not which release it is for.
+    pub version: String,
+    pub release: String,
     /// The OpenPGP certificate. Relative to the input file once
     /// [`anchor_key_files`] has run; read from disk at ingestion, and its
     /// absence is an error and never a weaker rung.
@@ -174,6 +178,12 @@ pub enum PlanError {
     /// be consulted, because the signed rung either accepts or aborts.
     PgpSumsAndUpstreamSums {
         tool: String,
+    },
+    /// `pgp-sums` with an asset name that names no release: an older, validly
+    /// signed list could stand in for this one.
+    PgpSumsAssetNotVersioned {
+        tool: String,
+        asset: String,
     },
     Template(TemplateError),
     /// Documentation describes the layer, not a machine, so a per-platform
@@ -250,6 +260,15 @@ impl std::fmt::Display for PlanError {
                 f,
                 "tool {tool:?} declares pgp-sums-format = {found:?}. Known \
                  formats are \"sha256sums\" (the default) and \"rust-channel\"."
+            ),
+            PlanError::PgpSumsAssetNotVersioned { tool, asset } => write!(
+                f,
+                "tool {tool:?} declares `pgp-sums` with the asset name {asset:?}, which \
+                 names no release (no `%V` or `%R`). A signed digest list proves who \
+                 published it, not which release it is for: with a versionless asset name \
+                 an OLDER, validly signed list and its older assets could be served in \
+                 place of this release and be recorded as it. Put `%V` or `%R` in the \
+                 asset name so the list must name this release's files."
             ),
             PlanError::PgpSumsAndUpstreamSums { tool } => write!(
                 f,
@@ -406,7 +425,11 @@ fn kind_of(t: &ManifestTool) -> Result<PayloadKind, PlanError> {
 /// convention (`SHA256SUMS` / `SHA256SUMS.asc`, and Rust's
 /// `channel-rust-stable.toml` / `.toml.asc`). The format defaults to
 /// `sha256sums`.
-fn pgp_plan(t: &ManifestTool, release: &str) -> Result<Option<PgpSumsPlan>, PlanError> {
+fn pgp_plan(
+    t: &ManifestTool,
+    release: &str,
+    kind: PayloadKind,
+) -> Result<Option<PgpSumsPlan>, PlanError> {
     let Some(list) = &t.pgp_sums else {
         let stray = [
             ("pgp-sums-signature", t.pgp_sums_signature.is_some()),
@@ -440,6 +463,37 @@ fn pgp_plan(t: &ManifestTool, release: &str) -> Result<Option<PgpSumsPlan>, Plan
             })?
         }
     };
+    // A signed list proves who published it, not which release it is for.
+    // With the sha256sums format the only thing tying the list to THIS release
+    // is that every asset is looked up by a name that carries the release, so
+    // a versionless name lets an older signed list and its older assets stand
+    // in for it. (A Rust channel binds through its own version instead, and is
+    // checked at ingestion.)
+    if format == crate::pgpsums::ListFormat::Sha256Sums {
+        let carries_release = |name: &str| name.contains("%V") || name.contains("%R");
+        // An entry with no `asset` takes the default tarball template, which
+        // embeds the version literally.
+        if let Some(a) = &t.asset
+            && !carries_release(a)
+        {
+            return Err(PlanError::PgpSumsAssetNotVersioned {
+                tool: t.name.clone(),
+                asset: a.clone(),
+            });
+        }
+        if t.asset.is_none() && kind != PayloadKind::Tarball {
+            return Err(PlanError::PgpSumsAssetNotVersioned {
+                tool: t.name.clone(),
+                asset: template_of(t, kind),
+            });
+        }
+        if let Some(a) = t.asset_for.values().find(|a| !carries_release(a)) {
+            return Err(PlanError::PgpSumsAssetNotVersioned {
+                tool: t.name.clone(),
+                asset: a.clone(),
+            });
+        }
+    }
     let list = asset::expand(list, &t.version, release, None, None)?;
     let signature = match &t.pgp_sums_signature {
         Some(s) => asset::expand(s, &t.version, release, None, None)?,
@@ -449,6 +503,8 @@ fn pgp_plan(t: &ManifestTool, release: &str) -> Result<Option<PgpSumsPlan>, Plan
         list,
         signature,
         format,
+        version: t.version.clone(),
+        release: release.to_string(),
         key_file: std::path::PathBuf::from(key_file),
     }))
 }
@@ -517,7 +573,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
     let name = t.binary.clone().unwrap_or_else(|| t.name.clone());
     // Absent `release`, the version serves as the tag — the ordinary case.
     let release = t.release.clone().unwrap_or_else(|| t.version.clone());
-    let pgp_sums = pgp_plan(t, &release)?;
+    let pgp_sums = pgp_plan(t, &release, kind)?;
 
     let mut out = Vec::new();
     if !asset::is_per_platform(&template) {
@@ -1747,5 +1803,105 @@ mod tests {
         assert_eq!(spec.signature, "channel-rust-stable.toml.asc");
         assert_eq!(p[0].pgp_sums, p[1].pgp_sums);
         assert_ne!(p[0].asset, p[1].asset);
+    }
+
+    /// REPLAY at plan time: a versionless asset name lets an older signed list
+    /// stand in for this release.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn pgp_sums_with_a_versionless_asset_template_is_a_plan_error() {
+        let err = plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"v1\"\nasset = \"t-%T.tar.gz\"\n\
+                 pgp-sums = \"SHA256SUMS\"\npgp-key-file = \"k.asc\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::PgpSumsAssetNotVersioned { asset, .. } if asset == "t-%T.tar.gz"),
+            "{err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("older") && msg.contains("%V"), "{msg}");
+    }
+
+    /// Either placeholder binds the name to a release, and so does the default
+    /// tarball template, which embeds the version.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_versioned_asset_template_is_accepted_with_pgp_sums() {
+        for asset in ["t-%V-%T.tar.gz", "t-%R-%T.tar.gz"] {
+            plan(
+                &manifest(&format!(
+                    "[[tool]]\nname = \"t\"\nversion = \"v1\"\nasset = \"{asset}\"\n\
+                     pgp-sums = \"SHA256SUMS\"\npgp-key-file = \"k.asc\"\n"
+                )),
+                PLATFORMS,
+            )
+            .unwrap_or_else(|e| panic!("{asset}: {e}"));
+        }
+        plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"v1\"\n\
+                 pgp-sums = \"SHA256SUMS\"\npgp-key-file = \"k.asc\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect("the default template embeds the version");
+    }
+
+    /// A raw-per-platform entry with no `asset` defaults to `<name>-%T`, which
+    /// names no release.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_default_raw_template_names_no_release_and_is_refused_with_pgp_sums() {
+        let err = plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"v1\"\nlayout = \"raw-per-platform\"\n\
+                 pgp-sums = \"SHA256SUMS\"\npgp-key-file = \"k.asc\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::PgpSumsAssetNotVersioned { asset, .. } if asset == "t-%T"),
+            "{err}"
+        );
+    }
+
+    /// An `asset-for` override is a name too, and each must be versioned.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_versionless_asset_for_name_is_a_plan_error_with_pgp_sums() {
+        let err = plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"v1\"\nasset = \"t-%V-%T.tar.gz\"\n\
+                 pgp-sums = \"SHA256SUMS\"\npgp-key-file = \"k.asc\"\n\
+                 [tool.asset-for]\naarch64-apple-darwin = \"t-darwin.tar.gz\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::PgpSumsAssetNotVersioned { asset, .. } if asset == "t-darwin.tar.gz"),
+            "{err}"
+        );
+    }
+
+    /// The version rule is for the sha256sums format; a Rust channel binds
+    /// through the manifest's own version, checked at ingestion.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_rust_channel_format_is_not_subject_to_the_template_rule() {
+        plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"1.98.1\"\nlayout = \"toolchain\"\n\
+                 asset = \"rustc.tar.xz\"\npgp-sums = \"c.toml\"\n\
+                 pgp-sums-format = \"rust-channel\"\npgp-key-file = \"k.asc\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect("plans");
     }
 }

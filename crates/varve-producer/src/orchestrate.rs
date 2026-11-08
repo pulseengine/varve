@@ -115,6 +115,15 @@ pub enum RunError {
         version: String,
         tried: Vec<String>,
     },
+    /// Payloads of one (repo, release) are verified once, with ONE
+    /// declaration. Plans that disagree would have one member's declared
+    /// verification silently not performed.
+    GroupDisagrees {
+        repo: String,
+        release: String,
+        field: &'static str,
+        tools: Vec<String>,
+    },
     /// Something in the outside world failed.
     Io {
         context: String,
@@ -150,6 +159,19 @@ impl fmt::Display for RunError {
                  The proof is a signature over a list of digests; an asset that \
                  is not in the list is not covered by it, however valid the \
                  signature over the list is. Refusing to record it as proven."
+            ),
+            RunError::GroupDisagrees {
+                repo,
+                release,
+                field,
+                tools,
+            } => write!(
+                f,
+                "the entries {} all ingest from {repo} {release} but disagree on `{field}`. \
+                 A release is verified once, with one declaration, so one entry's \
+                 verification would silently not be performed. Give them the same `{field}`, \
+                 or split them across releases.",
+                tools.join(", ")
             ),
             RunError::NothingMatched {
                 name,
@@ -308,7 +330,16 @@ fn probe_pgp_sums<S: Source>(
         (Ok(l), Ok(s)) => (l, s),
         (Err(rejected), _) | (_, Err(rejected)) => return rejected,
     };
-    match crate::pgpsums::verify_digest_list(spec.format, &list, &signature, key) {
+    match crate::pgpsums::verify_digest_list(
+        spec.format,
+        &list,
+        &signature,
+        key,
+        &crate::pgpsums::BoundRelease {
+            version: &spec.version,
+            release: &spec.release,
+        },
+    ) {
         Err(e) => PgpSumsProbe::Rejected(format!(
             "{} does not verify against the pinned key {}: {e}",
             spec.list,
@@ -324,10 +355,11 @@ fn probe_pgp_sums<S: Source>(
             PgpSumsProbe::Verified {
                 signer: vouched.signer_annotation(),
                 asserts: format!(
-                    "the publisher holding OpenPGP key {} signed the digest list naming these \
-                     bytes (binary signature, SHA-256 or stronger{signing}); this says who \
-                     published the digests, not that they are trustworthy",
-                    vouched.primary_fingerprint
+                    "the publisher holding OpenPGP key {} signed the digest list for release {} \
+                     (version {}) naming these bytes (binary signature, SHA-256 or \
+                     stronger{signing}); this says who published the digests, not that they \
+                     are trustworthy",
+                    vouched.primary_fingerprint, spec.release, spec.version
                 ),
                 sums,
             }
@@ -700,6 +732,43 @@ pub fn by_release(plans: &[PayloadPlan]) -> Vec<((String, String), Vec<usize>)> 
         .collect()
 }
 
+/// Every plan of one (repo, release) must declare the same digest lists.
+///
+/// A release is verified once, from the first plan's declaration. If a sibling
+/// declared something else — a signed list the first did not, a different key —
+/// its declared verification would never run and its bytes would be admitted
+/// under the first plan's weaker (or different) proof. Refused before anything
+/// is fetched, naming the tools and the field.
+fn check_group_agrees(
+    plans: &[PayloadPlan],
+    idxs: &[usize],
+    repo: &str,
+    release: &str,
+) -> Result<(), RunError> {
+    let Some(first) = idxs.first().map(|i| &plans[*i]) else {
+        return Ok(());
+    };
+    let disagree = |field: &'static str, differs: &dyn Fn(&PayloadPlan) -> bool| {
+        if idxs.iter().all(|i| !differs(&plans[*i])) {
+            return Ok(());
+        }
+        let mut tools: Vec<String> = Vec::new();
+        for i in idxs {
+            if !tools.contains(&plans[*i].name) {
+                tools.push(plans[*i].name.clone());
+            }
+        }
+        Err(RunError::GroupDisagrees {
+            repo: repo.to_string(),
+            release: release.to_string(),
+            field,
+            tools,
+        })
+    };
+    disagree("pgp-sums", &|p| p.pgp_sums != first.pgp_sums)?;
+    disagree("upstream-sums", &|p| p.upstream_sums != first.upstream_sums)
+}
+
 /// Walk the whole plan.
 pub fn run<S: Source>(
     src: &S,
@@ -726,6 +795,9 @@ pub fn run<S: Source>(
             .first()
             .and_then(|i| plans[*i].upstream_sums.as_deref());
         let wanted: Vec<String> = idxs.iter().map(|i| plans[*i].asset.clone()).collect();
+        // ONE declaration per release, or none: verifying with whichever plan
+        // happens to come first would silently skip another member's.
+        check_group_agrees(plans, &idxs, &repo, &version)?;
         let declared = Declared {
             upstream_sums: sums_asset,
             pgp_sums: idxs.first().and_then(|i| plans[*i].pgp_sums.as_ref()),
@@ -2583,6 +2655,8 @@ mod tests {
             list: LIST.into(),
             signature: LIST_SIG.into(),
             format: crate::pgpsums::ListFormat::Sha256Sums,
+            version: "v1".into(),
+            release: "v1".into(),
             key_file,
         }
     }
@@ -2940,6 +3014,8 @@ mod tests {
             list: CHANNEL.into(),
             signature: CHANNEL_SIG.into(),
             format: crate::pgpsums::ListFormat::RustChannel,
+            version: "1.98.1".into(),
+            release: "v1".into(),
             key_file,
         }
     }
@@ -3100,5 +3176,214 @@ mod tests {
         p.pgp_sums = Some(spec);
         let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
         assert!(proof_rejected(&e).contains("not readable"), "{e}");
+    }
+
+    // ------------- one declaration per release; a list is bound to its release
+
+    /// Two plans of one release, from two tools, both asking for `a.tar.gz`
+    /// and `b.tar.gz`, so a group of two is exercised.
+    fn two_tool_group(pgp: &Pgp) -> (Fixture, Vec<PayloadPlan>) {
+        let mut f = good_pgp_release(&[("a.tar.gz", A), ("b.tar.gz", B)]).0;
+        let _ = pgp;
+        f.blobs.insert("o/r@v1/b.tar.gz".into(), B.to_vec());
+        let mut one = plan("one", "o/r", "v1", "a.tar.gz");
+        let mut two = plan("two", "o/r", "v1", "b.tar.gz");
+        one.pgp_sums = Some(pgp_spec(pgp.key_path()));
+        two.pgp_sums = Some(pgp_spec(pgp.key_path()));
+        (f, vec![one, two])
+    }
+
+    fn pgp_for_group() -> Pgp {
+        // The key the group's release was signed with.
+        let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
+        let _ = secret;
+        let pgp = Pgp {
+            dir: tempfile::tempdir().unwrap(),
+            fingerprint: String::new(),
+        };
+        pgp.write_key(&key);
+        pgp
+    }
+
+    /// FAIL-OPEN, closed: one plan declares pgp-sums and its sibling in the
+    /// same release declares nothing. Verifying with only the first plan's
+    /// declaration would silently skip the other's.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn plans_of_one_release_that_disagree_on_pgp_sums_are_refused() {
+        let pgp = pgp_for_group();
+        let (f, mut plans) = two_tool_group(&pgp);
+        plans[1].pgp_sums = None;
+        for order in [false, true] {
+            if order {
+                plans.reverse();
+            }
+            let e = run_pgp(&f, &plans, &BTreeMap::new()).expect_err("must refuse");
+            match &e {
+                RunError::GroupDisagrees { field, tools, .. } => {
+                    assert_eq!(*field, "pgp-sums");
+                    assert!(tools.contains(&"one".to_string()), "{tools:?}");
+                    assert!(tools.contains(&"two".to_string()), "{tools:?}");
+                }
+                other => panic!("expected GroupDisagrees, got {other:?}"),
+            }
+            assert!(e.to_string().contains("pgp-sums"), "{e}");
+            assert!(
+                f.log().iter().all(|c| !c.starts_with("fetch")),
+                "refused before anything was fetched: {:?}",
+                f.log()
+            );
+        }
+    }
+
+    /// Two declarations that differ in any one field are a disagreement.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn plans_of_one_release_with_different_lists_keys_or_formats_are_refused() {
+        let pgp = pgp_for_group();
+        type Tweak = fn(&mut crate::plan::PgpSumsPlan);
+        let tweaks: [(&str, Tweak); 5] = [
+            ("list", |s| s.list = "OTHER".into()),
+            ("signature", |s| s.signature = "OTHER.asc".into()),
+            ("key", |s| s.key_file = "elsewhere.asc".into()),
+            ("format", |s| {
+                s.format = crate::pgpsums::ListFormat::RustChannel
+            }),
+            ("version", |s| s.version = "v2".into()),
+        ];
+        for (what, tweak) in tweaks {
+            let (f, mut plans) = two_tool_group(&pgp);
+            tweak(plans[1].pgp_sums.as_mut().unwrap());
+            let e = run_pgp(&f, &plans, &BTreeMap::new()).expect_err(what);
+            assert!(
+                matches!(
+                    &e,
+                    RunError::GroupDisagrees {
+                        field: "pgp-sums",
+                        ..
+                    }
+                ),
+                "{what}: {e:?}"
+            );
+        }
+    }
+
+    /// The unsigned list has the same shape of hole.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn plans_of_one_release_that_disagree_on_upstream_sums_are_refused() {
+        let pgp = pgp_for_group();
+        let (f, mut plans) = two_tool_group(&pgp);
+        for p in &mut plans {
+            p.pgp_sums = None;
+        }
+        plans[0].upstream_sums = Some(LIST.into());
+        let e = run_pgp(&f, &plans, &BTreeMap::new()).expect_err("must refuse");
+        assert!(
+            matches!(
+                &e,
+                RunError::GroupDisagrees {
+                    field: "upstream-sums",
+                    ..
+                }
+            ),
+            "{e:?}"
+        );
+    }
+
+    /// The accepting direction: identical declarations are one declaration.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn plans_of_one_release_with_identical_declarations_are_accepted() {
+        let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
+        let list = list_for(&[("a.tar.gz", A), ("b.tar.gz", B)]);
+        let sig = testkit::sign_binary(&secret, list.as_bytes());
+        let (f, pgp) = pgp_release(
+            "o/r",
+            "v1",
+            &[("a.tar.gz", A), ("b.tar.gz", B)],
+            &list,
+            sig,
+            &key,
+            "-",
+        );
+        let mut one = plan("one", "o/r", "v1", "a.tar.gz");
+        let mut two = plan("two", "o/r", "v1", "b.tar.gz");
+        one.pgp_sums = Some(pgp_spec(pgp.key_path()));
+        two.pgp_sums = Some(pgp_spec(pgp.key_path()));
+        let got = run_pgp(&f, &[one, two], &BTreeMap::new()).unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(
+            got.iter()
+                .all(|r| r.accepted.mechanism == Mechanism::PgpSums)
+        );
+    }
+
+    /// REPLAY, sha256sums: the host serves an OLD validly signed list with the
+    /// OLD assets. The entry now declares the new release, whose asset name
+    /// the old list cannot name.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_older_signed_list_served_for_a_newer_release_is_refused() {
+        let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
+        let old = list_for(&[("t-1.0.tar.gz", A)]);
+        let sig = testkit::sign_binary(&secret, old.as_bytes());
+        let (mut f, pgp) = pgp_release("o/r", "v2", &[("t-1.0.tar.gz", A)], &old, sig, &key, "-");
+        // The attacker also serves the old bytes under the NEW asset name.
+        f.probes
+            .get_mut("o/r@v2")
+            .unwrap()
+            .published
+            .push("t-2.0.tar.gz".into());
+        f.blobs.insert("o/r@v2/t-2.0.tar.gz".into(), A.to_vec());
+        let mut p = plan("t", "o/r", "v2", "t-2.0.tar.gz");
+        let mut spec = pgp_spec(pgp.key_path());
+        spec.version = "2.0".into();
+        spec.release = "v2".into();
+        p.pgp_sums = Some(spec);
+        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
+        assert!(
+            matches!(&e, RunError::NotCoveredByProof { asset, .. } if asset == "t-2.0.tar.gz"),
+            "{e:?}"
+        );
+    }
+
+    /// REPLAY, rust-channel: the real 1.98.1 manifest, validly signed, served
+    /// for an entry that declares 1.99.0. The asset names are the old ones.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_older_signed_channel_served_for_a_newer_version_is_refused() {
+        let (asset, _) = a_real_rust_asset();
+        let (f, pgp) = rust_release(&asset, testkit::RUST_KEY_ASC);
+        let mut p = plan("rust", "o/r", "v1", &asset);
+        let mut spec = rust_spec(pgp.key_path());
+        spec.version = "1.99.0".into();
+        spec.release = "1.99.0".into();
+        p.pgp_sums = Some(spec);
+        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
+        let d = proof_rejected(&e);
+        assert!(d.contains("different release"), "{d}");
+        assert!(d.contains("1.98.1") && d.contains("1.99.0"), "{d}");
+    }
+
+    /// (c) The signed manifest states which release the signature was bound to.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_recorded_assertion_names_the_release_it_was_bound_to() {
+        let (f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let got = run_pgp(
+            &f,
+            &[pgp_plan("a.tar.gz", pgp.key_path())],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(
+            got[0]
+                .accepted
+                .asserts
+                .contains("digest list for release v1"),
+            "{}",
+            got[0].accepted.asserts
+        );
     }
 }

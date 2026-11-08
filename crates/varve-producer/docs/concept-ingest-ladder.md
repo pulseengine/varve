@@ -58,6 +58,26 @@ fingerprint** as the signer (a user ID is text the key's own holder typed, so
 it is shown as a label after the fingerprint and never as the identity), and a
 one-line assertion; a signature made by a subkey names that subkey as well.
 
+A signature says who published a list, not **which release** it belongs to: a
+host that controls the release could serve an older, validly signed list with
+the older assets. So the list is bound to the release the entry declares:
+
+- with `sha256sums`, every asset name of the entry (`asset`, each `asset-for`
+  value) must carry `%V` or `%R`, refused at plan time otherwise, so a list for
+  another release cannot name this release's files. (An entry with no `asset`
+  uses the default tarball template, which embeds the version.)
+- with `rust-channel`, the manifest's own version must match: the declared
+  version or release tag, ignoring a leading `v`, must equal the version of the
+  manifest's `rust` package (`1.98.1` out of `1.98.1 (48a229cea 2026-09-01)`),
+  or the manifest's `date` must equal the declared version or release tag as
+  written. Anything else is refused as a different release.
+
+The recorded assertion names that release. Every entry that ingests from one
+repository release must declare the same `pgp-sums` (and the same
+`upstream-sums`); entries that disagree are refused before anything is fetched,
+because a release is verified once and one entry's declared verification would
+otherwise silently not run.
+
 What it proves: the holder of that key published a list naming these bytes.
 What it does **not** prove: that the upstream is trustworthy, or that the key
 was valid when it signed. Key **expiry is deliberately not checked**, because

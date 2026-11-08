@@ -109,8 +109,8 @@
 //! either absent (air-gapped), wrong, or supplied by the thing being verified:
 //! a signature's creation timestamp lives in the hashed area, so it is signed —
 //! by the key whose validity is the question. An expiry check built on either
-//! would be an invariant enforced by the attacker. The realm's pin is the
-//! custody boundary; a key that should no longer be trusted is a key that
+//! would be an invariant enforced by the attacker. The operator's pin, in the
+//! committed producer input, is the custody boundary; a key that should no longer be trusted is a key that
 //! should no longer be pinned. If this is ever wanted, it needs the same
 //! trusted-time story as anti-rollback, not a `SystemTime::now()`.
 //!
@@ -189,6 +189,17 @@ pub enum PgpSumsError {
         keys: usize,
         last: String,
     },
+    #[error(
+        "the verified channel manifest is for a different release than the one declared: it \
+         names {found}, and the entry declares version {version:?} / release {release:?}. A \
+         signature proves who published a list, not which release it belongs to; an older \
+         validly signed list must not stand in for this one"
+    )]
+    WrongRelease {
+        found: String,
+        version: String,
+        release: String,
+    },
     #[error("the digest list is not UTF-8 text")]
     ListNotText,
     #[error("the digest list is not readable: {0}")]
@@ -246,8 +257,8 @@ impl VouchedBy {
 /// `public_key` may be an ASCII-armored certificate (`-----BEGIN PGP PUBLIC KEY
 /// BLOCK-----`) or the same certificate in binary packet form; likewise
 /// `detached_signature` may be armored or binary. Both are auto-detected, so a
-/// realm may pin whichever form its custody process produces — and both forms
-/// are tested.
+/// operator may commit whichever form their custody process produces — and both
+/// forms are tested.
 ///
 /// Returns who vouched. **There is no third outcome**: this never warns, never
 /// downgrades, and never reports a weaker rung (clause 5). A digest list whose
@@ -339,6 +350,9 @@ pub struct RustChannel {
     /// The manifest's `date`, which is the channel's identity — `1.98.1` is not
     /// enough to name a build, but `2026-09-03` is.
     pub date: String,
+    /// The version token of the `rust` package (`1.98.1` out of
+    /// `1.98.1 (48a229cea 2026-09-01)`), when the manifest carries one.
+    pub rust_version: Option<String>,
     pub entries: Vec<ChannelEntry>,
 }
 
@@ -405,8 +419,16 @@ fn parse_rust_channel(manifest: &[u8]) -> Result<RustChannel, PgpSumsError> {
         }
     }
 
+    let rust_version = raw
+        .pkg
+        .get("rust")
+        .and_then(|p| p.version.as_deref())
+        .and_then(|v| v.split_whitespace().next())
+        .map(str::to_string);
+
     Ok(RustChannel {
         date: raw.date,
+        rust_version,
         entries,
     })
 }
@@ -456,6 +478,17 @@ impl ListFormat {
     }
 }
 
+/// The release a digest list is being used for. A signature proves WHO
+/// published a list, not WHICH release it belongs to, so a list that names its
+/// own release must be checked against the one the entry declares.
+#[derive(Debug, Clone, Copy)]
+pub struct BoundRelease<'a> {
+    /// The payload's version, as the entry declares it (`1.98.1`, or `v1.98.1`).
+    pub version: &'a str,
+    /// The release tag the assets are fetched from.
+    pub release: &'a str,
+}
+
 /// A digest list whose signature verified, and the identity that vouched for
 /// it. The fields are private: the only constructor is
 /// [`verify_digest_list`], so a `VerifiedList` IS the proof that verification
@@ -488,6 +521,7 @@ pub fn verify_digest_list(
     list: &[u8],
     detached_signature: &[u8],
     public_key: &[u8],
+    bound: &BoundRelease<'_>,
 ) -> Result<VerifiedList, PgpSumsError> {
     let (vouched, sums) = match format {
         ListFormat::Sha256Sums => {
@@ -496,6 +530,7 @@ pub fn verify_digest_list(
         ListFormat::RustChannel => {
             let (vouched, channel) =
                 verify_and_parse_rust_channel(list, detached_signature, public_key)?;
+            channel_is_for(&channel, bound)?;
             let sums = Sums::from_pairs(
                 channel
                     .entries
@@ -521,6 +556,35 @@ pub fn verify_and_parse_sha256sums(
     let text = std::str::from_utf8(list).map_err(|_| PgpSumsError::ListNotText)?;
     let sums = Sums::parse(text).map_err(|e| PgpSumsError::ListUnreadable(e.to_string()))?;
     Ok((vouched, sums))
+}
+
+/// Is this (already verified) channel the one the entry declares?
+///
+/// The rule: the declared version or release tag, with a leading `v` ignored,
+/// equals the version token of the manifest's `rust` package (`1.98.1` out of
+/// `1.98.1 (48a229cea 2026-09-01)`); or the manifest's `date` equals the
+/// declared version or release tag as written (a mirror that tags releases by
+/// channel date). Anything else is a different release, however well signed.
+fn channel_is_for(channel: &RustChannel, bound: &BoundRelease<'_>) -> Result<(), PgpSumsError> {
+    let bare = |s: &str| s.strip_prefix('v').unwrap_or(s).to_string();
+    let declared = [bound.version, bound.release];
+    let by_version = channel
+        .rust_version
+        .as_ref()
+        .is_some_and(|v| declared.iter().any(|d| bare(d) == *v));
+    let by_date = declared.iter().any(|d| *d == channel.date);
+    if by_version || by_date {
+        return Ok(());
+    }
+    Err(PgpSumsError::WrongRelease {
+        found: format!(
+            "version {} dated {}",
+            channel.rust_version.as_deref().unwrap_or("(none)"),
+            channel.date
+        ),
+        version: bound.version.to_string(),
+        release: bound.release.to_string(),
+    })
 }
 
 /// What a release asset is called, from the `url` that names it.
@@ -560,7 +624,7 @@ fn hex_fingerprint(key: &impl VerifyCandidate) -> String {
 }
 
 fn read_certificate(public_key: &[u8]) -> Result<SignedPublicKey, PgpSumsError> {
-    // `from_reader_single` sniffs armor vs binary, so a realm may pin either.
+    // `from_reader_single` sniffs armor vs binary, so an operator may commit either.
     let (cert, _headers) = SignedPublicKey::from_reader_single(public_key)
         .map_err(|e| PgpSumsError::KeyUnreadable(e.to_string()))?;
     cert.verify_bindings()
@@ -678,6 +742,7 @@ struct RawChannel {
 
 #[derive(serde::Deserialize)]
 struct RawPkg {
+    version: Option<String>,
     #[serde(default)]
     target: BTreeMap<String, RawTarget>,
 }
@@ -907,6 +972,12 @@ mod tests {
 
     use super::testkit::*;
 
+    /// The release the Rust fixture belongs to; every sha256sums list ignores it.
+    const BOUND: BoundRelease<'static> = BoundRelease {
+        version: "1.98.1",
+        release: "1.98.1",
+    };
+
     // ------------------------------------------------- the real Rust artifact
 
     /// Fails if `verify_detached_signature` feeds the wrong bytes to the
@@ -981,7 +1052,7 @@ mod tests {
 
     // ------------------------------------------------------- input encodings
 
-    /// Both encodings are accepted, so both are tested (the realm decides which
+    /// Both encodings are accepted, so both are tested (the operator's committed file decides which
     /// form its custody process pins). Fails if `read_certificate` or
     /// `read_signatures` is narrowed to one encoding.
     // rivet: verifies REQ-SIGNEDSUMS-001
@@ -1503,8 +1574,14 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
         let (secret, key) = generated_key("p <p@example.invalid>");
         let list = sums_for("tool.tar.gz", b"payload");
         let signature = sign_binary(&secret, list.as_bytes());
-        let verified =
-            verify_digest_list(ListFormat::Sha256Sums, list.as_bytes(), &signature, &key).unwrap();
+        let verified = verify_digest_list(
+            ListFormat::Sha256Sums,
+            list.as_bytes(),
+            &signature,
+            &key,
+            &BOUND,
+        )
+        .unwrap();
         let primary = hex::encode(secret.primary_key.public_key().fingerprint().as_bytes());
         assert_eq!(verified.vouched().primary_fingerprint, primary);
         assert_eq!(
@@ -1524,9 +1601,11 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
         let (secret, key) = generated_key("p <p@example.invalid>");
         let list = b"this is not a checksum line\n";
         let other = sign_binary(&secret, b"something else entirely");
-        let err = verify_digest_list(ListFormat::Sha256Sums, list, &other, &key).unwrap_err();
+        let err =
+            verify_digest_list(ListFormat::Sha256Sums, list, &other, &key, &BOUND).unwrap_err();
         assert!(matches!(err, PgpSumsError::DoesNotVerify { .. }), "{err}");
-        let err = verify_digest_list(ListFormat::RustChannel, list, &other, &key).unwrap_err();
+        let err =
+            verify_digest_list(ListFormat::RustChannel, list, &other, &key, &BOUND).unwrap_err();
         assert!(matches!(err, PgpSumsError::DoesNotVerify { .. }), "{err}");
     }
 
@@ -1542,6 +1621,7 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
             junk,
             &sign_binary(&secret, junk),
             &key,
+            &BOUND,
         )
         .unwrap_err();
         assert!(matches!(err, PgpSumsError::ListUnreadable(_)), "{err}");
@@ -1552,6 +1632,7 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
             &binary,
             &sign_binary(&secret, &binary),
             &key,
+            &BOUND,
         )
         .unwrap_err();
         assert!(matches!(err, PgpSumsError::ListNotText), "{err}");
@@ -1567,7 +1648,8 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
         let list = sums_for("tool.tar.gz", b"payload");
         let good = sign_binary(&secret, list.as_bytes());
         let run = |sig: &[u8], key: &[u8]| {
-            verify_digest_list(ListFormat::Sha256Sums, list.as_bytes(), sig, key).unwrap_err()
+            verify_digest_list(ListFormat::Sha256Sums, list.as_bytes(), sig, key, &BOUND)
+                .unwrap_err()
         };
         assert!(matches!(
             run(&good, &other_key),
@@ -1600,6 +1682,7 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
             &manifest,
             RUST_SIG_ASC,
             RUST_KEY_ASC,
+            &BOUND,
         )
         .unwrap();
         assert_eq!(verified.vouched().primary_fingerprint, RUST_PRIMARY_FPR);
@@ -1626,6 +1709,7 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
             &manifest,
             RUST_SIG_ASC,
             RUST_KEY_ASC,
+            &BOUND,
         )
         .unwrap_err();
         assert!(matches!(err, PgpSumsError::ListUnreadable(_)), "{err}");
@@ -1637,6 +1721,7 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
             list.as_bytes(),
             &sign_binary(&secret, list.as_bytes()),
             &key,
+            &BOUND,
         )
         .unwrap_err();
         assert!(matches!(err, PgpSumsError::ManifestUnreadable(_)), "{err}");
@@ -1659,5 +1744,79 @@ xz_hash = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee"
     fn a_url_is_named_by_its_last_path_segment() {
         assert_eq!(url_basename("https://h/dist/2026/a-1.tar.xz"), "a-1.tar.xz");
         assert_eq!(url_basename("bare.tar.gz"), "bare.tar.gz");
+    }
+
+    // ------------------------------------------- a list is bound to its release
+
+    fn rust_bound(
+        version: &'static str,
+        release: &'static str,
+    ) -> Result<VerifiedList, PgpSumsError> {
+        verify_digest_list(
+            ListFormat::RustChannel,
+            &rust_manifest(),
+            RUST_SIG_ASC,
+            RUST_KEY_ASC,
+            &BoundRelease { version, release },
+        )
+    }
+
+    /// The rule: the declared version (or release tag), with a leading `v`
+    /// ignored, must equal the version token of the manifest's `rust` package,
+    /// or the manifest's `date` must equal the declared version or release.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_channel_is_accepted_only_for_the_release_it_names() {
+        for (version, release) in [
+            ("1.98.1", "1.98.1"),
+            ("v1.98.1", "v1.98.1"),
+            ("1.98.1", "something-else"),
+            ("other", "1.98.1"),
+            ("other", "v1.98.1"),
+            ("2026-09-03", "x"),
+            ("x", "2026-09-03"),
+        ] {
+            rust_bound(version, release)
+                .unwrap_or_else(|e| panic!("{version}/{release} should be bound: {e}"));
+        }
+        for (version, release) in [
+            ("1.99.0", "1.99.0"),
+            ("1.98", "1.98"),
+            ("1.98.10", "1.98.10"),
+            ("2026-09-04", "2026-09-04"),
+            ("", ""),
+        ] {
+            let err = rust_bound(version, release).unwrap_err();
+            match err {
+                PgpSumsError::WrongRelease { found, .. } => {
+                    assert!(
+                        found.contains("1.98.1") && found.contains("2026-09-03"),
+                        "{found}"
+                    )
+                }
+                other => panic!("{version}/{release}: expected WrongRelease, got {other}"),
+            }
+        }
+    }
+
+    /// The check runs after the signature, so a wrong-release manifest that is
+    /// also forged reports the forgery, and a verified one reports the release.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_release_binding_never_runs_before_the_signature() {
+        let mut manifest = rust_manifest();
+        manifest[0] = b'#';
+        let err = verify_digest_list(
+            ListFormat::RustChannel,
+            &manifest,
+            RUST_SIG_ASC,
+            RUST_KEY_ASC,
+            &BoundRelease {
+                version: "9.9.9",
+                release: "9.9.9",
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, PgpSumsError::DoesNotVerify { .. }), "{err}");
     }
 }
