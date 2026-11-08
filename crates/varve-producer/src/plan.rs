@@ -595,24 +595,77 @@ fn pgp_plan(
 }
 
 /// Words that name a CHANNEL rather than a release: what they point at changes.
-const MOVING_TAGS: &[&str] = &[
-    "latest", "nightly", "stable", "beta", "current", "head", "main", "master", "edge", "dev",
-    "canary", "snapshot",
+/// As a suffix of a full version (`1.2.3-beta.1`) `beta` and `alpha` are
+/// ordinary prerelease labels and pass; these do not, even as a suffix.
+const MOVING_SUFFIXES: &[&str] = &[
+    "latest", "rolling", "lts", "stable", "current", "head", "main", "master", "edge", "next",
+    "canary",
 ];
 
-/// Does this version or release tag name ONE release?
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A segment that is a wildcard, or that fuses digits with a moving word
+/// (`3lts`).
+fn is_wildcard_or_fused(segment: &str) -> bool {
+    let lower = segment.to_ascii_lowercase();
+    lower == "x"
+        || lower == "*"
+        || (segment.bytes().any(|b| b.is_ascii_digit())
+            && MOVING_SUFFIXES.iter().any(|w| lower.contains(w)))
+}
+
+/// Does this version or release tag name exactly ONE release?
 ///
-/// The rule: after one leading `v`, it starts with an ASCII digit (`1.2.3`,
-/// `34.0`, `2026-10-01`), and no segment between `-`, `.` or `_` is a moving-tag
-/// word ([`MOVING_TAGS`], compared without case). `latest`, `nightly`, `main`,
-/// `v-edge`, `1.0-latest` and the empty string all fail; `v1.2.3`,
-/// `2026-10-01` and `1.0.0-rc.1` pass.
+/// This is a NAME HEURISTIC, not a cryptographic binding: it keeps the names a
+/// signed list is looked up under from being the same for every release, and a
+/// publisher who reuses a numbered tag defeats it.
+///
+/// After one leading `v` the token must be either
+/// * a full date, `YYYY-MM-DD` or `YYYY.MM.DD`; or
+/// * at least two numeric dot-components (`1.2`, `1.2.3`), optionally followed
+///   by a `-prerelease` or `+build` suffix.
+///
+/// Refused: a bare number (`1`, `2026`, `v4`), any `x`, `X` or `*` segment
+/// (`3.x`, `1.*`), a component that is not all digits (`3lts`), an empty
+/// suffix, and a suffix segment that is a moving word (`1.2.3-latest`,
+/// `1.0-rolling`) or fuses one with digits (`1.2.3-3lts`). `beta`, `alpha`,
+/// `rc` and `nightly` are prerelease labels and pass as a suffix of a full
+/// version, never as the version.
 pub fn names_a_release(token: &str) -> bool {
     let bare = token.strip_prefix('v').unwrap_or(token);
-    bare.chars().next().is_some_and(|c| c.is_ascii_digit())
-        && !bare
-            .split(['-', '.', '_'])
-            .any(|segment| MOVING_TAGS.contains(&segment.to_ascii_lowercase().as_str()))
+    if is_full_date(bare) {
+        return true;
+    }
+    let (core, suffix) = match bare.find(['-', '+']) {
+        Some(at) => (&bare[..at], Some(&bare[at + 1..])),
+        None => (bare, None),
+    };
+    let components: Vec<&str> = core.split('.').collect();
+    if components.len() < 2 || !components.iter().all(|c| is_digits(c)) {
+        return false;
+    }
+    match suffix {
+        None => true,
+        Some(suffix) => {
+            !suffix.is_empty()
+                && suffix.split(['-', '.', '+', '_']).all(|segment| {
+                    !segment.is_empty()
+                        && !is_wildcard_or_fused(segment)
+                        && !MOVING_SUFFIXES.contains(&segment.to_ascii_lowercase().as_str())
+                })
+        }
+    }
+}
+
+/// `YYYY-MM-DD` or `YYYY.MM.DD`, digits only.
+fn is_full_date(s: &str) -> bool {
+    let sep = if s.contains('-') { '-' } else { '.' };
+    let parts: Vec<&str> = s.split(sep).collect();
+    matches!(parts.as_slice(), [y, m, d]
+        if y.len() == 4 && m.len() == 2 && d.len() == 2
+            && is_digits(y) && is_digits(m) && is_digits(d))
 }
 
 /// Resolve every `pgp-key-file` against the input file that named it.
@@ -1739,7 +1792,7 @@ mod tests {
 
     // ------------------------------------------ pgp-sums (REQ-SIGNEDSUMS-001)
 
-    const SIGNED_TOOL: &str = "[[tool]]\nname = \"t\"\nversion = \"v1\"\n\
+    const SIGNED_TOOL: &str = "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\n\
          asset = \"t-%V.tar.gz\"\n";
 
     fn signed(extra: &str) -> Result<Vec<PayloadPlan>, PlanError> {
@@ -1753,8 +1806,8 @@ mod tests {
     fn a_pgp_sums_entry_plans_with_its_defaults() {
         let p = signed("pgp-sums = \"SUMS-%V\"\npgp-key-file = \"keys/up.asc\"\n").unwrap();
         let spec = p[0].pgp_sums.as_ref().expect("declared");
-        assert_eq!(spec.list, "SUMS-1");
-        assert_eq!(spec.signature, "SUMS-1.asc");
+        assert_eq!(spec.list, "SUMS-1.0");
+        assert_eq!(spec.signature, "SUMS-1.0.asc");
         assert_eq!(spec.format, crate::pgpsums::ListFormat::Sha256Sums);
         assert_eq!(spec.key_file, std::path::PathBuf::from("keys/up.asc"));
         // A property of the release: every platform's payload carries it.
@@ -1773,13 +1826,16 @@ mod tests {
         .unwrap();
         let spec = p[0].pgp_sums.as_ref().unwrap();
         // %V is the bare version, %R the release tag.
-        assert_eq!(spec.list, "sums-1.txt");
-        assert_eq!(spec.signature, "sums-v1.sig");
+        assert_eq!(spec.list, "sums-1.0.txt");
+        assert_eq!(spec.signature, "sums-v1.0.sig");
         assert_eq!(spec.format, crate::pgpsums::ListFormat::RustChannel);
 
         // Not stated: the default signature follows the EXPANDED list name.
         let p = signed("pgp-sums = \"sums-%V.txt\"\npgp-key-file = \"k.asc\"\n").unwrap();
-        assert_eq!(p[0].pgp_sums.as_ref().unwrap().signature, "sums-1.txt.asc");
+        assert_eq!(
+            p[0].pgp_sums.as_ref().unwrap().signature,
+            "sums-1.0.txt.asc"
+        );
     }
 
     /// `pgp-sums` without a key is a signature checked against nothing.
@@ -1919,7 +1975,7 @@ mod tests {
     fn pgp_sums_with_a_versionless_asset_template_is_a_plan_error() {
         let err = plan(
             &manifest(
-                "[[tool]]\nname = \"t\"\nversion = \"v1\"\nasset = \"t-%T.tar.gz\"\n\
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nasset = \"t-%T.tar.gz\"\n\
                  pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n",
             ),
             PLATFORMS,
@@ -1941,7 +1997,7 @@ mod tests {
         for asset in ["t-%V-%T.tar.gz", "t-%R-%T.tar.gz"] {
             plan(
                 &manifest(&format!(
-                    "[[tool]]\nname = \"t\"\nversion = \"v1\"\nasset = \"{asset}\"\n\
+                    "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nasset = \"{asset}\"\n\
                      pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n"
                 )),
                 PLATFORMS,
@@ -1950,7 +2006,7 @@ mod tests {
         }
         plan(
             &manifest(
-                "[[tool]]\nname = \"t\"\nversion = \"v1\"\n\
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\n\
                  pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n",
             ),
             PLATFORMS,
@@ -1965,7 +2021,7 @@ mod tests {
     fn a_default_raw_template_names_no_release_and_is_refused_with_pgp_sums() {
         let err = plan(
             &manifest(
-                "[[tool]]\nname = \"t\"\nversion = \"v1\"\nlayout = \"raw-per-platform\"\n\
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nlayout = \"raw-per-platform\"\n\
                  pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n",
             ),
             PLATFORMS,
@@ -1983,7 +2039,7 @@ mod tests {
     fn a_versionless_asset_for_name_is_a_plan_error_with_pgp_sums() {
         let err = plan(
             &manifest(
-                "[[tool]]\nname = \"t\"\nversion = \"v1\"\nasset = \"t-%V-%T.tar.gz\"\n\
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nasset = \"t-%V-%T.tar.gz\"\n\
                  pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n\
                  [tool.asset-for]\naarch64-apple-darwin = \"t-darwin.tar.gz\"\n",
             ),
@@ -2117,7 +2173,7 @@ mod tests {
     fn a_list_and_signature_that_name_no_release_are_refused() {
         let err = plan(
             &manifest(
-                "[[tool]]\nname = \"t\"\nversion = \"v1\"\nasset = \"t-%V.tar.gz\"\n\
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nasset = \"t-%V.tar.gz\"\n\
                  pgp-sums = \"SHA256SUMS\"\npgp-key-file = \"k.asc\"\n",
             ),
             PLATFORMS,
@@ -2132,7 +2188,7 @@ mod tests {
         for (list, sig) in [("SHA256SUMS", "S-%V.asc"), ("S-%R", "SHA256SUMS.asc")] {
             plan(
                 &manifest(&format!(
-                    "[[tool]]\nname = \"t\"\nversion = \"v1\"\nasset = \"t-%V.tar.gz\"\n\
+                    "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nasset = \"t-%V.tar.gz\"\n\
                      pgp-sums = \"{list}\"\npgp-sums-signature = \"{sig}\"\npgp-key-file = \"k.asc\"\n"
                 )),
                 PLATFORMS,
@@ -2155,5 +2211,62 @@ mod tests {
             PLATFORMS,
         )
         .expect("plans");
+    }
+
+    /// What may stand for "one release": a name heuristic, not a binding.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn only_a_token_that_names_exactly_one_release_passes() {
+        for ok in [
+            "1.2",
+            "v1.2.3",
+            "0.47.0",
+            "1.98.1",
+            "2026-11-08",
+            "2026.11.08",
+            "1.2.3-rc.1",
+            "v1.0.0-beta.2",
+            "1.0.0-beta1",
+            "1.2.3+build5",
+            "34.0",
+            "0.7.2",
+        ] {
+            assert!(names_a_release(ok), "{ok:?} names one release");
+        }
+        for bad in [
+            "1",
+            "v4",
+            "3.x",
+            "2-lts",
+            "1.x-rolling",
+            "2026",
+            "latest",
+            "beta",
+            "v",
+            "",
+            "1.*",
+            "3lts",
+            "1.X",
+            "x",
+            "*",
+            "nightly",
+            "main",
+            "1.2.3-x",
+            "1.2.3-",
+            "1.2.3-latest",
+            "1.2.3-3lts",
+            "1.2.",
+            ".1.2",
+            "1..2",
+            "2026-11",
+            "2026-1-8",
+            "2026-11-08-nightly",
+            "next",
+            "alpha",
+            "lts",
+            "rolling",
+        ] {
+            assert!(!names_a_release(bad), "{bad:?} must not pass");
+        }
     }
 }
