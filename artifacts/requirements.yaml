@@ -5535,3 +5535,88 @@ artifacts:
     links:
       - type: satisfies
         target: REQ-REALM-001
+
+  - id: REQ-OVERRIDE-001
+    type: requirement
+    title: A project can pin one tool at another verified version, and every view says the toolchain is mixed
+    status: approved
+    release: v0.48.0
+    description: "Maintainer decision 2026-11-10 (v0.48.0 usability). Evidence: gale keeps eight toolchain pins that cannot see each other (gale#323) and its dissolve pipeline downloads synth 0.57.0 as a tarball outside varve while the pin carries synth 0.65.0 (gale#386), because committed objects must stay byte-identical; varve cannot say 'this tool at another version'. Clauses: (1) varve.toml may declare, per tool, a version from a layer of a realm the project trusts (layer id and manifest digest, or a version varve resolves to one through the realm's signed line index); the binary is fetched and verified exactly like a pinned layer's, against that realm's trust root. (2) Nothing unverified can enter through this: a version no signed layer carries, or a layer that fails verification, is refused, never fetched another way. (3) The project's state is MIXED while any override is active: varve status, varve which <tool> (naming both layers) and every export and attestation state it; a MIXED toolchain is never reported as the pinned layer. (4) An override of a tool the pinned layer does not carry is refused (use the passthrough or add it to a layer), so an override cannot smuggle a tool in. (5) Measured on gale's case: with one override, gale's dissolve pipeline resolves synth 0.57.0 through varve and its tarball download can be removed."
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-SHADOW-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-10T20:48:22Z
+
+  - id: REQ-PASSTHROUGH-001
+    type: requirement
+    title: A user may let a shim run an ambient binary for a tool the layer does not carry, and is told every time
+    status: approved
+    release: v0.48.0
+    description: "Maintainer decision 2026-11-10, revising the 2026-10-21 decision recorded in REQ-SHIMFALLBACK-001 (refuse and list options) after user feedback that shims make locally installed tools unusable (varve#273). Clauses: (1) A USER-level configuration (outside every repository, e.g. the XDG config directory) may list tools, or '*', whose shims fall through to the executable on PATH outside the shim directory. A committed varve.toml cannot enable it; a repository therefore cannot switch it on for everyone. (2) A tool the pinned layer carries is NEVER passed through, whatever the configuration says: the REQ-SHADOW-001 property holds. (3) Every passthrough run prints one line on stderr naming the binary it ran and that it ran outside the layer. (4) varve status lists active passthroughs, and verify, exports and attestations record that the session allowed ambient tools. (5) Without the configuration, REQ-SHIMFALLBACK-001's refusal is unchanged."
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-SHIMFALLBACK-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-10T20:48:22Z
+
+  - id: REQ-LOCALBUILD-001
+    type: requirement
+    title: A developer may run a local build instead of a layer's tool, and the project is tainted while it does
+    status: approved
+    release: v0.48.0
+    description: "Maintainer decision 2026-11-10, from user feedback ('use my home-built synth', compared to cargo's [patch]) and gale's $SYNTH/~/pe-toolchain defaults (gale docs/toolchain-pin.md). Clauses: (1) Only USER-level configuration may name a local executable to use in place of a layer's tool; a committed varve.toml cannot. (2) While any local override is active the project is TAINTED: varve status and varve which <tool> say 'OVERRIDDEN (local build, unverified)' with the path and its sha256; every shim run of that tool prints a notice. (3) varve verify exits non-zero while a local override is active, and exports and attestations refuse, so a home build cannot reach evidence or a deliverable silently. (4) The override names a file, not a directory or a PATH lookup, and its digest is recorded at each run so a changed binary is visible."
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-SHADOW-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-10T20:48:22Z
+
+  - id: REQ-RUNWITH-001
+    type: requirement
+    title: One command can run with a different version of a tool without changing the project
+    status: approved
+    release: v0.48.0
+    description: "Maintainer decision 2026-11-10. Evidence: gale measures every synth bump both ways (benches/gust/drivers/measurements/synth-pin-0.57.md: same source, only $SYNTH changed, 8/9 vs 9/9 under qemu). Clauses: (1) varve run --with <tool>@<version> -- <command> runs one command with that tool resolved as under REQ-OVERRIDE-001 (verified, from a realm) and every other tool from the pin. (2) Nothing persists: the project's pin and state are unchanged after the command. (3) The command's environment states the override (a variable naming tool, version and layer) so a script can record what it ran with."
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-OVERRIDE-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-10T20:48:22Z
+
+  - id: REQ-SEED-001
+    type: requirement
+    title: Installed layers can seed another store, such as a container's, without a network fetch or a credential
+    status: approved
+    release: v0.48.0
+    description: "Maintainer decision 2026-11-10. Evidence: a container's varve store (a Docker volume) refetched a composed layer and needed the registry credential after a pin change, although the host store already held it (1.7 GB host store, 702 MB volume, separate). Clauses: (1) A varve command writes installed layers (by pin, or by layer id and digest) to a directory in the form a realm's mirrors entry accepts (an absolute directory path). (2) A store using that directory as a mirror installs from it with no network access and no credential, and verifies every manifest, blob, index and status against the realm's trust root exactly as from the registry: a mirror is transport, not authority (REQ-MIRROR-002). (3) Absolute paths baked into shims are not copied; the target store lays down its own."
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-MIRROR-002
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-10T20:48:22Z
