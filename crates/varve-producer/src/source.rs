@@ -283,6 +283,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
                     has_cosign_bundle,
                     cosign: cosign.clone(),
                     attestation: crate::ingest::AttestationProbe::NotProbed,
+                    pgp_sums: crate::ingest::PgpSumsProbe::NotDeclared,
                 },
             ),
             crate::ingest::Rung::Accepted { .. } | crate::ingest::Rung::Failed(_)
@@ -294,6 +295,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
                 has_cosign_bundle,
                 cosign,
                 attestation: crate::ingest::AttestationProbe::NotProbed,
+                pgp_sums: crate::ingest::PgpSumsProbe::NotDeclared,
             });
         }
 
@@ -321,6 +323,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
             has_cosign_bundle,
             cosign,
             attestation,
+            pgp_sums: crate::ingest::PgpSumsProbe::NotDeclared,
         })
     }
 

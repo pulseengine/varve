@@ -524,32 +524,57 @@ jobs:
           # more, which would have turned it into a cancellation. They decide
           # which advisories reach a line-status draft, so they are gated, in
           # their own shard.
+          # SPLIT at v0.47.0, measured: 404 mutants, unchanged, but the larger
+          # producer lib suite made each one slower and the shard was cancelled
+          # at 90:20 on varve#344 (it took 57-74 minutes before). The watcher
+          # half holds 205 (advisorywatch 177, statusdraft 28), the other 199
+          # (advisory 120, cvss 79).
           - shard: varve-producer (advisories)
             files: >-
               -f crates/varve-producer/src/advisory.rs
-              -f crates/varve-producer/src/advisorywatch.rs
               -f crates/varve-producer/src/cvss.rs
+          - shard: varve-producer (advisory watch)
+            files: >-
+              -f crates/varve-producer/src/advisorywatch.rs
               -f crates/varve-producer/src/statusdraft.rs
           # SPLIT AGAIN, measured. With the advisory watcher's additions to
           # gh, orchestrate and source the shard below held 703 mutants and was
           # cancelled at 90:32 on varve#275 (it had taken 87 minutes at 635).
           # These are the modules that talk to a forge or a registry: 306
           # mutants here, 397 left below, so each finishes well inside the cap.
+          # SPLIT AGAIN at v0.47.0, measured: on varve#344 this shard held 340
+          # mutants and was cancelled at 90:18. The ingestion half below holds
+          # 147 (orchestrate 79, ingest 45, deposit 23), the forge half 193
+          # (gh 100, source 47, registry 33, forge 13).
           - shard: varve-producer (forge)
             files: >-
               -f crates/varve-producer/src/gh.rs
-              -f crates/varve-producer/src/orchestrate.rs
               -f crates/varve-producer/src/source.rs
               -f crates/varve-producer/src/registry.rs
               -f crates/varve-producer/src/forge.rs
+          - shard: varve-producer (ingest)
+            files: >-
+              -f crates/varve-producer/src/orchestrate.rs
               -f crates/varve-producer/src/deposit.rs
               -f crates/varve-producer/src/ingest.rs
+          # SPLIT AGAIN at v0.47.0, measured. On varve#344 (the pgp-sums rung)
+          # this shard held 455 mutants (plan.rs grew to 87) and the producer's
+          # lib suite grew, so every mutant ran longer; it was cancelled at
+          # 90:17. Per-file counts from `cargo mutants --list`: the plan half
+          # below holds 275 (plan 87, nextlayer 116, sums 35, stage 35, spec 2),
+          # the rest 180.
+          - shard: varve-producer (plan)
+            files: >-
+              -f crates/varve-producer/src/plan.rs
+              -f crates/varve-producer/src/nextlayer.rs
+              -f crates/varve-producer/src/sums.rs
+              -f crates/varve-producer/src/stage.rs
+              -f crates/varve-producer/src/spec.rs
           - shard: varve-producer
             files: >-
               -f crates/varve-producer/src/apply.rs
               -f crates/varve-producer/src/asset.rs
               -f crates/varve-producer/src/scan.rs
-              -f crates/varve-producer/src/nextlayer.rs
               -f crates/varve-producer/src/docs.rs
               -f crates/varve-producer/src/cli.rs
               -f crates/varve-producer/src/attestation.rs
@@ -557,10 +582,6 @@ jobs:
               -f crates/varve-producer/src/carryforward.rs
               -f crates/varve-producer/src/extract.rs
               -f crates/varve-producer/src/immutable.rs
-              -f crates/varve-producer/src/plan.rs
-              -f crates/varve-producer/src/spec.rs
-              -f crates/varve-producer/src/stage.rs
-              -f crates/varve-producer/src/sums.rs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable

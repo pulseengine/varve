@@ -121,6 +121,10 @@ pub struct PayloadPlan {
     /// one (REQ-UPSTREAMSUMS-001). A property of the RELEASE, so every payload
     /// from one release carries the same value.
     pub upstream_sums: Option<String>,
+    /// The signed digest list this release is verified against, and the key
+    /// that must have signed it (REQ-SIGNEDSUMS-001). A property of the
+    /// RELEASE, like `upstream_sums`.
+    pub pgp_sums: Option<PgpSumsPlan>,
     /// The label a human reads when choosing between documents. `None` for
     /// every kind but `docs`.
     pub title: Option<String>,
@@ -132,8 +136,69 @@ pub struct PayloadPlan {
     pub allow_pip: Option<Vec<String>>,
 }
 
+/// A release's PGP-signed digest list, as declared in the producer's input
+/// (REQ-SIGNEDSUMS-001): where the list and its detached signature are, how
+/// to read the list, and the pinned certificate that must have signed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgpSumsPlan {
+    /// The release asset carrying the digest list, templates expanded.
+    pub list: String,
+    /// The release asset carrying the detached signature over `list`.
+    pub signature: String,
+    pub format: crate::pgpsums::ListFormat,
+    /// The payload version and release tag the list must belong to. A
+    /// signature says who published a list, not which release it is for.
+    pub version: String,
+    pub release: String,
+    /// The OpenPGP certificate. Relative to the input file once
+    /// [`anchor_key_files`] has run; read from disk at ingestion, and its
+    /// absence is an error and never a weaker rung.
+    pub key_file: std::path::PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
+    /// `pgp-sums` without `pgp-key-file`: a signature with no pinned key to
+    /// check it against verifies nothing.
+    PgpSumsNeedsKey {
+        tool: String,
+    },
+    /// A `pgp-*` field on an entry that declares no `pgp-sums`: read by
+    /// nothing, and believed.
+    PgpFieldWithoutSums {
+        tool: String,
+        field: &'static str,
+    },
+    /// `pgp-sums-format` names a format this producer does not read.
+    PgpSumsFormatUnknown {
+        tool: String,
+        found: String,
+    },
+    /// Both a signed and an unsigned digest list: the unsigned one could never
+    /// be consulted, because the signed rung either accepts or aborts.
+    PgpSumsAndUpstreamSums {
+        tool: String,
+    },
+    /// `pgp-sums` with an asset name that names no release: an older, validly
+    /// signed list could stand in for this one.
+    PgpSumsAssetNotVersioned {
+        tool: String,
+        asset: String,
+    },
+    /// The version or release the names expand with is a MOVING tag, so the
+    /// expanded names are the same for every release.
+    PgpSumsMovingTag {
+        tool: String,
+        what: &'static str,
+        value: String,
+    },
+    /// Neither the list nor its signature carries the release, so the same
+    /// two names would serve every release.
+    PgpSumsListNotVersioned {
+        tool: String,
+        list: String,
+        signature: String,
+    },
     Template(TemplateError),
     /// Documentation describes the layer, not a machine, so a per-platform
     /// template would expand to several identical payloads under one name.
@@ -190,6 +255,62 @@ impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PlanError::Template(e) => write!(f, "{e}"),
+            PlanError::PgpSumsNeedsKey { tool } => write!(
+                f,
+                "tool {tool:?} declares `pgp-sums` but no `pgp-key-file`. A \
+                 signature is only evidence against a key the operator pinned: \
+                 name the OpenPGP certificate, as a path relative to this file, \
+                 e.g. pgp-key-file = \"keys/upstream.asc\". varve never fetches \
+                 the key and never reads one from beside the artifact."
+            ),
+            PlanError::PgpFieldWithoutSums { tool, field } => write!(
+                f,
+                "tool {tool:?} sets `{field}` but declares no `pgp-sums`. \
+                 Nothing would read it, and a pinned key that vouches for \
+                 nothing looks like a verified release. Declare `pgp-sums`, or \
+                 drop `{field}`."
+            ),
+            PlanError::PgpSumsFormatUnknown { tool, found } => write!(
+                f,
+                "tool {tool:?} declares pgp-sums-format = {found:?}. Known \
+                 formats are \"sha256sums\" (the default) and \"rust-channel\"."
+            ),
+            PlanError::PgpSumsAssetNotVersioned { tool, asset } => write!(
+                f,
+                "tool {tool:?} declares `pgp-sums` with the asset name {asset:?}, which \
+                 names no release (no `%V` or `%R`). A signed digest list proves who \
+                 published it, not which release it is for: with a versionless asset name \
+                 an OLDER, validly signed list and its older assets could be served in \
+                 place of this release and be recorded as it. Put `%V` or `%R` in the \
+                 asset name so the list must name this release's files."
+            ),
+            PlanError::PgpSumsMovingTag { tool, what, value } => write!(
+                f,
+                "tool {tool:?} declares `pgp-sums` with the {what} {value:?}, which names no \
+                 particular release (a moving tag such as latest, nightly, stable or main, or \
+                 a token with no leading digit). The asset names built from it are identical \
+                 for every release, so an OLDER validly signed list and its older assets \
+                 would stand in for this one. Declare a {what} that starts with a digit — a \
+                 version such as 1.2.3 or a date such as 2026-10-01."
+            ),
+            PlanError::PgpSumsListNotVersioned {
+                tool,
+                list,
+                signature,
+            } => write!(
+                f,
+                "tool {tool:?} declares `pgp-sums` with the list {list:?} and signature \
+                 {signature:?}, and neither names a release (no `%V` or `%R`). The same two \
+                 names would serve every release, so a list from another release could be \
+                 served in place of this one's. Put `%V` or `%R` in the list or signature name."
+            ),
+            PlanError::PgpSumsAndUpstreamSums { tool } => write!(
+                f,
+                "tool {tool:?} declares both `pgp-sums` and `upstream-sums`. \
+                 The signed list either verifies or aborts the run; it never \
+                 falls through to an unsigned one, so `upstream-sums` could \
+                 never be consulted. Drop it."
+            ),
             PlanError::PlatformNotInLayer {
                 tool,
                 platform,
@@ -327,6 +448,278 @@ fn kind_of(t: &ManifestTool) -> Result<PayloadKind, PlanError> {
     }
 }
 
+/// The signed-digest-list declaration of one tool, validated (REQ-SIGNEDSUMS-001).
+///
+/// `pgp-sums`, `pgp-sums-signature`, `pgp-sums-format` and `pgp-key-file` are
+/// ONE declaration: the first and the last are required together, and the two
+/// in between are meaningless without them. Anything else is refused here, at
+/// plan time, because half of it is a proof nobody can check.
+///
+/// The signature defaults to the list's name plus `.asc`, which is the
+/// convention (`SHA256SUMS` / `SHA256SUMS.asc`, and Rust's
+/// `channel-rust-stable.toml` / `.toml.asc`). The format defaults to
+/// `sha256sums`.
+fn pgp_plan(
+    t: &ManifestTool,
+    release: &str,
+    kind: PayloadKind,
+) -> Result<Option<PgpSumsPlan>, PlanError> {
+    let Some(list) = &t.pgp_sums else {
+        let stray = [
+            ("pgp-sums-signature", t.pgp_sums_signature.is_some()),
+            ("pgp-sums-format", t.pgp_sums_format.is_some()),
+            ("pgp-key-file", t.pgp_key_file.is_some()),
+        ];
+        if let Some((field, _)) = stray.into_iter().find(|(_, set)| *set) {
+            return Err(PlanError::PgpFieldWithoutSums {
+                tool: t.name.clone(),
+                field,
+            });
+        }
+        return Ok(None);
+    };
+    let Some(key_file) = &t.pgp_key_file else {
+        return Err(PlanError::PgpSumsNeedsKey {
+            tool: t.name.clone(),
+        });
+    };
+    if t.upstream_sums.is_some() {
+        return Err(PlanError::PgpSumsAndUpstreamSums {
+            tool: t.name.clone(),
+        });
+    }
+    let format = match &t.pgp_sums_format {
+        None => crate::pgpsums::ListFormat::default(),
+        Some(f) => {
+            crate::pgpsums::ListFormat::parse(f).ok_or_else(|| PlanError::PgpSumsFormatUnknown {
+                tool: t.name.clone(),
+                found: f.clone(),
+            })?
+        }
+    };
+    // A signed list proves who published it, not which release it is for.
+    // With the sha256sums format the only thing tying the list to THIS release
+    // is that every asset is looked up by a name that carries the release, so
+    // a versionless name lets an older signed list and its older assets stand
+    // in for it. (A Rust channel binds through its own version instead, and is
+    // checked at ingestion.)
+    //
+    // But template TEXT proves nothing when the value it expands with is a
+    // moving tag: `t-%V.tar.gz` with version `latest` is `t-latest.tar.gz` for
+    // every release. So each placeholder a template uses must expand from a
+    // value that names a release ([`names_a_release`]).
+    let list_template = list.clone();
+    let signature_template = t
+        .pgp_sums_signature
+        .clone()
+        .unwrap_or_else(|| format!("{list_template}.asc"));
+    if format == crate::pgpsums::ListFormat::Sha256Sums {
+        let carries_release = |name: &str| name.contains("%V") || name.contains("%R");
+        let expands_from_a_release = |name: &str| -> Result<(), PlanError> {
+            if name.contains("%V") && !names_a_release(&t.version) {
+                return Err(PlanError::PgpSumsMovingTag {
+                    tool: t.name.clone(),
+                    what: "version",
+                    value: t.version.clone(),
+                });
+            }
+            if name.contains("%R") && !names_a_release(release) {
+                return Err(PlanError::PgpSumsMovingTag {
+                    tool: t.name.clone(),
+                    what: "release",
+                    value: release.to_string(),
+                });
+            }
+            Ok(())
+        };
+        // An entry with no `asset` takes the default tarball template, which
+        // embeds the version literally.
+        if let Some(a) = &t.asset {
+            if !carries_release(a) {
+                return Err(PlanError::PgpSumsAssetNotVersioned {
+                    tool: t.name.clone(),
+                    asset: a.clone(),
+                });
+            }
+            expands_from_a_release(a)?;
+        }
+        if t.asset.is_none() {
+            if kind != PayloadKind::Tarball {
+                return Err(PlanError::PgpSumsAssetNotVersioned {
+                    tool: t.name.clone(),
+                    asset: template_of(t, kind),
+                });
+            }
+            if !names_a_release(&t.version) {
+                return Err(PlanError::PgpSumsMovingTag {
+                    tool: t.name.clone(),
+                    what: "version",
+                    value: t.version.clone(),
+                });
+            }
+        }
+        for a in t.asset_for.values() {
+            if !carries_release(a) {
+                return Err(PlanError::PgpSumsAssetNotVersioned {
+                    tool: t.name.clone(),
+                    asset: a.clone(),
+                });
+            }
+            expands_from_a_release(a)?;
+        }
+        // The list or its signature must carry the release as well, or two
+        // fixed names serve every release.
+        if !carries_release(&list_template) && !carries_release(&signature_template) {
+            return Err(PlanError::PgpSumsListNotVersioned {
+                tool: t.name.clone(),
+                list: list_template,
+                signature: signature_template,
+            });
+        }
+        expands_from_a_release(&list_template)?;
+        expands_from_a_release(&signature_template)?;
+    }
+    let list = asset::expand(&list_template, &t.version, release, None, None)?;
+    let signature = match &t.pgp_sums_signature {
+        Some(s) => asset::expand(s, &t.version, release, None, None)?,
+        None => format!("{list}.asc"),
+    };
+    Ok(Some(PgpSumsPlan {
+        list,
+        signature,
+        format,
+        version: t.version.clone(),
+        release: release.to_string(),
+        key_file: std::path::PathBuf::from(key_file),
+    }))
+}
+
+/// Words that name a CHANNEL rather than a release: what they point at changes.
+/// As a suffix of a full version (`1.2.3-beta.1`) `beta` and `alpha` are
+/// ordinary prerelease labels and pass; these do not, even as a suffix.
+const MOVING_SUFFIXES: &[&str] = &[
+    "latest", "rolling", "lts", "stable", "current", "head", "main", "master", "edge", "next",
+    "canary",
+];
+
+/// Prerelease labels that name a CYCLE, not a build: every nightly of a cycle
+/// carries the same version. They pass only when a numeric segment follows
+/// (`1.2.3-nightly.20261108`, `-dev.5`), fused with a digit or not.
+const CHANNEL_LABELS: &[&str] = &[
+    "nightly", "snapshot", "dev", "daily", "weekly", "tip", "trunk", "develop", "unstable",
+];
+
+/// Is this suffix segment a channel-wide label (`nightly`, `nightly2`,
+/// `latestbuild`)?
+fn is_channel_label(segment: &str) -> bool {
+    let lower = segment.to_ascii_lowercase();
+    lower.starts_with("latest")
+        || CHANNEL_LABELS.contains(&lower.trim_end_matches(|c: char| c.is_ascii_digit()))
+}
+
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A segment that is a wildcard, or that fuses digits with a moving word
+/// (`3lts`).
+fn is_wildcard_or_fused(segment: &str) -> bool {
+    let lower = segment.to_ascii_lowercase();
+    lower == "x"
+        || lower == "*"
+        || (segment.bytes().any(|b| b.is_ascii_digit())
+            && MOVING_SUFFIXES.iter().any(|w| lower.contains(w)))
+}
+
+/// Does this version or release tag name exactly ONE release?
+///
+/// This is a NAME HEURISTIC, not a cryptographic binding: it keeps the names a
+/// signed list is looked up under from being the same for every release, and a
+/// publisher who reuses a numbered tag defeats it.
+///
+/// After one leading `v` the token must be either
+/// * a full date, `YYYY-MM-DD` or `YYYY.MM.DD`; or
+/// * at least two numeric dot-components (`1.2`, `1.2.3`), optionally followed
+///   by a `-prerelease` or `+build` suffix.
+///
+/// Refused: a bare number (`1`, `2026`, `v4`), any `x`, `X` or `*` segment
+/// (`3.x`, `1.*`), a component that is not all digits (`3lts`), an empty
+/// suffix, and a suffix segment that is a moving word (`1.2.3-latest`,
+/// `1.0-rolling`) or fuses one with digits (`1.2.3-3lts`). `beta`, `alpha` and
+/// `rc` are prerelease labels and pass as a suffix of a full version, never as
+/// the version. Cycle labels (`nightly`, `snapshot`, `dev`, `daily`, `weekly`,
+/// `tip`, `trunk`, `develop`, `unstable`, `latest*`, fused with a digit or not)
+/// pass only when a numeric segment follows (`1.2.3-nightly.20261108`). `/`, `%`
+/// and whitespace are refused anywhere.
+pub fn names_a_release(token: &str) -> bool {
+    // A name must not smuggle in a path, an escape or a gap.
+    if token.contains(['/', '%']) || token.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let bare = token.strip_prefix('v').unwrap_or(token);
+    if is_full_date(bare) {
+        return true;
+    }
+    let (core, suffix) = match bare.find(['-', '+']) {
+        Some(at) => (&bare[..at], Some(&bare[at + 1..])),
+        None => (bare, None),
+    };
+    let components: Vec<&str> = core.split('.').collect();
+    if components.len() < 2 || !components.iter().all(|c| is_digits(c)) {
+        return false;
+    }
+    match suffix {
+        None => true,
+        Some(suffix) => {
+            // Walked from the END so "is a build number after me" is a flag and
+            // not index arithmetic: a cycle label passes only if a numeric
+            // segment follows it.
+            let mut build_number_after = false;
+            for segment in suffix.split(['-', '.', '+', '_']).rev() {
+                if segment.is_empty()
+                    || is_wildcard_or_fused(segment)
+                    || MOVING_SUFFIXES.contains(&segment.to_ascii_lowercase().as_str())
+                    || (is_channel_label(segment) && !build_number_after)
+                {
+                    return false;
+                }
+                if is_digits(segment) {
+                    build_number_after = true;
+                }
+            }
+            true
+        }
+    }
+}
+
+/// `YYYY-MM-DD` or `YYYY.MM.DD`, digits only.
+fn is_full_date(s: &str) -> bool {
+    let sep = if s.contains('-') { '-' } else { '.' };
+    let parts: Vec<&str> = s.split(sep).collect();
+    matches!(parts.as_slice(), [y, m, d]
+        if y.len() == 4 && m.len() == 2 && d.len() == 2
+            && is_digits(y) && is_digits(m) && is_digits(d))
+}
+
+/// Resolve every `pgp-key-file` against the input file that named it.
+///
+/// The path in the input is relative to THAT file, so the planner (which has no
+/// idea where the file lives) leaves it as written and the caller that read the
+/// file anchors it here, once, before anything is ingested. A relative path
+/// resolved against the working directory instead would make the same input
+/// verify against a different key depending on where it was run from.
+pub fn anchor_key_files(plans: &mut [PayloadPlan], input_file: &std::path::Path) {
+    let base = match input_file.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    for plan in plans {
+        if let Some(pgp) = &mut plan.pgp_sums {
+            pgp.key_file = base.join(&pgp.key_file);
+        }
+    }
+}
+
 /// Expand one tool into one plan item per platform.
 pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan>, PlanError> {
     let kind = kind_of(t)?;
@@ -372,6 +765,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
     let name = t.binary.clone().unwrap_or_else(|| t.name.clone());
     // Absent `release`, the version serves as the tag — the ordinary case.
     let release = t.release.clone().unwrap_or_else(|| t.version.clone());
+    let pgp_sums = pgp_plan(t, &release, kind)?;
 
     let mut out = Vec::new();
     if !asset::is_per_platform(&template) {
@@ -389,6 +783,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: t.opt_in_reason(),
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
+            pgp_sums: pgp_sums.clone(),
             title: None,
             documents: None,
             allow_pip: t.allow_pip.clone(),
@@ -450,6 +845,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: t.opt_in_reason(),
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
+            pgp_sums: pgp_sums.clone(),
             title: None,
             documents: None,
             // A per-platform entry is never a module (refused above), so it
@@ -479,6 +875,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: None,
             contains: None,
             upstream_sums: None,
+            pgp_sums: None,
             title: None,
             documents: None,
             allow_pip: None,
@@ -500,6 +897,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             unverified_reason: None,
             contains: None,
             upstream_sums: None,
+            pgp_sums: None,
             title: None,
             documents: None,
             allow_pip: None,
@@ -543,6 +941,7 @@ pub fn plan_docs(d: &ManifestDocs) -> Result<Vec<PayloadPlan>, PlanError> {
         // whose link 404s.
         contains: d.entry.clone(),
         upstream_sums: None,
+        pgp_sums: None,
         title: d.title.clone(),
         documents: d.documents.clone(),
         allow_pip: None,
@@ -579,6 +978,7 @@ pub fn plan_crate(c: &ManifestCrate) -> Result<Vec<PayloadPlan>, PlanError> {
         unverified_reason: None,
         contains: None,
         upstream_sums: None,
+        pgp_sums: None,
         title: None,
         documents: None,
         allow_pip: None,
@@ -1421,5 +1821,538 @@ mod tests {
             "every platform fetched the same asset"
         );
         assert_eq!(p[0].asset, "thing-aarch64-apple-darwin");
+    }
+
+    // ------------------------------------------ pgp-sums (REQ-SIGNEDSUMS-001)
+
+    const SIGNED_TOOL: &str = "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\n\
+         asset = \"t-%V.tar.gz\"\n";
+
+    fn signed(extra: &str) -> Result<Vec<PayloadPlan>, PlanError> {
+        plan(&manifest(&format!("{SIGNED_TOOL}{extra}")), PLATFORMS)
+    }
+
+    /// Defaults: the signature is the list's name plus `.asc`, the format is
+    /// sha256sums, and the key path is carried as written.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_pgp_sums_entry_plans_with_its_defaults() {
+        let p = signed("pgp-sums = \"SUMS-%V\"\npgp-key-file = \"keys/up.asc\"\n").unwrap();
+        let spec = p[0].pgp_sums.as_ref().expect("declared");
+        assert_eq!(spec.list, "SUMS-1.0");
+        assert_eq!(spec.signature, "SUMS-1.0.asc");
+        assert_eq!(spec.format, crate::pgpsums::ListFormat::Sha256Sums);
+        assert_eq!(spec.key_file, std::path::PathBuf::from("keys/up.asc"));
+        // A property of the release: every platform's payload carries it.
+        assert!(p.iter().all(|x| x.pgp_sums == p[0].pgp_sums));
+    }
+
+    /// Templates expand in the list and signature names; a stated signature
+    /// and format are honoured.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_list_and_signature_names_are_templates_and_overridable() {
+        let p = signed(
+            "pgp-sums = \"sums-%V.txt\"\npgp-sums-signature = \"sums-%R.sig\"\n\
+             pgp-sums-format = \"rust-channel\"\npgp-key-file = \"k.asc\"\n",
+        )
+        .unwrap();
+        let spec = p[0].pgp_sums.as_ref().unwrap();
+        // %V is the bare version, %R the release tag.
+        assert_eq!(spec.list, "sums-1.0.txt");
+        assert_eq!(spec.signature, "sums-v1.0.sig");
+        assert_eq!(spec.format, crate::pgpsums::ListFormat::RustChannel);
+
+        // Not stated: the default signature follows the EXPANDED list name.
+        let p = signed("pgp-sums = \"sums-%V.txt\"\npgp-key-file = \"k.asc\"\n").unwrap();
+        assert_eq!(
+            p[0].pgp_sums.as_ref().unwrap().signature,
+            "sums-1.0.txt.asc"
+        );
+    }
+
+    /// `pgp-sums` without a key is a signature checked against nothing.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn pgp_sums_without_a_key_file_is_a_plan_error() {
+        let err = signed("pgp-sums = \"SUMS-%V\"\n").expect_err("refuses");
+        assert_eq!(
+            err,
+            PlanError::PgpSumsNeedsKey { tool: "t".into() },
+            "{err}"
+        );
+        assert!(err.to_string().contains("pgp-key-file"), "{err}");
+    }
+
+    /// A key, a format or a signature with no list is read by nothing.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_pgp_field_without_pgp_sums_is_a_plan_error() {
+        for (line, field) in [
+            ("pgp-key-file = \"k.asc\"", "pgp-key-file"),
+            ("pgp-sums-signature = \"x.sig\"", "pgp-sums-signature"),
+            ("pgp-sums-format = \"rust-channel\"", "pgp-sums-format"),
+        ] {
+            let err = signed(&format!("{line}\n")).expect_err("refuses");
+            assert_eq!(
+                err,
+                PlanError::PgpFieldWithoutSums {
+                    tool: "t".into(),
+                    field
+                },
+                "{line}"
+            );
+            assert!(err.to_string().contains(field), "{err}");
+        }
+    }
+
+    /// An unknown format is refused, naming the ones that work.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_unknown_pgp_sums_format_is_a_plan_error() {
+        let err =
+            signed("pgp-sums = \"S-%V\"\npgp-key-file = \"k.asc\"\npgp-sums-format = \"yaml\"\n")
+                .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::PgpSumsFormatUnknown { found, .. } if found == "yaml"),
+            "{err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sha256sums") && msg.contains("rust-channel"),
+            "{msg}"
+        );
+    }
+
+    /// Both lists on one entry: the unsigned one could never be consulted.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_signed_and_an_unsigned_list_on_one_entry_is_a_plan_error() {
+        let err = signed(
+            "pgp-sums = \"S-%V\"\npgp-key-file = \"k.asc\"\nupstream-sums = \"sha256.sum\"\n",
+        )
+        .expect_err("refuses");
+        assert_eq!(err, PlanError::PgpSumsAndUpstreamSums { tool: "t".into() });
+        assert!(err.to_string().contains("upstream-sums"), "{err}");
+    }
+
+    /// A per-platform list name would not be one list.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_per_platform_list_name_is_refused() {
+        let err = signed("pgp-sums = \"sums-%V-%T.txt\"\npgp-key-file = \"k.asc\"\n")
+            .expect_err("refuses");
+        assert!(matches!(err, PlanError::Template(_)), "{err}");
+    }
+
+    /// An entry with only `upstream-sums` is untouched by the new fields.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_upstream_sums_entry_declares_no_pgp_plan() {
+        let p = signed("upstream-sums = \"sha256.sum\"\n").unwrap();
+        assert_eq!(p[0].pgp_sums, None);
+        assert_eq!(p[0].upstream_sums.as_deref(), Some("sha256.sum"));
+    }
+
+    /// The key path is relative to the input file, not to where the producer
+    /// was started.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn key_files_are_anchored_to_the_input_file() {
+        let mut p = signed("pgp-sums = \"S-%V\"\npgp-key-file = \"keys/up.asc\"\n").unwrap();
+        anchor_key_files(&mut p, std::path::Path::new("realm/layer.toml"));
+        assert_eq!(
+            p[0].pgp_sums.as_ref().unwrap().key_file,
+            std::path::PathBuf::from("realm/keys/up.asc")
+        );
+        // A bare file name has no directory to anchor to: the current one.
+        let mut p = signed("pgp-sums = \"S-%V\"\npgp-key-file = \"up.asc\"\n").unwrap();
+        anchor_key_files(&mut p, std::path::Path::new("layer.toml"));
+        assert_eq!(
+            p[0].pgp_sums.as_ref().unwrap().key_file,
+            std::path::PathBuf::from("./up.asc")
+        );
+        // Plans that declare nothing are left alone.
+        let mut p = signed("").unwrap();
+        anchor_key_files(&mut p, std::path::Path::new("realm/layer.toml"));
+        assert_eq!(p[0].pgp_sums, None);
+    }
+
+    /// A toolchain entry for the Rust channel plans with the channel format,
+    /// one asset per platform, and the one list shared by all of them.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_rust_toolchain_entry_plans_with_the_rust_channel_format() {
+        let m = manifest(
+            "[[tool]]\nname = \"rust\"\nrepo = \"o/rust-mirror\"\nversion = \"1.98.1\"\n\
+             layout = \"toolchain\"\nasset = \"rustc-%V-%T.tar.xz\"\n\
+             pgp-sums = \"channel-rust-stable.toml\"\n\
+             pgp-sums-format = \"rust-channel\"\n\
+             pgp-key-file = \"keys/rust-release.asc\"\n",
+        );
+        let p = plan(&m, PLATFORMS).unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].kind, PayloadKind::Toolchain);
+        let spec = p[0].pgp_sums.as_ref().expect("declared");
+        assert_eq!(spec.format, crate::pgpsums::ListFormat::RustChannel);
+        assert_eq!(spec.list, "channel-rust-stable.toml");
+        assert_eq!(spec.signature, "channel-rust-stable.toml.asc");
+        assert_eq!(p[0].pgp_sums, p[1].pgp_sums);
+        assert_ne!(p[0].asset, p[1].asset);
+    }
+
+    /// REPLAY at plan time: a versionless asset name lets an older signed list
+    /// stand in for this release.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn pgp_sums_with_a_versionless_asset_template_is_a_plan_error() {
+        let err = plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nasset = \"t-%T.tar.gz\"\n\
+                 pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::PgpSumsAssetNotVersioned { asset, .. } if asset == "t-%T.tar.gz"),
+            "{err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("older") && msg.contains("%V"), "{msg}");
+    }
+
+    /// Either placeholder binds the name to a release, and so does the default
+    /// tarball template, which embeds the version.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_versioned_asset_template_is_accepted_with_pgp_sums() {
+        for asset in ["t-%V-%T.tar.gz", "t-%R-%T.tar.gz"] {
+            plan(
+                &manifest(&format!(
+                    "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nasset = \"{asset}\"\n\
+                     pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n"
+                )),
+                PLATFORMS,
+            )
+            .unwrap_or_else(|e| panic!("{asset}: {e}"));
+        }
+        plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\n\
+                 pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect("the default template embeds the version");
+    }
+
+    /// A raw-per-platform entry with no `asset` defaults to `<name>-%T`, which
+    /// names no release.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_default_raw_template_names_no_release_and_is_refused_with_pgp_sums() {
+        let err = plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nlayout = \"raw-per-platform\"\n\
+                 pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::PgpSumsAssetNotVersioned { asset, .. } if asset == "t-%T"),
+            "{err}"
+        );
+    }
+
+    /// An `asset-for` override is a name too, and each must be versioned.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_versionless_asset_for_name_is_a_plan_error_with_pgp_sums() {
+        let err = plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nasset = \"t-%V-%T.tar.gz\"\n\
+                 pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n\
+                 [tool.asset-for]\naarch64-apple-darwin = \"t-darwin.tar.gz\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::PgpSumsAssetNotVersioned { asset, .. } if asset == "t-darwin.tar.gz"),
+            "{err}"
+        );
+    }
+
+    /// The version rule is for the sha256sums format; a Rust channel binds
+    /// through the manifest's own version, checked at ingestion.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_rust_channel_format_is_not_subject_to_the_template_rule() {
+        plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"1.98.1\"\nlayout = \"toolchain\"\n\
+                 asset = \"rustc.tar.xz\"\npgp-sums = \"c.toml\"\n\
+                 pgp-sums-format = \"rust-channel\"\npgp-key-file = \"k.asc\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect("plans");
+    }
+
+    fn signed_tool(
+        version: &str,
+        release: Option<&str>,
+        asset: &str,
+        extra: &str,
+    ) -> Result<Vec<PayloadPlan>, PlanError> {
+        let release = release
+            .map(|r| format!("release = \"{r}\"\n"))
+            .unwrap_or_default();
+        plan(
+            &manifest(&format!(
+                "[[tool]]\nname = \"t\"\nversion = \"{version}\"\n{release}asset = \"{asset}\"\n\
+                 pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n{extra}"
+            )),
+            PLATFORMS,
+        )
+    }
+
+    /// MOVING TAGS: the expanded names are the same for every release, so the
+    /// template text proves nothing. The rule: the version (or release) a
+    /// template expands with must, after one leading `v`, START WITH A DIGIT
+    /// and have no `-`/`.`/`_` separated segment that is a moving-tag word
+    /// (latest, nightly, stable, beta, current, head, main, master, edge, dev,
+    /// canary, snapshot).
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_moving_version_is_refused_with_pgp_sums() {
+        for v in [
+            "latest",
+            "nightly",
+            "stable",
+            "main",
+            "master",
+            "edge",
+            "current",
+            "head",
+            "dev",
+            "Latest",
+            "v-latest",
+            "1.0-latest",
+            "2026-10-01-nightly",
+            "",
+        ] {
+            let err = signed_tool(v, None, "t-%V.tar.gz", "").expect_err(v);
+            assert!(
+                matches!(&err, PlanError::PgpSumsMovingTag { what: "version", value, .. } if value == v),
+                "{v:?}: {err}"
+            );
+            assert!(err.to_string().contains("older"), "{err}");
+        }
+    }
+
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_moving_release_is_refused_when_a_template_uses_it_and_ignored_when_none_does() {
+        for r in ["latest", "nightly", "stable", "main"] {
+            let err = signed_tool("1.2.3", Some(r), "t-%R.tar.gz", "").expect_err(r);
+            assert!(
+                matches!(&err, PlanError::PgpSumsMovingTag { what: "release", value, .. } if value == r),
+                "{r}: {err}"
+            );
+        }
+        // No template names the release, so its value binds nothing and is not judged.
+        signed_tool("1.2.3", Some("latest"), "t-%V.tar.gz", "").expect("plans");
+    }
+
+    /// The default tarball template embeds the version literally, so the
+    /// literal itself is what must name a release.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_default_tarball_template_of_a_moving_version_is_refused() {
+        let err = plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"latest\"\n\
+                 pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(matches!(err, PlanError::PgpSumsMovingTag { .. }), "{err}");
+    }
+
+    /// Versions and dates that DO name a release are accepted.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn digit_led_versions_and_dates_are_accepted() {
+        for v in [
+            "v1.2.3",
+            "1.2.3",
+            "2026-10-01",
+            "34.0",
+            "1.0.0-rc.1",
+            "v0.7.2",
+        ] {
+            signed_tool(v, None, "t-%V.tar.gz", "").unwrap_or_else(|e| panic!("{v}: {e}"));
+        }
+    }
+
+    /// The list or the signature must carry the release, so two fixed names
+    /// do not serve every release.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_list_and_signature_that_name_no_release_are_refused() {
+        let err = plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nasset = \"t-%V.tar.gz\"\n\
+                 pgp-sums = \"SHA256SUMS\"\npgp-key-file = \"k.asc\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::PgpSumsListNotVersioned { list, signature, .. }
+                if list == "SHA256SUMS" && signature == "SHA256SUMS.asc"),
+            "{err}"
+        );
+        // Either one carrying the release is enough.
+        for (list, sig) in [("SHA256SUMS", "S-%V.asc"), ("S-%R", "SHA256SUMS.asc")] {
+            plan(
+                &manifest(&format!(
+                    "[[tool]]\nname = \"t\"\nversion = \"v1.0\"\nasset = \"t-%V.tar.gz\"\n\
+                     pgp-sums = \"{list}\"\npgp-sums-signature = \"{sig}\"\npgp-key-file = \"k.asc\"\n"
+                )),
+                PLATFORMS,
+            )
+            .unwrap_or_else(|e| panic!("{list} {sig}: {e}"));
+        }
+    }
+
+    /// Neither new rule applies to the Rust channel, which binds through its
+    /// own manifest.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_new_name_rules_do_not_apply_to_the_rust_channel_format() {
+        plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"latest\"\nlayout = \"toolchain\"\n\
+                 asset = \"rustc.tar.xz\"\npgp-sums = \"channel-rust-stable.toml\"\n\
+                 pgp-sums-format = \"rust-channel\"\npgp-key-file = \"k.asc\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect("plans");
+    }
+
+    /// What may stand for "one release": a name heuristic, not a binding.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn only_a_token_that_names_exactly_one_release_passes() {
+        for ok in [
+            "1.2",
+            "v1.2.3",
+            "0.47.0",
+            "1.98.1",
+            "2026-11-08",
+            "2026.11.08",
+            "1.2.3-rc.1",
+            "v1.0.0-beta.2",
+            "1.0.0-beta1",
+            "1.2.3+build5",
+            "34.0",
+            "0.7.2",
+        ] {
+            assert!(names_a_release(ok), "{ok:?} names one release");
+        }
+        for bad in [
+            "1",
+            "v4",
+            "3.x",
+            "2-lts",
+            "1.x-rolling",
+            "2026",
+            "latest",
+            "beta",
+            "v",
+            "",
+            "1.*",
+            "3lts",
+            "1.X",
+            "x",
+            "*",
+            "nightly",
+            "main",
+            "1.2.3-x",
+            "1.2.3-",
+            "1.2.3-latest",
+            "1.2.3-3lts",
+            "1.2.",
+            ".1.2",
+            "1..2",
+            "2026-11",
+            "2026-1-8",
+            "2026-11-08-nightly",
+            "next",
+            "alpha",
+            "lts",
+            "rolling",
+        ] {
+            assert!(!names_a_release(bad), "{bad:?} must not pass");
+        }
+    }
+
+    /// A channel-wide prerelease label names no release: every build of the
+    /// cycle expands to the same names. A numeric or date segment AFTER it
+    /// names one build, so those pass.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn channel_wide_prerelease_labels_do_not_name_one_release() {
+        for bad in [
+            "1.2.3-nightly",
+            "1.2.3-nightly2",
+            "0.5.0-SNAPSHOT",
+            "1.2.3-dev",
+            "1.2.3-unstable",
+            "1.2.3-tip",
+            "1.2.3-trunk",
+            "1.2.3-develop",
+            "1.2.3-daily",
+            "1.2.3-weekly",
+            "1.2.3-latestbuild",
+            "1.2.3-latest2",
+            "1.2.3-rc.1-nightly",
+            "1.2.3+snapshot",
+            "1.2.3-dev.foo",
+            "1.2.3-Nightly",
+            "1.2.3-daily7",
+            // characters a name must not smuggle in
+            "1.2.3/..",
+            "1.2/3",
+            "1.2.3%2f",
+            "1.2.3 ",
+            " 1.2.3",
+            "1.2.3\t",
+            "1.2.3-rc 1",
+            "2026-11-08/x",
+        ] {
+            assert!(!names_a_release(bad), "{bad:?} must not pass");
+        }
+        for ok in [
+            "1.2.3-nightly.20261108",
+            "1.2.3-dev.5",
+            "1.2.3-nightly.2026-11-08",
+            "1.2.3-snapshot.7",
+            "1.2.3-rc.1",
+            "1.2.3-beta.2",
+            "1.0.0-alpha1",
+            "1.2.3-20261108",
+            "1.2.3-weekly.45",
+            "1.2.3-devel",
+            "1.2.3-tipsy",
+        ] {
+            assert!(names_a_release(ok), "{ok:?} names one release");
+        }
     }
 }

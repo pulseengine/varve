@@ -131,6 +131,11 @@ pub(crate) struct Row {
     /// a consumer might filter on ("refuse anything not signed under
     /// pulseengine/"), which is why it is its own field and not prose.
     pub(crate) proof_signer: Option<String>,
+    /// The key that actually signed, where that is a different fact from the
+    /// signer (an OpenPGP subkey under the certificate named as the signer),
+    /// recorded separately so a compromised subkey does not hide behind its
+    /// owner. `None` for mechanisms with no such split.
+    pub(crate) proof_signing_key: Option<String>,
     /// Are these bytes on disk here? `install` lays down only the host
     /// platform's entries, so another platform's entry is present in the
     /// signed manifest and absent from the store — which is correct, and worth
@@ -218,6 +223,10 @@ pub(crate) fn rows_of(layers: &[varve_core::compose::ComposedLayer]) -> anyhow::
                     Err(varve_core::UnknownProof(raw)) => raw,
                 },
                 proof_signer: e.annotations.get(varve_core::ANN_PROOF_SIGNER).cloned(),
+                proof_signing_key: e
+                    .annotations
+                    .get(varve_core::ANN_PROOF_SIGNING_KEY)
+                    .cloned(),
                 docs: e
                     .annotations
                     .get(varve_core::deposit::ANN_DOCS_FORMAT)
@@ -283,7 +292,8 @@ fn store_of(l: &varve_core::compose::ComposedLayer) -> &Store {
 ///   "composition": [ {"layer","manifest_digest","realm","root"} ],
 ///   "payloads":    [ {"name","version","kind","known_kind","platform",
 ///                     "target","libc","dispatch","ingest_proof",
-///                     "proof_signer","digest","present","layer","realm",
+///                     "proof_signer","proof_signing_key","digest","present",
+///                     "layer","realm",
 ///                     "docs_*", "zephyr_allow_pip"} ],
 ///   "summary": {"payloads","dispatched","held","layers",
 ///               "unverified","unrecorded"}
@@ -324,6 +334,7 @@ fn payload_json(rows: &[Row]) -> Vec<serde_json::Value> {
                 "dispatch": r.dispatch,
                 "ingest_proof": r.ingest_proof,
                 "proof_signer": r.proof_signer,
+                "proof_signing_key": r.proof_signing_key,
                 "digest": r.digest,
                 "present": r.present,
                 "layer": r.layer,
@@ -651,6 +662,7 @@ mod tests {
             zephyr_allow_pip: None,
             ingest_proof: "cosign-sums".into(),
             proof_signer: None,
+            proof_signing_key: Some("abcd".into()),
             present: true,
             layer: "2026.09.9".into(),
             realm: "t".into(),
@@ -877,5 +889,21 @@ mod tests {
         );
         assert_eq!(d.dispatch, HELD);
         assert!(!varve_core::PayloadKind::Docs.is_dispatchable());
+    }
+
+    /// REQ-SIGNEDSUMS-001 clause 1: the key that actually signed is shown as
+    /// its own field, not folded into the signer.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_signing_key_is_reported_apart_from_the_signer() {
+        let mut r = row("rust", None);
+        r.proof_signer = Some("openpgp:aaaa (Rust)".into());
+        r.proof_signing_key = Some("bbbb".into());
+        let json = payload_json(std::slice::from_ref(&r));
+        assert_eq!(json[0]["proof_signer"], "openpgp:aaaa (Rust)");
+        assert_eq!(json[0]["proof_signing_key"], "bbbb");
+        r.proof_signing_key = None;
+        let json = payload_json(std::slice::from_ref(&r));
+        assert!(json[0]["proof_signing_key"].is_null());
     }
 }

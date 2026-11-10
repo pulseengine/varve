@@ -34,6 +34,11 @@ pub struct SourceOut {
     pub proof_signer: Option<String>,
     #[serde(rename = "proof-asserts", skip_serializing_if = "Option::is_none")]
     pub proof_asserts: Option<String>,
+    /// The key that actually signed, where that is not the same fact as the
+    /// signer (an OpenPGP subkey under the certificate's primary). Absent for
+    /// every other mechanism.
+    #[serde(rename = "proof-signing-key", skip_serializing_if = "Option::is_none")]
+    pub proof_signing_key: Option<String>,
     /// The upstream repository's DECLARED SPDX license (REQ-SBOMFIELDS-001
     /// clause 5) — GitHub's own statement, never a default this assembler
     /// invents when GitHub has nothing to say.
@@ -143,6 +148,7 @@ mod tests {
             proof: Some("cosign-sums".into()),
             proof_signer: Some("https://github.com/pulseengine/rivet/".into()),
             proof_asserts: Some("SHA256SUMS.txt signed by an identity under …".into()),
+            proof_signing_key: None,
             license: None,
             sbom: None,
             sbom_sha256: None,

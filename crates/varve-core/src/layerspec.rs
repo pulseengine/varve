@@ -168,6 +168,25 @@ pub struct ManifestTool {
     /// manifest, parsed as one, vouches for nothing while looking like it does.
     #[serde(rename = "upstream-sums", default)]
     pub upstream_sums: Option<String>,
+    /// The asset carrying this release's digest list, when somebody SIGNED it
+    /// with OpenPGP (REQ-SIGNEDSUMS-001). An asset name or template (`%V`,
+    /// `%R`). Needs `pgp-key-file`; the producer refuses either without the
+    /// other.
+    #[serde(rename = "pgp-sums", default)]
+    pub pgp_sums: Option<String>,
+    /// The asset carrying the DETACHED signature over `pgp-sums`. Absent = the
+    /// list's name plus `.asc`.
+    #[serde(rename = "pgp-sums-signature", default)]
+    pub pgp_sums_signature: Option<String>,
+    /// How to read the verified list: `sha256sums` (the `sha256sum` format;
+    /// the default) or `rust-channel` (a `channel-rust-*.toml`).
+    #[serde(rename = "pgp-sums-format", default)]
+    pub pgp_sums_format: Option<String>,
+    /// The OpenPGP certificate that must have signed `pgp-sums`, as a path
+    /// relative to the file that names it. Pinned in the operator's committed
+    /// input: never fetched at ingestion, never read from beside the artifact.
+    #[serde(rename = "pgp-key-file", default)]
+    pub pgp_key_file: Option<String>,
     /// A path that must exist inside a `sdk` payload once unpacked
     /// (REQ-SDKDEPOSIT-001 clause 5).
     ///
@@ -538,6 +557,10 @@ pub enum LayerSpecError {
     /// The encoding has no field for the upstream digest manifest, and losing
     /// it downgrades how the release is verified rather than how it is named.
     UpstreamSumsNotEncodable { tool: String, asset: String },
+    /// The encoding has no field for a signed digest list or its pinned key,
+    /// and losing them downgrades how the release is verified rather than how
+    /// it is named (REQ-SIGNEDSUMS-001).
+    PgpSumsNotEncodable { tool: String },
     /// The encoding has no field for a per-tool platform restriction, and
     /// losing it would carry the tool on a platform the realm deliberately
     /// excluded (REQ-TOOLPLAT-001).
@@ -640,6 +663,17 @@ impl fmt::Display for LayerSpecError {
                  bundle and an attestation, find neither, and ingest the \
                  payload with no proof at all — while every other field \
                  survives the trip and the entry looks ordinary.\n\n\
+                 Deposit this realm with `varve-producer deposit --manifest \
+                 layer.toml`, which reads the mechanism directly."
+            ),
+            LayerSpecError::PgpSumsNotEncodable { tool } => write!(
+                f,
+                "tool {tool:?} declares a `pgp-sums` / `pgp-key-file` mechanism, which the \
+                 environment encoding cannot express. Dropping it would not lose a hint: \
+                 it is the MECHANISM that vouches for the release, so the shell assembler \
+                 would look for a cosign bundle and an attestation, find neither, and \
+                 ingest the payload with no proof at all while the entry looks \
+                 ordinary.\n\n\
                  Deposit this realm with `varve-producer deposit --manifest \
                  layer.toml`, which reads the mechanism directly."
             ),
@@ -1068,6 +1102,18 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
             return Err(LayerSpecError::UpstreamSumsNotEncodable {
                 tool: t.name.clone(),
                 asset: sums.clone(),
+            });
+        }
+        // And the signed form of the same mechanism (REQ-SIGNEDSUMS-001): the
+        // list, its signature, its format and the pinned key all stop here
+        // together, because any one of them alone is a half-declared proof.
+        if t.pgp_sums.is_some()
+            || t.pgp_sums_signature.is_some()
+            || t.pgp_sums_format.is_some()
+            || t.pgp_key_file.is_some()
+        {
+            return Err(LayerSpecError::PgpSumsNotEncodable {
+                tool: t.name.clone(),
             });
         }
         // Same rule again, and this one is not about naming at all: a
@@ -2423,6 +2469,31 @@ upstream-sums=\"sha256.sum\"\n"
 
     /// One vocabulary. `varve deposit` refuses a format, and both readers
     /// parse one, and all three used to carry their own list of names.
+    /// REQ-SIGNEDSUMS-001: the env encoding has no field for the signed digest
+    /// list or the pinned key, so each of the four fields refuses on its own
+    /// rather than vanishing and leaving a tool that ingests with less proof.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_pgp_sums_entry_refuses_rather_than_losing_the_mechanism() {
+        for field in [
+            "pgp-sums=\"SHA256SUMS\"",
+            "pgp-sums-signature=\"SHA256SUMS.sig\"",
+            "pgp-sums-format=\"rust-channel\"",
+            "pgp-key-file=\"keys/up.asc\"",
+        ] {
+            let e = env_of(&format!(
+                "{HEAD}\n[[tool]]\nname=\"wac\"\nrepo=\"bytecodealliance/wac\"\n\
+binary=\"wac\"\nversion=\"v0.10.1\"\nasset=\"wac-%V-%T.tar.gz\"\n{field}\n"
+            ))
+            .expect_err("must refuse");
+            assert!(
+                matches!(&e, LayerSpecError::PgpSumsNotEncodable { tool } if tool == "wac"),
+                "{field}: {e}"
+            );
+            assert!(e.to_string().contains("varve-producer deposit"), "{e}");
+        }
+    }
+
     // rivet: verifies REQ-LAYERDOCS-001
     #[test]
     fn every_docs_format_parses_back_from_the_name_it_is_signed_as() {

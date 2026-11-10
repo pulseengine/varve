@@ -186,6 +186,10 @@ pub struct ToolSource {
     /// `DepositError::UnverifiedWithoutReason`.
     #[serde(rename = "proof-asserts", default)]
     pub proof_asserts: Option<String>,
+    /// The key that actually signed, where that is not the same fact as
+    /// `proof-signer` (an OpenPGP subkey under the certificate's primary).
+    #[serde(rename = "proof-signing-key", default)]
+    pub proof_signing_key: Option<String>,
     /// The upstream repository's DECLARED SPDX license (REQ-SBOMFIELDS-001
     /// clause 5) — GitHub's statement, recorded at deposit, never a concluded
     /// audit of what the binary bundles. `None` on a spec written before the
@@ -580,7 +584,7 @@ pub enum DepositError {
         "payload '{name}' from {repo} carries ingestion-proof detail ({detail}) but declares no \
          `proof` mechanism — the detail would be signed into the layer with nothing saying HOW \
          it was established, which makes it attributable and believed rather than checkable. \
-         Declare `proof = \"cosign-sums\" | \"build-provenance\" | \"upstream-sums\" | \"unverified\"`, or drop the \
+         Declare `proof = \"cosign-sums\" | \"build-provenance\" | \"pgp-sums\" | \"upstream-sums\" | \"unverified\"`, or drop the \
          detail."
     )]
     ProofDetailWithoutMechanism {
@@ -862,7 +866,11 @@ fn check_ingest_proofs(tools: &[&DepositTool]) -> Result<(), DepositError> {
                         repo: source.repo.clone(),
                     });
                 }
-                if let Some(signer) = &source.proof_signer {
+                if let Some(signer) = source
+                    .proof_signer
+                    .as_ref()
+                    .or(source.proof_signing_key.as_ref())
+                {
                     return Err(DepositError::UnverifiedNamesASigner {
                         name: tool.name.clone(),
                         repo: source.repo.clone(),
@@ -874,23 +882,33 @@ fn check_ingest_proofs(tools: &[&DepositTool]) -> Result<(), DepositError> {
             // who. A blank identity here is not "unrecorded" — `None` is; this
             // is a signed claim of provenance with nobody behind it.
             Some(proof) => {
-                if let Some(signer) = &source.proof_signer
-                    && signer.trim().is_empty()
+                // A blank signer, or a blank signing key, is a claim with
+                // nobody behind it.
+                for named in [&source.proof_signer, &source.proof_signing_key]
+                    .into_iter()
+                    .flatten()
                 {
-                    return Err(DepositError::ProofSignerBlank {
-                        name: tool.name.clone(),
-                        repo: source.repo.clone(),
-                        proof: proof.as_str(),
-                        signer: signer.clone(),
-                    });
+                    if named.trim().is_empty() {
+                        return Err(DepositError::ProofSignerBlank {
+                            name: tool.name.clone(),
+                            repo: source.repo.clone(),
+                            proof: proof.as_str(),
+                            signer: named.clone(),
+                        });
+                    }
                 }
             }
             None => {
-                let detail = match (&source.proof_signer, &source.proof_asserts) {
-                    (Some(_), Some(_)) => Some("proof-signer and proof-asserts"),
-                    (Some(_), None) => Some("proof-signer"),
-                    (None, Some(_)) => Some("proof-asserts"),
-                    (None, None) => None,
+                let detail = match (
+                    &source.proof_signer,
+                    &source.proof_asserts,
+                    &source.proof_signing_key,
+                ) {
+                    (_, _, Some(_)) => Some("proof-signing-key"),
+                    (Some(_), Some(_), None) => Some("proof-signer and proof-asserts"),
+                    (Some(_), None, None) => Some("proof-signer"),
+                    (None, Some(_), None) => Some("proof-asserts"),
+                    (None, None, None) => None,
                 };
                 if let Some(detail) = detail {
                     return Err(DepositError::ProofDetailWithoutMechanism {
@@ -1077,6 +1095,12 @@ pub fn deposit_with_signer(
                     annotations.insert(
                         crate::ingest::ANN_PROOF_ASSERTS.into(),
                         asserts.clone().into(),
+                    );
+                }
+                if let Some(key) = &source.proof_signing_key {
+                    annotations.insert(
+                        crate::ingest::ANN_PROOF_SIGNING_KEY.into(),
+                        key.clone().into(),
                     );
                 }
                 // REQ-SBOMFIELDS-001 clauses 4–6: stamped only when the spec
@@ -1680,12 +1704,16 @@ mod tests {
                     "https://github.com/{repo}/.github/workflows/release.yml@refs/tags/v1.0.0"
                 )),
             },
+            proof_signing_key: None,
             proof_asserts: Some(match proof {
                 crate::ingest::IngestProof::CosignSums => {
                     "SHA256SUMS.txt signed for this repo".to_string()
                 }
                 crate::ingest::IngestProof::BuildProvenance => {
                     "built from source commit deadbeef".to_string()
+                }
+                crate::ingest::IngestProof::PgpSums => {
+                    "the publisher holding OpenPGP key 0123 signed the digest list".to_string()
                 }
                 crate::ingest::IngestProof::UpstreamSums => {
                     "transcribed from sha256.sum, which upstream publishes and                      does not sign"
@@ -1788,6 +1816,76 @@ mod tests {
         );
     }
 
+    /// REQ-SIGNEDSUMS-001 clause 1: the key that actually signed is recorded
+    /// SEPARATELY from the identity, as its own signed annotation.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn the_signing_key_is_its_own_signed_annotation_beside_the_signer() {
+        use crate::ingest::{ANN_PROOF_SIGNER, ANN_PROOF_SIGNING_KEY, IngestProof};
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        let mut pgp = ingested("rust", "o/rust", IngestProof::PgpSums);
+        pgp.source.as_mut().unwrap().proof_signer = Some("openpgp:aaaa (Rust)".into());
+        pgp.source.as_mut().unwrap().proof_signing_key = Some("bbbb".into());
+        spec.tools = vec![
+            pgp,
+            ingested("rivet", "pulseengine/rivet", IngestProof::CosignSums),
+        ];
+        let outcome = deposit(&spec, &sk, "k", &tmp.path().join("d")).unwrap();
+        let hex = outcome.digest.strip_prefix("sha256:").unwrap();
+        let bytes = std::fs::read(tmp.path().join("d/blobs/sha256").join(hex)).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let entry = |n: &str| {
+            json["manifests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["annotations"]["eu.pulseengine.tool"] == n)
+                .unwrap()
+                .clone()
+        };
+        let rust = entry("rust");
+        assert_eq!(rust["annotations"][ANN_PROOF_SIGNER], "openpgp:aaaa (Rust)");
+        assert_eq!(rust["annotations"][ANN_PROOF_SIGNING_KEY], "bbbb");
+        assert!(
+            entry("rivet")["annotations"][ANN_PROOF_SIGNING_KEY].is_null(),
+            "a mechanism with no separate signing key records none"
+        );
+    }
+
+    /// A signing key with no mechanism, or a blank one, would be signed and
+    /// believed with nothing behind it.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn a_signing_key_without_a_proof_or_a_blank_one_is_refused() {
+        use crate::ingest::IngestProof;
+        let (sk, _) = generate_root_keypair();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spec = spec();
+        let mut bare = ingested("rust", "o/rust", IngestProof::PgpSums);
+        let source = bare.source.as_mut().unwrap();
+        source.proof = None;
+        source.proof_signer = None;
+        source.proof_asserts = None;
+        source.proof_signing_key = Some("bbbb".into());
+        spec.tools = vec![bare];
+        let err = deposit(&spec, &sk, "k", &tmp.path().join("a")).unwrap_err();
+        assert!(
+            matches!(&err, DepositError::ProofDetailWithoutMechanism { detail, .. } if detail.contains("proof-signing-key")),
+            "{err}"
+        );
+
+        let mut blank = ingested("rust", "o/rust", IngestProof::PgpSums);
+        blank.source.as_mut().unwrap().proof_signing_key = Some("  ".into());
+        spec.tools = vec![blank];
+        let err = deposit(&spec, &sk, "k", &tmp.path().join("b")).unwrap_err();
+        assert!(
+            matches!(err, DepositError::ProofSignerBlank { .. }),
+            "{err}"
+        );
+    }
+
     // rivet: verifies REQ-INGEST-001
     #[test]
     fn an_unproven_payload_may_not_be_signed_in_silently() {
@@ -1846,6 +1944,7 @@ mod tests {
         for (n, (proof, blank)) in [
             (crate::ingest::IngestProof::CosignSums, ""),
             (crate::ingest::IngestProof::BuildProvenance, "   "),
+            (crate::ingest::IngestProof::PgpSums, " "),
             (crate::ingest::IngestProof::UpstreamSums, "\t"),
         ]
         .into_iter()
@@ -1914,6 +2013,11 @@ mod tests {
             .annotations
             .insert(crate::ingest::ANN_PROOF.into(), "upstream-sums".into());
         assert_eq!(entry.ingest_proof(), Ok(Some(IngestProof::UpstreamSums)));
+        // And the signed digest list (REQ-SIGNEDSUMS-001), likewise.
+        entry
+            .annotations
+            .insert(crate::ingest::ANN_PROOF.into(), "pgp-sums".into());
+        assert_eq!(entry.ingest_proof(), Ok(Some(IngestProof::PgpSums)));
         // An unknown mechanism is reported verbatim, never guessed into a
         // known one — a newer varve may mint mechanisms this build has not
         // heard of, and quietly reading one as `cosign-sums` would be a lie.

@@ -106,7 +106,8 @@ fn main() -> anyhow::Result<()> {
                 platforms
             };
             let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-            let planned = plan::plan(&m, &refs)?;
+            let mut planned = plan::plan(&m, &refs)?;
+            plan::anchor_key_files(&mut planned, &manifest);
 
             let prev = match &previous {
                 Some(p) => deposit::previous_from_spec(&std::fs::read_to_string(p)?)?,

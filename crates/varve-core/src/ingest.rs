@@ -26,7 +26,7 @@
 //!
 //! # The three states, and the fourth
 //!
-//! `cosign-sums`, `build-provenance`, `upstream-sums` and `unverified` are the mechanisms an
+//! `cosign-sums`, `build-provenance`, `pgp-sums`, `upstream-sums` and `unverified` are the mechanisms an
 //! entry can DECLARE. The fourth state is the ABSENT annotation, and it is
 //! deliberately not any of them: every layer published before this requirement
 //! carries no proof annotation, and reading that as "verified" would silently
@@ -47,6 +47,12 @@ pub const ANN_PROOF: &str = "eu.pulseengine.source.proof";
 /// The identity that vouched: the certificate identity cosign matched, or the
 /// attestation's `buildSignerURI`. Absent where nothing vouched.
 pub const ANN_PROOF_SIGNER: &str = "eu.pulseengine.source.proof-signer";
+/// The key that actually produced the signature, when it is a different fact
+/// from `ANN_PROOF_SIGNER` (REQ-SIGNEDSUMS-001 clause 1): for an OpenPGP list,
+/// the signer is the certificate's primary fingerprint and this is the
+/// (sub)key that signed. Recorded separately because collapsing them is how a
+/// compromised subkey goes unnoticed. Absent for mechanisms with no such split.
+pub const ANN_PROOF_SIGNING_KEY: &str = "eu.pulseengine.source.proof-signing-key";
 /// One line stating what that mechanism ASSERTED — the sums blob it covered,
 /// the source commit it bound the build to, or the operator's recorded reason
 /// for shipping bytes nothing vouched for.
@@ -110,6 +116,13 @@ ingest_proofs! {
     /// stronger claim than a sums file, since it covers WHERE the bytes came
     /// from and not merely WHAT they hash to.
     BuildProvenance => "build-provenance",
+    /// A digest list that somebody SIGNED with OpenPGP (a detached binary
+    /// signature, SHA-256 or stronger), verified against a certificate the
+    /// operator pinned in the producer's committed input
+    /// (REQ-SIGNEDSUMS-001). Asserts that the holder of that key, named by
+    /// FINGERPRINT and never by the self-asserted user ID, published the
+    /// digests. Says nothing about whether that publisher is trustworthy.
+    PgpSums => "pgp-sums",
     /// A digest list the upstream published beside its assets and NOBODY
     /// SIGNED (REQ-UPSTREAMSUMS-001).
     ///
@@ -251,6 +264,7 @@ mod tests {
         // these strings are a compatibility promise, inside a signature.
         assert_eq!(IngestProof::CosignSums.as_str(), "cosign-sums");
         assert_eq!(IngestProof::BuildProvenance.as_str(), "build-provenance");
+        assert_eq!(IngestProof::PgpSums.as_str(), "pgp-sums");
         assert_eq!(IngestProof::UpstreamSums.as_str(), "upstream-sums");
         assert_eq!(IngestProof::Unverified.as_str(), "unverified");
     }
@@ -269,6 +283,7 @@ mod tests {
         }
         assert!(IngestProof::CosignSums.is_verified());
         assert!(IngestProof::BuildProvenance.is_verified());
+        assert!(IngestProof::PgpSums.is_verified());
         assert!(IngestProof::UpstreamSums.is_verified());
         assert!(
             !IngestProof::Unverified.is_verified(),

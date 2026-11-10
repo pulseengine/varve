@@ -81,8 +81,8 @@ pub use deposit::{
     RunnerSpec, ToolSource, deposit, deposit_with_options, deposit_with_signer, parse_deposit_spec,
 };
 pub use ingest::{
-    ANN_PROOF, ANN_PROOF_ASSERTS, ANN_PROOF_SIGNER, ANN_SBOM, ANN_SBOM_SHA256, IngestProof,
-    UnknownProof,
+    ANN_PROOF, ANN_PROOF_ASSERTS, ANN_PROOF_SIGNER, ANN_PROOF_SIGNING_KEY, ANN_SBOM,
+    ANN_SBOM_SHA256, IngestProof, UnknownProof,
 };
 pub use install::{DigestConsent, cached_consent_why_not};
 pub use install::{
