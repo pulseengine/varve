@@ -36,7 +36,13 @@ entry (`asset` and every `asset-for` value, or the default template of the
 layout) must carry `%V` or `%R`, and the version or release it expands from
 must name exactly one release (`1.2.3`, `v1.2.3`, `2026-10-01`; not `latest`,
 `nightly`, `v4`, `3.x`). A template or value that does not is refused at
-`plan` and `deposit`. The same applies to extension, document and crate
+`plan` and `deposit`. Only a template that produces a planned asset is judged:
+for a per-platform entry that is each carried platform's `asset-for` override
+or else the template. A template every carried platform overrides is never
+expanded and is not judged; a platform that falls back to it is planned (even
+if the upstream publishes no build for it) and counts, so an entry that
+overrides only some platforms either names every one it carries or restricts
+itself with `platforms = [...]`. The same applies to extension, document and crate
 entries. The rule is not applied to a Rust channel (which binds through its
 own manifest version) or to an entry that is itself an `unverified` opt-in
 and declares no list. Ingestion checks again, independently of the plan, that

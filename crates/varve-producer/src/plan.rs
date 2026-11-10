@@ -678,6 +678,7 @@ fn check_tool_binding(
     release: &str,
     kind: PayloadKind,
     rust_channel: bool,
+    platforms: &[&str],
 ) -> Result<(), PlanError> {
     // Only a RECORDED waiver exempts, or a Rust channel, which binds through
     // its own manifest version. An `unverified-reason` never exempts an entry
@@ -690,28 +691,60 @@ fn check_tool_binding(
     if rust_channel || t.unbound_release_reason.is_some() || t.opt_in_reason().is_some() {
         return Ok(());
     }
-    match &t.asset {
-        Some(a) => check_templates_bound(&t.name, &[a], &t.version, release)?,
-        // An entry with no `asset` takes the default tarball template, which
-        // embeds the version literally.
-        None if kind == PayloadKind::Tarball => {
-            if !names_a_release(&t.version) {
-                return Err(PlanError::MovingRelease {
-                    tool: t.name.clone(),
-                    what: "version",
-                    value: t.version.clone(),
-                });
+    if !version_matches_release(&t.version, release) {
+        return Err(PlanError::VersionReleaseMismatch {
+            tool: t.name.clone(),
+            version: t.version.clone(),
+            release: release.to_string(),
+        });
+    }
+    // Judge exactly the templates that produce a planned asset: for a
+    // per-platform entry, each carried platform's `asset-for` override or else
+    // the template. A template every carried platform overrides is never
+    // expanded; a platform that falls back to it (even one the upstream does
+    // not publish) is planned and counts; an override for a platform that is
+    // not carried produces nothing.
+    let template = template_of(t, kind);
+    let planned: Vec<Option<&str>> = if asset::is_per_platform(&template) {
+        carried_platforms(t, platforms)
+            .into_iter()
+            .map(|p| t.asset_for.get(p).map(String::as_str))
+            .collect()
+    } else {
+        vec![None]
+    };
+    for over in planned {
+        match over {
+            Some(a) => check_templates_bound(&t.name, &[a], &t.version, release)?,
+            // The entry's own template. With no `asset`, a tarball takes the
+            // default template, which embeds the version literally.
+            None if t.asset.is_none() && kind == PayloadKind::Tarball => {
+                if !names_a_release(&t.version) {
+                    return Err(PlanError::MovingRelease {
+                        tool: t.name.clone(),
+                        what: "version",
+                        value: t.version.clone(),
+                    });
+                }
             }
-        }
-        None => {
-            return Err(PlanError::AssetNotVersioned {
-                tool: t.name.clone(),
-                asset: template_of(t, kind),
-            });
+            // `asset`, or a layout's default template, which names no release.
+            None => check_templates_bound(&t.name, &[&template], &t.version, release)?,
         }
     }
-    let overrides: Vec<&str> = t.asset_for.values().map(String::as_str).collect();
-    check_templates_bound(&t.name, &overrides, &t.version, release)
+    Ok(())
+}
+
+/// The platforms an entry is planned for: all the layer declares, or the
+/// entry's own `platforms` list in the layer's order.
+fn carried_platforms<'a>(t: &ManifestTool, platforms: &[&'a str]) -> Vec<&'a str> {
+    match &t.platforms {
+        None => platforms.to_vec(),
+        Some(only) => platforms
+            .iter()
+            .copied()
+            .filter(|p| only.iter().any(|w| w == p))
+            .collect(),
+    }
 }
 
 /// One warning line per entry carried without a release binding, for plan and
@@ -916,6 +949,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
         pgp_sums
             .as_ref()
             .is_some_and(|p| p.format == crate::pgpsums::ListFormat::RustChannel),
+        platforms,
     )?;
 
     let mut out = Vec::new();
@@ -2817,6 +2851,65 @@ mod tests {
         ] {
             hub(v, r, "").unwrap_or_else(|e| panic!("{v} / {r}: {e}"));
         }
+    }
+
+    /// Only a template that produces a planned asset is judged. A default
+    /// template (or `asset`) that every carried platform overrides through
+    /// `asset-for` is never expanded, so it is not checked; a platform that
+    /// falls back to it, even one the upstream does not publish, is planned
+    /// and so is checked; an override for a platform that is not carried is
+    /// planned for nobody and is not checked.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn only_the_templates_that_produce_a_planned_asset_are_judged() {
+        let raw = |extra: &str| {
+            plan(
+                &manifest(&format!(
+                    "[[tool]]\nname = \"t\"\nversion = \"v1.0.0\"\nlayout = \"raw-per-platform\"\n{extra}"
+                )),
+                PLATFORMS,
+            )
+        };
+        // Every carried platform overrides: the unused default is not judged.
+        let covered = "[tool.asset-for]\naarch64-apple-darwin = \"t-%V-mac\"\n\
+                       x86_64-unknown-linux-gnu = \"t-%V-linux\"\n";
+        let p = raw(covered).expect("the default template is never expanded");
+        assert_eq!(p.len(), 2);
+        // One platform falls back to the versionless default: refused.
+        let err = raw("[tool.asset-for]\naarch64-apple-darwin = \"t-%V-mac\"\n")
+            .expect_err("the fallback platform is planned");
+        assert!(
+            matches!(&err, PlanError::AssetNotVersioned { asset, .. } if asset == "t-%T"),
+            "{err}"
+        );
+        // Restricting the platforms to the covered one is the fix.
+        let p = raw("platforms = [\"aarch64-apple-darwin\"]\n\
+                     [tool.asset-for]\naarch64-apple-darwin = \"t-%V-mac\"\n")
+        .expect("only the covered platform is planned");
+        assert_eq!(p.len(), 1);
+        // A versionless override for a platform that is not carried is inert.
+        raw("platforms = [\"aarch64-apple-darwin\"]\n\
+             [tool.asset-for]\naarch64-apple-darwin = \"t-%V-mac\"\n\
+             x86_64-unknown-linux-gnu = \"t-linux\"\n")
+        .expect("an uncarried platform's override produces no asset");
+        // A versionless `asset` that every carried platform overrides.
+        plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0.0\"\nlayout = \"raw-per-platform\"\n\
+                 asset = \"t-%T\"\n[tool.asset-for]\naarch64-apple-darwin = \"t-%V-mac\"\n\
+                 x86_64-unknown-linux-gnu = \"t-%V-linux\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect("`asset` is never expanded");
+        // But a carried platform with a versionless override is refused.
+        let err = raw("[tool.asset-for]\naarch64-apple-darwin = \"t-%V-mac\"\n\
+                       x86_64-unknown-linux-gnu = \"t-linux\"\n")
+        .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::AssetNotVersioned { asset, .. } if asset == "t-linux"),
+            "{err}"
+        );
     }
 
     /// The warning an operator reads at plan and deposit names every entry
