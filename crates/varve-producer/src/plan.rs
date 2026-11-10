@@ -114,6 +114,10 @@ pub struct PayloadPlan {
     pub kind: PayloadKind,
     /// Why this release is ingested with no proof, if it is.
     pub unverified_reason: Option<String>,
+    /// Why this entry's assets are NOT tied to their release by name, if they
+    /// are not (`unbound-release-reason`). Lets the entry past the plan-time
+    /// and ingestion checks, and is signed into the layer beside the proof.
+    pub unbound_release_reason: Option<String>,
     /// A path that must exist inside an `sdk` payload once unpacked
     /// (REQ-SDKDEPOSIT-001 clause 5). `None` for every other kind.
     pub contains: Option<String>,
@@ -181,13 +185,13 @@ pub enum PlanError {
     },
     /// `pgp-sums` with an asset name that names no release: an older, validly
     /// signed list could stand in for this one.
-    PgpSumsAssetNotVersioned {
+    AssetNotVersioned {
         tool: String,
         asset: String,
     },
     /// The version or release the names expand with is a MOVING tag, so the
     /// expanded names are the same for every release.
-    PgpSumsMovingTag {
+    MovingRelease {
         tool: String,
         what: &'static str,
         value: String,
@@ -275,23 +279,26 @@ impl std::fmt::Display for PlanError {
                 "tool {tool:?} declares pgp-sums-format = {found:?}. Known \
                  formats are \"sha256sums\" (the default) and \"rust-channel\"."
             ),
-            PlanError::PgpSumsAssetNotVersioned { tool, asset } => write!(
+            PlanError::AssetNotVersioned { tool, asset } => write!(
                 f,
-                "tool {tool:?} declares `pgp-sums` with the asset name {asset:?}, which \
-                 names no release (no `%V` or `%R`). A signed digest list proves who \
-                 published it, not which release it is for: with a versionless asset name \
-                 an OLDER, validly signed list and its older assets could be served in \
-                 place of this release and be recorded as it. Put `%V` or `%R` in the \
-                 asset name so the list must name this release's files."
+                "{tool:?} has the asset name {asset:?}, which names no release (no `%V` or \
+                 `%R`). A proof (a signature, an attestation or a digest list) says who \
+                 published bytes, not which release they are for: with a versionless asset \
+                 name an OLDER release's proof and its older bytes could be served under a \
+                 newer tag and be recorded as the newer version. Put `%V` or `%R` in the \
+                 asset name. An upstream that names its files with no version can be carried \
+                 anyway by stating why, which is signed into the layer: \
+                 unbound-release-reason = \"<why>\"."
             ),
-            PlanError::PgpSumsMovingTag { tool, what, value } => write!(
+            PlanError::MovingRelease { tool, what, value } => write!(
                 f,
-                "tool {tool:?} declares `pgp-sums` with the {what} {value:?}, which names no \
-                 particular release (a moving tag such as latest, nightly, stable or main, or \
-                 a token with no leading digit). The asset names built from it are identical \
-                 for every release, so an OLDER validly signed list and its older assets \
-                 would stand in for this one. Declare a {what} that starts with a digit — a \
-                 version such as 1.2.3 or a date such as 2026-10-01."
+                "{tool:?} has the {what} {value:?}, which names no particular release (a \
+                 moving tag such as latest, nightly, stable or main, or a token that is not a \
+                 dotted version or a date). The asset names built from it are identical for \
+                 every release, so an OLDER release's proof and its older bytes would stand \
+                 in for this one. Declare a {what} such as 1.2.3 or 2026-10-01. An entry that \
+                 cannot be pinned can be carried anyway by stating why, which is signed into \
+                 the layer: unbound-release-reason = \"<why>\"."
             ),
             PlanError::PgpSumsListNotVersioned {
                 tool,
@@ -459,11 +466,7 @@ fn kind_of(t: &ManifestTool) -> Result<PayloadKind, PlanError> {
 /// convention (`SHA256SUMS` / `SHA256SUMS.asc`, and Rust's
 /// `channel-rust-stable.toml` / `.toml.asc`). The format defaults to
 /// `sha256sums`.
-fn pgp_plan(
-    t: &ManifestTool,
-    release: &str,
-    kind: PayloadKind,
-) -> Result<Option<PgpSumsPlan>, PlanError> {
+fn pgp_plan(t: &ManifestTool, release: &str) -> Result<Option<PgpSumsPlan>, PlanError> {
     let Some(list) = &t.pgp_sums else {
         let stray = [
             ("pgp-sums-signature", t.pgp_sums_signature.is_some()),
@@ -499,15 +502,11 @@ fn pgp_plan(
     };
     // A signed list proves who published it, not which release it is for.
     // With the sha256sums format the only thing tying the list to THIS release
-    // is that every asset is looked up by a name that carries the release, so
-    // a versionless name lets an older signed list and its older assets stand
-    // in for it. (A Rust channel binds through its own version instead, and is
-    // checked at ingestion.)
-    //
-    // But template TEXT proves nothing when the value it expands with is a
-    // moving tag: `t-%V.tar.gz` with version `latest` is `t-latest.tar.gz` for
-    // every release. So each placeholder a template uses must expand from a
-    // value that names a release ([`names_a_release`]).
+    // is that every asset is looked up by a name that carries the release. The
+    // asset names themselves are checked for EVERY ingestion rung by
+    // [`check_tool_binding`]; what is left here is the list and its signature,
+    // which only this rung has. (A Rust channel binds through its own version
+    // instead, and is checked at ingestion.)
     let list_template = list.clone();
     let signature_template = t
         .pgp_sums_signature
@@ -515,58 +514,6 @@ fn pgp_plan(
         .unwrap_or_else(|| format!("{list_template}.asc"));
     if format == crate::pgpsums::ListFormat::Sha256Sums {
         let carries_release = |name: &str| name.contains("%V") || name.contains("%R");
-        let expands_from_a_release = |name: &str| -> Result<(), PlanError> {
-            if name.contains("%V") && !names_a_release(&t.version) {
-                return Err(PlanError::PgpSumsMovingTag {
-                    tool: t.name.clone(),
-                    what: "version",
-                    value: t.version.clone(),
-                });
-            }
-            if name.contains("%R") && !names_a_release(release) {
-                return Err(PlanError::PgpSumsMovingTag {
-                    tool: t.name.clone(),
-                    what: "release",
-                    value: release.to_string(),
-                });
-            }
-            Ok(())
-        };
-        // An entry with no `asset` takes the default tarball template, which
-        // embeds the version literally.
-        if let Some(a) = &t.asset {
-            if !carries_release(a) {
-                return Err(PlanError::PgpSumsAssetNotVersioned {
-                    tool: t.name.clone(),
-                    asset: a.clone(),
-                });
-            }
-            expands_from_a_release(a)?;
-        }
-        if t.asset.is_none() {
-            if kind != PayloadKind::Tarball {
-                return Err(PlanError::PgpSumsAssetNotVersioned {
-                    tool: t.name.clone(),
-                    asset: template_of(t, kind),
-                });
-            }
-            if !names_a_release(&t.version) {
-                return Err(PlanError::PgpSumsMovingTag {
-                    tool: t.name.clone(),
-                    what: "version",
-                    value: t.version.clone(),
-                });
-            }
-        }
-        for a in t.asset_for.values() {
-            if !carries_release(a) {
-                return Err(PlanError::PgpSumsAssetNotVersioned {
-                    tool: t.name.clone(),
-                    asset: a.clone(),
-                });
-            }
-            expands_from_a_release(a)?;
-        }
         // The list or its signature must carry the release as well, or two
         // fixed names serve every release.
         if !carries_release(&list_template) && !carries_release(&signature_template) {
@@ -576,8 +523,8 @@ fn pgp_plan(
                 signature: signature_template,
             });
         }
-        expands_from_a_release(&list_template)?;
-        expands_from_a_release(&signature_template)?;
+        check_expansion(&t.name, &list_template, &t.version, release)?;
+        check_expansion(&t.name, &signature_template, &t.version, release)?;
     }
     let list = asset::expand(&list_template, &t.version, release, None, None)?;
     let signature = match &t.pgp_sums_signature {
@@ -592,6 +539,121 @@ fn pgp_plan(
         release: release.to_string(),
         key_file: std::path::PathBuf::from(key_file),
     }))
+}
+
+/// Does a template that uses `%V` or `%R` expand from a value that names ONE
+/// release? Template TEXT proves nothing when the value it expands with is a
+/// moving tag: `t-%V.tar.gz` with version `latest` is `t-latest.tar.gz` for
+/// every release.
+fn check_expansion(
+    tool: &str,
+    template: &str,
+    version: &str,
+    release: &str,
+) -> Result<(), PlanError> {
+    if template.contains("%V") && !names_a_release(version) {
+        return Err(PlanError::MovingRelease {
+            tool: tool.to_string(),
+            what: "version",
+            value: version.to_string(),
+        });
+    }
+    if template.contains("%R") && !names_a_release(release) {
+        return Err(PlanError::MovingRelease {
+            tool: tool.to_string(),
+            what: "release",
+            value: release.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Every asset template must carry `%V` or `%R`, and what it expands with must
+/// name one release.
+///
+/// A proof (a cosign identity, an attestation, a signed or unsigned digest
+/// list) says who published bytes, not which release they are for. Without
+/// this an OLDER release's proof, and the older bytes it names, served under a
+/// NEWER tag would be recorded as the newer version. The asset name is the one
+/// thing the release's own tag is tied to, so it must carry it.
+fn check_templates_bound(
+    tool: &str,
+    templates: &[&str],
+    version: &str,
+    release: &str,
+) -> Result<(), PlanError> {
+    for a in templates {
+        if !(a.contains("%V") || a.contains("%R")) {
+            return Err(PlanError::AssetNotVersioned {
+                tool: tool.to_string(),
+                asset: (*a).to_string(),
+            });
+        }
+        check_expansion(tool, a, version, release)?;
+    }
+    Ok(())
+}
+
+/// [`check_templates_bound`] for a tool entry: its `asset` (or the default
+/// template for its layout) and every `asset-for` override.
+///
+/// Not applied to an entry that is itself an unverified opt-in (it carries its
+/// own recorded exception), to one that states `unbound-release-reason`, or to
+/// a Rust channel (which binds through the channel manifest's own version).
+fn check_tool_binding(
+    t: &ManifestTool,
+    release: &str,
+    kind: PayloadKind,
+    rust_channel: bool,
+) -> Result<(), PlanError> {
+    if rust_channel || t.unbound_release_reason.is_some() || t.opt_in_reason().is_some() {
+        return Ok(());
+    }
+    match &t.asset {
+        Some(a) => check_templates_bound(&t.name, &[a], &t.version, release)?,
+        // An entry with no `asset` takes the default tarball template, which
+        // embeds the version literally.
+        None if kind == PayloadKind::Tarball => {
+            if !names_a_release(&t.version) {
+                return Err(PlanError::MovingRelease {
+                    tool: t.name.clone(),
+                    what: "version",
+                    value: t.version.clone(),
+                });
+            }
+        }
+        None => {
+            return Err(PlanError::AssetNotVersioned {
+                tool: t.name.clone(),
+                asset: template_of(t, kind),
+            });
+        }
+    }
+    let overrides: Vec<&str> = t.asset_for.values().map(String::as_str).collect();
+    check_templates_bound(&t.name, &overrides, &t.version, release)
+}
+
+/// One warning line per entry carried without a release binding, for plan and
+/// deposit to print. An operator who set `unbound-release-reason` has said the
+/// entry cannot be bound; they have not said the risk is gone.
+pub fn unbound_warnings(plans: &[PayloadPlan]) -> Vec<String> {
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    let mut out = Vec::new();
+    for p in plans {
+        let Some(why) = p.unbound_release_reason.as_deref() else {
+            continue;
+        };
+        if seen.contains(&(p.name.as_str(), why)) {
+            continue;
+        }
+        seen.push((p.name.as_str(), why));
+        out.push(format!(
+            "warning: {:?} ({} {}) is ingested with its assets NOT tied to the release by name; \
+             an older release's proof served under this tag would be accepted. Recorded reason: {why}",
+            p.name, p.repo, p.release
+        ));
+    }
+    out
 }
 
 /// Words that name a CHANNEL rather than a release: what they point at changes.
@@ -765,7 +827,15 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
     let name = t.binary.clone().unwrap_or_else(|| t.name.clone());
     // Absent `release`, the version serves as the tag — the ordinary case.
     let release = t.release.clone().unwrap_or_else(|| t.version.clone());
-    let pgp_sums = pgp_plan(t, &release, kind)?;
+    let pgp_sums = pgp_plan(t, &release)?;
+    check_tool_binding(
+        t,
+        &release,
+        kind,
+        pgp_sums
+            .as_ref()
+            .is_some_and(|p| p.format == crate::pgpsums::ListFormat::RustChannel),
+    )?;
 
     let mut out = Vec::new();
     if !asset::is_per_platform(&template) {
@@ -781,6 +851,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             named_explicitly: false,
             kind,
             unverified_reason: t.opt_in_reason(),
+            unbound_release_reason: t.unbound_release_reason.clone(),
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
             pgp_sums: pgp_sums.clone(),
@@ -843,6 +914,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
             named_explicitly: explicit.is_some(),
             kind,
             unverified_reason: t.opt_in_reason(),
+            unbound_release_reason: t.unbound_release_reason.clone(),
             contains: t.contains.clone(),
             upstream_sums: t.upstream_sums.clone(),
             pgp_sums: pgp_sums.clone(),
@@ -859,6 +931,7 @@ pub fn plan_tool(t: &ManifestTool, platforms: &[&str]) -> Result<Vec<PayloadPlan
 /// Expand one extension entry.
 pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan>, PlanError> {
     let repo = repo_of(&v.repo, &v.name);
+    check_templates_bound(&v.name, &[&v.asset], &v.version, &v.version)?;
     let mut out = Vec::new();
     if !asset::is_per_platform(&v.asset) {
         out.push(PayloadPlan {
@@ -873,6 +946,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             named_explicitly: false,
             kind: PayloadKind::Vsix,
             unverified_reason: None,
+            unbound_release_reason: None,
             contains: None,
             upstream_sums: None,
             pgp_sums: None,
@@ -895,6 +969,7 @@ pub fn plan_vsix(v: &ManifestVsix, platforms: &[&str]) -> Result<Vec<PayloadPlan
             named_explicitly: false,
             kind: PayloadKind::Vsix,
             unverified_reason: None,
+            unbound_release_reason: None,
             contains: None,
             upstream_sums: None,
             pgp_sums: None,
@@ -921,6 +996,7 @@ pub fn plan_docs(d: &ManifestDocs) -> Result<Vec<PayloadPlan>, PlanError> {
         });
     }
     let release = d.release.clone().unwrap_or_else(|| d.version.clone());
+    check_templates_bound(&d.name, &[&d.asset], &d.version, &release)?;
     Ok(vec![PayloadPlan {
         name: d.name.clone(),
         repo: repo_of(&d.repo, &d.name),
@@ -933,6 +1009,7 @@ pub fn plan_docs(d: &ManifestDocs) -> Result<Vec<PayloadPlan>, PlanError> {
         named_explicitly: false,
         kind: PayloadKind::Docs(d.format),
         unverified_reason: None,
+        unbound_release_reason: None,
         // The declared entry point IS a shape check — `contains` already
         // means "a path that must exist inside this payload". Reusing it
         // makes `entry` verified at deposit rather than decorative: a
@@ -964,6 +1041,7 @@ pub fn plan_crate(c: &ManifestCrate) -> Result<Vec<PayloadPlan>, PlanError> {
         });
     }
     let release = c.release.clone().unwrap_or_else(|| c.version.clone());
+    check_templates_bound(&c.name, &[&template], &c.version, &release)?;
     Ok(vec![PayloadPlan {
         name: c.name.clone(),
         repo: repo_of(&c.repo, &c.name),
@@ -976,6 +1054,7 @@ pub fn plan_crate(c: &ManifestCrate) -> Result<Vec<PayloadPlan>, PlanError> {
         named_explicitly: false,
         kind: PayloadKind::Crate,
         unverified_reason: None,
+        unbound_release_reason: None,
         contains: None,
         upstream_sums: None,
         pgp_sums: None,
@@ -1034,6 +1113,7 @@ mod asset_for_template_tests {
              [realm]\nname = \"r\"\nchannel = \"rolling\"\n\
              registry = \"oci://ghcr.io/o/r\"\n\n\
              [[tool]]\nname = \"synth\"\nversion = \"v0.74.0\"\n\
+             unbound-release-reason = \"fixture: upstream names its files with no version\"\n\
              [tool.asset-for]\n{entries}\n"
         );
         varve_core::layerspec::parse_layer_manifest(&text).expect("layer.toml")
@@ -1129,6 +1209,7 @@ mod tests {
         let m = manifest(
             "[[tool]]\nname = \"wasm-opt\"\nrepo = \"WebAssembly/binaryen\"\n\
              version = \"133\"\nrelease = \"version_133\"\n\
+             unbound-release-reason = \"binaryen tags version_133, which is no dotted version\"\n\
              platforms = [\"x86_64-unknown-linux-gnu\"]\n",
         );
         let p = plan(&m, PLATFORMS).expect("plans");
@@ -1160,6 +1241,7 @@ mod tests {
         let m = manifest(
             "[[tool]]\nname = \"wasm-opt\"\nrepo = \"WebAssembly/binaryen\"\n\
              version = \"133\"\nrelease = \"version_133\"\n\
+             unbound-release-reason = \"binaryen tags version_133, which is no dotted version\"\n\
              platforms = [\"x86_64-unknown-linux-musl\"]\n",
         );
         let e = plan(&m, PLATFORMS).expect_err("a platform the layer never declared");
@@ -1210,12 +1292,12 @@ mod tests {
     fn three_raw_per_platform_tools_are_not_a_special_case() {
         let m = manifest(
             "[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\n\
-             version = \"v0.10.1\"\nlayout = \"raw-per-platform\"\nasset = \"wac-cli-%T\"\n\
+             version = \"v0.10.1\"\nlayout = \"raw-per-platform\"\nasset = \"wac-cli-%T\"\nunbound-release-reason = \"fixture: upstream names its files with no version\"\n\
              [[tool]]\nname = \"wkg\"\nrepo = \"bytecodealliance/wasm-pkg-tools\"\n\
-             version = \"v0.16.1\"\nlayout = \"raw-per-platform\"\nasset = \"wkg-%T\"\n\
+             version = \"v0.16.1\"\nlayout = \"raw-per-platform\"\nasset = \"wkg-%T\"\nunbound-release-reason = \"fixture: upstream names its files with no version\"\n\
              [[tool]]\nname = \"wrpc\"\nrepo = \"bytecodealliance/wrpc\"\n\
              version = \"v0.17.0\"\nlayout = \"raw-per-platform\"\n\
-             asset = \"wit-bindgen-wrpc-%T\"\n",
+             asset = \"wit-bindgen-wrpc-%T\"\nunbound-release-reason = \"fixture: upstream names its files with no version\"\n",
         );
         let p = plan(&m, PLATFORMS).expect("plans");
         assert_eq!(p.len(), 6, "three tools x two platforms");
@@ -1236,7 +1318,7 @@ mod tests {
         let m = manifest(
             "[[tool]]\nname = \"wac\"\nrepo = \"bytecodealliance/wac\"\n\
              version = \"v0.10.1\"\nlayout = \"raw-per-platform\"\n\
-             asset = \"wac-cli-%T\"\n\
+             asset = \"wac-cli-%T\"\nunbound-release-reason = \"fixture: upstream names its files with no version\"\n\
              [tool.asset-for]\n\
              \"x86_64-unknown-linux-gnu\" = \"wac-cli-x86_64-unknown-linux-musl\"\n",
         );
@@ -1274,7 +1356,7 @@ mod tests {
     #[test]
     fn a_portable_vsix_is_planned_once_and_a_per_platform_one_per_platform() {
         let m = manifest(
-            "[[tool]]\nname = \"t\"\nversion = \"v1\"\n\
+            "[[tool]]\nname = \"t\"\nversion = \"v1\"\nunbound-release-reason = \"fixture: upstream names its files with no version\"\n\
              [[vsix]]\nname = \"rivet-sdlc\"\nrepo = \"pulseengine/rivet\"\n\
              version = \"v0.34.0\"\nasset = \"rivet-sdlc-%V.vsix\"\n\
              [[vsix]]\nname = \"spar-aadl\"\nrepo = \"pulseengine/spar\"\n\
@@ -1389,10 +1471,16 @@ mod tests {
              version = \"1.2.3\"\nrelease = \"v9.9.9\"\n\
              asset = \"probe-%V-%T.bin\"\nlayout = \"raw-per-platform\"\n\
              unverified-reason = \"v9.9.9 upstream publishes nothing\"\n\
-             upstream-sums = \"sha256.sum\"\n",
+             upstream-sums = \"sha256.sum\"\n\
+             unbound-release-reason = \"probe names no release\"\n",
         );
         let p = plan(&m, PLATFORMS).expect("plans");
         let f = p.first().expect("at least one payload");
+        assert_eq!(
+            f.unbound_release_reason.as_deref(),
+            Some("probe names no release"),
+            "`unbound-release-reason` is inert"
+        );
 
         assert_eq!(f.repo, "acme/hub", "`repo` is inert");
         assert_eq!(f.name, "probed", "`binary` is inert");
@@ -1426,7 +1514,7 @@ mod tests {
 
         let explicit = manifest(
             "[[tool]]\nname = \"musl\"\nrepo = \"m/m\"\nversion = \"1.0.0\"\n\
-             layout = \"raw-per-platform\"\nasset = \"m-%T\"\n\
+             layout = \"raw-per-platform\"\nasset = \"m-%T\"\nunbound-release-reason = \"fixture: upstream names its files with no version\"\n\
              [tool.asset-for]\n\"x86_64-unknown-linux-gnu\" = \"m-musl\"\n",
         );
         let ep = plan(&explicit, PLATFORMS).expect("plans");
@@ -1579,7 +1667,7 @@ mod tests {
         );
         let bare = manifest(
             "[[tool]]\nname = \"gale\"\nversion = \"v0.1.0\"\nlayout = \"zephyr-module\"\n\
-             asset = \"gale.tar.gz\"\n",
+             asset = \"gale.tar.gz\"\nunbound-release-reason = \"fixture: upstream names its files with no version\"\n",
         );
         assert_eq!(plan(&bare, PLATFORMS).unwrap()[0].allow_pip, None);
     }
@@ -1812,7 +1900,7 @@ mod tests {
     #[test]
     fn a_raw_tool_without_a_template_still_varies_by_platform() {
         let m = manifest(
-            "[[tool]]\nname = \"thing\"\nversion = \"v1\"\nlayout = \"raw-per-platform\"\n",
+            "[[tool]]\nname = \"thing\"\nversion = \"v1\"\nlayout = \"raw-per-platform\"\nunbound-release-reason = \"fixture: upstream names its files with no version\"\n",
         );
         let p = plan(&m, PLATFORMS).expect("plans");
         assert_eq!(p.len(), 2);
@@ -2015,7 +2103,7 @@ mod tests {
         )
         .expect_err("refuses");
         assert!(
-            matches!(&err, PlanError::PgpSumsAssetNotVersioned { asset, .. } if asset == "t-%T.tar.gz"),
+            matches!(&err, PlanError::AssetNotVersioned { asset, .. } if asset == "t-%T.tar.gz"),
             "{err}"
         );
         let msg = err.to_string();
@@ -2061,7 +2149,7 @@ mod tests {
         )
         .expect_err("refuses");
         assert!(
-            matches!(&err, PlanError::PgpSumsAssetNotVersioned { asset, .. } if asset == "t-%T"),
+            matches!(&err, PlanError::AssetNotVersioned { asset, .. } if asset == "t-%T"),
             "{err}"
         );
     }
@@ -2080,7 +2168,7 @@ mod tests {
         )
         .expect_err("refuses");
         assert!(
-            matches!(&err, PlanError::PgpSumsAssetNotVersioned { asset, .. } if asset == "t-darwin.tar.gz"),
+            matches!(&err, PlanError::AssetNotVersioned { asset, .. } if asset == "t-darwin.tar.gz"),
             "{err}"
         );
     }
@@ -2146,7 +2234,7 @@ mod tests {
         ] {
             let err = signed_tool(v, None, "t-%V.tar.gz", "").expect_err(v);
             assert!(
-                matches!(&err, PlanError::PgpSumsMovingTag { what: "version", value, .. } if value == v),
+                matches!(&err, PlanError::MovingRelease { what: "version", value, .. } if value == v),
                 "{v:?}: {err}"
             );
             assert!(err.to_string().contains("older"), "{err}");
@@ -2159,7 +2247,7 @@ mod tests {
         for r in ["latest", "nightly", "stable", "main"] {
             let err = signed_tool("1.2.3", Some(r), "t-%R.tar.gz", "").expect_err(r);
             assert!(
-                matches!(&err, PlanError::PgpSumsMovingTag { what: "release", value, .. } if value == r),
+                matches!(&err, PlanError::MovingRelease { what: "release", value, .. } if value == r),
                 "{r}: {err}"
             );
         }
@@ -2180,7 +2268,7 @@ mod tests {
             PLATFORMS,
         )
         .expect_err("refuses");
-        assert!(matches!(err, PlanError::PgpSumsMovingTag { .. }), "{err}");
+        assert!(matches!(err, PlanError::MovingRelease { .. }), "{err}");
     }
 
     /// Versions and dates that DO name a release are accepted.
@@ -2354,5 +2442,216 @@ mod tests {
         ] {
             assert!(names_a_release(ok), "{ok:?} names one release");
         }
+    }
+
+    // ------------------- every rung: a proof is bound to the release it is for
+
+    /// A manifest with one tool and NO pgp declaration: ingestion goes through
+    /// cosign-sums, build-provenance or upstream-sums, none of which says which
+    /// release a proof is for.
+    fn bare_tool(version: &str, asset: &str, extra: &str) -> Result<Vec<PayloadPlan>, PlanError> {
+        plan(
+            &manifest(&format!(
+                "[[tool]]\nname = \"t\"\nversion = \"{version}\"\nasset = \"{asset}\"\n{extra}"
+            )),
+            PLATFORMS,
+        )
+    }
+
+    /// REPLAY at plan time, for the rungs that were never bound: a versionless
+    /// asset template lets an older release's validly proven bytes stand in
+    /// for the newer tag.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_versionless_asset_template_is_refused_on_every_rung() {
+        for extra in [
+            "",
+            "upstream-sums = \"sha256.sum\"\n",
+            "upstream-sums = \"sha256.sum\"\nlayout = \"raw-per-platform\"\n",
+        ] {
+            let err = bare_tool("v1.0.0", "t-%T.tar.gz", extra).expect_err("refuses");
+            assert!(
+                matches!(&err, PlanError::AssetNotVersioned { asset, .. } if asset == "t-%T.tar.gz"),
+                "{extra:?}: {err}"
+            );
+        }
+        // The default raw template, and a versionless `asset-for` override.
+        let err = plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"v1.0.0\"\nlayout = \"raw-per-platform\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(matches!(&err, PlanError::AssetNotVersioned { asset, .. } if asset == "t-%T"));
+        let err = bare_tool(
+            "v1.0.0",
+            "t-%V-%T.tar.gz",
+            "[tool.asset-for]\naarch64-apple-darwin = \"t-darwin.tar.gz\"\n",
+        )
+        .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::AssetNotVersioned { asset, .. } if asset == "t-darwin.tar.gz"),
+            "{err}"
+        );
+        // A versioned template, either placeholder, is accepted, and so is the
+        // default tarball template.
+        bare_tool("v1.0.0", "t-%V-%T.tar.gz", "").expect("%V binds");
+        bare_tool("v1.0.0", "t-%R-%T.tar.gz", "").expect("%R binds");
+        plan(
+            &manifest("[[tool]]\nname = \"t\"\nversion = \"v1.0.0\"\n"),
+            PLATFORMS,
+        )
+        .expect("the default tarball template embeds the version");
+    }
+
+    /// Template TEXT proves nothing when the value is a moving tag.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_moving_version_is_refused_on_every_rung() {
+        for v in ["latest", "nightly", "v4", "3.x", "main", "1.2.3-latest"] {
+            let err = bare_tool(v, "t-%V-%T.tar.gz", "").expect_err("refuses");
+            assert!(
+                matches!(&err, PlanError::MovingRelease { what: "version", value, .. } if value == v),
+                "{v}: {err}"
+            );
+        }
+        let err = plan(
+            &manifest(
+                "[[tool]]\nname = \"t\"\nversion = \"1.2.3\"\nrelease = \"stable\"\n\
+                 asset = \"t-%R-%T.tar.gz\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::MovingRelease { what: "release", value, .. } if value == "stable"),
+            "{err}"
+        );
+        // The default tarball template embeds the VERSION, so a moving one is
+        // refused there too.
+        let err = plan(
+            &manifest("[[tool]]\nname = \"t\"\nversion = \"latest\"\n"),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(matches!(err, PlanError::MovingRelease { .. }), "{err}");
+    }
+
+    /// An entry that states why it cannot be bound goes through, carries the
+    /// reason, and is not a licence for the entries around it.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_unbound_release_reason_lets_the_entry_through_and_is_carried() {
+        let why = "upstream names its binaries with no version; tracked in acme/t#4";
+        let p = bare_tool(
+            "v1.0.0",
+            "t-%T",
+            &format!("unbound-release-reason = \"{why}\"\n"),
+        )
+        .expect("a recorded reason lets it through");
+        assert!(
+            p.iter()
+                .all(|x| x.unbound_release_reason.as_deref() == Some(why))
+        );
+        // A moving version too: the reason covers the whole binding.
+        let p = bare_tool(
+            "latest",
+            "t-%T",
+            &format!("unbound-release-reason = \"{why}\"\n"),
+        )
+        .expect("plans");
+        assert_eq!(p[0].unbound_release_reason.as_deref(), Some(why));
+        // Another entry in the same manifest is still refused.
+        let err = plan(
+            &manifest(&format!(
+                "[[tool]]\nname = \"a\"\nversion = \"v1.0.0\"\nasset = \"a-%T\"\n\
+                 unbound-release-reason = \"{why}\"\n\
+                 [[tool]]\nname = \"b\"\nversion = \"v1.0.0\"\nasset = \"b-%T\"\n"
+            )),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(
+            matches!(&err, PlanError::AssetNotVersioned { tool, .. } if tool == "b"),
+            "{err}"
+        );
+        // And a bound entry carries no annotation.
+        let p = bare_tool("v1.0.0", "t-%V-%T.tar.gz", "").expect("plans");
+        assert_eq!(p[0].unbound_release_reason, None);
+    }
+
+    /// An unverified opt-in is its own recorded exception, with its own reason.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_unverified_entry_is_not_subject_to_the_binding_rule() {
+        bare_tool(
+            "133",
+            "b-%R-%T",
+            "unverified-reason = \"v133 publishes nothing; tracked upstream\"\n",
+        )
+        .expect("the opt-in is the recorded exception");
+    }
+
+    /// Extensions, documents and crates ride the same ladder and the same
+    /// replay, and have no opt-out.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn extensions_documents_and_crates_must_name_their_release_too() {
+        let err = plan(
+            &manifest(
+                "[[vsix]]\nname = \"x\"\nrepo = \"o/r\"\nversion = \"v1.0.0\"\nasset = \"x.vsix\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(matches!(err, PlanError::AssetNotVersioned { .. }), "{err}");
+        let err = plan(
+            &manifest(
+                "[[docs]]\nname = \"d\"\nrepo = \"o/r\"\nversion = \"1.0.0\"\nformat = \"rustdoc\"\n\
+                 entry = \"i.html\"\ntitle = \"T\"\ndocuments = \"c\"\nasset = \"docs.tar.gz\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(matches!(err, PlanError::AssetNotVersioned { .. }), "{err}");
+        let err = plan(
+            &manifest(
+                "[[crate]]\nname = \"c\"\nrepo = \"o/r\"\nversion = \"1.0.0\"\nasset = \"c.crate\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(matches!(err, PlanError::AssetNotVersioned { .. }), "{err}");
+        let err = plan(
+            &manifest("[[crate]]\nname = \"c\"\nrepo = \"o/r\"\nversion = \"latest\"\n"),
+            PLATFORMS,
+        )
+        .expect_err("refuses");
+        assert!(matches!(err, PlanError::MovingRelease { .. }), "{err}");
+    }
+
+    /// The warning an operator reads at plan and deposit names every entry
+    /// carried without a release binding, with its reason.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_unbound_warning_names_each_entry_and_its_reason() {
+        let p = plan(
+            &manifest(
+                "[[tool]]\nname = \"a\"\nversion = \"v1.0.0\"\nasset = \"a-%T\"\n\
+                 unbound-release-reason = \"no version upstream\"\n\
+                 [[tool]]\nname = \"b\"\nversion = \"v1.0.0\"\n",
+            ),
+            PLATFORMS,
+        )
+        .expect("plans");
+        let w = unbound_warnings(&p);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].contains("a") && w[0].contains("no version upstream"),
+            "{w:?}"
+        );
+        assert!(!w[0].contains("\"b\""), "{w:?}");
+        assert!(unbound_warnings(&[]).is_empty());
     }
 }
