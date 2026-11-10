@@ -75,3 +75,6 @@ tempfile = "3.27.0"
 # safe Rust; serde_yaml was tried first and fails cargo-deny (it pulls the
 # unmaintained unsafe-libyaml). Test-only, never in a shipped binary.
 yaml-rust2 = "0.13"
+# Compiles the cosign identity regexp in tests, so "this tag in this repo, nothing else" is
+# checked by a regex engine and not by reading the string. Test-only.
+regex = "1.13"

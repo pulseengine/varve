@@ -175,14 +175,21 @@ pub fn release_download_argv(repo: &str, version: &str, asset: &str, dir: &str) 
     ]
 }
 
-/// `gh attestation verify <file> --repo <repo> --format json`
-pub fn attestation_verify_argv(file: &str, repo: &str) -> Vec<String> {
+/// `gh attestation verify <file> --repo <repo> --source-ref refs/tags/<release> --format json`
+///
+/// `--repo` says which repository built the file; it says nothing about which
+/// release, so an older release's attestation would verify for any tag.
+/// `--source-ref` makes gh compare the attestation's source ref with the tag
+/// this release is being ingested under.
+pub fn attestation_verify_argv(file: &str, repo: &str, release: &str) -> Vec<String> {
     vec![
         "attestation".into(),
         "verify".into(),
         file.into(),
         "--repo".into(),
         repo.into(),
+        "--source-ref".into(),
+        format!("refs/tags/{release}"),
         "--format".into(),
         "json".into(),
     ]
@@ -601,10 +608,16 @@ mod tests {
     // rivet: verifies REQ-INGEST-001
     #[test]
     fn attestation_verify_is_bound_to_the_repository_that_must_have_built_it() {
-        let argv = attestation_verify_argv("a.tar.gz", "o/r");
+        let argv = attestation_verify_argv("a.tar.gz", "o/r", "v1.2.3");
         assert!(
             argv.windows(2).any(|w| w == ["--repo", "o/r"]),
             "without --repo any repository's attestation would be accepted: {argv:?}"
+        );
+        // And to the TAG: the repository alone accepts any release's build.
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--source-ref", "refs/tags/v1.2.3"]),
+            "without --source-ref an older release's attestation would be accepted: {argv:?}"
         );
         assert_eq!(&argv[..3], &["attestation", "verify", "a.tar.gz"]);
         // The JSON is what classify_attestation reads; human output would parse
@@ -639,13 +652,15 @@ mod tests {
         let f = Forge::enterprise("ghe.example.com");
         let argv = cosign_verify_argv(
             "b.bundle",
-            &f.identity_prefix("acme/tool"),
+            &f.identity_regexp("acme/tool", "v1.0.0"),
             &f.oidc_issuer,
             "SHA256SUMS.txt",
         );
         let joined = argv.join(" ");
         assert!(
-            joined.contains("https://ghe.example.com/acme/tool/"),
+            joined.contains(
+                r"^https://ghe\.example\.com/acme/tool/\.github/workflows/[^@]+@refs/tags/v1\.0\.0$"
+            ),
             "{joined}"
         );
         assert!(

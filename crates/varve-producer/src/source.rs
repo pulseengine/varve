@@ -245,7 +245,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
             let bundle = self.download(repo, version, BUNDLE)?;
             let argv = gh::cosign_verify_argv(
                 &bundle.to_string_lossy(),
-                &forge.identity_prefix(repo),
+                &forge.identity_regexp(repo, version),
                 &forge.oidc_issuer,
                 &sums.to_string_lossy(),
             );
@@ -306,7 +306,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
             None => crate::ingest::AttestationProbe::NotAttested,
             Some(subject) => {
                 let path = self.download(repo, version, subject)?;
-                let argv = gh::attestation_verify_argv(&path.to_string_lossy(), repo);
+                let argv = gh::attestation_verify_argv(&path.to_string_lossy(), repo, version);
                 let out = self.runner.run("gh", &argv, &gh::forge_env(forge));
                 if out.ok() {
                     self.attestations
@@ -365,7 +365,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
         // digest recorded for these bytes is one an attestation actually
         // vouches for rather than one inherited from a sibling.
         let path = self.download(repo, version, asset)?;
-        let argv = gh::attestation_verify_argv(&path.to_string_lossy(), repo);
+        let argv = gh::attestation_verify_argv(&path.to_string_lossy(), repo, version);
         let out = self.runner.run("gh", &argv, &gh::forge_env(&self.forge));
         if !out.ok() {
             return Err(io_err(
@@ -527,6 +527,156 @@ mod tests {
         // None, not Some(Err(...)): never run, rather than run and failed.
         assert!(p.cosign.is_none(), "{:?}", p.cosign);
         assert_eq!(p.attestation, crate::ingest::AttestationProbe::NotAttested);
+    }
+
+    /// A `cosign` and a `gh attestation` that enforce what they are TOLD to,
+    /// the way the real ones do: cosign matches the identity regexp it is
+    /// handed against the certificate's identity, and gh compares
+    /// `--source-ref` with the attestation's. A double that always said yes (or
+    /// always no) could not tell a tag-pinned command from the old prefix one.
+    struct Certified {
+        inner: FakeGh,
+        /// The signing workflow in the certificate.
+        identity: String,
+        /// The ref the attestation was built from.
+        source_ref: String,
+    }
+
+    const ONE_DIGEST: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
+    impl CommandRunner for Certified {
+        fn run(&self, program: &str, args: &[String], env: &[(String, String)]) -> RunOutput {
+            if program == "cosign" {
+                let re = flag(args, "--certificate-identity-regexp").expect("an identity");
+                let re = regex::Regex::new(re).expect("the regexp compiles");
+                return if re.is_match(&self.identity) {
+                    out(0, "Verified OK", "")
+                } else {
+                    out(
+                        1,
+                        "",
+                        "none of the expected identities matched what was in the certificate",
+                    )
+                };
+            }
+            if program == "gh" && args.first().map(String::as_str) == Some("attestation") {
+                return if flag(args, "--source-ref") == Some(self.source_ref.as_str()) {
+                    out(
+                        0,
+                        &format!(
+                            r#"[{{"verificationResult":{{
+                              "statement":{{"subject":[{{"name":"one.tar.gz","digest":{{"sha256":"{ONE_DIGEST}"}}}}]}},
+                              "signature":{{"certificate":{{
+                                "buildSignerURI":"https://github.com/o/r/.github/workflows/release.yml@{}",
+                                "sourceRepositoryDigest":"abc"}}}}}}}}]"#,
+                            self.source_ref
+                        ),
+                        "",
+                    )
+                } else {
+                    out(
+                        1,
+                        "",
+                        "verifying with issuer \"sigstore.dev\": the source ref does not match",
+                    )
+                };
+            }
+            self.inner.run(program, args, env)
+        }
+    }
+
+    fn certified(listing: &[&str], identity: &str, source_ref: &str) -> Certified {
+        Certified {
+            inner: FakeGh::new()
+                .listing(listing)
+                .file(SUMS, SUMS_TEXT.as_bytes())
+                .file(BUNDLE, b"bundle")
+                .file("one.tar.gz", b"payload"),
+            identity: identity.into(),
+            source_ref: source_ref.into(),
+        }
+    }
+
+    fn ladder_at(
+        runner: Certified,
+        repo: &str,
+        tag: &str,
+    ) -> Result<crate::ingest::Accepted, crate::ingest::IngestError> {
+        let dir = scratch("bound-ladder");
+        let forge = Forge::github_com();
+        let src = GhSource::new(runner, forge.clone(), &*dir);
+        let probe = src.probe(&forge, repo, tag).expect("probes");
+        crate::ingest::choose(&forge, repo, tag, &probe, &BTreeMap::new(), None)
+    }
+
+    const SIGNED_AT_V1: &str =
+        "https://github.com/o/r/.github/workflows/release.yml@refs/tags/v1.0.0";
+
+    /// Rung 1: sums signed for v1.0.0 are refused when presented as v2.0.0,
+    /// accepted as v1.0.0, and refused when the signing workflow belongs to a
+    /// different repository at the same tag.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn cosign_sums_signed_for_one_release_are_refused_for_another() {
+        let listing = [SUMS, BUNDLE, "one.tar.gz"];
+        let older = ladder_at(certified(&listing, SIGNED_AT_V1, ""), "o/r", "v2.0.0");
+        assert!(
+            matches!(
+                &older,
+                Err(crate::ingest::IngestError::ProofRejected { .. })
+            ),
+            "an older release's signature must not vouch for a newer tag: {older:?}"
+        );
+        let same = ladder_at(certified(&listing, SIGNED_AT_V1, ""), "o/r", "v1.0.0")
+            .expect("the same tag verifies");
+        assert_eq!(same.mechanism, crate::ingest::Mechanism::CosignSums);
+        assert!(
+            same.asserts.contains("v1.0.0"),
+            "the record names the release it was bound to: {}",
+            same.asserts
+        );
+        let elsewhere = SIGNED_AT_V1.replace("/o/r/", "/o/other/");
+        let other = ladder_at(certified(&listing, &elsewhere, ""), "o/r", "v1.0.0");
+        assert!(
+            matches!(
+                &other,
+                Err(crate::ingest::IngestError::ProofRejected { .. })
+            ),
+            "another repository's workflow at the same tag must be refused: {other:?}"
+        );
+        let branch = SIGNED_AT_V1.replace("refs/tags/v1.0.0", "refs/heads/main");
+        let on_a_branch = ladder_at(certified(&listing, &branch, ""), "o/r", "v1.0.0");
+        assert!(
+            matches!(
+                &on_a_branch,
+                Err(crate::ingest::IngestError::ProofRejected { .. })
+            ),
+            "a branch is not a release: {on_a_branch:?}"
+        );
+    }
+
+    /// Rung 2: an attestation built from v1.0.0 is refused for v2.0.0 because
+    /// gh is told `--source-ref refs/tags/v2.0.0`.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn build_provenance_for_one_release_is_refused_for_another() {
+        let listing = ["one.tar.gz"];
+        let older = ladder_at(certified(&listing, "", "refs/tags/v1.0.0"), "o/r", "v2.0.0");
+        assert!(
+            matches!(
+                &older,
+                Err(crate::ingest::IngestError::ProofRejected { .. })
+            ),
+            "an older release's attestation must not vouch for a newer tag: {older:?}"
+        );
+        let same = ladder_at(certified(&listing, "", "refs/tags/v1.0.0"), "o/r", "v1.0.0")
+            .expect("the same tag verifies");
+        assert_eq!(same.mechanism, crate::ingest::Mechanism::BuildProvenance);
+        assert!(
+            same.asserts.contains("refs/tags/v1.0.0"),
+            "the record names the release it was bound to: {}",
+            same.asserts
+        );
     }
 
     fn scratch(name: &str) -> crate::testscratch::Scratch {

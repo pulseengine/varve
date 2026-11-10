@@ -501,7 +501,12 @@ pub fn choose(
             return Ok(Accepted {
                 mechanism: Mechanism::CosignSums,
                 signer: Some(signer),
-                asserts,
+                // The probe pinned the certificate identity to this tag
+                // (`Forge::identity_regexp`); the record says so.
+                asserts: format!(
+                    "{asserts}; bound to release {version}: the signing workflow's identity \
+                     was required to be refs/tags/{version}"
+                ),
                 signing_key: None,
             });
         }
@@ -520,7 +525,11 @@ pub fn choose(
             return Ok(Accepted {
                 mechanism: Mechanism::BuildProvenance,
                 signer: Some(signer),
-                asserts,
+                // `gh attestation verify --source-ref refs/tags/<tag>`.
+                asserts: format!(
+                    "{asserts}; bound to release {version}: the attestation's source ref was \
+                     required to be refs/tags/{version}"
+                ),
                 signing_key: None,
             });
         }
@@ -569,7 +578,14 @@ pub fn choose(
             return Ok(Accepted {
                 mechanism: Mechanism::UpstreamSums,
                 signer: Some(signer),
-                asserts,
+                // Nothing signed this list, so nothing proves which release
+                // it belongs to. The only binding is that every asset name
+                // must carry the release (checked at plan time and again at
+                // ingestion), which is a name heuristic.
+                asserts: format!(
+                    "{asserts}; release {version}: bound only by the asset name carrying it \
+                     (a name heuristic, not a proof)"
+                ),
                 signing_key: None,
             });
         }
@@ -686,6 +702,56 @@ mod tests {
         assert_eq!(
             a.signer.as_deref(),
             Some("https://github.com/pulseengine/rivet/")
+        );
+    }
+
+    /// Each rung records WHICH release it was bound to, so a reader of the
+    /// signed layer can see the proof was for this tag and how strong that
+    /// binding is: the cosign identity and the attestation's source ref are
+    /// pinned to the tag, the unsigned list only by the asset's name.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn every_rung_records_the_release_it_was_bound_to() {
+        let f = Forge::github_com();
+        let cosign = choose(&f, "o/r", "v3.1.0", &sums_ok(), &no_optins(), None).expect("accepts");
+        assert!(
+            cosign.asserts.contains("refs/tags/v3.1.0"),
+            "{}",
+            cosign.asserts
+        );
+        let attested = ReleaseProbe {
+            published: vec!["a.tar.gz".into()],
+            attestation: AttestationProbe::Verified {
+                signer: "s".into(),
+                commit: "c".into(),
+            },
+            ..Default::default()
+        };
+        let prov = choose(&f, "o/r", "v3.1.0", &attested, &no_optins(), None).expect("accepts");
+        assert!(
+            prov.asserts.contains("refs/tags/v3.1.0"),
+            "{}",
+            prov.asserts
+        );
+        let unsigned = ReleaseProbe {
+            published: vec!["sha256.sum".into()],
+            attestation: AttestationProbe::NotAttested,
+            ..Default::default()
+        };
+        let up = choose(
+            &f,
+            "o/r",
+            "v3.1.0",
+            &unsigned,
+            &no_optins(),
+            Some("sha256.sum"),
+        )
+        .expect("accepts");
+        assert!(up.asserts.contains("v3.1.0"), "{}", up.asserts);
+        assert!(
+            up.asserts.contains("asset name"),
+            "the weaker binding is said to be the name only: {}",
+            up.asserts
         );
     }
 
