@@ -542,13 +542,19 @@ jobs:
           # cancelled at 90:32 on varve#275 (it had taken 87 minutes at 635).
           # These are the modules that talk to a forge or a registry: 306
           # mutants here, 397 left below, so each finishes well inside the cap.
+          # SPLIT AGAIN at v0.47.0, measured: on varve#344 this shard held 340
+          # mutants and was cancelled at 90:18. The ingestion half below holds
+          # 147 (orchestrate 79, ingest 45, deposit 23), the forge half 193
+          # (gh 100, source 47, registry 33, forge 13).
           - shard: varve-producer (forge)
             files: >-
               -f crates/varve-producer/src/gh.rs
-              -f crates/varve-producer/src/orchestrate.rs
               -f crates/varve-producer/src/source.rs
               -f crates/varve-producer/src/registry.rs
               -f crates/varve-producer/src/forge.rs
+          - shard: varve-producer (ingest)
+            files: >-
+              -f crates/varve-producer/src/orchestrate.rs
               -f crates/varve-producer/src/deposit.rs
               -f crates/varve-producer/src/ingest.rs
           # SPLIT AGAIN at v0.47.0, measured. On varve#344 (the pgp-sums rung)
