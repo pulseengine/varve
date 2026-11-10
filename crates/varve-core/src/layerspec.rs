@@ -443,6 +443,10 @@ pub struct ManifestDocs {
     /// The release tag to fetch, when it differs from the payload's version.
     #[serde(rename = "release", default)]
     pub release: Option<String>,
+    /// Why this entry's assets are not tied to their release by name; see
+    /// [`ManifestTool::unbound_release_reason`]. Signed into the layer.
+    #[serde(rename = "unbound-release-reason", default)]
+    pub unbound_release_reason: Option<String>,
 }
 
 /// A Rust crate carried BY the layer, as the `.crate` file a release publishes
@@ -474,6 +478,10 @@ pub struct ManifestCrate {
     /// `v0.36.0` and publishes the crate as `0.36.0`.
     #[serde(rename = "release", default)]
     pub release: Option<String>,
+    /// Why this entry's assets are not tied to their release by name; see
+    /// [`ManifestTool::unbound_release_reason`]. Signed into the layer.
+    #[serde(rename = "unbound-release-reason", default)]
+    pub unbound_release_reason: Option<String>,
 }
 
 /// Another realm's layer, composed into this one (REQ-COMPOSE-001).
@@ -915,6 +923,21 @@ pub fn parse_layer_manifest(text: &str) -> Result<LayerManifest, LayerSpecError>
         toml::from_str(text).map_err(|e| LayerSpecError::Parse(e.to_string()))?;
     check_includes(&manifest.includes)?;
     check_unverified(&manifest.tools)?;
+    let others = manifest
+        .docs
+        .iter()
+        .map(|d| (&d.name, &d.unbound_release_reason))
+        .chain(
+            manifest
+                .crates
+                .iter()
+                .map(|c| (&c.name, &c.unbound_release_reason)),
+        );
+    for (name, reason) in others {
+        if reason.as_deref().is_some_and(|r| r.trim().is_empty()) {
+            return Err(LayerSpecError::UnboundReleaseWithoutReason { tool: name.clone() });
+        }
+    }
     Ok(manifest)
 }
 
@@ -2559,6 +2582,17 @@ unbound-release-reason=\"upstream names no version\"\n"
                 parse_layer_manifest(&text).unwrap_err(),
                 LayerSpecError::UnboundReleaseWithoutReason { tool: "wac".into() },
                 "{bad}"
+            );
+        }
+        for (table, extra) in [("docs", "format = \"pdf\"\n"), ("crate", "")] {
+            let text = format!(
+                "{HEAD}\n[[{table}]]\nname = \"x\"\nversion = \"1.0.0\"\n{extra}asset = \"a\"\n\
+                 unbound-release-reason = \" \"\n"
+            );
+            assert_eq!(
+                parse_layer_manifest(&text).unwrap_err(),
+                LayerSpecError::UnboundReleaseWithoutReason { tool: "x".into() },
+                "{table}"
             );
         }
         let ok = format!(

@@ -37,11 +37,23 @@ layout) must carry `%V` or `%R`, and the version or release it expands from
 must name exactly one release (`1.2.3`, `v1.2.3`, `2026-10-01`; not `latest`,
 `nightly`, `v4`, `3.x`). A template or value that does not is refused at
 `plan` and `deposit`. The same applies to extension, document and crate
-entries. The rule is not applied to an `unverified` opt-in (which carries its
-own recorded reason) or to a Rust channel (which binds through its own
-manifest version). Ingestion checks again, independently of the plan, that
-each expanded asset name contains the concrete version or release on a token
-boundary.
+entries. The rule is not applied to a Rust channel (which binds through its
+own manifest version) or to an entry that is itself an `unverified` opt-in
+and declares no list. Ingestion checks again, independently of the plan, that
+each expanded asset name contains, on a token boundary, the release tag the
+group is fetched under (or the payload's version, where the plan has shown the
+version and the tag to name the same release). That check runs after the
+release is verified and is skipped only when the release was actually accepted
+as `unverified`: an `unverified-reason` exempts nothing once a signed or listed
+rung vouches for the release. An entry that declares `unverified-reason` and
+also `pgp-sums` or `upstream-sums` is refused at plan time, because the two
+contradict each other.
+
+The payload's `version` and the release tag must also name the same release:
+after dropping a leading `v`, the tag must equal the version or contain it on a
+token boundary (`0.2.2` and `v0.2.2`; not `0.2.2` and `v0.7.2`). A hub that tags
+one release for payloads of several versions (`with-device` 0.2.2 under
+`v0.7.2`) cannot satisfy that and carries `unbound-release-reason`.
 
 This is a **name heuristic**, not a cryptographic binding: a publisher who
 reuses a numbered tag, or who names an older asset after the newer version,
@@ -67,9 +79,10 @@ unbound-release-reason = "upstream names its binaries with no version; tracked i
 
 The reason lets the entry past the plan-time and ingestion name checks, prints a
 warning at `plan` and `deposit`, and is signed into the layer: the entry's
-`proof-asserts` ends with `NOT BOUND TO ITS RELEASE` and the reason in the
-operator's words, so a consumer reads that this entry's proof does not say which
-release it is. It is per entry, never inherited, and an empty reason is refused.
+`proof-asserts` ends with `NOT BOUND TO ITS RELEASE`, says the name binding was
+`WAIVED`, and gives the reason in the operator's words, so a consumer reads that this entry's proof does not say which
+release it is. It is per entry, never inherited, and an empty reason is refused. It is accepted
+on `[[tool]]`, `[[docs]]` and `[[crate]]` entries.
 It can only be written in `layer.toml`; the environment encoding refuses it. It
 does not weaken the cosign and build-provenance ref checks.
 
