@@ -30,6 +30,19 @@ use crate::store::Store;
 /// symlinked or `..`-spelled route to it does not slip through. The same
 /// executable reached through two PATH entries is listed once.
 pub fn on_path(path_var: Option<&OsStr>, tool: &str, shim_dir: &Path) -> Vec<PathBuf> {
+    search_path(path_var, tool, shim_dir, None)
+}
+
+/// [`on_path`], optionally looking at absolute entries only (`Some(cwd)`), and
+/// then not at those inside a repository above `cwd` either. The filter has to
+/// run BEFORE the de-duplication: otherwise a relative spelling of a directory
+/// listed ahead of its absolute one would swallow it.
+fn search_path(
+    path_var: Option<&OsStr>,
+    tool: &str,
+    shim_dir: &Path,
+    absolute_only: Option<&Path>,
+) -> Vec<PathBuf> {
     if tool.is_empty() || tool.contains('/') || tool.contains('\\') {
         return Vec::new();
     }
@@ -37,9 +50,13 @@ pub fn on_path(path_var: Option<&OsStr>, tool: &str, shim_dir: &Path) -> Vec<Pat
         return Vec::new();
     };
     let shim_canon = std::fs::canonicalize(shim_dir).ok();
+    let repos = absolute_only.map(repository_roots).unwrap_or_default();
     let mut out: Vec<PathBuf> = Vec::new();
     let mut seen: Vec<PathBuf> = Vec::new();
     for dir in std::env::split_paths(path_var) {
+        if absolute_only.is_some() && !dir.is_absolute() {
+            continue;
+        }
         let dir = if dir.as_os_str().is_empty() {
             PathBuf::from(".")
         } else {
@@ -47,6 +64,14 @@ pub fn on_path(path_var: Option<&OsStr>, tool: &str, shim_dir: &Path) -> Vec<Pat
         };
         let dir_canon = std::fs::canonicalize(&dir).ok();
         if dir == shim_dir || (dir_canon.is_some() && dir_canon == shim_canon) {
+            continue;
+        }
+        // direnv's `PATH_add bin`: an absolute entry that is the repository's
+        // own, however spelt (symlinks and `..` resolved).
+        if dir_canon
+            .as_deref()
+            .is_some_and(|d| repos.iter().any(|r| d.starts_with(r)))
+        {
             continue;
         }
         let candidate = dir.join(tool);
@@ -290,19 +315,32 @@ pub fn config_path(xdg: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf>
     Some(base.join(USER_CONFIG_FILE))
 }
 
+/// What makes a directory a repository root: varve's own pin, and the marker
+/// of each version-control system a project is likely to live in.
+const REPOSITORY_MARKERS: [&str; 5] = ["varve.toml", ".git", ".hg", ".jj", ".svn"];
+
 /// The repository root above `cwd` that `config` lies inside, if any: the
-/// nearest ancestor holding a `varve.toml` or a `.git` that contains it.
+/// nearest ancestor holding a `varve.toml` or a version-control marker
+/// (`.git`, `.hg`, `.jj`, `.svn`) that contains it.
 /// Both sides are canonicalized, so a symlink (or a `..`) cannot launder a
 /// repository file into a "user" one.
 pub fn repository_holding(config: &Path, cwd: &Path) -> Option<PathBuf> {
     let config = std::fs::canonicalize(config).ok()?;
-    let cwd = std::fs::canonicalize(cwd).ok()?;
+    repository_roots(cwd)
+        .into_iter()
+        .find(|dir| config.starts_with(dir))
+}
+
+/// Every ancestor of `cwd` (canonical, `cwd` itself included) that holds a
+/// repository marker. Empty when `cwd` cannot be resolved.
+fn repository_roots(cwd: &Path) -> Vec<PathBuf> {
+    let Ok(cwd) = std::fs::canonicalize(cwd) else {
+        return Vec::new();
+    };
     cwd.ancestors()
-        .find(|dir| {
-            (dir.join("varve.toml").exists() || dir.join(".git").exists())
-                && config.starts_with(dir)
-        })
+        .filter(|dir| REPOSITORY_MARKERS.iter().any(|m| dir.join(m).exists()))
         .map(Path::to_path_buf)
+        .collect()
 }
 
 /// Why the user configuration did not take effect.
@@ -402,23 +440,119 @@ pub fn ambient_binary(
     tool: &str,
     shim_dir: &Path,
     self_exe: Option<&Path>,
+    cwd: &Path,
 ) -> Option<PathBuf> {
-    on_path(path_var, tool, shim_dir)
+    // ABSOLUTE entries only. An empty entry means the working directory, and
+    // so does `.` or any relative one — and the working directory is the
+    // repository, which could plant a `ghost` for the user to run unknowingly.
+    // An absolute entry inside a repository above `cwd` is skipped for the
+    // same reason (the rule that refuses a repository's configuration).
+    search_path(path_var, tool, shim_dir, Some(cwd))
         .into_iter()
         .find(|p| !is_varve(p, self_exe))
 }
 
+/// How many passthroughs of one tool a single chain of processes may make.
+/// The landing check catches a passthrough that lands on varve itself; a
+/// wrapper script in between hides that, so every chain is also bounded by
+/// count. Legitimate nesting (a recursive `make`) is a handful of levels.
+pub const MAX_PASSTHROUGH_HOPS: u32 = 64;
+
+/// The key an entry of the hop counter is filed under: the name with every
+/// control character escaped, so one name is exactly one line.
+fn hop_key(tool: &str) -> String {
+    tool.escape_default().to_string()
+}
+
+/// The entries of a hop-counter value: (count, key), unparsable lines dropped.
+fn hop_entries(env: Option<&OsStr>) -> Vec<(u32, String)> {
+    let text = env.map(|e| e.to_string_lossy().into_owned());
+    text.as_deref()
+        .unwrap_or("")
+        .lines()
+        .filter_map(|line| {
+            let (n, key) = line.split_once(' ')?;
+            Some((n.parse::<u32>().ok()?, key.to_string()))
+        })
+        .collect()
+}
+
+/// Passthroughs of `tool` already made by the chain that `env` (the value of
+/// the hop-counter variable) describes.
+pub fn hops(env: Option<&OsStr>, tool: &str) -> u32 {
+    let key = hop_key(tool);
+    hop_entries(env)
+        .into_iter()
+        .find(|(_, k)| *k == key)
+        .map_or(0, |(n, _)| n)
+}
+
+/// The hop-counter value to hand to the next process: `env` with `tool`'s
+/// count one higher. Other tools' counts are kept, so A -> B -> A -> B climbs.
+pub fn with_hop(env: Option<&OsStr>, tool: &str) -> String {
+    let key = hop_key(tool);
+    let mut entries = hop_entries(env);
+    match entries.iter_mut().find(|(_, k)| *k == key) {
+        Some((n, _)) => *n = n.saturating_add(1),
+        None => entries.push((1, key)),
+    }
+    entries
+        .iter()
+        .map(|(n, k)| format!("{n} {k}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Format and separator characters that are not `char::is_control` but still
+/// reorder (bidi embeddings, overrides, isolates, marks) or split or hide
+/// (zero-width, line and paragraph separators, the byte-order mark) displayed
+/// text.
+fn reorders_or_splits(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+            | '\u{061c}'
+            | '\u{00ad}'
+            | '\u{180e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0000}'..='\u{e007f}'
+    )
+}
+
+/// `text` with every control character (a newline above all) written as an
+/// escape, so a path or a name cannot split a line it is printed in.
+fn one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() || reorders_or_splits(c) {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The one stderr line a passed-through run prints (REQ-PASSTHROUGH-001
-/// clause 3): the binary, and that it is not the layer's.
+/// clause 3): the binary, and that it is not the layer's. Everything that
+/// came from the environment is escaped so the line stays ONE line.
 pub fn notice(tool: &str, binary: &Path, layer: &str, config: Option<&Path>) -> String {
     let by = match config {
-        Some(c) => format!("allowed by {}", c.display()),
+        Some(c) => format!("allowed by {}", one_line(&c.display().to_string())),
         None => "allowed by your user configuration".to_string(),
     };
     format!(
-        "varve: passthrough: '{tool}' is not part of layer {layer}; running {} outside the \
+        "varve: passthrough: '{}' is not part of layer {}; running {} outside the \
          layer (not verified by varve; {by})",
-        binary.display()
+        one_line(tool),
+        one_line(layer),
+        one_line(&binary.display().to_string())
     )
 }
 
@@ -440,7 +574,14 @@ pub fn active(
     path_var: Option<&OsStr>,
     shim_dir: &Path,
     self_exe: Option<&Path>,
+    cwd: &Path,
 ) -> Vec<Active> {
+    // Folding is ASCII only: with a non-ASCII carried name nothing can be said
+    // to be uncarried, and a non-ASCII candidate has no sound comparison. Both
+    // fail closed, as the shim does.
+    if carried.iter().any(|c| !c.is_ascii()) {
+        return Vec::new();
+    }
     let mut names: Vec<String> = match allow {
         Allow::Nothing => Vec::new(),
         Allow::Everything => shim_names.to_vec(),
@@ -450,9 +591,9 @@ pub fn active(
     names.dedup();
     names
         .into_iter()
-        .filter(|n| !carried.contains(n))
+        .filter(|n| n.is_ascii() && !carried.iter().any(|c| c.eq_ignore_ascii_case(n)))
         .map(|tool| {
-            let binary = ambient_binary(path_var, &tool, shim_dir, self_exe);
+            let binary = ambient_binary(path_var, &tool, shim_dir, self_exe, cwd);
             Active { tool, binary }
         })
         .filter(|a| a.binary.is_some() || !matches!(allow, Allow::Everything))
@@ -744,6 +885,38 @@ mod tests {
 
 #[cfg(test)]
 mod passthrough_tests {
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn hops_are_counted_per_tool_and_survive_interleaving() {
+        let os = |s: &str| std::ffi::OsString::from(s);
+        assert_eq!(hops(None, "ghost"), 0);
+        let one = with_hop(None, "ghost");
+        assert_eq!(hops(Some(&os(&one)), "ghost"), 1);
+        assert_eq!(hops(Some(&os(&one)), "other"), 0);
+        // A -> B -> A -> B: each tool's count keeps climbing.
+        let mut env = String::new();
+        for _ in 0..3 {
+            env = with_hop(Some(&os(&env)), "a");
+            env = with_hop(Some(&os(&env)), "b");
+        }
+        assert_eq!(hops(Some(&os(&env)), "a"), 3);
+        assert_eq!(hops(Some(&os(&env)), "b"), 3);
+        assert_eq!(hops(Some(&os(&env)), "c"), 0);
+        // A name that would split an entry is escaped, not parsed as two.
+        let odd = with_hop(None, "x\n5 y");
+        assert_eq!(hops(Some(&os(&odd)), "x\n5 y"), 1);
+        assert_eq!(hops(Some(&os(&odd)), "y"), 0);
+        // Garbage is ignored, not trusted and not fatal.
+        assert_eq!(hops(Some(&os("junk\n\n-3 ghost\nx ghost")), "ghost"), 0);
+        // The bound is reached after exactly MAX_PASSTHROUGH_HOPS hops.
+        let mut env = String::new();
+        for i in 0..MAX_PASSTHROUGH_HOPS {
+            assert!(hops(Some(&os(&env)), "t") < MAX_PASSTHROUGH_HOPS, "{i}");
+            env = with_hop(Some(&os(&env)), "t");
+        }
+        assert_eq!(hops(Some(&os(&env)), "t"), MAX_PASSTHROUGH_HOPS);
+    }
     use super::*;
     use std::ffi::OsString;
 
@@ -992,22 +1165,43 @@ mod passthrough_tests {
 
         // Only shims on PATH: nothing to run.
         assert_eq!(
-            ambient_binary(Some(&path), "ghost", shims.path(), Some(&varve)),
+            ambient_binary(
+                Some(&path),
+                "ghost",
+                shims.path(),
+                Some(&varve),
+                Path::new("/")
+            ),
             None
         );
         // Another root's shim is skipped by identity, the real one is found.
         let ghost = exe(real.path(), "ghost");
         let path = std::env::join_paths([other_shims.path(), real.path()]).unwrap();
         assert_eq!(
-            ambient_binary(Some(&path), "ghost", shims.path(), Some(&varve)),
+            ambient_binary(
+                Some(&path),
+                "ghost",
+                shims.path(),
+                Some(&varve),
+                Path::new("/")
+            ),
             Some(ghost.clone())
         );
         // Without a known self, only the shim directory itself is skipped.
         assert_eq!(
-            ambient_binary(Some(&path), "ghost", other_shims.path(), None),
+            ambient_binary(
+                Some(&path),
+                "ghost",
+                other_shims.path(),
+                None,
+                Path::new("/")
+            ),
             Some(ghost)
         );
-        assert_eq!(ambient_binary(None, "ghost", shims.path(), None), None);
+        assert_eq!(
+            ambient_binary(None, "ghost", shims.path(), None, Path::new("/")),
+            None
+        );
     }
 
     // rivet: verifies REQ-PASSTHROUGH-001
@@ -1042,7 +1236,17 @@ mod passthrough_tests {
         let path = os(bin.path());
         let carried = vec!["probe".to_string()];
         let names = vec!["ghost".to_string(), "probe".to_string(), "mute".to_string()];
-        let act = |allow: &Allow| active(allow, &carried, &names, Some(&path), shims.path(), None);
+        let act = |allow: &Allow| {
+            active(
+                allow,
+                &carried,
+                &names,
+                Some(&path),
+                shims.path(),
+                None,
+                Path::new("/"),
+            )
+        };
 
         assert!(act(&Allow::Nothing).is_empty());
         // Listed: carried tools drop out (clause 2); an unanswered name stays.
@@ -1067,5 +1271,195 @@ mod passthrough_tests {
                 binary: Some(ghost)
             }]
         );
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_ascii_is_never_active() {
+        let shims = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        exe(bin.path(), "ghost");
+        exe(bin.path(), "\u{d1}");
+        let path = os(bin.path());
+        let act = |carried: &[&str], names: &[&str]| {
+            active(
+                &Allow::Everything,
+                &carried.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                &names.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                Some(&path),
+                shims.path(),
+                None,
+                Path::new("/"),
+            )
+            .into_iter()
+            .map(|a| a.tool)
+            .collect::<Vec<_>>()
+        };
+        // A non-ASCII candidate is skipped, an ASCII one stays.
+        assert_eq!(act(&[], &["ghost", "\u{d1}"]), ["ghost"]);
+        // A non-ASCII carried name makes nothing certain: nothing is active.
+        assert!(act(&["\u{f1}"], &["ghost"]).is_empty());
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[cfg(unix)]
+    #[test]
+    fn a_carried_name_blocks_a_spelling_in_another_case() {
+        let shims = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        exe(bin.path(), "PROBE");
+        let path = os(bin.path());
+        let carried = vec!["probe".to_string()];
+        let names = vec!["PROBE".to_string()];
+        assert!(
+            active(
+                &Allow::Everything,
+                &carried,
+                &names,
+                Some(&path),
+                shims.path(),
+                None,
+                Path::new("/")
+            )
+            .is_empty()
+        );
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn the_notice_escapes_control_characters_and_stays_one_line() {
+        let n = notice(
+            "gh\nost",
+            Path::new("/opt/a\nb\r/ghost\u{1b}[0m"),
+            "2026\n.07",
+            Some(Path::new("/u/c\nonfig.toml")),
+        );
+        assert!(!n.chars().any(char::is_control), "{n:?}");
+        assert!(n.contains("/opt/a\\nb\\r/ghost\\u{1b}[0m"), "{n}");
+        assert!(n.contains("gh\\nost"), "{n}");
+        assert!(n.contains("2026\\n.07"), "{n}");
+        assert!(n.contains("/u/c\\nonfig.toml"), "{n}");
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn the_notice_escapes_format_and_separator_characters_too() {
+        // Bidi controls reorder what a terminal shows; zero-width and line or
+        // paragraph separators split or hide text. None is `is_control`.
+        let hostile = [
+            '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}',
+            '\u{202c}', '\u{202d}', '\u{202e}', '\u{2028}', '\u{2029}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{feff}',
+        ];
+        // Also: the Arabic letter mark, the soft hyphen, the word joiner and
+        // invisible operators, the Mongolian vowel separator, the interlinear
+        // annotation controls, and the whole tag block (invisible "ASCII").
+        let more = [0x61c_u32, 0xad, 0x180e]
+            .into_iter()
+            .chain(0x2060..=0x2064)
+            .chain(0xfff9..=0xfffb)
+            .chain(0xe0000..=0xe007f)
+            .map(|u| char::from_u32(u).unwrap());
+        for c in hostile.into_iter().chain(more) {
+            let name = format!("a{c}b");
+            let n = notice(&name, Path::new("/opt/x"), "2026.07.0", None);
+            assert!(!n.contains(c), "U+{:04X} survived: {n:?}", c as u32);
+            assert!(n.contains(&format!("a{}b", c.escape_default())), "{n}");
+        }
+        // The sets end where they end: neighbours are ordinary text.
+        for u in [
+            0x61b_u32, 0x61d, 0xac, 0xae, 0x180d, 0x180f, 0x205f, 0x2065, 0xfff8, 0xfffc, 0xe0080,
+        ] {
+            let c = char::from_u32(u).unwrap();
+            let n = notice(&format!("a{c}b"), Path::new("/opt/x"), "2026.07.0", None);
+            assert!(n.contains(c), "U+{u:04X} was escaped: {n:?}");
+        }
+        // Ordinary non-ASCII text is left readable.
+        let n = notice("g\u{f1}", Path::new("/opt/x"), "2026.07.0", None);
+        assert!(n.contains("g\u{f1}"), "{n}");
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[cfg(unix)]
+    #[test]
+    fn the_ambient_search_skips_absolute_entries_inside_the_repository() {
+        let shims = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(repo.path().join("varve.toml"), "").unwrap();
+        let inside = repo.path().join("bin");
+        std::fs::create_dir_all(&inside).unwrap();
+        exe(&inside, "ghost");
+        let outside = tempfile::tempdir().unwrap();
+        let real = exe(outside.path(), "ghost");
+        let link = outside.path().join("link");
+        std::os::unix::fs::symlink(&inside, &link).unwrap();
+        let find = |dirs: &[&Path], cwd: &Path| {
+            ambient_binary(
+                Some(&std::env::join_paths(dirs).unwrap()),
+                "ghost",
+                shims.path(),
+                None,
+                cwd,
+            )
+        };
+        // Inside the repository: skipped, whether spelt directly or by a link;
+        // the next entry is used.
+        assert_eq!(
+            find(&[&inside, outside.path()], repo.path()),
+            Some(real.clone())
+        );
+        assert_eq!(find(&[&link, outside.path()], repo.path()), Some(real));
+        assert_eq!(find(&[&inside], repo.path()), None);
+        assert_eq!(find(&[&link], &inside), None);
+        // The same directory is searched when cwd is in no repository.
+        assert_eq!(find(&[&inside], Path::new("/")), Some(inside.join("ghost")));
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[cfg(unix)]
+    #[test]
+    fn the_ambient_search_skips_relative_path_entries() {
+        // A relative entry that DOES resolve to a real ghost (it climbs to the
+        // root and back down) is still the working directory's business, not
+        // PATH's: only the absolute spelling of the same directory is used.
+        let shims = tempfile::tempdir().unwrap();
+        let real = tempfile::tempdir().unwrap();
+        let ghost = exe(real.path(), "ghost");
+        let climb = format!(
+            "{}{}",
+            "../".repeat(64),
+            real.path().to_str().unwrap().trim_start_matches('/')
+        );
+        assert!(Path::new(&climb).join("ghost").exists());
+        let relative = OsString::from(&climb);
+        assert_eq!(
+            ambient_binary(Some(&relative), "ghost", shims.path(), None, Path::new("/")),
+            None
+        );
+        let both = std::env::join_paths([OsString::from(&climb), os(real.path())]).unwrap();
+        assert_eq!(
+            ambient_binary(Some(&both), "ghost", shims.path(), None, Path::new("/")),
+            Some(ghost)
+        );
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn every_common_version_control_marker_makes_a_directory_a_repository() {
+        for marker in [".git", ".hg", ".jj", ".svn", "varve.toml"] {
+            let repo = tempfile::tempdir().unwrap();
+            let repo_path = std::fs::canonicalize(repo.path()).unwrap();
+            let cfg = write_config(&repo_path.join("home/.config"), "");
+            let work = repo_path.join("work");
+            std::fs::create_dir_all(&work).unwrap();
+            assert_eq!(repository_holding(&cfg, &work), None, "no marker yet");
+            std::fs::create_dir(repo_path.join(marker)).unwrap();
+            assert_eq!(
+                repository_holding(&cfg, &work),
+                Some(repo_path.clone()),
+                "{marker} was not recognised as a repository"
+            );
+        }
     }
 }

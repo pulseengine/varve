@@ -2112,11 +2112,11 @@ fn ambient_report(ctx: &ProjectCtx) -> AmbientReport {
     };
     // Which names the layer carries decides which passthroughs are inert: a
     // carried tool is never passed through, whatever the file says.
-    let mut carried: Vec<String> = Vec::new();
-    if let Ok(resolved) = varve_core::resolve(&ctx.pin, &ctx.store) {
-        carried.extend(resolved.tools.iter().map(|(n, _)| n.clone()));
-        carried.extend(resolved.qualified.iter().map(|(p, _)| p.tool.clone()));
-    }
+    // Where that cannot be determined nothing is reported active (fail closed).
+    let carried: Option<Vec<String>> = varve_core::resolve(&ctx.pin, &ctx.store)
+        .ok()
+        .and_then(|r| varve_core::carried_tool_names(&ctx.pin, &r.layer, &ctx.store).ok())
+        .map(|names| names.into_iter().collect());
     let shim_dir = ctx.base_root.join("shims");
     let shim_names: Vec<String> = std::fs::read_dir(&shim_dir)
         .map(|rd| {
@@ -2126,16 +2126,17 @@ fn ambient_report(ctx: &ProjectCtx) -> AmbientReport {
         })
         .unwrap_or_default();
     let me = std::env::current_exe().ok();
-    let active = match &user {
-        Ok(u) => varve_core::shimfallback::active(
+    let active = match (&user, &carried) {
+        (Ok(u), Some(carried)) => varve_core::shimfallback::active(
             &u.allow,
-            &carried,
+            carried,
             &shim_names,
             std::env::var_os("PATH").as_deref(),
             &shim_dir,
             me.as_deref(),
+            &std::env::current_dir().unwrap_or_default(),
         ),
-        Err(_) => Vec::new(),
+        _ => Vec::new(),
     };
     let json = serde_json::json!({
         "allowed": allowed,
@@ -2203,6 +2204,35 @@ fn launch(mut cmd: std::process::Command, tool: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Set to the tool name in the environment of a passed-through process, with
+/// [`PASSTHROUGH_EXE`] naming the binary it was passed through to. Children
+/// inherit both, so the pair alone cannot mean "loop": a passed-through `make`
+/// that runs `make -C sub` is legitimate nesting. It is a loop only when the
+/// process now running IS that binary, i.e. the passthrough landed on a copy
+/// of varve.
+const PASSTHROUGH_MARK: &str = "VARVE_PASSTHROUGH";
+/// The canonical path of the binary a passthrough exec'd.
+const PASSTHROUGH_EXE: &str = "VARVE_PASSTHROUGH_EXE";
+/// Per-tool count of passthroughs in this chain of processes. The landing
+/// check cannot see through a wrapper script that execs a second varve, so
+/// every chain is also bounded by [`varve_core::shimfallback::MAX_PASSTHROUGH_HOPS`].
+const PASSTHROUGH_HOPS: &str = "VARVE_PASSTHROUGH_HOPS";
+
+/// Whether this process is the binary an earlier passthrough for `tool` ran.
+fn passthrough_landed_on_me(tool: &str) -> bool {
+    let marked = std::env::var_os(PASSTHROUGH_MARK);
+    if marked.as_deref() != Some(std::ffi::OsStr::new(tool)) {
+        return false;
+    }
+    let (Some(recorded), Ok(me)) = (
+        std::env::var_os(PASSTHROUGH_EXE),
+        std::env::current_exe().and_then(std::fs::canonicalize),
+    ) else {
+        return false;
+    };
+    std::path::Path::new(&recorded) == me
+}
+
 fn run_tool(
     store: &Store,
     override_layer: Option<&str>,
@@ -2261,33 +2291,91 @@ fn run_tool(
         // outside every repository says so. The layer is asked first, so a
         // carried tool never even reads that file.
         let mut config_note = String::new();
-        let carried = resolved.qualified.iter().any(|(p, _)| p.tool == tool);
-        if via_shim && override_layer.is_none() && !carried {
+        //
+        // "Carries" is the whole composition's manifests, not the names the pin
+        // exposes, and it is asked case-insensitively; a layer whose manifests
+        // cannot be read is treated as carrying the tool (fail closed).
+        let passthrough_possible = via_shim && override_layer.is_none();
+        let carried = if passthrough_possible && !tool.is_ascii() {
+            // Folding is ASCII only; a filesystem may fold more, so a
+            // non-ASCII request has no sound comparison. Refuse.
+            Err(format!(
+                "the requested name ({}) is not ASCII and cannot be compared safely \
+                 with what the layer carries",
+                tool.escape_default()
+            ))
+        } else if passthrough_possible {
+            varve_core::carried_tool_names(&pin, &resolved.layer, &ctx.store)
+                .map(|names| names.contains(&tool.to_ascii_lowercase()))
+        } else {
+            Ok(true)
+        };
+        if passthrough_possible && carried != Ok(true) {
             match user_passthrough() {
-                Ok(user) if user.allow.permits(tool) => {
-                    let me = std::env::current_exe().ok();
-                    if let Some(binary) = varve_core::shimfallback::ambient_binary(
-                        std::env::var_os("PATH").as_deref(),
-                        tool,
-                        &store.root().join("shims"),
-                        me.as_deref(),
-                    ) {
-                        eprintln!(
-                            "{}",
-                            varve_core::shimfallback::notice(
-                                tool,
-                                &binary,
-                                &resolved.layer.layer.to_string(),
-                                user.source.as_deref(),
-                            )
+                Ok(user) if user.allow.permits(tool) => match &carried {
+                    Err(why) => {
+                        config_note = format!(
+                            "\nNote: passthrough is refused because what the layer carries \
+                             could not be determined: {why}."
                         );
-                        // No VARVE_LAYER*: the tool is not the layer's, and
-                        // saying otherwise would be the lie this prevents.
-                        let mut cmd = std::process::Command::new(binary);
-                        cmd.args(args);
-                        return launch(cmd, tool);
                     }
-                }
+                    Ok(_) => {
+                        // A passthrough sets this for the process it runs. Seeing
+                        // it again for the SAME tool means the "ambient" binary
+                        // led back to a varve shim that `is_varve` cannot
+                        // recognise (a copy or hardlink of the binary): refuse
+                        // rather than exec forever.
+                        if passthrough_landed_on_me(tool) {
+                            bail!(
+                                "passthrough loop: '{tool}' already passed through to a binary \
+                                 on PATH, and that binary is another varve shim (a copy or link \
+                                 of varve that is not this one) — refusing to pass through \
+                                 again. Remove the extra varve shim for '{tool}' from PATH."
+                            );
+                        }
+                        let hops_env = std::env::var_os(PASSTHROUGH_HOPS);
+                        if varve_core::shimfallback::hops(hops_env.as_deref(), tool)
+                            >= varve_core::shimfallback::MAX_PASSTHROUGH_HOPS
+                        {
+                            bail!(
+                                "passthrough loop: '{tool}' has been passed through {} times in \
+                                 one chain of processes — a wrapper or script on PATH leads back \
+                                 to a varve shim for '{tool}'. Refusing to pass through again.",
+                                varve_core::shimfallback::MAX_PASSTHROUGH_HOPS
+                            );
+                        }
+                        let me = std::env::current_exe().ok();
+                        if let Some(binary) = varve_core::shimfallback::ambient_binary(
+                            std::env::var_os("PATH").as_deref(),
+                            tool,
+                            &store.root().join("shims"),
+                            me.as_deref(),
+                            &std::env::current_dir().unwrap_or_default(),
+                        ) {
+                            eprintln!(
+                                "{}",
+                                varve_core::shimfallback::notice(
+                                    tool,
+                                    &binary,
+                                    &resolved.layer.layer.to_string(),
+                                    user.source.as_deref(),
+                                )
+                            );
+                            // No VARVE_LAYER*: the tool is not the layer's, and
+                            // saying otherwise would be the lie this prevents.
+                            let landed = std::fs::canonicalize(&binary).unwrap_or(binary.clone());
+                            let mut cmd = std::process::Command::new(binary);
+                            cmd.args(args)
+                                .env(PASSTHROUGH_MARK, tool)
+                                .env(PASSTHROUGH_EXE, landed)
+                                .env(
+                                    PASSTHROUGH_HOPS,
+                                    varve_core::shimfallback::with_hop(hops_env.as_deref(), tool),
+                                );
+                            return launch(cmd, tool);
+                        }
+                    }
+                },
                 Ok(_) => {}
                 Err(problem) => config_note = format!("\nNote: {problem}."),
             }
@@ -5258,6 +5346,13 @@ fn report_attestations(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> 
                 producer = r.producer,
                 reason = r.reason.as_deref().unwrap_or("unknown"),
             );
+        }
+        // The signer's session, as recorded in the signed statement. Printed
+        // for a statement that verifies whether or not it still binds: the
+        // record is about who signed it, not about this layer.
+        let ambient = ambient_sentence(&r.ambient_tools, "the signing session");
+        if !ambient.is_empty() {
+            println!("      {}", ambient.trim_start());
         }
     }
     Ok(())

@@ -5557,7 +5557,7 @@ artifacts:
     type: requirement
     title: A user may let a shim run an ambient binary for a tool the layer does not carry, and is told every time
     status: approved
-    release: v0.48.0
+    release: v0.47.0
     description: "Maintainer decision 2026-11-10, revising the 2026-10-21 decision recorded in REQ-SHIMFALLBACK-001 (refuse and list options) after user feedback that shims make locally installed tools unusable (varve#273). Clauses: (1) A USER-level configuration (outside every repository, e.g. the XDG config directory) may list tools, or '*', whose shims fall through to the executable on PATH outside the shim directory. A committed varve.toml cannot enable it; a repository therefore cannot switch it on for everyone. (2) A tool the pinned layer carries is NEVER passed through, whatever the configuration says: the REQ-SHADOW-001 property holds. (3) Every passthrough run prints one line on stderr naming the binary it ran and that it ran outside the layer. (4) varve status lists active passthroughs, and verify, exports and attestations record that the session allowed ambient tools. (5) Without the configuration, REQ-SHIMFALLBACK-001's refusal is unchanged."
     fields:
       category: functional

@@ -9089,6 +9089,10 @@ fn star_passes_any_tool_the_layer_lacks() {
     assert!(marker.exists());
 }
 
+/// Guards an EXISTING property, not new evidence for #349: `pin.rs` has always
+/// been `deny_unknown_fields` (it is unchanged by that PR), so this passes on
+/// the code before passthrough existed too. It pins that no later change adds
+/// a `[shim]` table or a `passthrough` key to the pin.
 // rivet: verifies REQ-PASSTHROUGH-001
 #[test]
 fn a_varve_toml_key_cannot_enable_passthrough() {
@@ -10023,4 +10027,527 @@ fn a_module_dropped_from_a_re_export_is_removed_and_the_export_still_verifies() 
     // `mine/KEEP` was not in the stamp (it was added after the first export,
     // but the second export re-stamped over it), so this stays consistent.
     assert!(v.status.success(), "{}", String::from_utf8_lossy(&v.stderr));
+}
+
+// ---------------------------------------------------------------------------
+// passthrough review fixes (REQ-PASSTHROUGH-001 clause 2, 3 and 4)
+// ---------------------------------------------------------------------------
+
+/// A manifest whose signed entries name `tools`, for a layer called 2026.07.0.
+#[cfg(unix)]
+fn manifest_naming(tools: &[&str]) -> String {
+    let entries: Vec<String> = tools
+        .iter()
+        .map(|t| {
+            format!(r#"{{"digest":"sha256:{t}","annotations":{{"eu.pulseengine.tool":"{t}"}}}}"#)
+        })
+        .collect();
+    MANIFEST_JULY.replace(
+        "\"manifests\": []",
+        &format!("\"manifests\": [{}]", entries.join(",")),
+    )
+}
+
+/// A layer that CARRIES `probe` and `ghost`, pinned to `probe` alone, with an
+/// ambient `ghost` and `probe` on a PATH directory that each write a marker.
+/// Returns (fixture, ambient bin dir, marker).
+#[cfg(unix)]
+fn pin_exposes_less_than_layer_carries() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
+    let pin = format!("{PIN_JULY}tools = [\"probe\"]\n");
+    let fx = fixture(
+        Some(&pin),
+        &[(
+            &manifest_naming(&["probe", "ghost"]),
+            &[
+                ("probe", b"#!/bin/sh\necho layer-probe\n".as_slice()),
+                ("ghost", b"#!/bin/sh\necho layer-ghost\n".as_slice()),
+            ],
+        )],
+    );
+    let bin = fx.root.with_file_name("ambient-bin");
+    let marker = fx.root.with_file_name("ghost-ran");
+    for name in ["ghost", "probe"] {
+        write_executable(
+            &bin.join(name),
+            &format!("#!/bin/sh\necho ran > {}\necho ambient\n", marker.display()),
+        );
+    }
+    install_shims(&fx, &["probe", "ghost"]);
+    (fx, bin, marker)
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_tool_the_layer_carries_but_the_pin_does_not_expose_is_never_passed_through() {
+    // Clause 2. `resolved.qualified` holds only the names the pin EXPOSES, so a
+    // guard that asked it let `ghost` through whenever `tools = [...]` left it
+    // out — and the notice then claimed 'ghost' is not part of the layer.
+    let (fx, bin, marker) = pin_exposes_less_than_layer_carries();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        !marker.exists(),
+        "an ambient binary shadowed a carried tool"
+    );
+    assert!(stderr.contains("is not part of layer"), "{stderr}");
+    assert!(!stderr.contains("passthrough:"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_shim_spelt_in_another_case_does_not_pass_through_a_carried_tool() {
+    // Clause 2 on a case-insensitive filesystem: `shims/PROBE` IS `shims/probe`
+    // there, the layer carries `probe`, and an exact-case comparison called
+    // `PROBE` "not carried" and ran an ambient binary in its place. The
+    // comparison ignores ASCII case on every platform, so this runs on Linux
+    // too (where the `PROBE` link is made by hand).
+    let (fx, bin, _marker) = shim_fallback_fixture();
+    install_shims(&fx, &["probe"]);
+    let shims = fx.root.join("shims");
+    if !shims.join("PROBE").exists() {
+        let target = std::fs::read_link(shims.join("probe")).unwrap();
+        std::os::unix::fs::symlink(target, shims.join("PROBE")).unwrap();
+    }
+    let upper_marker = fx.root.with_file_name("upper-probe-ran");
+    write_executable(
+        &bin.join("PROBE"),
+        &format!("#!/bin/sh\necho ran > {}\n", upper_marker.display()),
+    );
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "PROBE", &path, Some(&xdg), &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !upper_marker.exists(),
+        "an ambient PROBE ran in place of the layer's probe: {stderr}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!stderr.contains("passthrough:"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn two_copies_of_varve_on_path_end_in_a_loop_error_not_a_hang() {
+    // `is_varve` compares canonical paths, so a COPY (or a hardlink) of the
+    // binary is not recognised: each copy's `ghost` shim passes through to the
+    // other, forever. Passthrough now marks the environment it execs into, and
+    // a shim started under the mark for its own tool refuses instead.
+    let (fx, _bin, _marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let real = assert_cmd::cargo::cargo_bin("varve");
+    let a = fx.root.with_file_name("copy-a");
+    let b = fx.root.with_file_name("copy-b");
+    for dir in [&a, &b] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::copy(&real, dir.join("ghost")).unwrap();
+    }
+    let log = fx.root.with_file_name("loop-stderr");
+    let mut child = std::process::Command::new(fx.root.join("shims").join("ghost"))
+        .current_dir(&fx.project)
+        .env("VARVE_ROOT", &fx.root)
+        .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
+        .env(
+            "PATH",
+            format!("{}:{}:/usr/bin:/bin", a.display(), b.display()),
+        )
+        .env("HOME", fx.root.with_file_name("no-user-config"))
+        .env("XDG_CONFIG_HOME", &xdg)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let stderr = std::fs::read_to_string(&log).unwrap_or_default();
+    let status = status.unwrap_or_else(|| panic!("passthrough looped for 20s: {stderr:.600}"));
+    assert_eq!(status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("passthrough loop"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_wrapper_script_around_a_second_varve_ends_in_a_loop_error_not_a_hang() {
+    // The landing check only fires when the running binary IS the one the
+    // previous passthrough exec'd. A wrapper (`~/bin/ghost` = `exec
+    // /opt/varve2/ghost "$@"`) breaks that: the recorded binary is the script,
+    // the second varve is a different file, and each round passes through to
+    // the script again. The per-tool hop counter bounds every such cycle.
+    let (fx, _bin, _marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let real = assert_cmd::cargo::cargo_bin("varve");
+    let second = fx.root.with_file_name("varve2");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::copy(&real, second.join("ghost")).unwrap();
+    let wrapper = fx.root.with_file_name("wrapper-bin");
+    write_executable(
+        &wrapper.join("ghost"),
+        &format!(
+            "#!/bin/sh\nexec {} \"$@\"\n",
+            second.join("ghost").display()
+        ),
+    );
+    let log = fx.root.with_file_name("wrapper-loop-stderr");
+    let mut child = std::process::Command::new(fx.root.join("shims").join("ghost"))
+        .current_dir(&fx.project)
+        .env("VARVE_ROOT", &fx.root)
+        .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
+        .env("PATH", format!("{}:/usr/bin:/bin", wrapper.display()))
+        .env("HOME", fx.root.with_file_name("no-user-config"))
+        .env("XDG_CONFIG_HOME", &xdg)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let stderr = std::fs::read_to_string(&log).unwrap_or_default();
+    let status = status.unwrap_or_else(|| panic!("passthrough looped for 60s: {stderr:.600}"));
+    assert_eq!(status.code(), Some(1), "{stderr:.600}");
+    assert!(stderr.contains("passthrough loop"), "{stderr:.600}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_passed_through_tool_that_calls_itself_nests_instead_of_looping() {
+    // The loop guard must not fire for LEGITIMATE nesting: a recursive
+    // `make -C sub`, a git hook calling `git`. The ambient `ghost` finds the
+    // shim first on its PATH, so the second `ghost` is the shim again, passing
+    // through to the same ambient binary. Only a passthrough that landed on a
+    // varve binary is a loop.
+    let (fx, bin, _marker) = passthrough_fixture();
+    write_executable(
+        &bin.join("ghost"),
+        "#!/bin/sh\nif [ \"$1\" = inner ]; then echo inner-ran; exit 0; fi\nghost inner\n",
+    );
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"ghost\"]\n");
+    let path = format!(
+        "{}:{}:/usr/bin:/bin",
+        fx.root.join("shims").display(),
+        bin.display()
+    );
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "inner-ran\n");
+    assert!(!stderr.contains("passthrough loop"), "{stderr}");
+    assert_eq!(stderr.matches("varve: passthrough:").count(), 2, "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_carried_name_that_is_not_ascii_refuses_every_passthrough() {
+    // Clause 2, fail closed. Case folding is ASCII only, so on a filesystem
+    // that folds more (APFS: `ñ` is `Ñ`; NFC is NFD) a layer carrying `ñ`
+    // cannot be compared with how a shim happens to be spelt. When any carried
+    // name is not ASCII, nothing passes through.
+    let fx = fixture(
+        Some(PIN_JULY),
+        &[(
+            MANIFEST_JULY,
+            &[
+                ("probe", b"#!/bin/sh\n".as_slice()),
+                ("\u{f1}", b"#!/bin/sh\n".as_slice()),
+            ],
+        )],
+    );
+    let bin = fx.root.with_file_name("ambient-bin");
+    let marker = fx.root.with_file_name("ghost-ran");
+    write_executable(
+        &bin.join("ghost"),
+        &format!("#!/bin/sh\necho ran > {}\n", marker.display()),
+    );
+    install_shims(&fx, &["ghost"]);
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!marker.exists(), "passthrough ran beside a non-ASCII name");
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(!stderr.contains("varve: passthrough:"), "{stderr}");
+    assert!(stderr.contains("not ASCII"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_requested_name_that_is_not_ascii_is_never_passed_through() {
+    // The layer carries `probe` only; the shim is spelt `\u{d1}` (made by hand,
+    // as a case-folding filesystem would resolve it). Whatever the folding
+    // rules, a non-ASCII request is refused rather than compared.
+    let (fx, bin, _marker) = shim_fallback_fixture();
+    install_shims(&fx, &["probe"]);
+    let shims = fx.root.join("shims");
+    let target = std::fs::read_link(shims.join("probe")).unwrap();
+    std::os::unix::fs::symlink(target, shims.join("\u{d1}")).unwrap();
+    let upper_marker = fx.root.with_file_name("upper-n-ran");
+    write_executable(
+        &bin.join("\u{d1}"),
+        &format!("#!/bin/sh\necho ran > {}\n", upper_marker.display()),
+    );
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "\u{d1}", &path, Some(&xdg), &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !upper_marker.exists(),
+        "a non-ASCII name was passed through"
+    );
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(!stderr.contains("varve: passthrough:"), "{stderr}");
+    assert!(stderr.contains("not ASCII"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn passthrough_is_refused_when_what_the_layer_carries_cannot_be_determined() {
+    // Clause 2, fail closed, at the CLI: a layer whose `bin/` cannot be listed
+    // after install may carry `ghost`. Treating "could not tell" as "does not
+    // carry" would run an ambient `ghost` in its place.
+    use std::os::unix::fs::PermissionsExt;
+    let (fx, bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"ghost\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    // Control: with the layer readable, this very setup passes through.
+    let ok = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    assert_eq!(ok.status.code(), Some(7), "{ok:?}");
+    std::fs::remove_file(&marker).unwrap();
+
+    let layer_bin = std::fs::read_dir(fx.root.join("core"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path().join("bin"))
+        .find(|p| p.is_dir())
+        .expect("the fixture layer has a bin/");
+    std::fs::set_permissions(&layer_bin, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unlistable = std::fs::read_dir(&layer_bin).is_err();
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    std::fs::set_permissions(&layer_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if !unlistable {
+        return; // permission bits are not enforced (running as root)
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !marker.exists(),
+        "an unreadable layer was read as carrying nothing: {stderr}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(!stderr.contains("varve: passthrough:"), "{stderr}");
+    // The reason is the carried-set failure itself, not some earlier refusal.
+    assert!(
+        stderr.contains("could not be determined") && stderr.contains("cannot list"),
+        "{stderr}"
+    );
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn passthrough_never_runs_a_binary_from_an_absolute_path_entry_inside_the_repository() {
+    // direnv's `PATH_add bin` puts the repository's own directory on PATH as an
+    // ABSOLUTE entry. It is still the repository's, so it is not searched —
+    // however it is spelt (here also through a symlink outside the repository).
+    let (fx, _bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let planted = fx.project.join("bin");
+    write_executable(
+        &planted.join("ghost"),
+        &format!("#!/bin/sh\necho planted > {}\n", marker.display()),
+    );
+    let link = fx.root.with_file_name("outside-link");
+    std::os::unix::fs::symlink(&planted, &link).unwrap();
+    for path in [
+        format!("{}:/usr/bin:/bin", planted.display()),
+        format!("{}:/usr/bin:/bin", link.display()),
+    ] {
+        let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+        assert!(
+            !marker.exists(),
+            "PATH={path:?} ran a binary planted in the repository"
+        );
+        assert_eq!(out.status.code(), Some(1), "PATH={path:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("varve: passthrough:"), "{stderr}");
+    }
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[test]
+fn verify_reports_that_a_carried_attestation_was_signed_in_an_ambient_session() {
+    // Clause 4. `check-attestation` printed the ambient sentence; the report
+    // `verify` gives for the attestations a layer CARRIES dropped the field, so
+    // an attestation signed with passthrough on read as pure there.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap().to_path_buf();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("ambatt-root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("ambatt-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    let tool = parent.join("ambatt-synth");
+    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+    let spec = parent.join("ambatt-spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0.0\"\npath = \"{}\"\n",
+            tool.display()
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("ambatt-layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "test-root", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    let producer_root = parent.join("ambatt-producer");
+    let sbom = parent.join("ambatt.cdx.json");
+    let stmt = parent.join("ambatt.statement.dsse");
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["sbom", "--out"])
+        .arg(&sbom)
+        .assert()
+        .success();
+    // Signed in a session that allowed passthrough.
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"ghost\"]\n");
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .args([
+            "sign-attestation",
+            "--kind",
+            "sbom",
+            "--producer",
+            "acme-ci",
+            "--file",
+        ])
+        .arg(&sbom)
+        .arg("--key")
+        .arg(&sk_path)
+        .args(["--key-id", "test-root", "--out"])
+        .arg(&stmt)
+        .arg("--attach-to")
+        .arg(&layout)
+        .assert()
+        .success();
+    let consumer_root = parent.join("ambatt-consumer");
+    varve(&fx)
+        .env("VARVE_ROOT", &consumer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+    // The consumer's own session allows nothing; the record is the signer's.
+    varve(&fx)
+        .env("VARVE_ROOT", &consumer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("sbom by acme-ci: binds to this layer").and(
+                predicate::str::contains("ambient tools were allowed in the signing session")
+                    .and(predicate::str::contains("ghost")),
+            ),
+        );
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn the_notice_stays_one_line_when_a_path_directory_name_holds_a_newline() {
+    // Clause 3: exactly one stderr line. A directory called `a\nb` on PATH
+    // printed unescaped would split the notice and let its name forge a line.
+    let (fx, _bin, _marker) = passthrough_fixture();
+    let evil = fx.root.with_file_name("amb\nvarve forged line\nbin");
+    write_executable(&evil.join("ghost"), "#!/bin/sh\nexit 7\n");
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"ghost\"]\n");
+    let path = format!("{}:/usr/bin:/bin", evil.display());
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    assert_eq!(out.status.code(), Some(7), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
+    assert!(stderr.starts_with("varve: passthrough:"), "{stderr:?}");
+    assert!(
+        stderr.contains("\\n"),
+        "the newline must show escaped: {stderr:?}"
+    );
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn passthrough_never_runs_a_binary_the_repository_planted_via_a_relative_path_entry() {
+    // An empty PATH entry means the working directory, and so does `.` or any
+    // relative one — and the working directory is the repository. Passthrough
+    // searches absolute entries only.
+    let (fx, _bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    for planted in [fx.project.join("ghost"), fx.project.join("rel-bin/ghost")] {
+        write_executable(
+            &planted,
+            &format!("#!/bin/sh\necho planted > {}\n", marker.display()),
+        );
+    }
+    for path in [
+        ":/usr/bin:/bin",
+        "/usr/bin::/bin",
+        ".:/usr/bin:/bin",
+        "rel-bin:/usr/bin:/bin",
+    ] {
+        let out = run_shim(&fx, "ghost", path, Some(&xdg), &[]);
+        assert!(
+            !marker.exists(),
+            "PATH={path:?} ran a binary planted in the repository"
+        );
+        assert_eq!(out.status.code(), Some(1), "PATH={path:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("passthrough:"), "{stderr}");
+    }
 }
