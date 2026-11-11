@@ -10125,3 +10125,53 @@ fn a_shim_spelt_in_another_case_does_not_pass_through_a_carried_tool() {
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(!stderr.contains("passthrough:"), "{stderr}");
 }
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn two_copies_of_varve_on_path_end_in_a_loop_error_not_a_hang() {
+    // `is_varve` compares canonical paths, so a COPY (or a hardlink) of the
+    // binary is not recognised: each copy's `ghost` shim passes through to the
+    // other, forever. Passthrough now marks the environment it execs into, and
+    // a shim started under the mark for its own tool refuses instead.
+    let (fx, _bin, _marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let real = assert_cmd::cargo::cargo_bin("varve");
+    let a = fx.root.with_file_name("copy-a");
+    let b = fx.root.with_file_name("copy-b");
+    for dir in [&a, &b] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::copy(&real, dir.join("ghost")).unwrap();
+    }
+    let log = fx.root.with_file_name("loop-stderr");
+    let mut child = std::process::Command::new(fx.root.join("shims").join("ghost"))
+        .current_dir(&fx.project)
+        .env("VARVE_ROOT", &fx.root)
+        .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
+        .env(
+            "PATH",
+            format!("{}:{}:/usr/bin:/bin", a.display(), b.display()),
+        )
+        .env("HOME", fx.root.with_file_name("no-user-config"))
+        .env("XDG_CONFIG_HOME", &xdg)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let stderr = std::fs::read_to_string(&log).unwrap_or_default();
+    let status = status.unwrap_or_else(|| panic!("passthrough looped for 20s: {stderr:.600}"));
+    assert_eq!(status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("passthrough loop"), "{stderr}");
+}

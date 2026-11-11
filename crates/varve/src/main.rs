@@ -2203,6 +2203,10 @@ fn launch(mut cmd: std::process::Command, tool: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Set to the tool name in the environment of a passed-through process, so a
+/// shim that finds it again for the same tool can tell it is in a loop.
+const PASSTHROUGH_MARK: &str = "VARVE_PASSTHROUGH";
+
 fn run_tool(
     store: &Store,
     override_layer: Option<&str>,
@@ -2282,6 +2286,21 @@ fn run_tool(
                         );
                     }
                     Ok(_) => {
+                        // A passthrough sets this for the process it runs. Seeing
+                        // it again for the SAME tool means the "ambient" binary
+                        // led back to a varve shim that `is_varve` cannot
+                        // recognise (a copy or hardlink of the binary): refuse
+                        // rather than exec forever.
+                        if std::env::var_os(PASSTHROUGH_MARK).as_deref()
+                            == Some(std::ffi::OsStr::new(tool))
+                        {
+                            bail!(
+                                "passthrough loop: '{tool}' already passed through to a binary \
+                                 on PATH, and that binary is another varve shim (a copy or link \
+                                 of varve that is not this one) — refusing to pass through \
+                                 again. Remove the extra varve shim for '{tool}' from PATH."
+                            );
+                        }
                         let me = std::env::current_exe().ok();
                         if let Some(binary) = varve_core::shimfallback::ambient_binary(
                             std::env::var_os("PATH").as_deref(),
@@ -2301,7 +2320,7 @@ fn run_tool(
                             // No VARVE_LAYER*: the tool is not the layer's, and
                             // saying otherwise would be the lie this prevents.
                             let mut cmd = std::process::Command::new(binary);
-                            cmd.args(args);
+                            cmd.args(args).env(PASSTHROUGH_MARK, tool);
                             return launch(cmd, tool);
                         }
                     }
