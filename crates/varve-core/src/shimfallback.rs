@@ -450,7 +450,7 @@ pub fn active(
     names.dedup();
     names
         .into_iter()
-        .filter(|n| !carried.contains(n))
+        .filter(|n| !carried.iter().any(|c| c.eq_ignore_ascii_case(n)))
         .map(|tool| {
             let binary = ambient_binary(path_var, &tool, shim_dir, self_exe);
             Active { tool, binary }

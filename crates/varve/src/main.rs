@@ -2112,11 +2112,11 @@ fn ambient_report(ctx: &ProjectCtx) -> AmbientReport {
     };
     // Which names the layer carries decides which passthroughs are inert: a
     // carried tool is never passed through, whatever the file says.
-    let mut carried: Vec<String> = Vec::new();
-    if let Ok(resolved) = varve_core::resolve(&ctx.pin, &ctx.store) {
-        carried.extend(resolved.tools.iter().map(|(n, _)| n.clone()));
-        carried.extend(resolved.qualified.iter().map(|(p, _)| p.tool.clone()));
-    }
+    // Where that cannot be determined nothing is reported active (fail closed).
+    let carried: Option<Vec<String>> = varve_core::resolve(&ctx.pin, &ctx.store)
+        .ok()
+        .and_then(|r| varve_core::carried_tool_names(&ctx.pin, &r.layer, &ctx.store).ok())
+        .map(|names| names.into_iter().collect());
     let shim_dir = ctx.base_root.join("shims");
     let shim_names: Vec<String> = std::fs::read_dir(&shim_dir)
         .map(|rd| {
@@ -2126,16 +2126,16 @@ fn ambient_report(ctx: &ProjectCtx) -> AmbientReport {
         })
         .unwrap_or_default();
     let me = std::env::current_exe().ok();
-    let active = match &user {
-        Ok(u) => varve_core::shimfallback::active(
+    let active = match (&user, &carried) {
+        (Ok(u), Some(carried)) => varve_core::shimfallback::active(
             &u.allow,
-            &carried,
+            carried,
             &shim_names,
             std::env::var_os("PATH").as_deref(),
             &shim_dir,
             me.as_deref(),
         ),
-        Err(_) => Vec::new(),
+        _ => Vec::new(),
     };
     let json = serde_json::json!({
         "allowed": allowed,
@@ -2261,33 +2261,51 @@ fn run_tool(
         // outside every repository says so. The layer is asked first, so a
         // carried tool never even reads that file.
         let mut config_note = String::new();
-        let carried = resolved.qualified.iter().any(|(p, _)| p.tool == tool);
-        if via_shim && override_layer.is_none() && !carried {
+        //
+        // "Carries" is the whole composition's manifests, not the names the pin
+        // exposes, and it is asked case-insensitively; a layer whose manifests
+        // cannot be read is treated as carrying the tool (fail closed).
+        let passthrough_possible = via_shim && override_layer.is_none();
+        let carried = if passthrough_possible {
+            varve_core::carried_tool_names(&pin, &resolved.layer, &ctx.store)
+                .map(|names| names.contains(&tool.to_ascii_lowercase()))
+        } else {
+            Ok(true)
+        };
+        if passthrough_possible && carried != Ok(true) {
             match user_passthrough() {
-                Ok(user) if user.allow.permits(tool) => {
-                    let me = std::env::current_exe().ok();
-                    if let Some(binary) = varve_core::shimfallback::ambient_binary(
-                        std::env::var_os("PATH").as_deref(),
-                        tool,
-                        &store.root().join("shims"),
-                        me.as_deref(),
-                    ) {
-                        eprintln!(
-                            "{}",
-                            varve_core::shimfallback::notice(
-                                tool,
-                                &binary,
-                                &resolved.layer.layer.to_string(),
-                                user.source.as_deref(),
-                            )
+                Ok(user) if user.allow.permits(tool) => match &carried {
+                    Err(why) => {
+                        config_note = format!(
+                            "\nNote: passthrough is refused because what the layer carries \
+                             could not be determined: {why}."
                         );
-                        // No VARVE_LAYER*: the tool is not the layer's, and
-                        // saying otherwise would be the lie this prevents.
-                        let mut cmd = std::process::Command::new(binary);
-                        cmd.args(args);
-                        return launch(cmd, tool);
                     }
-                }
+                    Ok(_) => {
+                        let me = std::env::current_exe().ok();
+                        if let Some(binary) = varve_core::shimfallback::ambient_binary(
+                            std::env::var_os("PATH").as_deref(),
+                            tool,
+                            &store.root().join("shims"),
+                            me.as_deref(),
+                        ) {
+                            eprintln!(
+                                "{}",
+                                varve_core::shimfallback::notice(
+                                    tool,
+                                    &binary,
+                                    &resolved.layer.layer.to_string(),
+                                    user.source.as_deref(),
+                                )
+                            );
+                            // No VARVE_LAYER*: the tool is not the layer's, and
+                            // saying otherwise would be the lie this prevents.
+                            let mut cmd = std::process::Command::new(binary);
+                            cmd.args(args);
+                            return launch(cmd, tool);
+                        }
+                    }
+                },
                 Ok(_) => {}
                 Err(problem) => config_note = format!("\nNote: {problem}."),
             }

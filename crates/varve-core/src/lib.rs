@@ -117,7 +117,7 @@ pub use referrers::{
     CarriedWork, WouldDestroy, guard as guard_layout, scan as scan_layout_referrers,
 };
 pub use registry::{RegistryRef, RegistrySource};
-pub use resolve::{ResolveError, Resolved, RunnerContract, resolve};
+pub use resolve::{ResolveError, Resolved, RunnerContract, carried_tool_names, resolve};
 pub use reverify::{
     ReverifyError, VerifyTiming, verify_installed, verify_installed_timed, verify_retained_envelope,
 };

@@ -10024,3 +10024,71 @@ fn a_module_dropped_from_a_re_export_is_removed_and_the_export_still_verifies() 
     // but the second export re-stamped over it), so this stays consistent.
     assert!(v.status.success(), "{}", String::from_utf8_lossy(&v.stderr));
 }
+
+// ---------------------------------------------------------------------------
+// passthrough review fixes (REQ-PASSTHROUGH-001 clause 2, 3 and 4)
+// ---------------------------------------------------------------------------
+
+/// A manifest whose signed entries name `tools`, for a layer called 2026.07.0.
+#[cfg(unix)]
+fn manifest_naming(tools: &[&str]) -> String {
+    let entries: Vec<String> = tools
+        .iter()
+        .map(|t| {
+            format!(r#"{{"digest":"sha256:{t}","annotations":{{"eu.pulseengine.tool":"{t}"}}}}"#)
+        })
+        .collect();
+    MANIFEST_JULY.replace(
+        "\"manifests\": []",
+        &format!("\"manifests\": [{}]", entries.join(",")),
+    )
+}
+
+/// A layer that CARRIES `probe` and `ghost`, pinned to `probe` alone, with an
+/// ambient `ghost` and `probe` on a PATH directory that each write a marker.
+/// Returns (fixture, ambient bin dir, marker).
+#[cfg(unix)]
+fn pin_exposes_less_than_layer_carries() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
+    let pin = format!("{PIN_JULY}tools = [\"probe\"]\n");
+    let fx = fixture(
+        Some(&pin),
+        &[(
+            &manifest_naming(&["probe", "ghost"]),
+            &[
+                ("probe", b"#!/bin/sh\necho layer-probe\n".as_slice()),
+                ("ghost", b"#!/bin/sh\necho layer-ghost\n".as_slice()),
+            ],
+        )],
+    );
+    let bin = fx.root.with_file_name("ambient-bin");
+    let marker = fx.root.with_file_name("ghost-ran");
+    for name in ["ghost", "probe"] {
+        write_executable(
+            &bin.join(name),
+            &format!("#!/bin/sh\necho ran > {}\necho ambient\n", marker.display()),
+        );
+    }
+    install_shims(&fx, &["probe", "ghost"]);
+    (fx, bin, marker)
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_tool_the_layer_carries_but_the_pin_does_not_expose_is_never_passed_through() {
+    // Clause 2. `resolved.qualified` holds only the names the pin EXPOSES, so a
+    // guard that asked it let `ghost` through whenever `tools = [...]` left it
+    // out — and the notice then claimed 'ghost' is not part of the layer.
+    let (fx, bin, marker) = pin_exposes_less_than_layer_carries();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        !marker.exists(),
+        "an ambient binary shadowed a carried tool"
+    );
+    assert!(stderr.contains("is not part of layer"), "{stderr}");
+    assert!(!stderr.contains("passthrough:"), "{stderr}");
+}
