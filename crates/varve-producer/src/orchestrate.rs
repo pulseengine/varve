@@ -420,7 +420,8 @@ pub fn verify_release<S: Source>(
             PgpSumsProbe::NotProbed
         };
     }
-    let accepted = ingest::choose(forge, repo, version, &probe, optins, declared.upstream_sums)?;
+    let mut accepted =
+        ingest::choose(forge, repo, version, &probe, optins, declared.upstream_sums)?;
     let sums = match accepted.mechanism {
         Mechanism::CosignSums => {
             let text = src.sums_text(repo, version)?;
@@ -469,12 +470,10 @@ pub fn verify_release<S: Source>(
             // batches its release names every asset here, and this is the
             // whole answer — one verification, as clause 3 requires.
             let json = src.attestation_json(repo, version)?;
-            let mut covered = crate::attestation::parse(&json)
-                .map_err(|e| RunError::Io {
-                    context: format!("{repo} {version}: reading the verified attestation"),
-                    detail: e.to_string(),
-                })?
-                .sums;
+            let mut covered = crate::attestation::parse(&json).map_err(|e| RunError::Io {
+                context: format!("{repo} {version}: reading the verified attestation"),
+                detail: e.to_string(),
+            })?;
 
             // An upstream that calls `attest-build-provenance` per file names
             // only ONE asset there, and every other asset of the release has
@@ -483,7 +482,7 @@ pub fn verify_release<S: Source>(
             // planned asset the probed statement does not name is verified
             // against its own bytes and its own statement.
             for asset in wanted {
-                if covered.digest_of(asset).is_some() {
+                if covered.sums.digest_of(asset).is_some() {
                     continue;
                 }
                 // Not published at all is "this platform has no build", which
@@ -502,12 +501,42 @@ pub fn verify_release<S: Source>(
                 // asset leaves this one uncovered, and it is then refused by
                 // the same rule as any other unproven asset rather than
                 // credited with its sibling's proof.
-                covered.merge(&parsed.sums).map_err(|e| RunError::Io {
+                covered.merge(&parsed).map_err(|e| RunError::Io {
                     context: format!("{repo} {version}: {asset}"),
                     detail: e.to_string(),
                 })?;
             }
-            Some(covered)
+            // Record the statements that actually vouched for the planned
+            // assets: their buildSignerURI, ref and commit, not whichever
+            // statement gh happened to list first.
+            let mut builds: Vec<(String, String, String)> = Vec::new();
+            for asset in wanted {
+                for st in covered.vouching(asset) {
+                    let b = (
+                        st.signer.clone(),
+                        st.source_ref.clone(),
+                        st.source_commit.clone(),
+                    );
+                    if !builds.contains(&b) {
+                        builds.push(b);
+                    }
+                }
+            }
+            if !builds.is_empty() {
+                let refs: Vec<(&str, &str, &str)> = builds
+                    .iter()
+                    .map(|(a, b, c)| (a.as_str(), b.as_str(), c.as_str()))
+                    .collect();
+                accepted.signer = Some(
+                    builds
+                        .iter()
+                        .map(|(a, _, _)| a.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+                accepted.asserts = ingest::provenance_asserts(&refs, version);
+            }
+            Some(covered.sums)
         }
         // No proof was offered and an operator said to proceed anyway. There
         // is no list of covered digests because there is no list.

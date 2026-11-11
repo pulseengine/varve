@@ -73,9 +73,21 @@ all of them. What binds that rung is the subject name: `gh` confirms an
 attestation from the named repository covers the downloaded bytes, and the
 digest recorded for an asset is then looked up by that asset's name among the
 attestation's subjects, so an attestation for an older release's asset (a
-different name, its own digest) never covers this release's asset. The recorded
-assertion says so: the binding is by asset name and the source ref is not
-pinned.
+different name, its own digest) never covers this release's asset. `gh` returns every attestation from the repository that covers the digest, and
+all of them are read: an asset is vouched for only by a statement with a subject
+named for that asset, and two statements that give one name different digests
+are refused. A statement built from `refs/pull/*` is set aside (a pull-request
+build is never a release); when nothing else remains the release is refused.
+The record (`proof-signer`, `proof-asserts`) names the `buildSignerURI`, the ref
+and the commit of the statements that vouched for the planned assets.
+
+The limit, plainly: with no ref pin, an attestation built from **any branch or
+tag of the repository**, by any workflow in it, is accepted when one of its
+subjects carries this release's asset name and the matching digest. The
+producer does not check that the workflow is the upstream's release workflow, or
+that the ref is the release. What stops an older release's attestation is the
+subject name carrying the release; what it does not stop is a build of the same
+name and digest from a branch.
 
 For `cosign-sums` the recorded `proof-signer` is the identity pattern that was
 enforced, `https://<host>/<owner>/<repo>/.github/workflows/[^@]+@refs/tags/<tag>`

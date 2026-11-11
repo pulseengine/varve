@@ -364,6 +364,32 @@ pub fn rung_cosign_sums(forge: &Forge, repo: &str, release: &str, probe: &Releas
     }
 }
 
+/// What a build-provenance record says about the statements that vouched: for
+/// each distinct (signer, ref, commit) the actual `buildSignerURI`, the ref the
+/// build ran from, and the commit, then the binding that was enforced. Used for
+/// the probe's first statement and, once the assets are covered, for the
+/// statements that actually vouched for them.
+pub fn provenance_asserts(builds: &[(&str, &str, &str)], version: &str) -> String {
+    let built: Vec<String> = builds
+        .iter()
+        .map(|(signer, source_ref, commit)| {
+            let mut t = format!("built by {signer}");
+            if !source_ref.is_empty() {
+                t.push_str(&format!(" from ref {source_ref}"));
+            }
+            t.push_str(&format!(" at source commit {commit}"));
+            t
+        })
+        .collect();
+    format!(
+        "{}; this payload's recorded asset digest is a subject of that attestation; bound to \
+         release {version} by asset name: each asset is vouched for only by the attestation \
+         subject carrying its own name and digest, and the attestation's source ref is not \
+         pinned (a pull-request build is refused)",
+        built.join("; ")
+    )
+}
+
 /// Rung 2 — a GitHub build attestation.
 pub fn rung_build_provenance(probe: &ReleaseProbe) -> Rung {
     match &probe.attestation {
@@ -523,18 +549,19 @@ pub fn choose(
     }
 
     match rung_build_provenance(probe) {
-        Rung::Accepted { signer, asserts } => {
+        Rung::Accepted { signer, .. } => {
+            let commit = match &probe.attestation {
+                AttestationProbe::Verified { commit, .. } => commit.as_str(),
+                _ => "",
+            };
             return Ok(Accepted {
                 mechanism: Mechanism::BuildProvenance,
-                signer: Some(signer),
+                signer: Some(signer.clone()),
                 // No ref is pinned (see `gh::attestation_verify_argv`): the
                 // binding is the subject's name, enforced when the proof is
-                // spent.
-                asserts: format!(
-                    "{asserts}; bound to release {version} by asset name: each asset is \
-                     vouched for only by the attestation subject carrying its own name and \
-                     digest; the attestation's source ref is not pinned"
-                ),
+                // spent. `verify_release` replaces this with the statements
+                // that vouched for the assets.
+                asserts: provenance_asserts(&[(signer.as_str(), "", commit)], version),
                 signing_key: None,
             });
         }

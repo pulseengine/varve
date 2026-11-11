@@ -549,6 +549,9 @@ mod tests {
         built_from: String,
         /// The attestation's subjects: (name, sha256 hex).
         subjects: Vec<(String, String)>,
+        /// Further attestations gh returns for the same digest (a list, as the
+        /// real one): (built from, subjects).
+        more: Vec<(String, Vec<(String, String)>)>,
         /// The identity regexp cosign was last handed.
         seen_identity: std::rc::Rc<RefCell<Option<String>>>,
     }
@@ -583,7 +586,12 @@ mod tests {
                 }
                 let file = std::fs::read(&args[2]).expect("gh is handed a downloaded file");
                 let digest = crate::orchestrate::sha256_hex(&file);
-                if !self.subjects.iter().any(|(_, d)| *d == digest) {
+                let covered = self
+                    .subjects
+                    .iter()
+                    .chain(self.more.iter().flat_map(|(_, s)| s.iter()))
+                    .any(|(_, d)| *d == digest);
+                if !covered {
                     return out(
                         1,
                         "",
@@ -591,24 +599,31 @@ mod tests {
                          a subject of any attestation",
                     );
                 }
-                let subjects: Vec<String> = self
-                    .subjects
-                    .iter()
-                    .map(|(n, d)| format!(r#"{{"name":"{n}","digest":{{"sha256":"{d}"}}}}"#))
+                // Like gh: every attestation whose subjects include the file's
+                // digest, in order, each with its own certificate.
+                let all = std::iter::once((&self.built_from, &self.subjects))
+                    .chain(self.more.iter().map(|(r, s)| (r, s)));
+                let results: Vec<String> = all
+                    .filter(|(_, subjects)| subjects.iter().any(|(_, d)| *d == digest))
+                    .map(|(built_from, subjects)| {
+                        let subjects: Vec<String> = subjects
+                            .iter()
+                            .map(|(n, d)| {
+                                format!(r#"{{"name":"{n}","digest":{{"sha256":"{d}"}}}}"#)
+                            })
+                            .collect();
+                        format!(
+                            r#"{{"verificationResult":{{
+                              "statement":{{"subject":[{}]}},
+                              "signature":{{"certificate":{{
+                                "buildSignerURI":"https://github.com/o/r/.github/workflows/release.yml@{built_from}",
+                                "sourceRepositoryRef":"{built_from}",
+                                "sourceRepositoryDigest":"abc"}}}}}}}}"#,
+                            subjects.join(",")
+                        )
+                    })
                     .collect();
-                return out(
-                    0,
-                    &format!(
-                        r#"[{{"verificationResult":{{
-                          "statement":{{"subject":[{}]}},
-                          "signature":{{"certificate":{{
-                            "buildSignerURI":"https://github.com/o/r/.github/workflows/release.yml@{}",
-                            "sourceRepositoryDigest":"abc"}}}}}}}}]"#,
-                        subjects.join(","),
-                        self.built_from
-                    ),
-                    "",
-                );
+                return out(0, &format!("[{}]", results.join(",")), "");
             }
             self.inner.run(program, args, env)
         }
@@ -624,6 +639,7 @@ mod tests {
             identity: identity.into(),
             run_in: "o/r".into(),
             built_from: built_from.into(),
+            more: Vec::new(),
             seen_identity: Default::default(),
             subjects: vec![(
                 "one.tar.gz".into(),
@@ -644,6 +660,17 @@ mod tests {
         /// The repository the signing certificate says the workflow ran in.
         fn running_in(mut self, repo: &str) -> Self {
             self.run_in = repo.into();
+            self
+        }
+        /// A further attestation gh returns for the same digest.
+        fn also_attested(mut self, built_from: &str, subjects: &[(&str, &[u8])]) -> Self {
+            self.more.push((
+                built_from.into(),
+                subjects
+                    .iter()
+                    .map(|(n, b)| (n.to_string(), crate::orchestrate::sha256_hex(b)))
+                    .collect(),
+            ));
             self
         }
         /// An asset the release serves under `name`.
@@ -755,6 +782,26 @@ mod tests {
             .expect("the repository's own run still verifies");
     }
 
+    /// Verify a release the way a run does.
+    fn verified(
+        runner: Certified,
+        tag: &str,
+        asset: &str,
+    ) -> Result<crate::orchestrate::Verified, crate::orchestrate::RunError> {
+        let dir = scratch("bound-spend");
+        let forge = Forge::github_com();
+        let src = GhSource::new(runner, forge.clone(), &*dir);
+        crate::orchestrate::verify_release(
+            &src,
+            &forge,
+            "o/r",
+            tag,
+            &BTreeMap::new(),
+            &crate::orchestrate::Declared::default(),
+            &[asset.to_string()],
+        )
+    }
+
     /// Verify a release the way a run does, then spend its proof on `bytes`
     /// served as `asset`.
     fn spend(
@@ -763,18 +810,7 @@ mod tests {
         asset: &str,
         bytes: &[u8],
     ) -> Result<String, crate::orchestrate::RunError> {
-        let dir = scratch("bound-spend");
-        let forge = Forge::github_com();
-        let src = GhSource::new(runner, forge.clone(), &*dir);
-        let v = crate::orchestrate::verify_release(
-            &src,
-            &forge,
-            "o/r",
-            tag,
-            &BTreeMap::new(),
-            &crate::orchestrate::Declared::default(),
-            &[asset.to_string()],
-        )?;
+        let v = verified(runner, tag, asset)?;
         assert_eq!(
             v.accepted.mechanism,
             crate::ingest::Mechanism::BuildProvenance
@@ -820,6 +856,77 @@ mod tests {
             spend(swapped, "v2.0.0", "one-2.0.0.tar.gz", old).is_err(),
             "bytes that are not the named subject's digest must be refused"
         );
+    }
+
+    const NEW: &[u8] = b"the 2.0.0 build";
+    const OLD: &[u8] = b"the 1.0.0 build";
+    const ASSET2: &str = "one-2.0.0.tar.gz";
+
+    fn serving_new(extra_first: &str, first: &[(&str, &[u8])]) -> Certified {
+        certified(&[ASSET2], "", extra_first)
+            .attesting(first)
+            .serving(ASSET2, NEW)
+    }
+
+    /// gh returns EVERY attestation for the digest. The first can be for
+    /// another asset's name (the same bytes attested under it); the one that
+    /// names this asset still vouches for it.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_attestation_after_the_first_can_vouch_for_the_asset_it_names() {
+        let r = serving_new("refs/heads/main", &[("misc.tar.gz", NEW)])
+            .also_attested("refs/heads/main", &[(ASSET2, NEW)]);
+        spend(r, "v2.0.0", ASSET2, NEW).expect("the second statement names the asset");
+    }
+
+    /// Two statements that disagree about one name's digest are refused, not
+    /// resolved by order: the first would have been taken alone before.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn statements_that_disagree_on_a_subjects_digest_are_refused() {
+        let r = serving_new("refs/heads/main", &[(ASSET2, NEW)])
+            .also_attested("refs/heads/main", &[(ASSET2, OLD), ("other.tar.gz", NEW)]);
+        let e = spend(r, "v2.0.0", ASSET2, NEW).expect_err("a disagreement is refused");
+        assert!(format!("{e}").contains(ASSET2), "{e}");
+    }
+
+    /// A pull-request build is never a release, however well it is signed.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_pull_request_build_never_vouches_for_a_release() {
+        let only = serving_new("refs/pull/7/merge", &[(ASSET2, NEW)]);
+        let e = spend(only, "v2.0.0", ASSET2, NEW).expect_err("a PR build is refused");
+        assert!(format!("{e}").contains("refs/pull/7/merge"), "{e}");
+        // Alongside a real build it is set aside, and the record names the
+        // statement that vouched.
+        let both = serving_new("refs/pull/7/merge", &[(ASSET2, NEW)])
+            .also_attested("refs/heads/main", &[(ASSET2, NEW)]);
+        let v = verified(both, "v2.0.0", ASSET2).expect("the real build vouches");
+        let signer = v.accepted.signer.expect("a signer");
+        assert!(signer.ends_with("@refs/heads/main"), "{signer}");
+        assert!(
+            !v.accepted.asserts.contains("refs/pull"),
+            "{}",
+            v.accepted.asserts
+        );
+    }
+
+    /// The record names the buildSignerURI and ref of the statement that
+    /// vouched for the assets, not of whichever came first.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_record_names_the_statement_that_vouched() {
+        let r = serving_new("refs/heads/other", &[("misc.tar.gz", NEW)])
+            .also_attested("refs/heads/main", &[(ASSET2, NEW)]);
+        let v = verified(r, "v2.0.0", ASSET2).expect("verifies");
+        let signer = v.accepted.signer.expect("a signer");
+        assert_eq!(
+            signer,
+            "https://github.com/o/r/.github/workflows/release.yml@refs/heads/main"
+        );
+        let asserts = &v.accepted.asserts;
+        assert!(asserts.contains("refs/heads/main"), "{asserts}");
+        assert!(!asserts.contains("refs/heads/other"), "{asserts}");
     }
 
     /// An attestation built from a branch is accepted: the producer passes gh
