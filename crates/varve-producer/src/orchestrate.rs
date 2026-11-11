@@ -116,6 +116,9 @@ pub enum RunError {
         asset: String,
         mechanism: &'static str,
         release: String,
+        /// Whether the release tag names exactly one release. A moving tag
+        /// (`nightly`) is reused across builds, so a tag pin binds nothing.
+        single_release: bool,
     },
     /// A tool matched no asset on ANY platform. Per-platform absence is
     /// routine; absence everywhere means the asset template no longer
@@ -199,6 +202,22 @@ impl fmt::Display for RunError {
                 asset,
                 mechanism,
                 release,
+                single_release,
+            } if !single_release => write!(
+                f,
+                "{tool}: the asset {asset:?} does not carry release {release:?}, and the tag \
+                 {release:?} does not name a single release (it is reused across builds), so \
+                 neither a {mechanism} proof pinned to that tag nor the name can tell this \
+                 release from an older build under the same tag. `unbound-release-reason` \
+                 does not waive that here. Release a tag that names one release, or name the \
+                 release in the asset (`%V` or `%R`)."
+            ),
+            RunError::SignedProofNotBoundByName {
+                tool,
+                asset,
+                mechanism,
+                release,
+                ..
             } => write!(
                 f,
                 "{tool}: the asset {asset:?} does not carry release {release:?}, and the \
@@ -901,14 +920,8 @@ fn check_assets_are_bound(
                     // The certificate identity is pinned to THIS release's
                     // tag, so an older release's signed sums can never verify
                     // here: the pin is the binding.
-                    Mechanism::CosignSums => continue,
-                    // A signed name and digest vouch for whichever release
-                    // produced them. Only an attestation built from exactly
-                    // this release's tag says which release it is.
-                    Mechanism::BuildProvenance => {
-                        let tag = format!("refs/tags/{}", p.release);
-                        let refs = vouching_refs.get(&p.asset);
-                        if refs.is_some_and(|r| !r.is_empty() && r.iter().all(|x| *x == tag)) {
+                    Mechanism::CosignSums => {
+                        if crate::plan::names_a_release(&p.release) {
                             continue;
                         }
                         return Err(RunError::SignedProofNotBoundByName {
@@ -916,6 +929,27 @@ fn check_assets_are_bound(
                             asset: p.asset.clone(),
                             mechanism: mechanism.as_str(),
                             release: p.release.clone(),
+                            single_release: false,
+                        });
+                    }
+                    // A signed name and digest vouch for whichever release
+                    // produced them. Only an attestation built from exactly
+                    // this release's tag says which release it is.
+                    Mechanism::BuildProvenance => {
+                        let tag = format!("refs/tags/{}", p.release);
+                        let refs = vouching_refs.get(&p.asset);
+                        let single_release = crate::plan::names_a_release(&p.release);
+                        if single_release
+                            && refs.is_some_and(|r| !r.is_empty() && r.iter().all(|x| *x == tag))
+                        {
+                            continue;
+                        }
+                        return Err(RunError::SignedProofNotBoundByName {
+                            tool: p.name.clone(),
+                            asset: p.asset.clone(),
+                            mechanism: mechanism.as_str(),
+                            release: p.release.clone(),
+                            single_release,
                         });
                     }
                     // pgp-sums: never waived (the plan refuses the pair).
@@ -3953,7 +3987,7 @@ mod tests {
     }
 
     /// cosign-sums under the waiver: the certificate identity is pinned to this
-    /// release's tag, so an older release's signed sums can never verify here
+    /// release's tag (which must name one release), so an older release's signed sums can never verify here
     /// and the pin IS the binding; a versionless name is admitted.
     // rivet: verifies REQ-INGEST-001
     #[test]
@@ -3962,6 +3996,44 @@ mod tests {
         let got = run_plan(&f, wac_plan()).expect("the tag pin binds it");
         assert_eq!(got[0].accepted.mechanism, Mechanism::CosignSums);
         assert!(got[0].accepted.asserts.contains("WAIVED"));
+    }
+
+    /// The tag pin only binds a release when the tag names ONE release: a
+    /// moving tag (`nightly`, `latest`) is reused across builds, so an older
+    /// build's proof for the same tag still matches.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_waiver_is_not_honoured_under_a_signed_proof_for_a_moving_tag() {
+        let plan_at = |tag: &str| {
+            let mut p = bound_plan("wac", "o/r", tag, WAC);
+            p.unbound_release_reason = Some("wac names its files with no version".into());
+            p
+        };
+        // A tag naming one release: admitted.
+        let f = Fixture::signed("o/r", "v1.2.3", &[(WAC, A)]);
+        run_plan(&f, plan_at("v1.2.3")).expect("a single release's tag binds it");
+        for tag in ["nightly", "latest", "stable"] {
+            let f = Fixture::signed("o/r", tag, &[(WAC, A)]);
+            let e = run_plan(&f, plan_at(tag)).expect_err(tag);
+            assert!(
+                matches!(e, RunError::SignedProofNotBoundByName { .. }),
+                "{tag}: {e:?}"
+            );
+            assert!(
+                e.to_string().contains("does not name a single release"),
+                "{tag}: {e}"
+            );
+            // And an attestation built from that very tag is no better.
+            let f = built_from(
+                Fixture::attested_as_one_batch("o/r", tag, &[(WAC, A)]),
+                &format!("refs/tags/{tag}"),
+            );
+            let e = run_plan(&f, plan_at(tag)).expect_err(tag);
+            assert!(
+                matches!(e, RunError::SignedProofNotBoundByName { .. }),
+                "{tag}: {e:?}"
+            );
+        }
     }
 
     /// build-provenance under the waiver: honoured only when every statement

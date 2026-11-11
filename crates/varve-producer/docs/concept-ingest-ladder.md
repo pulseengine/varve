@@ -140,8 +140,8 @@ once the release is verified:
 |---|---|
 | `upstream-sums` | accepted; the name was the only binding there was, and it is waived |
 | `unverified` | accepted (the opt-in is its own recorded exception) |
-| `cosign-sums` | accepted; the certificate identity is pinned to this release's tag, so an older release's signed sums can never verify for this tag and the pin is the binding |
-| `build-provenance` | accepted **only if every statement that vouched for the asset was built from exactly `refs/tags/<this release tag>`**; otherwise refused, because a signed name and digest vouch for whichever release produced them and an older release's file and attestation would satisfy a versionless name. A tag-built attestation would be accepted |
+| `cosign-sums` | accepted when the release tag names exactly one release (`v1.2.3`; not `nightly`, `latest`): the certificate identity is pinned to this release's tag, so an older release's signed sums can never verify for this tag and the pin is the binding. A moving tag is reused across builds, so the pin binds nothing and the entry is refused |
+| `build-provenance` | accepted **only if the release tag names exactly one release and every statement that vouched for the asset was built from exactly `refs/tags/<this release tag>`**; otherwise refused, because a signed name and digest vouch for whichever release produced them and an older release's file and attestation would satisfy a versionless name. A tag-built attestation would be accepted |
 | `pgp-sums` | never waived; the combination is refused at `plan` |
 
 When it is honoured it prints a warning at `plan` and `deposit`, and is signed
