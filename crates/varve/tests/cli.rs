@@ -10175,3 +10175,101 @@ fn two_copies_of_varve_on_path_end_in_a_loop_error_not_a_hang() {
     assert_eq!(status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("passthrough loop"), "{stderr}");
 }
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[test]
+fn verify_reports_that_a_carried_attestation_was_signed_in_an_ambient_session() {
+    // Clause 4. `check-attestation` printed the ambient sentence; the report
+    // `verify` gives for the attestations a layer CARRIES dropped the field, so
+    // an attestation signed with passthrough on read as pure there.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let parent = fx.project.parent().unwrap().to_path_buf();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let sk_path = parent.join("ambatt-root.key");
+    std::fs::write(&sk_path, hex::encode(&sk)).unwrap();
+    let trust_root = parent.join("ambatt-root.pub");
+    std::fs::write(&trust_root, hex::encode(&pk)).unwrap();
+    let tool = parent.join("ambatt-synth");
+    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+    let spec = parent.join("ambatt-spec.toml");
+    std::fs::write(
+        &spec,
+        format!(
+            "layer = \"2026.07.0\"\nchannel = \"qualified\"\ncounter = 1\n\n\
+             [[tool]]\nname = \"synth\"\nversion = \"1.0.0\"\npath = \"{}\"\n",
+            tool.display()
+        ),
+    )
+    .unwrap();
+    let layout = parent.join("ambatt-layout");
+    varve(&fx)
+        .args(["deposit", "--spec"])
+        .arg(&spec)
+        .args(["--issued-at", "2026-07-01T00:00:00Z", "--key"])
+        .arg(&sk_path)
+        .args(["--key-id", "test-root", "--out"])
+        .arg(&layout)
+        .assert()
+        .success();
+    let producer_root = parent.join("ambatt-producer");
+    let sbom = parent.join("ambatt.cdx.json");
+    let stmt = parent.join("ambatt.statement.dsse");
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["sbom", "--out"])
+        .arg(&sbom)
+        .assert()
+        .success();
+    // Signed in a session that allowed passthrough.
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"ghost\"]\n");
+    varve(&fx)
+        .env("VARVE_ROOT", &producer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .args([
+            "sign-attestation",
+            "--kind",
+            "sbom",
+            "--producer",
+            "acme-ci",
+            "--file",
+        ])
+        .arg(&sbom)
+        .arg("--key")
+        .arg(&sk_path)
+        .args(["--key-id", "test-root", "--out"])
+        .arg(&stmt)
+        .arg("--attach-to")
+        .arg(&layout)
+        .assert()
+        .success();
+    let consumer_root = parent.join("ambatt-consumer");
+    varve(&fx)
+        .env("VARVE_ROOT", &consumer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .args(["install", "--from"])
+        .arg(&layout)
+        .assert()
+        .success();
+    // The consumer's own session allows nothing; the record is the signer's.
+    varve(&fx)
+        .env("VARVE_ROOT", &consumer_root)
+        .env("VARVE_TRUST_ROOT", &trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("sbom by acme-ci: binds to this layer").and(
+                predicate::str::contains("ambient tools were allowed in the signing session")
+                    .and(predicate::str::contains("ghost")),
+            ),
+        );
+}

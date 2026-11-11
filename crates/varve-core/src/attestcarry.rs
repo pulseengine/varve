@@ -92,6 +92,10 @@ pub struct AttestationReport {
     pub binds: bool,
     /// Why not, when it does not.
     pub reason: Option<String>,
+    /// The passthrough policy of the session that SIGNED the statement
+    /// (REQ-PASSTHROUGH-001 clause 4): empty for a pure session, and for a
+    /// statement that did not verify (nothing it says can be trusted).
+    pub ambient_tools: Vec<String>,
 }
 
 fn io(path: &Path, source: std::io::Error) -> CarryError {
@@ -290,6 +294,7 @@ pub fn report(
                             producer: "<unverified>".into(),
                             binds: false,
                             reason: Some(e.to_string()),
+                            ambient_tools: Vec::new(),
                         };
                     }
                 };
@@ -301,6 +306,7 @@ pub fn report(
                 producer: st.producer.clone(),
                 binds: reason.is_none(),
                 reason,
+                ambient_tools: st.ambient_tools.clone(),
             }
         })
         .collect()
