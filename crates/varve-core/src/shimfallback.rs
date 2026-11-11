@@ -430,12 +430,28 @@ pub fn ambient_binary(
         .find(|p| !is_varve(p, self_exe))
 }
 
+/// Format and separator characters that are not `char::is_control` but still
+/// reorder (bidi embeddings, overrides, isolates, marks) or split or hide
+/// (zero-width, line and paragraph separators, the byte-order mark) displayed
+/// text.
+fn reorders_or_splits(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+    )
+}
+
 /// `text` with every control character (a newline above all) written as an
 /// escape, so a path or a name cannot split a line it is printed in.
 fn one_line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if c.is_control() {
+        if c.is_control() || reorders_or_splits(c) {
             out.extend(c.escape_default());
         } else {
             out.push(c);
@@ -1179,6 +1195,27 @@ mod passthrough_tests {
         assert!(n.contains("gh\\nost"), "{n}");
         assert!(n.contains("2026\\n.07"), "{n}");
         assert!(n.contains("/u/c\\nonfig.toml"), "{n}");
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn the_notice_escapes_format_and_separator_characters_too() {
+        // Bidi controls reorder what a terminal shows; zero-width and line or
+        // paragraph separators split or hide text. None is `is_control`.
+        let hostile = [
+            '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}',
+            '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2028}', '\u{2029}',
+            '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{feff}',
+        ];
+        for c in hostile {
+            let name = format!("a{c}b");
+            let n = notice(&name, Path::new("/opt/x"), "2026.07.0", None);
+            assert!(!n.contains(c), "U+{:04X} survived: {n:?}", c as u32);
+            assert!(n.contains(&format!("a{}b", c.escape_default())), "{n}");
+        }
+        // Ordinary non-ASCII text is left readable.
+        let n = notice("g\u{f1}", Path::new("/opt/x"), "2026.07.0", None);
+        assert!(n.contains("g\u{f1}"), "{n}");
     }
 
     // rivet: verifies REQ-PASSTHROUGH-001
