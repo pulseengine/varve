@@ -86,13 +86,23 @@ attesting the same name at another digest.
 The record (`proof-signer`, `proof-asserts`) names the `buildSignerURI`, the ref
 and the commit of the statements that vouched for the planned assets.
 
-The limit, plainly: with no ref pin, an attestation built from **any branch or
-tag of the repository**, by any workflow in it, is accepted when one of its
-subjects carries this release's asset name and the matching digest. The
-producer does not check that the workflow is the upstream's release workflow, or
-that the ref is the release. What stops an older release's attestation is the
-subject name carrying the release; what it does not stop is a build of the same
-name and digest from a branch.
+The limit, plainly: with no ref pin, an attestation built from **any
+non-pull-request branch or tag of the repository**, by any workflow in it, is
+accepted when one of its subjects carries this release's asset name and the
+matching digest. A workflow can attest a subject name and digest of its choosing
+(`attest-build-provenance` takes `subject-name` and `subject-digest` inputs), so
+the ability to push to a branch plus write access to the release's assets is
+enough to pass this rung. That is weaker than the `cosign-sums` rung, whose
+certificate identity is pinned to the release tag. The producer does not check
+that the workflow is the upstream's release workflow, or that the ref is the
+release. What stops an older release's attestation is the subject name carrying
+the release; what it does not stop is a build of the same name and digest from a
+branch.
+
+Besides `refs/pull/*`, statements built from `refs/heads/gh-readonly-queue/*`
+(merge-queue builds) are set aside the same way. `pull_request_target` and
+`workflow_run` builds report `refs/heads/<base>` and cannot be told apart from a
+branch build.
 
 For `cosign-sums` the recorded `proof-signer` is the repository's identity
 prefix, `https://<host>/<owner>/<repo>/`, the same from one release to the next

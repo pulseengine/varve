@@ -189,7 +189,7 @@ impl fmt::Display for AttestationError {
             AttestationError::PullRequestBuild { source_ref } => write!(
                 f,
                 "every attestation for these bytes was built from {source_ref}, a pull \
-                 request. A pull-request build is never a release, however well \
+                 request or merge-queue ref. Such a build is never a release, however well \
                  it is signed, so it vouches for nothing."
             ),
         }
@@ -198,9 +198,11 @@ impl fmt::Display for AttestationError {
 
 impl std::error::Error for AttestationError {}
 
-/// Whether a ref names a pull request build.
+/// Whether a ref names a build that is never a release: a pull request or a
+/// merge-queue branch. (`pull_request_target` and `workflow_run` builds report
+/// `refs/heads/<base>` and cannot be told apart from a branch build.)
 fn is_pull_request(r: &str) -> bool {
-    r.starts_with("refs/pull/")
+    r.starts_with("refs/pull/") || r.starts_with("refs/heads/gh-readonly-queue/")
 }
 
 /// Parse the output of `gh attestation verify --format json`.
@@ -523,6 +525,48 @@ mod tests {
         assert_eq!(
             parse(&format!("[{bad_branch},{good}]")),
             Err(AttestationError::NoSubjects)
+        );
+    }
+
+    /// Merge-queue builds are never releases either; `pull_request_target` and
+    /// `workflow_run` report `refs/heads/<base>` and cannot be told apart.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_merge_queue_build_is_set_aside_like_a_pull_request() {
+        let a = r#"{"name":"a","digest":{"sha256":"1111111111111111111111111111111111111111111111111111111111111111"}}"#;
+        let queue = result(
+            a,
+            "https://h/o/r/.github/workflows/p.yml@refs/heads/gh-readonly-queue/main/pr-4-abc",
+            "refs/heads/gh-readonly-queue/main/pr-4-abc",
+        );
+        assert!(matches!(
+            parse(&format!("[{queue}]")),
+            Err(AttestationError::PullRequestBuild { .. })
+        ));
+        let main = result(
+            a,
+            "https://h/o/r/.github/workflows/p.yml@refs/heads/main",
+            "refs/heads/main",
+        );
+        assert_eq!(
+            parse(&format!("[{queue},{main}]"))
+                .expect("parses")
+                .statements
+                .len(),
+            1
+        );
+        // Only the queue namespace: a branch merely named like it is kept.
+        let lookalike = result(
+            a,
+            "https://h/o/r/.github/workflows/p.yml@refs/heads/gh-readonly-queues",
+            "refs/heads/gh-readonly-queues",
+        );
+        assert_eq!(
+            parse(&format!("[{lookalike}]"))
+                .expect("parses")
+                .statements
+                .len(),
+            1
         );
     }
 }
