@@ -10295,3 +10295,35 @@ fn the_notice_stays_one_line_when_a_path_directory_name_holds_a_newline() {
         "the newline must show escaped: {stderr:?}"
     );
 }
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn passthrough_never_runs_a_binary_the_repository_planted_via_a_relative_path_entry() {
+    // An empty PATH entry means the working directory, and so does `.` or any
+    // relative one — and the working directory is the repository. Passthrough
+    // searches absolute entries only.
+    let (fx, _bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    for planted in [fx.project.join("ghost"), fx.project.join("rel-bin/ghost")] {
+        write_executable(
+            &planted,
+            &format!("#!/bin/sh\necho planted > {}\n", marker.display()),
+        );
+    }
+    for path in [
+        ":/usr/bin:/bin",
+        "/usr/bin::/bin",
+        ".:/usr/bin:/bin",
+        "rel-bin:/usr/bin:/bin",
+    ] {
+        let out = run_shim(&fx, "ghost", path, Some(&xdg), &[]);
+        assert!(
+            !marker.exists(),
+            "PATH={path:?} ran a binary planted in the repository"
+        );
+        assert_eq!(out.status.code(), Some(1), "PATH={path:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("passthrough:"), "{stderr}");
+    }
+}

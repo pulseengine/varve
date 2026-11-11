@@ -30,6 +30,18 @@ use crate::store::Store;
 /// symlinked or `..`-spelled route to it does not slip through. The same
 /// executable reached through two PATH entries is listed once.
 pub fn on_path(path_var: Option<&OsStr>, tool: &str, shim_dir: &Path) -> Vec<PathBuf> {
+    search_path(path_var, tool, shim_dir, false)
+}
+
+/// [`on_path`], optionally looking at absolute entries only. The filter has to
+/// run BEFORE the de-duplication: otherwise a relative spelling of a directory
+/// listed ahead of its absolute one would swallow it.
+fn search_path(
+    path_var: Option<&OsStr>,
+    tool: &str,
+    shim_dir: &Path,
+    absolute_only: bool,
+) -> Vec<PathBuf> {
     if tool.is_empty() || tool.contains('/') || tool.contains('\\') {
         return Vec::new();
     }
@@ -40,6 +52,9 @@ pub fn on_path(path_var: Option<&OsStr>, tool: &str, shim_dir: &Path) -> Vec<Pat
     let mut out: Vec<PathBuf> = Vec::new();
     let mut seen: Vec<PathBuf> = Vec::new();
     for dir in std::env::split_paths(path_var) {
+        if absolute_only && !dir.is_absolute() {
+            continue;
+        }
         let dir = if dir.as_os_str().is_empty() {
             PathBuf::from(".")
         } else {
@@ -403,7 +418,10 @@ pub fn ambient_binary(
     shim_dir: &Path,
     self_exe: Option<&Path>,
 ) -> Option<PathBuf> {
-    on_path(path_var, tool, shim_dir)
+    // ABSOLUTE entries only. An empty entry means the working directory, and
+    // so does `.` or any relative one — and the working directory is the
+    // repository, which could plant a `ghost` for the user to run unknowingly.
+    search_path(path_var, tool, shim_dir, true)
         .into_iter()
         .find(|p| !is_varve(p, self_exe))
 }
@@ -1123,5 +1141,33 @@ mod passthrough_tests {
         assert!(n.contains("gh\\nost"), "{n}");
         assert!(n.contains("2026\\n.07"), "{n}");
         assert!(n.contains("/u/c\\nonfig.toml"), "{n}");
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[cfg(unix)]
+    #[test]
+    fn the_ambient_search_skips_relative_path_entries() {
+        // A relative entry that DOES resolve to a real ghost (it climbs to the
+        // root and back down) is still the working directory's business, not
+        // PATH's: only the absolute spelling of the same directory is used.
+        let shims = tempfile::tempdir().unwrap();
+        let real = tempfile::tempdir().unwrap();
+        let ghost = exe(real.path(), "ghost");
+        let climb = format!(
+            "{}{}",
+            "../".repeat(64),
+            real.path().to_str().unwrap().trim_start_matches('/')
+        );
+        assert!(Path::new(&climb).join("ghost").exists());
+        let relative = OsString::from(&climb);
+        assert_eq!(
+            ambient_binary(Some(&relative), "ghost", shims.path(), None),
+            None
+        );
+        let both = std::env::join_paths([OsString::from(&climb), os(real.path())]).unwrap();
+        assert_eq!(
+            ambient_binary(Some(&both), "ghost", shims.path(), None),
+            Some(ghost)
+        );
     }
 }
