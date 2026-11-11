@@ -2203,9 +2203,30 @@ fn launch(mut cmd: std::process::Command, tool: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Set to the tool name in the environment of a passed-through process, so a
-/// shim that finds it again for the same tool can tell it is in a loop.
+/// Set to the tool name in the environment of a passed-through process, with
+/// [`PASSTHROUGH_EXE`] naming the binary it was passed through to. Children
+/// inherit both, so the pair alone cannot mean "loop": a passed-through `make`
+/// that runs `make -C sub` is legitimate nesting. It is a loop only when the
+/// process now running IS that binary, i.e. the passthrough landed on a copy
+/// of varve.
 const PASSTHROUGH_MARK: &str = "VARVE_PASSTHROUGH";
+/// The canonical path of the binary a passthrough exec'd.
+const PASSTHROUGH_EXE: &str = "VARVE_PASSTHROUGH_EXE";
+
+/// Whether this process is the binary an earlier passthrough for `tool` ran.
+fn passthrough_landed_on_me(tool: &str) -> bool {
+    let marked = std::env::var_os(PASSTHROUGH_MARK);
+    if marked.as_deref() != Some(std::ffi::OsStr::new(tool)) {
+        return false;
+    }
+    let (Some(recorded), Ok(me)) = (
+        std::env::var_os(PASSTHROUGH_EXE),
+        std::env::current_exe().and_then(std::fs::canonicalize),
+    ) else {
+        return false;
+    };
+    std::path::Path::new(&recorded) == me
+}
 
 fn run_tool(
     store: &Store,
@@ -2291,9 +2312,7 @@ fn run_tool(
                         // led back to a varve shim that `is_varve` cannot
                         // recognise (a copy or hardlink of the binary): refuse
                         // rather than exec forever.
-                        if std::env::var_os(PASSTHROUGH_MARK).as_deref()
-                            == Some(std::ffi::OsStr::new(tool))
-                        {
+                        if passthrough_landed_on_me(tool) {
                             bail!(
                                 "passthrough loop: '{tool}' already passed through to a binary \
                                  on PATH, and that binary is another varve shim (a copy or link \
@@ -2319,8 +2338,11 @@ fn run_tool(
                             );
                             // No VARVE_LAYER*: the tool is not the layer's, and
                             // saying otherwise would be the lie this prevents.
+                            let landed = std::fs::canonicalize(&binary).unwrap_or(binary.clone());
                             let mut cmd = std::process::Command::new(binary);
-                            cmd.args(args).env(PASSTHROUGH_MARK, tool);
+                            cmd.args(args)
+                                .env(PASSTHROUGH_MARK, tool)
+                                .env(PASSTHROUGH_EXE, landed);
                             return launch(cmd, tool);
                         }
                     }

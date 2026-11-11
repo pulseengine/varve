@@ -10181,6 +10181,34 @@ fn two_copies_of_varve_on_path_end_in_a_loop_error_not_a_hang() {
 }
 
 // rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_passed_through_tool_that_calls_itself_nests_instead_of_looping() {
+    // The loop guard must not fire for LEGITIMATE nesting: a recursive
+    // `make -C sub`, a git hook calling `git`. The ambient `ghost` finds the
+    // shim first on its PATH, so the second `ghost` is the shim again, passing
+    // through to the same ambient binary. Only a passthrough that landed on a
+    // varve binary is a loop.
+    let (fx, bin, _marker) = passthrough_fixture();
+    write_executable(
+        &bin.join("ghost"),
+        "#!/bin/sh\nif [ \"$1\" = inner ]; then echo inner-ran; exit 0; fi\nghost inner\n",
+    );
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"ghost\"]\n");
+    let path = format!(
+        "{}:{}:/usr/bin:/bin",
+        fx.root.join("shims").display(),
+        bin.display()
+    );
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "inner-ran\n");
+    assert!(!stderr.contains("passthrough loop"), "{stderr}");
+    assert_eq!(stderr.matches("varve: passthrough:").count(), 2, "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
 #[test]
 fn verify_reports_that_a_carried_attestation_was_signed_in_an_ambient_session() {
     // Clause 4. `check-attestation` printed the ambient sentence; the report
