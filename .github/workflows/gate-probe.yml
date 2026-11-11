@@ -1,0 +1,31 @@
+name: gate-probe
+
+# temper's report-only probe (temper#86, contract in temper's
+# docs/gate-probe.md): runs tools/ci/detect-changes.sh on the control paths
+# declared in .github/gate-probe.json and fails if any required check's
+# change detector would skip a change it must gate. Report-only until the
+# owner makes `gate-probe` a required check; the check name must then stay
+# stable, because renaming a required check silently drops the requirement.
+#
+# Per the contract: pull_request only (never pull_request_target), no path
+# filter, no `if:`, no continue-on-error, contents: read. Control paths live
+# only in .github/gate-probe.json.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate-probe:
+    name: gate-probe
+    # The probe runs the PR's own detector script, so a fork's PR goes to a
+    # GitHub-hosted VM and only this repository's own PRs use the pool.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","light"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pulseengine/temper/.github/actions/gate-probe@308848d151a0fdd0fc5eb8af0531addbf6f36ef4 # temper main, run 42897869007
