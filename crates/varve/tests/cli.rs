@@ -10271,6 +10271,44 @@ fn a_requested_name_that_is_not_ascii_is_never_passed_through() {
 }
 
 // rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn passthrough_is_refused_when_what_the_layer_carries_cannot_be_determined() {
+    // Clause 2, fail closed, at the CLI: a layer whose `bin/` cannot be listed
+    // after install may carry `ghost`. Treating "could not tell" as "does not
+    // carry" would run an ambient `ghost` in its place.
+    use std::os::unix::fs::PermissionsExt;
+    let (fx, bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"ghost\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    // Control: with the layer readable, this very setup passes through.
+    let ok = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    assert_eq!(ok.status.code(), Some(7), "{ok:?}");
+    std::fs::remove_file(&marker).unwrap();
+
+    let layer_bin = std::fs::read_dir(fx.root.join("core"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path().join("bin"))
+        .find(|p| p.is_dir())
+        .expect("the fixture layer has a bin/");
+    std::fs::set_permissions(&layer_bin, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unlistable = std::fs::read_dir(&layer_bin).is_err();
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    std::fs::set_permissions(&layer_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if !unlistable {
+        return; // permission bits are not enforced (running as root)
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !marker.exists(),
+        "an unreadable layer was read as carrying nothing: {stderr}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(!stderr.contains("varve: passthrough:"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
 #[test]
 fn verify_reports_that_a_carried_attestation_was_signed_in_an_ambient_session() {
     // Clause 4. `check-attestation` printed the ambient sentence; the report
