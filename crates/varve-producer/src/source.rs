@@ -278,6 +278,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
             crate::ingest::rung_cosign_sums(
                 forge,
                 repo,
+                version,
                 &ReleaseProbe {
                     published: Vec::new(),
                     has_sums,

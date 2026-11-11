@@ -77,6 +77,12 @@ different name, its own digest) never covers this release's asset. The recorded
 assertion says so: the binding is by asset name and the source ref is not
 pinned.
 
+For `cosign-sums` the recorded `proof-signer` is the identity pattern that was
+enforced, `https://<host>/<owner>/<repo>/.github/workflows/[^@]+@refs/tags/<tag>`
+(it still begins `https://<host>/<owner>/`, and it names the tag, so it differs
+from one release to the next); for `build-provenance` it is the attestation's
+build signer URI.
+
 The release each proof was bound to is part of the recorded assertion
 (`proof-asserts`).
 

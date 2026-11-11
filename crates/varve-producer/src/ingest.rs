@@ -336,7 +336,7 @@ impl fmt::Display for IngestError {
 impl std::error::Error for IngestError {}
 
 /// Rung 1 — a cosign-signed sums file.
-pub fn rung_cosign_sums(forge: &Forge, repo: &str, probe: &ReleaseProbe) -> Rung {
+pub fn rung_cosign_sums(forge: &Forge, repo: &str, release: &str, probe: &ReleaseProbe) -> Rung {
     if !(probe.has_sums && probe.has_cosign_bundle) {
         return Rung::NotOffered;
     }
@@ -348,12 +348,14 @@ pub fn rung_cosign_sums(forge: &Forge, repo: &str, probe: &ReleaseProbe) -> Rung
         ),
         Some(Err(e)) => Rung::Failed(e.clone()),
         Some(Ok(())) => {
-            let identity = forge.identity_prefix(repo);
+            // The identity the probe enforced (`Forge::identity_regexp`), not
+            // the repository it lives in.
+            let identity = forge.identity_pattern(repo, release);
             Rung::Accepted {
                 signer: identity.clone(),
                 asserts: format!(
-                    "SHA256SUMS.txt signed by an identity under {identity} via \
-                     {}; this payload's recorded asset digest is transcribed \
+                    "SHA256SUMS.txt signed by the workflow identity {identity}, run in {repo}, \
+                     via {}; this payload's recorded asset digest is transcribed \
                      from it",
                     forge.oidc_issuer
                 ),
@@ -496,7 +498,7 @@ pub fn choose(
     optins: &BTreeMap<String, String>,
     upstream_sums: Option<&str>,
 ) -> Result<Accepted, IngestError> {
-    match rung_cosign_sums(forge, repo, probe) {
+    match rung_cosign_sums(forge, repo, version, probe) {
         Rung::Accepted { signer, asserts } => {
             return Ok(Accepted {
                 mechanism: Mechanism::CosignSums,
@@ -704,7 +706,8 @@ mod tests {
         assert_eq!(a.mechanism, Mechanism::CosignSums);
         assert_eq!(
             a.signer.as_deref(),
-            Some("https://github.com/pulseengine/rivet/")
+            Some("https://github.com/pulseengine/rivet/.github/workflows/[^@]+@refs/tags/v0.34.0"),
+            "the record names the identity pattern that was enforced, not a prefix"
         );
     }
 
@@ -766,7 +769,7 @@ mod tests {
         assert_eq!(a.mechanism, Mechanism::CosignSums);
         assert_eq!(
             a.signer.as_deref(),
-            Some("https://ghe.example.com/acme/tool/")
+            Some("https://ghe.example.com/acme/tool/.github/workflows/[^@]+@refs/tags/v1.0.0")
         );
         assert!(
             a.asserts.contains("https://ghe.example.com/acme/tool/"),
@@ -918,7 +921,7 @@ mod tests {
             ..sums_ok()
         };
         assert!(matches!(
-            rung_cosign_sums(&Forge::github_com(), "r", &probe),
+            rung_cosign_sums(&Forge::github_com(), "r", "v1", &probe),
             Rung::Failed(_)
         ));
     }
@@ -937,7 +940,7 @@ mod tests {
             pgp_sums: crate::ingest::PgpSumsProbe::NotDeclared,
         };
         assert_eq!(
-            rung_cosign_sums(&Forge::github_com(), "r", &probe),
+            rung_cosign_sums(&Forge::github_com(), "r", "v1", &probe),
             Rung::NotOffered
         );
         let err = choose(&Forge::github_com(), "r", "v1", &probe, &no_optins(), None)
@@ -1382,7 +1385,7 @@ mod pgp_sums_tests {
         let plain = probe(PgpSumsProbe::NotProbed);
         assert!(pgp_rung_is_reachable(&plain));
         assert_eq!(
-            rung_cosign_sums(&forge, "up/stream", &plain),
+            rung_cosign_sums(&forge, "up/stream", "v1", &plain),
             Rung::NotOffered
         );
         assert_eq!(rung_build_provenance(&plain), Rung::NotOffered);
@@ -1391,7 +1394,7 @@ mod pgp_sums_tests {
         sums_only.has_sums = true;
         assert!(pgp_rung_is_reachable(&sums_only));
         assert_eq!(
-            rung_cosign_sums(&forge, "up/stream", &sums_only),
+            rung_cosign_sums(&forge, "up/stream", "v1", &sums_only),
             Rung::NotOffered
         );
         let mut bundle_only = plain.clone();

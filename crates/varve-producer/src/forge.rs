@@ -101,6 +101,18 @@ impl Forge {
         )
     }
 
+    /// The identity [`Self::identity_regexp`] enforces, spelled for a reader
+    /// and for the signed record: the path of the workflow is any file under
+    /// `.github/workflows/` (`[^@]+`) and the ref is the release tag. Not
+    /// escaped and not anchored; it begins `https://<host>/<owner>/`, so a
+    /// reader that wants the owner finds it where it always was.
+    pub fn identity_pattern(&self, repo: &str, release: &str) -> String {
+        format!(
+            "https://{}/{}/.github/workflows/[^@]+@refs/tags/{}",
+            self.host, repo, release
+        )
+    }
+
     pub fn is_public_github(&self) -> bool {
         self.host == "github.com"
     }
