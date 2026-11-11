@@ -729,8 +729,9 @@ mod tests {
     }
 
     /// The identity recorded in the signed manifest is the one cosign was told
-    /// to enforce, not text written beside the enforcement: the record, with
-    /// its pattern characters escaped, IS the regexp the command received.
+    /// to enforce, not text written beside the enforcement: the exact regexp
+    /// the command received, tag included, is in the recorded assertion, while
+    /// the signer stays the repository prefix.
     // rivet: verifies REQ-INGEST-001
     #[test]
     fn the_recorded_cosign_identity_is_the_regexp_cosign_enforced() {
@@ -739,13 +740,13 @@ mod tests {
         let seen = runner.seen_identity.clone();
         let accepted = ladder_at(runner, "o/r", "v1.0.0").expect("verifies");
         let enforced = seen.borrow().clone().expect("cosign was run");
-        let recorded = accepted.signer.expect("a verified rung names who");
-        assert_eq!(
-            enforced,
-            format!("^{}$", recorded.replace('.', "\\.")),
-            "the record must be what cosign enforced"
+        assert!(
+            accepted.asserts.contains(&enforced),
+            "the record must carry what cosign enforced: {enforced} not in {}",
+            accepted.asserts
         );
-        assert!(recorded.ends_with("@refs/tags/v1.0.0"), "{recorded}");
+        assert!(enforced.ends_with(r"@refs/tags/v1\.0\.0$"), "{enforced}");
+        assert_eq!(accepted.signer.as_deref(), Some("https://github.com/o/r/"));
     }
 
     /// A reusable workflow of the upstream repository, called from ANOTHER

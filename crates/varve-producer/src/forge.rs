@@ -101,18 +101,6 @@ impl Forge {
         )
     }
 
-    /// The identity [`Self::identity_regexp`] enforces, spelled for a reader
-    /// and for the signed record: the path of the workflow is any file under
-    /// `.github/workflows/` (`[^@]+`) and the ref is the release tag. Not
-    /// escaped and not anchored; it begins `https://<host>/<owner>/`, so a
-    /// reader that wants the owner finds it where it always was.
-    pub fn identity_pattern(&self, repo: &str, release: &str) -> String {
-        format!(
-            "https://{}/{}/.github/workflows/[^@]+@refs/tags/{}",
-            self.host, repo, release
-        )
-    }
-
     pub fn is_public_github(&self) -> bool {
         self.host == "github.com"
     }
@@ -178,30 +166,6 @@ mod tests {
         regex::Regex::new(&f.identity_regexp(repo, release))
             .expect("the identity regexp compiles")
             .is_match(identity)
-    }
-
-    /// The recorded form (`identity_pattern`) and the enforced form
-    /// (`identity_regexp`) are built separately, so they are tied here: a URI
-    /// the recorded pattern describes is accepted by the enforced regexp, and
-    /// another tag's URI and a branch URI are not.
-    // rivet: verifies REQ-INGEST-001
-    #[test]
-    fn the_recorded_identity_pattern_describes_what_the_regexp_accepts() {
-        for f in [Forge::github_com(), Forge::enterprise("ghe.example.com")] {
-            let described = f
-                .identity_pattern("acme/tool-x", "v1.2.3")
-                .replace("[^@]+", "release.yml");
-            assert!(
-                accepts(&f, "acme/tool-x", "v1.2.3", &described),
-                "{described}"
-            );
-            let other_tag = described.replace("v1.2.3", "v1.2.4");
-            assert!(!accepts(&f, "acme/tool-x", "v1.2.3", &other_tag));
-            let branch = described.replace("refs/tags/v1.2.3", "refs/heads/main");
-            assert!(!accepts(&f, "acme/tool-x", "v1.2.3", &branch));
-            let other_repo = described.replace("acme/tool-x", "acme/tool-y");
-            assert!(!accepts(&f, "acme/tool-x", "v1.2.3", &other_repo));
-        }
     }
 
     /// A certificate is accepted only when its workflow ran from THIS release's

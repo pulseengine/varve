@@ -348,15 +348,18 @@ pub fn rung_cosign_sums(forge: &Forge, repo: &str, release: &str, probe: &Releas
         ),
         Some(Err(e)) => Rung::Failed(e.clone()),
         Some(Ok(())) => {
-            // The identity the probe enforced (`Forge::identity_regexp`), not
-            // the repository it lives in.
-            let identity = forge.identity_pattern(repo, release);
+            // The signer stays the repository's identity prefix, stable from
+            // release to release (a delta reports a moved signer, and a tag in
+            // it would move on every bump). The exact regexp the probe
+            // enforced, tag included, is recorded in the assertion.
+            let identity = forge.identity_prefix(repo);
+            let enforced = forge.identity_regexp(repo, release);
             Rung::Accepted {
                 signer: identity.clone(),
                 asserts: format!(
-                    "SHA256SUMS.txt signed by the workflow identity {identity}, run in {repo}, \
-                     via {}; this payload's recorded asset digest is transcribed \
-                     from it",
+                    "SHA256SUMS.txt signed by a workflow identity under {identity} that matched \
+                     the enforced pattern {enforced}, run in {repo}, via {}; this payload's \
+                     recorded asset digest is transcribed from it",
                     forge.oidc_issuer
                 ),
             }
@@ -733,9 +736,20 @@ mod tests {
         assert_eq!(a.mechanism, Mechanism::CosignSums);
         assert_eq!(
             a.signer.as_deref(),
-            Some("https://github.com/pulseengine/rivet/.github/workflows/[^@]+@refs/tags/v0.34.0"),
-            "the record names the identity pattern that was enforced, not a prefix"
+            Some("https://github.com/pulseengine/rivet/"),
+            "the signer is stable across releases; the tag lives in the assertion"
         );
+        let next = choose(
+            &f,
+            "pulseengine/rivet",
+            "v0.35.0",
+            &sums_ok(),
+            &no_optins(),
+            None,
+        )
+        .expect("accepts");
+        assert_eq!(a.signer, next.signer, "two releases, one signer");
+        assert_ne!(a.asserts, next.asserts, "the assertion names each tag");
     }
 
     /// The text each rung writes into the signed record about its release
@@ -799,7 +813,7 @@ mod tests {
         assert_eq!(a.mechanism, Mechanism::CosignSums);
         assert_eq!(
             a.signer.as_deref(),
-            Some("https://ghe.example.com/acme/tool/.github/workflows/[^@]+@refs/tags/v1.0.0")
+            Some("https://ghe.example.com/acme/tool/")
         );
         assert!(
             a.asserts.contains("https://ghe.example.com/acme/tool/"),

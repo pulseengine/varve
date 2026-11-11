@@ -89,11 +89,12 @@ that the ref is the release. What stops an older release's attestation is the
 subject name carrying the release; what it does not stop is a build of the same
 name and digest from a branch.
 
-For `cosign-sums` the recorded `proof-signer` is the identity pattern that was
-enforced, `https://<host>/<owner>/<repo>/.github/workflows/[^@]+@refs/tags/<tag>`
-(it still begins `https://<host>/<owner>/`, and it names the tag, so it differs
-from one release to the next); for `build-provenance` it is the attestation's
-build signer URI.
+For `cosign-sums` the recorded `proof-signer` is the repository's identity
+prefix, `https://<host>/<owner>/<repo>/`, the same from one release to the next
+(`varve diff` reports a moved signer, and a tag in it would move on every
+bump); the exact identity regexp that cosign enforced, tag included, is in
+`proof-asserts`. For `build-provenance` the signer is the attestation's build
+signer URI.
 
 The release each proof was bound to is part of the recorded assertion
 (`proof-asserts`).
