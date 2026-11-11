@@ -81,6 +81,9 @@ version  = "v1.0.1"
 layout   = "sdk"
 asset    = "toolchain_gnu_%U_arm-zephyr-eabi.tar.xz"
 contains = "arm-zephyr-eabi/bin"
+# sdk-ng's asset names carry no version, so a proof cannot be bound to the
+# release by name; the reason is signed into the layer.
+unbound-release-reason = "sdk-ng names its archives with no version"
 ```
 
 > **Requires the Rust assembler.** `varve-producer deposit --manifest layer.toml`

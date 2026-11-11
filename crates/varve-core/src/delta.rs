@@ -411,6 +411,24 @@ mod tests {
         assert!(d.findings.is_empty(), "varve judged a signer change: {d:?}");
     }
 
+    /// A plain version bump of a tool whose proof and vouching identity are
+    /// unchanged reports the version, and neither the proof nor the signer: a
+    /// signer that carried the release tag would read as moved on every bump.
+    // rivet: verifies REQ-LAYERDIFF-001
+    #[test]
+    fn a_plain_version_bump_does_not_move_the_signer() {
+        let signed = |version: &str| {
+            let mut r = row("rivet", version, "cosign-sums");
+            r.proof_signer = Some("https://github.com/pulseengine/rivet/".to_string());
+            r
+        };
+        let d = delta(&[signed("0.39.0")], &[signed("0.40.0")]);
+        assert_eq!(d.changed.len(), 1, "{d:?}");
+        assert!(d.changed[0].version_moved());
+        assert!(!d.changed[0].signer_moved(), "{d:?}");
+        assert!(!d.changed[0].proof_moved());
+    }
+
     /// Every label, pinned individually.
     ///
     /// The mutation gate reached this file the moment it moved into the lib

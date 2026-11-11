@@ -70,18 +70,63 @@ struct Certificate {
     build_signer_uri: Option<String>,
     #[serde(rename = "sourceRepositoryDigest", default)]
     source_repository_digest: Option<String>,
+    #[serde(rename = "sourceRepositoryRef", default)]
+    source_repository_ref: Option<String>,
 }
 
-/// What an attestation established.
+/// One verified statement: who built it, from which ref and commit, and the
+/// subjects (name and digest) it vouches for.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Attested {
-    /// The workflow identity that signed the build.
+pub struct Build {
+    /// The workflow identity that signed the build (`buildSignerURI`).
     pub signer: String,
+    /// The ref the build ran from (`sourceRepositoryRef`, or, where the
+    /// certificate omits it, the part of the signer URI after `@`). Empty when
+    /// neither says.
+    pub source_ref: String,
     /// The source commit the artifact was built from. May be absent in older
     /// attestations; recorded as empty rather than invented.
     pub source_commit: String,
-    /// Every asset the attestation vouches for.
+    /// The subjects this statement names.
     pub sums: Sums,
+}
+
+/// What `gh attestation verify` established: EVERY statement it returned for
+/// the digest (a pull-request build set aside), not the first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attested {
+    /// The signer of the first statement kept. The record of what vouched for
+    /// an asset comes from [`Attested::vouching`], not from here.
+    pub signer: String,
+    /// The source commit of the first statement kept.
+    pub source_commit: String,
+    /// The statements kept, in the order gh returned them.
+    pub statements: Vec<Build>,
+    /// The union of every kept statement's subjects: a name at two digests is
+    /// refused rather than resolved by order.
+    pub sums: Sums,
+}
+
+impl Attested {
+    /// The statements whose subjects include a subject NAMED `asset`.
+    pub fn vouching(&self, asset: &str) -> Vec<&Build> {
+        self.statements
+            .iter()
+            .filter(|s| s.sums.digest_of(asset).is_some())
+            .collect()
+    }
+
+    /// Fold another verification's statements in (an upstream that attests
+    /// each file separately). A name at two digests is refused.
+    pub fn merge(&mut self, other: &Attested) -> Result<(), SumsError> {
+        self.sums.merge(&other.sums)?;
+        for s in &other.statements {
+            if !self.statements.contains(s) {
+                self.statements.push(s.clone());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +145,10 @@ pub enum AttestationError {
     NoSigner,
     /// A digest that fails the same checks a sums file's would.
     BadDigest(SumsError),
+    /// Every statement gh returned was built from a pull request ref.
+    PullRequestBuild {
+        source_ref: String,
+    },
 }
 
 impl fmt::Display for AttestationError {
@@ -137,56 +186,110 @@ impl fmt::Display for AttestationError {
                  say who."
             ),
             AttestationError::BadDigest(e) => write!(f, "{e}"),
+            AttestationError::PullRequestBuild { source_ref } => write!(
+                f,
+                "every attestation for these bytes was built from {source_ref}, a pull \
+                 request or merge-queue ref. Such a build is never a release, however well \
+                 it is signed, so it vouches for nothing."
+            ),
         }
     }
 }
 
 impl std::error::Error for AttestationError {}
 
+/// Whether a ref names a build that is never a release: a pull request or a
+/// merge-queue branch. (`pull_request_target` and `workflow_run` builds report
+/// `refs/heads/<base>` and cannot be told apart from a branch build.)
+fn is_pull_request(r: &str) -> bool {
+    r.starts_with("refs/pull/") || r.starts_with("refs/heads/gh-readonly-queue/")
+}
+
 /// Parse the output of `gh attestation verify --format json`.
+///
+/// gh returns every attestation from the repository that covers the digest, so
+/// all of them are read. A statement built from `refs/pull/*` is set aside
+/// (and refused when nothing else remains); a subject name that two kept
+/// statements give different digests is refused.
 pub fn parse(json: &str) -> Result<Attested, AttestationError> {
     let docs: Vec<Envelope> =
         serde_json::from_str(json).map_err(|e| AttestationError::NotJson(e.to_string()))?;
-    let first = docs
-        .into_iter()
-        .next()
-        .ok_or(AttestationError::NoAttestations)?;
-
-    let cert = first.verification_result.signature.certificate;
-    let signer = cert
-        .build_signer_uri
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or(AttestationError::NoSigner)?;
-    // Absent rather than invented: older attestations omit it, and an empty
-    // string reads as "built from nothing" rather than "not recorded".
-    let source_commit = cert
-        .source_repository_digest
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-
-    let subjects = first.verification_result.statement.subject;
-    if subjects.is_empty() {
-        return Err(AttestationError::NoSubjects);
+    if docs.is_empty() {
+        return Err(AttestationError::NoAttestations);
     }
-    let mut pairs = Vec::with_capacity(subjects.len());
-    for s in subjects {
-        let digest = s
-            .digest
-            .sha256
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty())
-            .ok_or_else(|| AttestationError::SubjectWithoutDigest {
-                name: s.name.clone(),
-            })?;
-        pairs.push((s.name, digest));
+    let mut statements: Vec<Build> = Vec::new();
+    let mut pull_request: Option<String> = None;
+    for doc in docs {
+        let cert = doc.verification_result.signature.certificate;
+        let raw_signer = cert
+            .build_signer_uri
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let source_ref = cert
+            .source_repository_ref
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .or_else(|| {
+                raw_signer
+                    .as_deref()
+                    .and_then(|s| s.split_once('@'))
+                    .map(|(_, r)| r.to_string())
+            })
+            .unwrap_or_default();
+        // Set aside BEFORE anything is validated: a malformed pull-request
+        // statement must not refuse a release whose real statement is fine.
+        if is_pull_request(&source_ref) {
+            pull_request.get_or_insert(source_ref);
+            continue;
+        }
+        let signer = raw_signer.ok_or(AttestationError::NoSigner)?;
+        // Absent rather than invented: older attestations omit it, and an empty
+        // string reads as "built from nothing" rather than "not recorded".
+        let source_commit = cert
+            .source_repository_digest
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        let subjects = doc.verification_result.statement.subject;
+        if subjects.is_empty() {
+            return Err(AttestationError::NoSubjects);
+        }
+        let mut pairs = Vec::with_capacity(subjects.len());
+        for s in subjects {
+            let digest = s
+                .digest
+                .sha256
+                .map(|d| d.trim().to_string())
+                .filter(|d| !d.is_empty())
+                .ok_or_else(|| AttestationError::SubjectWithoutDigest {
+                    name: s.name.clone(),
+                })?;
+            pairs.push((s.name, digest));
+        }
+        let sums = Sums::from_pairs(pairs).map_err(AttestationError::BadDigest)?;
+        statements.push(Build {
+            signer,
+            source_ref,
+            source_commit,
+            sums,
+        });
     }
-    let sums = Sums::from_pairs(pairs).map_err(AttestationError::BadDigest)?;
+    let Some(first) = statements.first() else {
+        return Err(AttestationError::PullRequestBuild {
+            source_ref: pull_request.unwrap_or_default(),
+        });
+    };
+    let (signer, source_commit) = (first.signer.clone(), first.source_commit.clone());
+    let mut union = statements[0].sums.clone();
+    for s in &statements[1..] {
+        union.merge(&s.sums).map_err(AttestationError::BadDigest)?;
+    }
     Ok(Attested {
         signer,
         source_commit,
-        sums,
+        statements,
+        sums: union,
     })
 }
 
@@ -321,5 +424,171 @@ mod tests {
         let err = parse("{\"not\":\"a list\"}").expect_err("refuses");
         assert!(matches!(err, AttestationError::NotJson(_)), "{err:?}");
         assert!(err.to_string().contains("gh attestation verify"), "{err}");
+    }
+
+    fn result(subjects: &str, signer: &str, source_ref: &str) -> String {
+        format!(
+            r#"{{"verificationResult":{{"statement":{{"subject":[{subjects}]}},
+               "signature":{{"certificate":{{"buildSignerURI":"{signer}",
+               "sourceRepositoryRef":"{source_ref}"}}}}}}}}"#
+        )
+    }
+
+    /// Merging another file's verification adds its statements once: a
+    /// statement first seen in the merged result can vouch afterwards, and
+    /// merging the same result again adds nothing.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn merging_adds_each_new_statement_once() {
+        let a = r#"{"name":"a","digest":{"sha256":"1111111111111111111111111111111111111111111111111111111111111111"}}"#;
+        let b = r#"{"name":"b","digest":{"sha256":"2222222222222222222222222222222222222222222222222222222222222222"}}"#;
+        let tag = "https://h/o/r/.github/workflows/q.yml@refs/tags/v1";
+        let mut first = parse(&format!("[{}]", result(a, tag, "refs/tags/v1"))).expect("parses");
+        let second = parse(&format!("[{}]", result(b, tag, "refs/tags/v1"))).expect("parses");
+        first.merge(&second).expect("no conflicting digest");
+        assert_eq!(first.statements.len(), 2, "{first:?}");
+        assert_eq!(first.vouching("b").len(), 1, "{first:?}");
+        first.merge(&second).expect("no conflicting digest");
+        assert_eq!(
+            first.statements.len(),
+            2,
+            "a repeated statement is not added twice"
+        );
+    }
+
+    /// Every result is read, the pull-request one is set aside, and each kept
+    /// statement keeps its own signer and ref.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn every_result_is_read_and_a_pull_request_build_is_set_aside() {
+        let a = r#"{"name":"a","digest":{"sha256":"1111111111111111111111111111111111111111111111111111111111111111"}}"#;
+        let b = r#"{"name":"b","digest":{"sha256":"2222222222222222222222222222222222222222222222222222222222222222"}}"#;
+        let json = format!(
+            "[{},{},{}]",
+            result(
+                a,
+                "https://h/o/r/.github/workflows/p.yml@refs/pull/9/merge",
+                "refs/pull/9/merge"
+            ),
+            result(
+                a,
+                "https://h/o/r/.github/workflows/p.yml@refs/heads/main",
+                "refs/heads/main"
+            ),
+            result(
+                b,
+                "https://h/o/r/.github/workflows/q.yml@refs/tags/v1",
+                "refs/tags/v1"
+            ),
+        );
+        let at = parse(&json).expect("parses");
+        assert_eq!(at.statements.len(), 2);
+        assert!(at.sums.digest_of("b").is_some() && at.sums.digest_of("a").is_some());
+        assert_eq!(at.vouching("a").len(), 1);
+        assert_eq!(at.vouching("a")[0].source_ref, "refs/heads/main");
+        assert_eq!(at.vouching("b")[0].source_ref, "refs/tags/v1");
+        assert!(at.vouching("c").is_empty());
+        let only = format!(
+            "[{}]",
+            result(
+                a,
+                "https://h/o/r/.github/workflows/p.yml@x",
+                "refs/pull/9/merge"
+            )
+        );
+        assert!(matches!(
+            parse(&only),
+            Err(AttestationError::PullRequestBuild { .. })
+        ));
+        // The ref is read from the signer URI when the certificate omits it.
+        let bare = format!(
+            r#"[{{"verificationResult":{{"statement":{{"subject":[{a}]}},
+               "signature":{{"certificate":{{"buildSignerURI":"https://h/o/r/.github/workflows/p.yml@refs/pull/3/head"}}}}}}}}]"#
+        );
+        assert!(matches!(
+            parse(&bare),
+            Err(AttestationError::PullRequestBuild { .. })
+        ));
+    }
+
+    /// A pull-request statement is set aside BEFORE it is validated, so a
+    /// malformed one (no subjects, no signer, a subject without a digest) does
+    /// not refuse a release whose real statement is fine.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_malformed_pull_request_statement_does_not_refuse_the_release() {
+        let a = r#"{"name":"a","digest":{"sha256":"1111111111111111111111111111111111111111111111111111111111111111"}}"#;
+        let good = result(
+            a,
+            "https://h/o/r/.github/workflows/p.yml@refs/heads/main",
+            "refs/heads/main",
+        );
+        let no_subjects = r#"{"verificationResult":{"statement":{"subject":[]},
+            "signature":{"certificate":{"buildSignerURI":"https://h/x@refs/pull/1/merge","sourceRepositoryRef":"refs/pull/1/merge"}}}}"#;
+        let no_signer = r#"{"verificationResult":{"statement":{"subject":[{"name":"a","digest":{}}]},
+            "signature":{"certificate":{"sourceRepositoryRef":"refs/pull/2/merge"}}}}"#;
+        let no_digest = result(
+            r#"{"name":"a","digest":{}}"#,
+            "https://h/x",
+            "refs/pull/3/head",
+        );
+        for bad in [no_subjects.to_string(), no_signer.to_string(), no_digest] {
+            let at = parse(&format!("[{bad},{good}]")).expect("the PR statement is set aside");
+            assert_eq!(at.statements.len(), 1);
+            assert_eq!(at.statements[0].source_ref, "refs/heads/main");
+        }
+        // Malformed AND the only statement: still a refusal, naming the ref.
+        assert!(matches!(
+            parse(&format!("[{no_subjects}]")),
+            Err(AttestationError::PullRequestBuild { .. })
+        ));
+        // A malformed statement that is NOT a pull request is still refused.
+        let bad_branch = result("", "https://h/x", "refs/heads/main");
+        assert_eq!(
+            parse(&format!("[{bad_branch},{good}]")),
+            Err(AttestationError::NoSubjects)
+        );
+    }
+
+    /// Merge-queue builds are never releases either; `pull_request_target` and
+    /// `workflow_run` report `refs/heads/<base>` and cannot be told apart.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_merge_queue_build_is_set_aside_like_a_pull_request() {
+        let a = r#"{"name":"a","digest":{"sha256":"1111111111111111111111111111111111111111111111111111111111111111"}}"#;
+        let queue = result(
+            a,
+            "https://h/o/r/.github/workflows/p.yml@refs/heads/gh-readonly-queue/main/pr-4-abc",
+            "refs/heads/gh-readonly-queue/main/pr-4-abc",
+        );
+        assert!(matches!(
+            parse(&format!("[{queue}]")),
+            Err(AttestationError::PullRequestBuild { .. })
+        ));
+        let main = result(
+            a,
+            "https://h/o/r/.github/workflows/p.yml@refs/heads/main",
+            "refs/heads/main",
+        );
+        assert_eq!(
+            parse(&format!("[{queue},{main}]"))
+                .expect("parses")
+                .statements
+                .len(),
+            1
+        );
+        // Only the queue namespace: a branch merely named like it is kept.
+        let lookalike = result(
+            a,
+            "https://h/o/r/.github/workflows/p.yml@refs/heads/gh-readonly-queues",
+            "refs/heads/gh-readonly-queues",
+        );
+        assert_eq!(
+            parse(&format!("[{lookalike}]"))
+                .expect("parses")
+                .statements
+                .len(),
+            1
+        );
     }
 }

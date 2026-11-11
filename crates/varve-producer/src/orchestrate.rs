@@ -51,6 +51,9 @@ pub struct Verified {
     /// The digests the proof covers. `None` for an `unverified` opt-in, where
     /// nothing vouches for anything and saying otherwise would be the lie.
     pub sums: Option<Sums>,
+    /// For build provenance: asset name -> the source ref of every statement
+    /// that named it. Empty for every other mechanism.
+    pub vouching_refs: BTreeMap<String, Vec<String>>,
 }
 
 /// Everything this module needs from the outside world. The real
@@ -104,6 +107,18 @@ pub enum RunError {
         repo: String,
         asset: String,
         mechanism: &'static str,
+    },
+    /// `unbound-release-reason` on an entry whose release a signed proof
+    /// (cosign or build provenance) vouches for, with an asset name that does
+    /// not carry the release: the proof cannot be bound to the release.
+    SignedProofNotBoundByName {
+        tool: String,
+        asset: String,
+        mechanism: &'static str,
+        release: String,
+        /// Whether the release tag names exactly one release. A moving tag
+        /// (`nightly`) is reused across builds, so a tag pin binds nothing.
+        single_release: bool,
     },
     /// A tool matched no asset on ANY platform. Per-platform absence is
     /// routine; absence everywhere means the asset template no longer
@@ -176,9 +191,43 @@ impl fmt::Display for RunError {
             } => write!(
                 f,
                 "{tool}: the asset {asset:?} contains neither the declared version {version:?} \
-                 nor the release {release:?}, so a validly signed list for a different release \
-                 could cover it. Refusing: a signed digest list is bound to a release only \
-                 through the names it lists."
+                 nor the release {release:?}, so a proof for a different release (a signed \
+                 list, an attestation, a certificate) could cover it. Refusing: a proof is \
+                 bound to a release through the names it covers. An entry that cannot name \
+                 its release can state why with unbound-release-reason, which is signed into \
+                 the layer."
+            ),
+            RunError::SignedProofNotBoundByName {
+                tool,
+                asset,
+                mechanism,
+                release,
+                single_release,
+            } if !single_release => write!(
+                f,
+                "{tool}: the asset {asset:?} does not carry release {release:?}, and the tag \
+                 {release:?} does not name a single release (it is reused across builds), so \
+                 neither a {mechanism} proof pinned to that tag nor the name can tell this \
+                 release from an older build under the same tag. `unbound-release-reason` \
+                 does not waive that here. Release a tag that names one release, or name the \
+                 release in the asset (`%V` or `%R`)."
+            ),
+            RunError::SignedProofNotBoundByName {
+                tool,
+                asset,
+                mechanism,
+                release,
+                ..
+            } => write!(
+                f,
+                "{tool}: the asset {asset:?} does not carry release {release:?}, and the \
+                 {mechanism} proof that vouches for this release signs a name and a digest \
+                 for whichever release produced them: with a versionless name an older \
+                 release's file and attestation would satisfy it. A signed proof cannot be \
+                 bound to the release by name, and `unbound-release-reason` does not waive \
+                 that here. A tag-built attestation would be accepted: one whose every \
+                 statement for this asset was built from refs/tags/{release}. Otherwise \
+                 name the release in the asset (`%V` or `%R`)."
             ),
             RunError::GroupDisagrees {
                 repo,
@@ -418,7 +467,9 @@ pub fn verify_release<S: Source>(
             PgpSumsProbe::NotProbed
         };
     }
-    let accepted = ingest::choose(forge, repo, version, &probe, optins, declared.upstream_sums)?;
+    let mut accepted =
+        ingest::choose(forge, repo, version, &probe, optins, declared.upstream_sums)?;
+    let mut vouching_refs: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let sums = match accepted.mechanism {
         Mechanism::CosignSums => {
             let text = src.sums_text(repo, version)?;
@@ -467,12 +518,10 @@ pub fn verify_release<S: Source>(
             // batches its release names every asset here, and this is the
             // whole answer — one verification, as clause 3 requires.
             let json = src.attestation_json(repo, version)?;
-            let mut covered = crate::attestation::parse(&json)
-                .map_err(|e| RunError::Io {
-                    context: format!("{repo} {version}: reading the verified attestation"),
-                    detail: e.to_string(),
-                })?
-                .sums;
+            let mut covered = crate::attestation::parse(&json).map_err(|e| RunError::Io {
+                context: format!("{repo} {version}: reading the verified attestation"),
+                detail: e.to_string(),
+            })?;
 
             // An upstream that calls `attest-build-provenance` per file names
             // only ONE asset there, and every other asset of the release has
@@ -481,7 +530,7 @@ pub fn verify_release<S: Source>(
             // planned asset the probed statement does not name is verified
             // against its own bytes and its own statement.
             for asset in wanted {
-                if covered.digest_of(asset).is_some() {
+                if covered.sums.digest_of(asset).is_some() {
                     continue;
                 }
                 // Not published at all is "this platform has no build", which
@@ -500,12 +549,42 @@ pub fn verify_release<S: Source>(
                 // asset leaves this one uncovered, and it is then refused by
                 // the same rule as any other unproven asset rather than
                 // credited with its sibling's proof.
-                covered.merge(&parsed.sums).map_err(|e| RunError::Io {
+                covered.merge(&parsed).map_err(|e| RunError::Io {
                     context: format!("{repo} {version}: {asset}"),
                     detail: e.to_string(),
                 })?;
             }
-            Some(covered)
+            // Record the statements that actually vouched for the planned
+            // assets: their buildSignerURI, ref and commit, not whichever
+            // statement gh happened to list first.
+            let mut builds: Vec<(String, String, String)> = Vec::new();
+            for asset in wanted {
+                for st in covered.vouching(asset) {
+                    vouching_refs
+                        .entry(asset.clone())
+                        .or_default()
+                        .push(st.source_ref.clone());
+                    let b = (
+                        st.signer.clone(),
+                        st.source_ref.clone(),
+                        st.source_commit.clone(),
+                    );
+                    if !builds.contains(&b) {
+                        builds.push(b);
+                    }
+                }
+            }
+            if !builds.is_empty() {
+                let refs: Vec<(&str, &str, &str)> = builds
+                    .iter()
+                    .map(|(a, b, c)| (a.as_str(), b.as_str(), c.as_str()))
+                    .collect();
+                accepted.signer = Some(ingest::provenance_signer(
+                    builds.iter().map(|(a, _, _)| a.as_str()),
+                ));
+                accepted.asserts = ingest::provenance_asserts(&refs, version);
+            }
+            Some(covered.sums)
         }
         // No proof was offered and an operator said to proceed anyway. There
         // is no list of covered digests because there is no list.
@@ -515,6 +594,7 @@ pub fn verify_release<S: Source>(
         accepted,
         published: probe.published,
         sums,
+        vouching_refs,
     })
 }
 
@@ -769,59 +849,139 @@ fn check_group_agrees(
     disagree("upstream-sums", &|p| p.upstream_sums != first.upstream_sums)
 }
 
-/// Does `asset` contain `token` as a whole version, not as a piece of a longer
-/// one? The character before it must not be a digit or `.`, and the one after
-/// it must not be a digit nor a `.` followed by a digit, so `1.2` is found in
-/// `tool-v1.2.tar.gz` and `tool-1.2-x86_64.tar.gz` and not in `tool-v1.2.3.tar.gz`,
-/// `tool-11.2.tar.gz` or `tool-1.2.30-old.tar.gz`. One bounded occurrence is
-/// enough.
-fn carries_at_a_boundary(asset: &str, token: &str) -> bool {
-    asset.match_indices(token).any(|(at, _)| {
-        let before = asset[..at].chars().next_back();
-        let mut after = asset[at + token.len()..].chars();
-        let next = after.next();
-        let next_next = after.next();
-        let clean_before = !before.is_some_and(|c| c.is_ascii_digit() || c == '.');
-        let clean_after = match next {
-            Some(c) if c.is_ascii_digit() => false,
-            Some('.') => !next_next.is_some_and(|c| c.is_ascii_digit()),
-            _ => true,
-        };
-        clean_before && clean_after
-    })
-}
-
-/// Ingestion's own check that a sha256sums-verified asset is bound to a release.
+/// Ingestion's own check that an asset is bound to the release it is ingested
+/// for, whichever rung vouches for it. Runs AFTER the release is verified,
+/// because only then is it known which mechanism accepted it.
 ///
-/// The plan refuses versionless and moving names, but the plan is not the only
-/// way to reach `run`, and a binding that holds only if an earlier step ran is
-/// not one. Every expanded asset name must contain the concrete version or
-/// release (a leading `v` set aside) it is bound to, and only a value that
-/// names ONE release counts.
-fn check_assets_are_bound(plans: &[PayloadPlan], idxs: &[usize]) -> Result<(), RunError> {
+/// A proof (a cosign identity, an attestation, a signed or unsigned digest
+/// list) says who published bytes, not which release they are for. The plan
+/// refuses versionless and moving names, but the plan is not the only way to
+/// reach `run`, and a binding that holds only if an earlier step ran is not
+/// one. Every expanded asset name must contain, on a token boundary and with a
+/// leading `v` set aside, the release tag the group is fetched under (when it
+/// names ONE release), or the payload's version when the plan-time check has
+/// shown that version and tag to name the same release.
+///
+/// Skipped only for (a) an entry that states `unbound-release-reason`, a
+/// recorded waiver honoured under an unsigned list (`upstream-sums`), under
+/// cosign-sums (the certificate identity is pinned to the release tag) and
+/// under build-provenance only when every statement that vouched for the asset
+/// was built from exactly `refs/tags/<release>`; otherwise a versionless name
+/// is refused ([`RunError::SignedProofNotBoundByName`]), and under `pgp-sums` it
+/// never waived, (b) a release that was actually accepted as
+/// [`Mechanism::Unverified`], which is its own recorded exception, and (c) a
+/// Rust channel, which binds through the channel manifest's own version. An
+/// `unverified-reason` on an entry whose release resolves to a signed or listed
+/// rung exempts nothing.
+///
+/// This is a NAME HEURISTIC. For cosign and build provenance the proof itself
+/// is also pinned to the tag (`Forge::identity_regexp`); for build provenance
+/// the asset's subject name in the attestation (`admit`) binds it; for the
+/// lists the name is all there is.
+fn check_assets_are_bound(
+    plans: &[PayloadPlan],
+    idxs: &[usize],
+    mechanism: Mechanism,
+    vouching_refs: &BTreeMap<String, Vec<String>>,
+) -> Result<(), RunError> {
+    if mechanism == Mechanism::Unverified {
+        return Ok(());
+    }
     for i in idxs {
         let p = &plans[*i];
-        let Some(spec) = &p.pgp_sums else { continue };
-        if spec.format != crate::pgpsums::ListFormat::Sha256Sums {
+        if p.pgp_sums
+            .as_ref()
+            .is_some_and(|s| s.format == crate::pgpsums::ListFormat::RustChannel)
+        {
             continue;
         }
-        let bound = [spec.version.as_str(), spec.release.as_str()]
-            .into_iter()
-            .filter(|v| crate::plan::names_a_release(v))
-            .map(|v| v.strip_prefix('v').unwrap_or(v));
+        let mut tokens: Vec<&str> = Vec::new();
+        if crate::plan::names_a_release(&p.release) {
+            tokens.push(&p.release);
+        }
+        if crate::plan::names_a_release(&p.version)
+            && crate::plan::version_matches_release(&p.version, &p.release)
+        {
+            tokens.push(&p.version);
+        }
+        let bound = tokens.into_iter().map(|v| v.strip_prefix('v').unwrap_or(v));
         if !bound
             .into_iter()
-            .any(|b| carries_at_a_boundary(&p.asset, b))
+            .any(|b| crate::plan::carries_at_a_boundary(&p.asset, b))
         {
+            #[cfg(test)]
+            if p.unbound_release_reason.as_deref() == Some(tests::FIXTURE_NAMES_ARE_ARBITRARY) {
+                continue;
+            }
+            if p.unbound_release_reason.is_some() {
+                match mechanism {
+                    // The name is the only binding there is: waived.
+                    Mechanism::UpstreamSums => continue,
+                    // The certificate identity is pinned to THIS release's
+                    // tag, so an older release's signed sums can never verify
+                    // here: the pin is the binding.
+                    Mechanism::CosignSums => {
+                        if crate::plan::names_a_release(&p.release) {
+                            continue;
+                        }
+                        return Err(RunError::SignedProofNotBoundByName {
+                            tool: p.name.clone(),
+                            asset: p.asset.clone(),
+                            mechanism: mechanism.as_str(),
+                            release: p.release.clone(),
+                            single_release: false,
+                        });
+                    }
+                    // A signed name and digest vouch for whichever release
+                    // produced them. Only an attestation built from exactly
+                    // this release's tag says which release it is.
+                    Mechanism::BuildProvenance => {
+                        let tag = format!("refs/tags/{}", p.release);
+                        let refs = vouching_refs.get(&p.asset);
+                        let single_release = crate::plan::names_a_release(&p.release);
+                        if single_release
+                            && refs.is_some_and(|r| !r.is_empty() && r.iter().all(|x| *x == tag))
+                        {
+                            continue;
+                        }
+                        return Err(RunError::SignedProofNotBoundByName {
+                            tool: p.name.clone(),
+                            asset: p.asset.clone(),
+                            mechanism: mechanism.as_str(),
+                            release: p.release.clone(),
+                            single_release,
+                        });
+                    }
+                    // pgp-sums: never waived (the plan refuses the pair).
+                    Mechanism::PgpSums | Mechanism::Unverified => {}
+                }
+            }
             return Err(RunError::AssetNotBoundToRelease {
                 tool: p.name.clone(),
                 asset: p.asset.clone(),
-                version: spec.version.clone(),
-                release: spec.release.clone(),
+                version: p.version.clone(),
+                release: p.release.clone(),
             });
         }
     }
     Ok(())
+}
+
+/// The proof annotation of an entry carried without a release binding: what
+/// the proof says, then plainly that it does not say which release, then the
+/// operator's reason. Signed into the layer beside the proof.
+fn annotate_unbound(accepted: &Accepted, p: &PayloadPlan) -> Accepted {
+    let Some(why) = &p.unbound_release_reason else {
+        return accepted.clone();
+    };
+    let mut out = accepted.clone();
+    out.asserts = format!(
+        "{}; NOT BOUND TO ITS RELEASE: this entry's asset names do not carry release {} \
+         (an operator exception), so an older release's proof and bytes served under this \
+         tag would have been accepted: the name binding was WAIVED. Recorded reason: {why}",
+        accepted.asserts, p.release
+    );
+    out
 }
 
 /// Walk the whole plan.
@@ -853,12 +1013,12 @@ pub fn run<S: Source>(
         // ONE declaration per release, or none: verifying with whichever plan
         // happens to come first would silently skip another member's.
         check_group_agrees(plans, &idxs, &repo, &version)?;
-        check_assets_are_bound(plans, &idxs)?;
         let declared = Declared {
             upstream_sums: sums_asset,
             pgp_sums: idxs.first().and_then(|i| plans[*i].pgp_sums.as_ref()),
         };
         let v = verify_release(src, forge, &repo, &version, optins, &declared, &wanted)?;
+        check_assets_are_bound(plans, &idxs, v.accepted.mechanism, &v.vouching_refs)?;
         seen.record(&repo, &version, v.accepted.clone())?;
 
         // Clause 4: a property of the RELEASE, ADMITTED through the same
@@ -970,7 +1130,7 @@ pub fn run<S: Source>(
             out[i] = Some(Resolved {
                 plan: p.clone(),
                 digest,
-                accepted: v.accepted.clone(),
+                accepted: annotate_unbound(&v.accepted, p),
                 bytes,
                 decision,
                 license: license.clone(),
@@ -1035,6 +1195,7 @@ mod tests {
             named_explicitly: false,
             kind: PayloadKind::Tarball,
             unverified_reason: None,
+            unbound_release_reason: None,
             contains: None,
             upstream_sums: None,
             pgp_sums: None,
@@ -1075,6 +1236,12 @@ mod tests {
         None
     }
 
+    /// The reason the `plan` helper gives. A real waiver is no longer honoured
+    /// under a signed proof, so the name check (compiled for tests only) lets
+    /// exactly this fixture reason through; the binding tests build their plans
+    /// with `bound_plan` or a reason of their own and are judged for real.
+    pub(super) const FIXTURE_NAMES_ARE_ARBITRARY: &str = "test fixture: names are arbitrary";
+
     fn plan(name: &str, repo: &str, version: &str, asset: &str) -> PayloadPlan {
         PayloadPlan {
             release: version.to_string(),
@@ -1092,7 +1259,18 @@ mod tests {
             named_explicitly: false,
             kind: PayloadKind::Tarball,
             unverified_reason: None,
+            // Most tests here are about something other than naming and use
+            // arbitrary asset names; they model an entry that opted out. The
+            // binding tests build their plans with `bound_plan`.
+            unbound_release_reason: Some(FIXTURE_NAMES_ARE_ARBITRARY.into()),
         }
+    }
+
+    /// A plan that has NOT opted out of the release binding.
+    fn bound_plan(name: &str, repo: &str, version: &str, asset: &str) -> PayloadPlan {
+        let mut p = plan(name, repo, version, asset);
+        p.unbound_release_reason = None;
+        p
     }
 
     /// Records what was asked of it, so ordering and call-count are testable.
@@ -2092,6 +2270,7 @@ mod tests {
     #[test]
     fn an_unverified_payload_records_the_digest_we_observed_and_claims_nothing() {
         let v = Verified {
+            vouching_refs: BTreeMap::new(),
             published: Vec::new(),
             accepted: Accepted {
                 mechanism: Mechanism::Unverified,
@@ -2327,6 +2506,7 @@ mod tests {
         f.blobs
             .insert("o/r@v1/r-v1.cdx.json".into(), b"{}".to_vec());
         let v = Verified {
+            vouching_refs: BTreeMap::new(),
             published: vec!["r-v1.cdx.json".into()],
             accepted: Accepted {
                 mechanism: Mechanism::Unverified,
@@ -2704,7 +2884,7 @@ mod tests {
         let list = list_for(pairs);
         let sig = testkit::sign_binary(&secret, list.as_bytes());
         let fpr = hex::encode(pgp::types::KeyDetails::fingerprint(&secret.primary_key).as_bytes());
-        let (f, pgp) = pgp_release("o/r", "v1", pairs, &list, sig, &key, &fpr);
+        let (f, pgp) = pgp_release("o/r", "v1.0", pairs, &list, sig, &key, &fpr);
         (f, pgp, list)
     }
 
@@ -2714,13 +2894,15 @@ mod tests {
             signature: LIST_SIG.into(),
             format: crate::pgpsums::ListFormat::Sha256Sums,
             version: "1.0".into(),
-            release: "v1".into(),
+            release: "v1.0".into(),
             key_file,
         }
     }
 
     fn pgp_plan(asset: &str, key_file: std::path::PathBuf) -> PayloadPlan {
-        let mut p = plan("t", "o/r", "v1", asset);
+        let mut p = bound_plan("t", "o/r", "v1.0", asset);
+        // The version the signed list was bound to (see `pgp_spec`).
+        p.version = "1.0".into();
         p.pgp_sums = Some(pgp_spec(key_file));
         p
     }
@@ -2804,7 +2986,7 @@ mod tests {
         );
         let (f, pgp) = pgp_release(
             "o/r",
-            "v1",
+            "v1.0",
             &[("a-1.0.tar.gz", A)],
             &list,
             sig,
@@ -2845,14 +3027,14 @@ mod tests {
         let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
         let list = list_for(&[("a-1.0.tar.gz", A)]);
         let sig = testkit::sign_binary(&secret, b"a different list");
-        let (f, pgp) = pgp_release("o/r", "v1", &[("a-1.0.tar.gz", A)], &list, sig, &key, "-");
+        let (f, pgp) = pgp_release("o/r", "v1.0", &[("a-1.0.tar.gz", A)], &list, sig, &key, "-");
         let mut optins = BTreeMap::new();
         optins.insert("o/r".to_string(), "carry it anyway".to_string());
         let mut p = pgp_plan("a-1.0.tar.gz", pgp.key_path());
         let e = run_pgp(&f, std::slice::from_ref(&p), &optins).expect_err("must refuse");
         assert!(proof_rejected(&e).contains("does not verify"), "{e}");
         // And the bytes were never fetched on the strength of anything.
-        assert!(!f.log().iter().any(|c| c == "fetch o/r@v1/a-1.0.tar.gz"));
+        assert!(!f.log().iter().any(|c| c == "fetch o/r@v1.0/a-1.0.tar.gz"));
         // A declared unsigned list is no way around it either.
         p.upstream_sums = Some(LIST.into());
         let e = run_pgp(&f, &[p], &optins).expect_err("must refuse");
@@ -2869,7 +3051,7 @@ mod tests {
         let sig = testkit::sign_binary(&other, list.as_bytes());
         let (f, pgp) = pgp_release(
             "o/r",
-            "v1",
+            "v1.0",
             &[("a-1.0.tar.gz", A)],
             &list,
             sig,
@@ -2895,7 +3077,7 @@ mod tests {
         let sig = testkit::sign_binary(&secret, list.as_bytes());
         let (f, pgp) = pgp_release(
             "o/r",
-            "v1",
+            "v1.0",
             &[("a-1.0.tar.gz", A)],
             &list,
             sig,
@@ -2918,7 +3100,7 @@ mod tests {
         let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
         let list = list_for(&[("a-1.0.tar.gz", A)]);
         let sig = testkit::sign_text(&secret, list.as_bytes());
-        let (f, pgp) = pgp_release("o/r", "v1", &[("a-1.0.tar.gz", A)], &list, sig, &key, "-");
+        let (f, pgp) = pgp_release("o/r", "v1.0", &[("a-1.0.tar.gz", A)], &list, sig, &key, "-");
         let e = run_pgp(
             &f,
             &[pgp_plan("a-1.0.tar.gz", pgp.key_path())],
@@ -2937,7 +3119,7 @@ mod tests {
         let sig = testkit::sign_binary(&secret, list.as_bytes());
         let (f, pgp) = pgp_release(
             "o/r",
-            "v1",
+            "v1.0",
             &[("a-1.0.tar.gz", A), ("b-1.0.tar.gz", B)],
             &list,
             sig,
@@ -2964,8 +3146,9 @@ mod tests {
         let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
         let list = list_for(&[("a-1.0.tar.gz", A)]);
         let sig = testkit::sign_binary(&secret, list.as_bytes());
-        let (mut f, pgp) = pgp_release("o/r", "v1", &[("a-1.0.tar.gz", A)], &list, sig, &key, "-");
-        f.blobs.insert("o/r@v1/a-1.0.tar.gz".into(), B.to_vec());
+        let (mut f, pgp) =
+            pgp_release("o/r", "v1.0", &[("a-1.0.tar.gz", A)], &list, sig, &key, "-");
+        f.blobs.insert("o/r@v1.0/a-1.0.tar.gz".into(), B.to_vec());
         let e = run_pgp(
             &f,
             &[pgp_plan("a-1.0.tar.gz", pgp.key_path())],
@@ -3006,7 +3189,7 @@ mod tests {
     fn a_declared_list_the_release_does_not_publish_is_rejected() {
         let (mut f, pgp, _) = good_pgp_release(&[("a-1.0.tar.gz", A)]);
         f.probes
-            .get_mut("o/r@v1")
+            .get_mut("o/r@v1.0")
             .unwrap()
             .published
             .retain(|n| n != LIST_SIG);
@@ -3028,7 +3211,7 @@ mod tests {
     #[test]
     fn a_list_that_cannot_be_fetched_is_rejected() {
         let (mut f, pgp, _) = good_pgp_release(&[("a-1.0.tar.gz", A)]);
-        f.blobs.remove(&format!("o/r@v1/{LIST}"));
+        f.blobs.remove(&format!("o/r@v1.0/{LIST}"));
         let e = run_pgp(
             &f,
             &[pgp_plan("a-1.0.tar.gz", pgp.key_path())],
@@ -3044,7 +3227,7 @@ mod tests {
     #[test]
     fn a_cosign_capable_release_still_picks_cosign_when_pgp_sums_is_declared() {
         let (_, pgp, _) = good_pgp_release(&[("a-1.0.tar.gz", A)]);
-        let f = Fixture::signed("o/r", "v1", &[("a-1.0.tar.gz", A)]);
+        let f = Fixture::signed("o/r", "v1.0", &[("a-1.0.tar.gz", A)]);
         let got = run_pgp(
             &f,
             &[pgp_plan("a-1.0.tar.gz", pgp.key_path())],
@@ -3065,7 +3248,7 @@ mod tests {
     #[test]
     fn an_attested_release_still_picks_build_provenance_when_pgp_sums_is_declared() {
         let (_, pgp, _) = good_pgp_release(&[("a-1.0.tar.gz", A)]);
-        let f = Fixture::attested_as_one_batch("o/r", "v1", &[("a-1.0.tar.gz", A)]);
+        let f = Fixture::attested_as_one_batch("o/r", "v1.0", &[("a-1.0.tar.gz", A)]);
         let got = run_pgp(
             &f,
             &[pgp_plan("a-1.0.tar.gz", pgp.key_path())],
@@ -3082,17 +3265,17 @@ mod tests {
     fn an_entry_with_only_upstream_sums_still_yields_upstream_sums() {
         let mut f = Fixture::default();
         let list = list_for(&[("a-1.0.tar.gz", A)]);
-        f.blobs.insert("o/r@v1/a-1.0.tar.gz".into(), A.to_vec());
+        f.blobs.insert("o/r@v1.0/a-1.0.tar.gz".into(), A.to_vec());
         f.blobs
-            .insert("o/r@v1/sha256.sum".into(), list.as_bytes().to_vec());
+            .insert("o/r@v1.0/sha256.sum".into(), list.as_bytes().to_vec());
         f.probes.insert(
-            "o/r@v1".into(),
+            "o/r@v1.0".into(),
             ReleaseProbe {
                 published: vec!["a-1.0.tar.gz".into(), "sha256.sum".into()],
                 ..Default::default()
             },
         );
-        let mut p = plan("t", "o/r", "v1", "a-1.0.tar.gz");
+        let mut p = plan("t", "o/r", "v1.0", "a-1.0.tar.gz");
         p.upstream_sums = Some("sha256.sum".into());
         let got = run_pgp(&f, &[p], &BTreeMap::new()).unwrap();
         assert_eq!(got[0].accepted.mechanism, Mechanism::UpstreamSums);
@@ -3110,7 +3293,7 @@ mod tests {
             signature: CHANNEL_SIG.into(),
             format: crate::pgpsums::ListFormat::RustChannel,
             version: "1.98.1".into(),
-            release: "v1".into(),
+            release: "v1.0".into(),
             key_file,
         }
     }
@@ -3142,7 +3325,7 @@ mod tests {
     /// asset whose bytes are NOT the real toolchain (the real one is 90 MB).
     fn rust_release(asset: &str, key: &[u8]) -> (Fixture, Pgp) {
         let mut f = Fixture::default();
-        let k = "o/r@v1";
+        let k = "o/r@v1.0";
         f.blobs
             .insert(format!("{k}/{CHANNEL}"), testkit::rust_manifest());
         f.blobs
@@ -3176,7 +3359,7 @@ mod tests {
             &f,
             &Forge::github_com(),
             "o/r",
-            "v1",
+            "v1.0",
             &BTreeMap::new(),
             &Declared {
                 upstream_sums: None,
@@ -3207,7 +3390,7 @@ mod tests {
     fn bytes_that_are_not_the_ones_the_real_channel_names_are_refused() {
         let (asset, digest) = a_real_rust_asset();
         let (f, pgp) = rust_release(&asset, testkit::RUST_KEY_ASC);
-        let mut p = plan("rust", "o/r", "v1", &asset);
+        let mut p = plan("rust", "o/r", "v1.0", &asset);
         p.pgp_sums = Some(rust_spec(pgp.key_path()));
         let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
         match e {
@@ -3228,13 +3411,13 @@ mod tests {
         let (asset, _) = a_real_rust_asset();
         let (mut f, pgp) = rust_release(&asset, testkit::RUST_KEY_ASC);
         f.probes
-            .get_mut("o/r@v1")
+            .get_mut("o/r@v1.0")
             .unwrap()
             .published
             .push("not-in-the-channel.tar.xz".into());
         f.blobs
-            .insert("o/r@v1/not-in-the-channel.tar.xz".into(), A.to_vec());
-        let mut p = plan("rust", "o/r", "v1", "not-in-the-channel.tar.xz");
+            .insert("o/r@v1.0/not-in-the-channel.tar.xz".into(), A.to_vec());
+        let mut p = plan("rust", "o/r", "v1.0", "not-in-the-channel.tar.xz");
         p.pgp_sums = Some(rust_spec(pgp.key_path()));
         let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
         assert!(
@@ -3251,8 +3434,8 @@ mod tests {
         let (mut f, pgp) = rust_release(&asset, testkit::RUST_KEY_ASC);
         let mut manifest = testkit::rust_manifest();
         manifest.extend_from_slice(b"\n# one more line\n");
-        f.blobs.insert(format!("o/r@v1/{CHANNEL}"), manifest);
-        let mut p = plan("rust", "o/r", "v1", &asset);
+        f.blobs.insert(format!("o/r@v1.0/{CHANNEL}"), manifest);
+        let mut p = plan("rust", "o/r", "v1.0", &asset);
         p.pgp_sums = Some(rust_spec(pgp.key_path()));
         let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
         assert!(proof_rejected(&e).contains("does not verify"), "{e}");
@@ -3265,7 +3448,7 @@ mod tests {
     fn the_channel_read_as_the_wrong_format_is_rejected() {
         let (asset, _) = a_real_rust_asset();
         let (f, pgp) = rust_release(&asset, testkit::RUST_KEY_ASC);
-        let mut p = plan("rust", "o/r", "v1", &asset);
+        let mut p = plan("rust", "o/r", "v1.0", &asset);
         let mut spec = rust_spec(pgp.key_path());
         spec.format = crate::pgpsums::ListFormat::Sha256Sums;
         p.pgp_sums = Some(spec);
@@ -3280,9 +3463,9 @@ mod tests {
     fn two_tool_group(pgp: &Pgp) -> (Fixture, Vec<PayloadPlan>) {
         let mut f = good_pgp_release(&[("a-1.0.tar.gz", A), ("b-1.0.tar.gz", B)]).0;
         let _ = pgp;
-        f.blobs.insert("o/r@v1/b-1.0.tar.gz".into(), B.to_vec());
-        let mut one = plan("one", "o/r", "v1", "a-1.0.tar.gz");
-        let mut two = plan("two", "o/r", "v1", "b-1.0.tar.gz");
+        f.blobs.insert("o/r@v1.0/b-1.0.tar.gz".into(), B.to_vec());
+        let mut one = plan("one", "o/r", "v1.0", "a-1.0.tar.gz");
+        let mut two = plan("two", "o/r", "v1.0", "b-1.0.tar.gz");
         one.pgp_sums = Some(pgp_spec(pgp.key_path()));
         two.pgp_sums = Some(pgp_spec(pgp.key_path()));
         (f, vec![one, two])
@@ -3395,15 +3578,15 @@ mod tests {
         let sig = testkit::sign_binary(&secret, list.as_bytes());
         let (f, pgp) = pgp_release(
             "o/r",
-            "v1",
+            "v1.0",
             &[("a-1.0.tar.gz", A), ("b-1.0.tar.gz", B)],
             &list,
             sig,
             &key,
             "-",
         );
-        let mut one = plan("one", "o/r", "v1", "a-1.0.tar.gz");
-        let mut two = plan("two", "o/r", "v1", "b-1.0.tar.gz");
+        let mut one = plan("one", "o/r", "v1.0", "a-1.0.tar.gz");
+        let mut two = plan("two", "o/r", "v1.0", "b-1.0.tar.gz");
         one.pgp_sums = Some(pgp_spec(pgp.key_path()));
         two.pgp_sums = Some(pgp_spec(pgp.key_path()));
         let got = run_pgp(&f, &[one, two], &BTreeMap::new()).unwrap();
@@ -3421,7 +3604,7 @@ mod tests {
     fn an_older_signed_channel_served_for_a_newer_version_is_refused() {
         let (asset, _) = a_real_rust_asset();
         let (f, pgp) = rust_release(&asset, testkit::RUST_KEY_ASC);
-        let mut p = plan("rust", "o/r", "v1", &asset);
+        let mut p = plan("rust", "o/r", "v1.0", &asset);
         let mut spec = rust_spec(pgp.key_path());
         spec.version = "1.99.0".into();
         spec.release = "1.99.0".into();
@@ -3530,7 +3713,7 @@ mod tests {
         );
         let err = planned("latest", "t-%V.tar.gz", &pgp.key_path()).expect_err("must refuse");
         assert!(
-            matches!(err, crate::plan::PlanError::PgpSumsMovingTag { .. }),
+            matches!(err, crate::plan::PlanError::MovingRelease { .. }),
             "{err}"
         );
     }
@@ -3540,21 +3723,15 @@ mod tests {
     // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn an_asset_name_that_carries_no_release_is_refused_at_ingestion() {
-        let (f, pgp, _) = good_pgp_release(&[("a-1.0.tar.gz", A)]);
-        let mut p = pgp_plan("a-1.0.tar.gz", pgp.key_path());
+        let mut p = pgp_plan("a-1.0.tar.gz", "k.asc".into());
         p.asset = "a.tar.gz".into();
-        let spec = p.pgp_sums.as_mut().unwrap();
-        spec.version = "2.0".into();
-        spec.release = "v2".into();
-        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
+        p.version = "2.0".into();
+        p.release = "v2.0".into();
+        let e = check_assets_are_bound(&[p], &[0], Mechanism::PgpSums, &BTreeMap::new())
+            .expect_err("must refuse");
         assert!(
             matches!(&e, RunError::AssetNotBoundToRelease { asset, .. } if asset == "a.tar.gz"),
             "{e:?}"
-        );
-        assert!(
-            f.log().iter().all(|c| !c.starts_with("fetch")),
-            "{:?}",
-            f.log()
         );
     }
 
@@ -3562,13 +3739,12 @@ mod tests {
     // rivet: verifies REQ-SIGNEDSUMS-001
     #[test]
     fn a_moving_version_is_refused_at_ingestion_even_when_the_name_contains_it() {
-        let (f, pgp, _) = good_pgp_release(&[("a-1.0.tar.gz", A)]);
-        let mut p = pgp_plan("a-1.0.tar.gz", pgp.key_path());
+        let mut p = pgp_plan("a-1.0.tar.gz", "k.asc".into());
         p.asset = "a-latest.tar.gz".into();
-        let spec = p.pgp_sums.as_mut().unwrap();
-        spec.version = "latest".into();
-        spec.release = "latest".into();
-        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("must refuse");
+        p.version = "latest".into();
+        p.release = "latest".into();
+        let e = check_assets_are_bound(&[p], &[0], Mechanism::PgpSums, &BTreeMap::new())
+            .expect_err("must refuse");
         assert!(
             matches!(e, RunError::AssetNotBoundToRelease { .. }),
             "{e:?}"
@@ -3581,15 +3757,17 @@ mod tests {
     #[test]
     fn a_name_carrying_the_version_or_the_release_is_accepted_at_ingestion() {
         for (asset, version, release) in [
-            ("t-1.2.3.tar.gz", "v1.2.3", "rel"),
+            ("t-1.2.3.tar.gz", "v1.2.3", "release-1.2.3"),
             ("t-1.2.3.tar.gz", "v1.2.3", "v1.2.3"),
             ("t-2026-10-01.tar.gz", "other", "2026-10-01"),
         ] {
             let (secret, key) = testkit::generated_key("Up Stream <up@example.invalid>");
             let list = list_for(&[(asset, A)]);
             let sig = testkit::sign_binary(&secret, list.as_bytes());
-            let (f, pgp) = pgp_release("o/r", "v1", &[(asset, A)], &list, sig, &key, "-");
+            let (f, pgp) = pgp_release("o/r", release, &[(asset, A)], &list, sig, &key, "-");
             let mut p = pgp_plan(asset, pgp.key_path());
+            p.version = version.into();
+            p.release = release.into();
             let spec = p.pgp_sums.as_mut().unwrap();
             spec.version = version.into();
             spec.release = release.into();
@@ -3610,18 +3788,18 @@ mod tests {
         ] {
             let mut f = Fixture::default();
             let list = list_for(&[("a-1.0.tar.gz", A)]);
-            f.blobs.insert("o/r@v1/a-1.0.tar.gz".into(), A.to_vec());
+            f.blobs.insert("o/r@v1.0/a-1.0.tar.gz".into(), A.to_vec());
             f.blobs
-                .insert("o/r@v1/sha256.sum".into(), list.as_bytes().to_vec());
+                .insert("o/r@v1.0/sha256.sum".into(), list.as_bytes().to_vec());
             f.probes.insert(
-                "o/r@v1".into(),
+                "o/r@v1.0".into(),
                 ReleaseProbe {
                     published: vec!["a-1.0.tar.gz".into(), "sha256.sum".into()],
                     pgp_sums: state,
                     ..Default::default()
                 },
             );
-            let mut p = plan("t", "o/r", "v1", "a-1.0.tar.gz");
+            let mut p = plan("t", "o/r", "v1.0", "a-1.0.tar.gz");
             p.upstream_sums = Some("sha256.sum".into());
             let got = run_pgp(&f, &[p], &BTreeMap::new()).expect("the probe's value is ignored");
             assert_eq!(got[0].accepted.mechanism, Mechanism::UpstreamSums);
@@ -3634,12 +3812,11 @@ mod tests {
     #[test]
     fn a_version_must_sit_on_a_token_boundary_in_the_asset_name() {
         let bound = |asset: &str, version: &str| {
-            let mut p = plan("t", "o/r", "v1", asset);
-            let mut spec = pgp_spec("k.asc".into());
-            spec.version = version.into();
-            spec.release = "v1".into();
-            p.pgp_sums = Some(spec);
-            check_assets_are_bound(&[p], &[0])
+            let mut p = bound_plan("t", "o/r", "v1.0", asset);
+            p.version = version.into();
+            p.release = version.into();
+            p.pgp_sums = Some(pgp_spec("k.asc".into()));
+            check_assets_are_bound(&[p], &[0], Mechanism::PgpSums, &BTreeMap::new())
         };
         for refused in [
             "tool-v1.2.3.tar.gz",
@@ -3667,11 +3844,339 @@ mod tests {
         // One occurrence on a boundary is enough, wherever it is.
         bound("tool-1.2.3-and-1.2.tar.gz", "1.2").expect("the second occurrence is bounded");
         // The release is judged the same way.
-        let mut p = plan("t", "o/r", "v1", "tool-v1.2.3.tar.gz");
-        let mut spec = pgp_spec("k.asc".into());
-        spec.version = "other".into();
-        spec.release = "1.2".into();
-        p.pgp_sums = Some(spec);
-        check_assets_are_bound(&[p], &[0]).expect_err("release 1.2 is not 1.2.3");
+        let mut p = bound_plan("t", "o/r", "v1.0", "tool-v1.2.3.tar.gz");
+        p.version = "other".into();
+        p.release = "1.2".into();
+        p.pgp_sums = Some(pgp_spec("k.asc".into()));
+        check_assets_are_bound(&[p], &[0], Mechanism::PgpSums, &BTreeMap::new())
+            .expect_err("release 1.2 is not 1.2.3");
+    }
+
+    // ------------- every rung: a proof is bound to the release it is ingested for
+
+    /// The three rungs that were never bound, each with a release whose proof
+    /// is for `tag` and whose one asset is `asset`.
+    fn rung_fixtures(tag: &str, asset: &str) -> Vec<(&'static str, Fixture, Mechanism)> {
+        let mut upstream = Fixture::default();
+        let list = list_for(&[(asset, A)]);
+        upstream
+            .blobs
+            .insert(format!("o/r@{tag}/{asset}"), A.to_vec());
+        upstream
+            .blobs
+            .insert(format!("o/r@{tag}/sha256.sum"), list.as_bytes().to_vec());
+        upstream.probes.insert(
+            format!("o/r@{tag}"),
+            ReleaseProbe {
+                published: vec![asset.into(), "sha256.sum".into()],
+                ..Default::default()
+            },
+        );
+        vec![
+            (
+                "cosign-sums",
+                Fixture::signed("o/r", tag, &[(asset, A)]),
+                Mechanism::CosignSums,
+            ),
+            (
+                "build-provenance",
+                Fixture::attested_as_one_batch("o/r", tag, &[(asset, A)]),
+                Mechanism::BuildProvenance,
+            ),
+            ("upstream-sums", upstream, Mechanism::UpstreamSums),
+        ]
+    }
+
+    fn run_plan(f: &Fixture, p: PayloadPlan) -> Result<Vec<Resolved>, RunError> {
+        run_pgp(f, &[p], &BTreeMap::new())
+    }
+
+    fn with_sums(mut p: PayloadPlan, rung: &str) -> PayloadPlan {
+        if rung == "upstream-sums" {
+            p.upstream_sums = Some("sha256.sum".into());
+        }
+        p
+    }
+
+    /// REPLAY: an older release's bytes, under an asset name that carries the
+    /// OLDER version, presented for the newer tag are refused on every rung,
+    /// before anything is fetched.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_older_releases_assets_served_for_a_newer_tag_are_refused_on_every_rung() {
+        for (rung, f, _) in rung_fixtures("v2.0.0", "t-1.0.0.tar.gz") {
+            let p = with_sums(bound_plan("t", "o/r", "v2.0.0", "t-1.0.0.tar.gz"), rung);
+            let e = run_plan(&f, p).expect_err(rung);
+            assert!(
+                matches!(&e, RunError::AssetNotBoundToRelease { asset, .. } if asset == "t-1.0.0.tar.gz"),
+                "{rung}: {e:?}"
+            );
+            assert!(
+                f.log().iter().all(|c| !c.ends_with("t-1.0.0.tar.gz")),
+                "{rung}: the payload is not fetched for a refused name: {:?}",
+                f.log()
+            );
+        }
+    }
+
+    /// A name that carries no release at all is refused the same way, and one
+    /// that carries THIS release is accepted on every rung.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_versionless_asset_is_refused_at_ingestion_on_every_rung_and_a_versioned_one_passes() {
+        for (rung, f, _) in rung_fixtures("v2.0.0", "t.tar.gz") {
+            let p = with_sums(bound_plan("t", "o/r", "v2.0.0", "t.tar.gz"), rung);
+            let e = run_plan(&f, p).expect_err(rung);
+            assert!(
+                matches!(e, RunError::AssetNotBoundToRelease { .. }),
+                "{rung}: {e:?}"
+            );
+        }
+        for (rung, f, mechanism) in rung_fixtures("v2.0.0", "t-2.0.0.tar.gz") {
+            let p = with_sums(bound_plan("t", "o/r", "v2.0.0", "t-2.0.0.tar.gz"), rung);
+            let got = run_plan(&f, p).unwrap_or_else(|e| panic!("{rung}: {e}"));
+            assert_eq!(got[0].accepted.mechanism, mechanism, "{rung}");
+            assert!(
+                !got[0].accepted.asserts.contains("NOT BOUND"),
+                "a bound entry carries no annotation: {}",
+                got[0].accepted.asserts
+            );
+        }
+    }
+
+    /// `unbound-release-reason` is honoured at ingestion only where the name is
+    /// the sole binding the mechanism has (an unsigned list), and the reason is
+    /// recorded in the proof annotation in the operator's words.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_unbound_release_reason_lets_an_unsigned_list_through_and_is_recorded() {
+        let why = "upstream names its binaries with no version";
+        for (rung, f, mechanism) in rung_fixtures("v2.0.0", "t.tar.gz") {
+            if rung != "upstream-sums" {
+                continue;
+            }
+            let mut p = with_sums(bound_plan("t", "o/r", "v2.0.0", "t.tar.gz"), rung);
+            p.unbound_release_reason = Some(why.into());
+            let got = run_plan(&f, p).unwrap_or_else(|e| panic!("{rung}: {e}"));
+            assert_eq!(got[0].accepted.mechanism, mechanism, "{rung}");
+            let asserts = &got[0].accepted.asserts;
+            assert!(asserts.contains(why), "{rung}: {asserts}");
+            assert!(asserts.contains("NOT BOUND"), "{rung}: {asserts}");
+            assert!(
+                asserts.contains("WAIVED"),
+                "{rung}: the binding was waived, and the record says so: {asserts}"
+            );
+        }
+    }
+
+    const WAC: &str = "wac-cli-x86_64-unknown-linux-gnu";
+
+    /// A waived plan for the wac-shaped entry: a versionless name.
+    fn wac_plan() -> PayloadPlan {
+        let mut p = bound_plan("wac", "o/r", "v0.11.0", WAC);
+        p.unbound_release_reason = Some("wac names its files with no version".into());
+        p
+    }
+
+    /// Rewrite the ref every attestation of a fixture was built from.
+    fn built_from(mut f: Fixture, to: &str) -> Fixture {
+        for doc in f.attestations.values_mut().chain(f.per_asset.values_mut()) {
+            *doc = doc.replace("@refs/tags/v1\"", &format!("@{to}\""));
+        }
+        f
+    }
+
+    /// cosign-sums under the waiver: the certificate identity is pinned to this
+    /// release's tag (which must name one release), so an older release's signed sums can never verify here
+    /// and the pin IS the binding; a versionless name is admitted.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_versionless_name_under_the_waiver_is_admitted_for_cosign_sums() {
+        let f = Fixture::signed("o/r", "v0.11.0", &[(WAC, A)]);
+        let got = run_plan(&f, wac_plan()).expect("the tag pin binds it");
+        assert_eq!(got[0].accepted.mechanism, Mechanism::CosignSums);
+        assert!(got[0].accepted.asserts.contains("WAIVED"));
+    }
+
+    /// The tag pin only binds a release when the tag names ONE release: a
+    /// moving tag (`nightly`, `latest`) is reused across builds, so an older
+    /// build's proof for the same tag still matches.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_waiver_is_not_honoured_under_a_signed_proof_for_a_moving_tag() {
+        let plan_at = |tag: &str| {
+            let mut p = bound_plan("wac", "o/r", tag, WAC);
+            p.unbound_release_reason = Some("wac names its files with no version".into());
+            p
+        };
+        // A tag naming one release: admitted.
+        let f = Fixture::signed("o/r", "v1.2.3", &[(WAC, A)]);
+        run_plan(&f, plan_at("v1.2.3")).expect("a single release's tag binds it");
+        for tag in ["nightly", "latest", "stable"] {
+            let f = Fixture::signed("o/r", tag, &[(WAC, A)]);
+            let e = run_plan(&f, plan_at(tag)).expect_err(tag);
+            assert!(
+                matches!(e, RunError::SignedProofNotBoundByName { .. }),
+                "{tag}: {e:?}"
+            );
+            assert!(
+                e.to_string().contains("does not name a single release"),
+                "{tag}: {e}"
+            );
+            // And an attestation built from that very tag is no better.
+            let f = built_from(
+                Fixture::attested_as_one_batch("o/r", tag, &[(WAC, A)]),
+                &format!("refs/tags/{tag}"),
+            );
+            let e = run_plan(&f, plan_at(tag)).expect_err(tag);
+            assert!(
+                matches!(e, RunError::SignedProofNotBoundByName { .. }),
+                "{tag}: {e:?}"
+            );
+        }
+    }
+
+    /// build-provenance under the waiver: honoured only when every statement
+    /// that vouched for the asset was built from exactly this release's tag.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_versionless_name_under_the_waiver_needs_a_tag_built_attestation() {
+        let fixture = |to: &str| {
+            built_from(
+                Fixture::attested_as_one_batch("o/r", "v0.11.0", &[(WAC, A)]),
+                to,
+            )
+        };
+        let got = run_plan(&fixture("refs/tags/v0.11.0"), wac_plan())
+            .expect("a statement built from this tag binds the release");
+        assert_eq!(got[0].accepted.mechanism, Mechanism::BuildProvenance);
+        // Another tag, or a branch: the name is all there is, and it carries
+        // nothing.
+        for other in ["refs/heads/main", "refs/tags/v0.10.1"] {
+            let e = run_plan(&fixture(other), wac_plan()).expect_err(other);
+            assert!(
+                matches!(e, RunError::SignedProofNotBoundByName { .. }),
+                "{other}: {e:?}"
+            );
+            assert!(
+                e.to_string()
+                    .contains("tag-built attestation would be accepted"),
+                "{other}: {e}"
+            );
+        }
+    }
+
+    /// Ingestion never skips the name check for a signed list, whatever the
+    /// plan says: a plan that reached `run` with `unbound-release-reason` and
+    /// `pgp-sums` (the plan refuses it) is still refused for a versionless name.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_unbound_release_reason_never_waives_the_name_check_of_a_signed_list() {
+        let (f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let mut p = pgp_plan("a.tar.gz", pgp.key_path());
+        p.unbound_release_reason = Some("x".into());
+        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("refused at ingestion");
+        assert!(
+            matches!(e, RunError::AssetNotBoundToRelease { .. }),
+            "{e:?}"
+        );
+    }
+
+    /// An `unverified-reason` on an entry whose release then resolves to a
+    /// proven rung does not waive the name check, through `run`.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_opt_in_reason_does_not_waive_the_name_check_on_a_proven_release() {
+        for (rung, f, _) in rung_fixtures("v2.0.0", "t.tar.gz") {
+            let mut p = with_sums(bound_plan("t", "o/r", "v2.0.0", "t.tar.gz"), rung);
+            p.unverified_reason = Some("nothing published".into());
+            let optins = BTreeMap::from([("o/r".to_string(), "nothing published".to_string())]);
+            let e = run_pgp(&f, &[p], &optins).expect_err(rung);
+            assert!(
+                matches!(e, RunError::AssetNotBoundToRelease { .. }),
+                "{rung}: {e:?}"
+            );
+        }
+        // A release nothing vouches for, ingested on the opt-in, passes.
+        let mut f = Fixture::default();
+        f.blobs.insert("o/r@v2.0.0/t.tar.gz".into(), A.to_vec());
+        f.probes.insert(
+            "o/r@v2.0.0".into(),
+            ReleaseProbe {
+                published: vec!["t.tar.gz".into()],
+                ..Default::default()
+            },
+        );
+        let mut p = bound_plan("t", "o/r", "v2.0.0", "t.tar.gz");
+        p.unverified_reason = Some("nothing published".into());
+        let optins = BTreeMap::from([("o/r".to_string(), "nothing published".to_string())]);
+        let got = run_pgp(&f, &[p], &optins).expect("the opt-in is accepted");
+        assert_eq!(got[0].accepted.mechanism, Mechanism::Unverified);
+    }
+
+    /// An asset that carries only the plan's VERSION, when the version and the
+    /// release tag name different releases, is refused at ingestion: the
+    /// release the group is fetched under is what the name must carry.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_asset_carrying_only_a_mismatched_version_is_refused_at_ingestion() {
+        for (rung, f, _) in rung_fixtures("v0.7.2", "t-0.2.2.tar.gz") {
+            let mut p = with_sums(bound_plan("t", "o/r", "v0.7.2", "t-0.2.2.tar.gz"), rung);
+            p.version = "0.2.2".into();
+            let e = run_plan(&f, p).expect_err(rung);
+            assert!(
+                matches!(e, RunError::AssetNotBoundToRelease { .. }),
+                "{rung}: {e:?}"
+            );
+        }
+        // The release tag in the name passes, and so does a consistent pair
+        // whose name carries the version.
+        for (rung, f, _) in rung_fixtures("v1.2.3", "t-1.2.3.tar.gz") {
+            let p = with_sums(bound_plan("t", "o/r", "v1.2.3", "t-1.2.3.tar.gz"), rung);
+            run_plan(&f, p).unwrap_or_else(|e| panic!("{rung}: {e}"));
+        }
+        let mut p = bound_plan("t", "o/r", "v1.2.3", "t-v1.2.3.tar.gz");
+        p.version = "1.2.3".into();
+        check_assets_are_bound(&[p], &[0], Mechanism::CosignSums, &BTreeMap::new())
+            .expect("consistent pair");
+    }
+
+    /// An unverified opt-in carries its own recorded exception, and a Rust
+    /// channel binds through its manifest's own version: neither is refused by
+    /// the name rule.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_opt_in_and_a_rust_channel_are_not_subject_to_the_name_rule() {
+        let mut p = bound_plan("t", "o/r", "v2.0.0", "t.tar.gz");
+        check_assets_are_bound(
+            std::slice::from_ref(&p),
+            &[0],
+            Mechanism::CosignSums,
+            &BTreeMap::new(),
+        )
+        .expect_err("a bound plan is checked");
+        // An opt-in reason is no exemption from a SIGNED rung: only the
+        // unverified mechanism actually accepted is its own exception.
+        p.unverified_reason = Some("nothing published".into());
+        for signed in [
+            Mechanism::CosignSums,
+            Mechanism::BuildProvenance,
+            Mechanism::PgpSums,
+            Mechanism::UpstreamSums,
+        ] {
+            check_assets_are_bound(std::slice::from_ref(&p), &[0], signed, &BTreeMap::new())
+                .expect_err("an opt-in reason does not exempt a proven release");
+        }
+        check_assets_are_bound(
+            std::slice::from_ref(&p),
+            &[0],
+            Mechanism::Unverified,
+            &BTreeMap::new(),
+        )
+        .expect("an accepted opt-in is its own exception");
+        let mut p = bound_plan("t", "o/r", "v2.0.0", "rustc.tar.xz");
+        p.pgp_sums = Some(rust_spec("k.asc".into()));
+        check_assets_are_bound(&[p], &[0], Mechanism::PgpSums, &BTreeMap::new())
+            .expect("a channel binds through its own version");
     }
 }

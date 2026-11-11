@@ -58,6 +58,9 @@ fn main() -> anyhow::Result<()> {
             if unverified > 0 {
                 println!("{unverified} release(s) carry NO proof of origin (opt-in recorded)");
             }
+            for w in plan::unbound_warnings(&items) {
+                println!("{w}");
+            }
             for i in &items {
                 println!(
                     "  {:<14} {:<24} {:<26} {}{}",
@@ -108,6 +111,9 @@ fn main() -> anyhow::Result<()> {
             let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
             let mut planned = plan::plan(&m, &refs)?;
             plan::anchor_key_files(&mut planned, &manifest);
+            for w in plan::unbound_warnings(&planned) {
+                eprintln!("{w}");
+            }
 
             let prev = match &previous {
                 Some(p) => deposit::previous_from_spec(&std::fs::read_to_string(p)?)?,

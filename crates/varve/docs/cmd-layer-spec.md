@@ -50,6 +50,7 @@ name    = "wsc"
 repo    = "pulseengine/sigil"
 version = "v0.11.0"
 layout  = "raw-per-platform"
+asset   = "wsc-%V-%T"       # an asset name must carry the release (%V or %R)
 
 [[vsix]]
 name    = "rivet-sdlc"
