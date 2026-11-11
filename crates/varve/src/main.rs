@@ -2291,7 +2291,15 @@ fn run_tool(
         // exposes, and it is asked case-insensitively; a layer whose manifests
         // cannot be read is treated as carrying the tool (fail closed).
         let passthrough_possible = via_shim && override_layer.is_none();
-        let carried = if passthrough_possible {
+        let carried = if passthrough_possible && !tool.is_ascii() {
+            // Folding is ASCII only; a filesystem may fold more, so a
+            // non-ASCII request has no sound comparison. Refuse.
+            Err(format!(
+                "the requested name ({}) is not ASCII and cannot be compared safely \
+                 with what the layer carries",
+                tool.escape_default()
+            ))
+        } else if passthrough_possible {
             varve_core::carried_tool_names(&pin, &resolved.layer, &ctx.store)
                 .map(|names| names.contains(&tool.to_ascii_lowercase()))
         } else {

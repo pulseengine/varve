@@ -480,6 +480,12 @@ pub fn active(
     shim_dir: &Path,
     self_exe: Option<&Path>,
 ) -> Vec<Active> {
+    // Folding is ASCII only: with a non-ASCII carried name nothing can be said
+    // to be uncarried, and a non-ASCII candidate has no sound comparison. Both
+    // fail closed, as the shim does.
+    if carried.iter().any(|c| !c.is_ascii()) {
+        return Vec::new();
+    }
     let mut names: Vec<String> = match allow {
         Allow::Nothing => Vec::new(),
         Allow::Everything => shim_names.to_vec(),
@@ -489,7 +495,7 @@ pub fn active(
     names.dedup();
     names
         .into_iter()
-        .filter(|n| !carried.iter().any(|c| c.eq_ignore_ascii_case(n)))
+        .filter(|n| n.is_ascii() && !carried.iter().any(|c| c.eq_ignore_ascii_case(n)))
         .map(|tool| {
             let binary = ambient_binary(path_var, &tool, shim_dir, self_exe);
             Active { tool, binary }
@@ -1106,6 +1112,34 @@ mod passthrough_tests {
                 binary: Some(ghost)
             }]
         );
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_ascii_is_never_active() {
+        let shims = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        exe(bin.path(), "ghost");
+        exe(bin.path(), "\u{d1}");
+        let path = os(bin.path());
+        let act = |carried: &[&str], names: &[&str]| {
+            active(
+                &Allow::Everything,
+                &carried.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                &names.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                Some(&path),
+                shims.path(),
+                None,
+            )
+            .into_iter()
+            .map(|a| a.tool)
+            .collect::<Vec<_>>()
+        };
+        // A non-ASCII candidate is skipped, an ASCII one stays.
+        assert_eq!(act(&[], &["ghost", "\u{d1}"]), ["ghost"]);
+        // A non-ASCII carried name makes nothing certain: nothing is active.
+        assert!(act(&["\u{f1}"], &["ghost"]).is_empty());
     }
 
     // rivet: verifies REQ-PASSTHROUGH-001

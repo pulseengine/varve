@@ -283,6 +283,8 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
 ///
 /// Names are folded to ASCII lower case: on a case-insensitive filesystem the
 /// shim `PROBE` IS `probe`, so the comparison must not depend on the spelling.
+/// A carried name that is not ASCII is an `Err` too (no sound comparison
+/// exists), as is an unreadable `bin/`.
 ///
 /// FAILS CLOSED: a manifest in the composition that cannot be read, or an
 /// included layer that cannot be found, is an `Err` — "we could not tell what
@@ -350,6 +352,16 @@ pub fn carried_tool_names(
                     .map(|e| e.file_name().to_string_lossy().to_ascii_lowercase()),
             );
         }
+    }
+    // Folding is ASCII only, and a filesystem may fold more (APFS: `ñ` is `Ñ`;
+    // NFC is NFD; the Kelvin sign is `k`). A non-ASCII name cannot be compared
+    // soundly, so it is "we could not tell", never "not carried".
+    if let Some(odd) = names.iter().find(|n| !n.is_ascii()) {
+        return Err(format!(
+            "the layer carries a tool name that is not ASCII ({}), which cannot be \
+             compared safely with the name requested",
+            odd.escape_default()
+        ));
     }
     Ok(names)
 }
@@ -1060,5 +1072,22 @@ mod tests {
         // So does the root's own.
         std::fs::remove_file(layer.root.join("layer.json")).unwrap();
         assert!(carried_tool_names(&p, &layer, &store).is_err());
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn a_carried_name_that_is_not_ascii_is_an_error_not_a_name() {
+        // ASCII folding cannot compare it with a filesystem's own folding.
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &fixtures::manifest("2026.07.0", "qualified"),
+                &[("rivet", b"r"), ("\u{f1}", b"n")],
+            )
+            .unwrap();
+        let p = qualified_pin("2026.07.0");
+        let layer = resolve(&p, &store).unwrap().layer;
+        let why = carried_tool_names(&p, &layer, &store).unwrap_err();
+        assert!(why.contains("not ASCII"), "{why}");
     }
 }

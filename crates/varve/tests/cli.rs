@@ -10209,6 +10209,68 @@ fn a_passed_through_tool_that_calls_itself_nests_instead_of_looping() {
 }
 
 // rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_carried_name_that_is_not_ascii_refuses_every_passthrough() {
+    // Clause 2, fail closed. Case folding is ASCII only, so on a filesystem
+    // that folds more (APFS: `ñ` is `Ñ`; NFC is NFD) a layer carrying `ñ`
+    // cannot be compared with how a shim happens to be spelt. When any carried
+    // name is not ASCII, nothing passes through.
+    let fx = fixture(
+        Some(PIN_JULY),
+        &[(
+            MANIFEST_JULY,
+            &[
+                ("probe", b"#!/bin/sh\n".as_slice()),
+                ("\u{f1}", b"#!/bin/sh\n".as_slice()),
+            ],
+        )],
+    );
+    let bin = fx.root.with_file_name("ambient-bin");
+    let marker = fx.root.with_file_name("ghost-ran");
+    write_executable(
+        &bin.join("ghost"),
+        &format!("#!/bin/sh\necho ran > {}\n", marker.display()),
+    );
+    install_shims(&fx, &["ghost"]);
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!marker.exists(), "passthrough ran beside a non-ASCII name");
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(!stderr.contains("varve: passthrough:"), "{stderr}");
+    assert!(stderr.contains("not ASCII"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_requested_name_that_is_not_ascii_is_never_passed_through() {
+    // The layer carries `probe` only; the shim is spelt `\u{d1}` (made by hand,
+    // as a case-folding filesystem would resolve it). Whatever the folding
+    // rules, a non-ASCII request is refused rather than compared.
+    let (fx, bin, _marker) = shim_fallback_fixture();
+    install_shims(&fx, &["probe"]);
+    let shims = fx.root.join("shims");
+    let target = std::fs::read_link(shims.join("probe")).unwrap();
+    std::os::unix::fs::symlink(target, shims.join("\u{d1}")).unwrap();
+    let upper_marker = fx.root.with_file_name("upper-n-ran");
+    write_executable(
+        &bin.join("\u{d1}"),
+        &format!("#!/bin/sh\necho ran > {}\n", upper_marker.display()),
+    );
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "\u{d1}", &path, Some(&xdg), &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!upper_marker.exists(), "a non-ASCII name was passed through");
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(!stderr.contains("varve: passthrough:"), "{stderr}");
+    assert!(stderr.contains("not ASCII"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
 #[test]
 fn verify_reports_that_a_carried_attestation_was_signed_in_an_ambient_session() {
     // Clause 4. `check-attestation` printed the ambient sentence; the report
