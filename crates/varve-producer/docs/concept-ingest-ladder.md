@@ -78,6 +78,11 @@ all of them are read: an asset is vouched for only by a statement with a subject
 named for that asset, and two statements that give one name different digests
 are refused. A statement built from `refs/pull/*` is set aside (a pull-request
 build is never a release); when nothing else remains the release is refused.
+A pull-request statement is set aside before it is validated, so a malformed one
+cannot refuse a release. Two kept statements that give one subject name
+different digests are still refused (fail closed); that means anyone who can run
+a workflow on a branch of the upstream repository can block a release by
+attesting the same name at another digest.
 The record (`proof-signer`, `proof-asserts`) names the `buildSignerURI`, the ref
 and the commit of the statements that vouched for the planned assets.
 

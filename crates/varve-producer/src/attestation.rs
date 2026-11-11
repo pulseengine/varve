@@ -189,8 +189,8 @@ impl fmt::Display for AttestationError {
             AttestationError::PullRequestBuild { source_ref } => write!(
                 f,
                 "every attestation for these bytes was built from {source_ref}, a pull \
-                 request. A pull-request build is never a release, however well it is \
-                 signed, so it vouches for nothing."
+                 request. A pull-request build is never a release, however well \
+                 it is signed, so it vouches for nothing."
             ),
         }
     }
@@ -219,17 +219,28 @@ pub fn parse(json: &str) -> Result<Attested, AttestationError> {
     let mut pull_request: Option<String> = None;
     for doc in docs {
         let cert = doc.verification_result.signature.certificate;
-        let signer = cert
+        let raw_signer = cert
             .build_signer_uri
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .ok_or(AttestationError::NoSigner)?;
+            .filter(|s| !s.is_empty());
         let source_ref = cert
             .source_repository_ref
             .map(|r| r.trim().to_string())
             .filter(|r| !r.is_empty())
-            .or_else(|| signer.split_once('@').map(|(_, r)| r.to_string()))
+            .or_else(|| {
+                raw_signer
+                    .as_deref()
+                    .and_then(|s| s.split_once('@'))
+                    .map(|(_, r)| r.to_string())
+            })
             .unwrap_or_default();
+        // Set aside BEFORE anything is validated: a malformed pull-request
+        // statement must not refuse a release whose real statement is fine.
+        if is_pull_request(&source_ref) {
+            pull_request.get_or_insert(source_ref);
+            continue;
+        }
+        let signer = raw_signer.ok_or(AttestationError::NoSigner)?;
         // Absent rather than invented: older attestations omit it, and an empty
         // string reads as "built from nothing" rather than "not recorded".
         let source_commit = cert
@@ -255,10 +266,6 @@ pub fn parse(json: &str) -> Result<Attested, AttestationError> {
             pairs.push((s.name, digest));
         }
         let sums = Sums::from_pairs(pairs).map_err(AttestationError::BadDigest)?;
-        if is_pull_request(&source_ref) {
-            pull_request.get_or_insert(source_ref);
-            continue;
-        }
         statements.push(Build {
             signer,
             source_ref,
@@ -478,5 +485,44 @@ mod tests {
             parse(&bare),
             Err(AttestationError::PullRequestBuild { .. })
         ));
+    }
+
+    /// A pull-request statement is set aside BEFORE it is validated, so a
+    /// malformed one (no subjects, no signer, a subject without a digest) does
+    /// not refuse a release whose real statement is fine.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_malformed_pull_request_statement_does_not_refuse_the_release() {
+        let a = r#"{"name":"a","digest":{"sha256":"1111111111111111111111111111111111111111111111111111111111111111"}}"#;
+        let good = result(
+            a,
+            "https://h/o/r/.github/workflows/p.yml@refs/heads/main",
+            "refs/heads/main",
+        );
+        let no_subjects = r#"{"verificationResult":{"statement":{"subject":[]},
+            "signature":{"certificate":{"buildSignerURI":"https://h/x@refs/pull/1/merge","sourceRepositoryRef":"refs/pull/1/merge"}}}}"#;
+        let no_signer = r#"{"verificationResult":{"statement":{"subject":[{"name":"a","digest":{}}]},
+            "signature":{"certificate":{"sourceRepositoryRef":"refs/pull/2/merge"}}}}"#;
+        let no_digest = result(
+            r#"{"name":"a","digest":{}}"#,
+            "https://h/x",
+            "refs/pull/3/head",
+        );
+        for bad in [no_subjects.to_string(), no_signer.to_string(), no_digest] {
+            let at = parse(&format!("[{bad},{good}]")).expect("the PR statement is set aside");
+            assert_eq!(at.statements.len(), 1);
+            assert_eq!(at.statements[0].source_ref, "refs/heads/main");
+        }
+        // Malformed AND the only statement: still a refusal, naming the ref.
+        assert!(matches!(
+            parse(&format!("[{no_subjects}]")),
+            Err(AttestationError::PullRequestBuild { .. })
+        ));
+        // A malformed statement that is NOT a pull request is still refused.
+        let bad_branch = result("", "https://h/x", "refs/heads/main");
+        assert_eq!(
+            parse(&format!("[{bad_branch},{good}]")),
+            Err(AttestationError::NoSubjects)
+        );
     }
 }
