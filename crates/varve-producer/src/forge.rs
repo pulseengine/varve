@@ -180,6 +180,30 @@ mod tests {
             .is_match(identity)
     }
 
+    /// The recorded form (`identity_pattern`) and the enforced form
+    /// (`identity_regexp`) are built separately, so they are tied here: a URI
+    /// the recorded pattern describes is accepted by the enforced regexp, and
+    /// another tag's URI and a branch URI are not.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_recorded_identity_pattern_describes_what_the_regexp_accepts() {
+        for f in [Forge::github_com(), Forge::enterprise("ghe.example.com")] {
+            let described = f
+                .identity_pattern("acme/tool-x", "v1.2.3")
+                .replace("[^@]+", "release.yml");
+            assert!(
+                accepts(&f, "acme/tool-x", "v1.2.3", &described),
+                "{described}"
+            );
+            let other_tag = described.replace("v1.2.3", "v1.2.4");
+            assert!(!accepts(&f, "acme/tool-x", "v1.2.3", &other_tag));
+            let branch = described.replace("refs/tags/v1.2.3", "refs/heads/main");
+            assert!(!accepts(&f, "acme/tool-x", "v1.2.3", &branch));
+            let other_repo = described.replace("acme/tool-x", "acme/tool-y");
+            assert!(!accepts(&f, "acme/tool-x", "v1.2.3", &other_repo));
+        }
+    }
+
     /// A certificate is accepted only when its workflow ran from THIS release's
     /// tag in THIS repository. Same repo and another tag, another repo and the
     /// same tag, and a branch are all refused.
