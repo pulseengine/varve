@@ -552,13 +552,9 @@ pub fn verify_release<S: Source>(
                     .iter()
                     .map(|(a, b, c)| (a.as_str(), b.as_str(), c.as_str()))
                     .collect();
-                accepted.signer = Some(
-                    builds
-                        .iter()
-                        .map(|(a, _, _)| a.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
+                accepted.signer = Some(ingest::provenance_signer(
+                    builds.iter().map(|(a, _, _)| a.as_str()),
+                ));
                 accepted.asserts = ingest::provenance_asserts(&refs, version);
             }
             Some(covered.sums)

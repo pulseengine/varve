@@ -367,6 +367,23 @@ pub fn rung_cosign_sums(forge: &Forge, repo: &str, release: &str, probe: &Releas
     }
 }
 
+/// The stable part of a build signer URI: `<workflow URL>` without its
+/// `@<ref>`. The ref changes with every release of a tag-signing upstream, and
+/// a delta reports a moved signer.
+pub fn signer_without_ref(uri: &str) -> &str {
+    uri.split_once('@').map_or(uri, |(workflow, _)| workflow)
+}
+
+/// The recorded signer of a build-provenance proof: the workflow URLs of the
+/// statements that vouched, refs stripped, de-duplicated and sorted. The full
+/// URIs, refs included, are in the assertion ([`provenance_asserts`]).
+pub fn provenance_signer<'a>(signers: impl IntoIterator<Item = &'a str>) -> String {
+    let mut stable: Vec<&str> = signers.into_iter().map(signer_without_ref).collect();
+    stable.sort_unstable();
+    stable.dedup();
+    stable.join(", ")
+}
+
 /// What a build-provenance record says about the statements that vouched: for
 /// each distinct (signer, ref, commit) the actual `buildSignerURI`, the ref the
 /// build ran from, and the commit, then the binding that was enforced. Used for
@@ -559,7 +576,7 @@ pub fn choose(
             };
             return Ok(Accepted {
                 mechanism: Mechanism::BuildProvenance,
-                signer: Some(signer.clone()),
+                signer: Some(provenance_signer([signer.as_str()])),
                 // No ref is pinned (see `gh::attestation_verify_argv`): the
                 // binding is the subject's name, enforced when the proof is
                 // spent. `verify_release` replaces this with the statements

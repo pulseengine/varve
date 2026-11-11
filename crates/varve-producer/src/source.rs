@@ -894,11 +894,48 @@ mod tests {
             .also_attested("refs/heads/main", &[(ASSET2, NEW)]);
         let v = verified(both, "v2.0.0", ASSET2).expect("the real build vouches");
         let signer = v.accepted.signer.expect("a signer");
-        assert!(signer.ends_with("@refs/heads/main"), "{signer}");
+        assert!(!signer.contains('@'), "{signer}");
+        assert!(
+            v.accepted.asserts.contains("@refs/heads/main"),
+            "{}",
+            v.accepted.asserts
+        );
         assert!(
             !v.accepted.asserts.contains("refs/pull"),
             "{}",
             v.accepted.asserts
+        );
+    }
+
+    /// An upstream that signs from the release tag has a different
+    /// buildSignerURI (its `@<ref>` part) for every release; the recorded
+    /// `proof-signer` must not move with it, or a layer delta reports a moved
+    /// signer on every bump. The full URIs, refs included, are in the assertion.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_build_provenance_signer_is_the_same_for_two_releases() {
+        let release = |tag: &str, asset: &str, bytes: &[u8]| {
+            let r = certified(&[asset], "", &format!("refs/tags/{tag}"))
+                .attesting(&[(asset, bytes)])
+                .serving(asset, bytes);
+            verified(r, tag, asset).expect("verifies").accepted
+        };
+        let one = release("v1.0.0", "one-1.0.0.tar.gz", OLD);
+        let two = release("v2.0.0", "one-2.0.0.tar.gz", NEW);
+        assert_eq!(one.signer, two.signer, "{one:?} {two:?}");
+        assert_eq!(
+            one.signer.as_deref(),
+            Some("https://github.com/o/r/.github/workflows/release.yml")
+        );
+        assert!(
+            one.asserts.contains("release.yml@refs/tags/v1.0.0"),
+            "{}",
+            one.asserts
+        );
+        assert!(
+            two.asserts.contains("release.yml@refs/tags/v2.0.0"),
+            "{}",
+            two.asserts
         );
     }
 
@@ -913,7 +950,7 @@ mod tests {
         let signer = v.accepted.signer.expect("a signer");
         assert_eq!(
             signer,
-            "https://github.com/o/r/.github/workflows/release.yml@refs/heads/main"
+            "https://github.com/o/r/.github/workflows/release.yml"
         );
         let asserts = &v.accepted.asserts;
         assert!(asserts.contains("refs/heads/main"), "{asserts}");
