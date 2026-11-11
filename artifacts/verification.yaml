@@ -3610,6 +3610,27 @@ artifacts:
       model: claude-opus-5-5
       timestamp: 2026-11-07T19:32:32Z
 
+  - id: VER-REVIEW-V0-47-0-B
+    type: verification
+    title: "Independent clean-room review of v0.47.0, second part: #342-#351"
+    status: verified
+    release: v0.47.0
+    tags: [independence, review]
+    fields:
+      baseline: "Independent clean-room review (fresh context, refute-framed) of everything merged for v0.47.0 since VER-REVIEW-V0-47-0 (#342, #344, #347, #349, #350) and of #351, at 369b2566, 2026-11-11, by a fresh-context clean-room reviewer (Claude). cargo test --workspace --no-fail-fast: exit 0, 2199 passed, 0 failed, 2 ignored. VERDICTS: C1 #344 pgp-sums (pinned key from the operator's input, a rejected signature never falls to an unsigned list, recorded as its own proof kind, waivers refused) CONFIRMED. C2 #350 release binding (cosign identity anchored to refs/tags/<tag> plus the workflow repository; build-provenance by subject name and digest with every gh result read; asset names carry the release) PARTIAL on wording only: unbound-release-reason is also honoured under upstream-sums, as documented and signed as not bound to its release; no older release's proof could be accepted for a newer tag. C3 #349+#351 shim passthrough CONFIRMED. C4 #347 gate-probe report-only and SHA-pinned, not among the 22 required checks, CONFIRMED. C5 #342 YAML scanner of PR gates CONFIRMED. C6 no regression CONFIRMED. Negative controls, all restored and red: cosign regexp without the tag (6 tests); workflow-repository pin, pull-request filter and build-provenance waiver (7); rejected PGP list and the pgp waiver refusal (11); carried check forced false (2); hop bound raised to u32::MAX (1); relative PATH filter removed (1 unit test only); quoted flow-mapping if in ci.yml (1). LOW findings: build-provenance accepts a branch build whose subject names this release (stated limit); the relative-PATH CLI test is also satisfied by the in-repository filter; OpenPGP key expiry is not checked (stated in pgpsums.rs). Earlier reviews of #349 (three rounds) found and had fixed: carried check limited to exposed names, case folding, loops, nesting, non-ASCII names, unreadable bin/, notice escaping, in-repository PATH entries. Not checked: live cosign or gh attestation against real releases, Linux-only paths, fork triggering of gate-probe."
+      method: review
+      steps: cargo test --workspace --no-fail-fast; cargo test -p varve-producer --lib; cargo test -p varve --test cli passthrough; cargo test -p varve-core --lib shimfallback; cargo test -p varve-producer --test pr_gates_cannot_be_switched_off; python3 -m unittest discover -s tools -p test_*.py
+    links:
+      - type: verifies
+        target: REQ-SIGNEDSUMS-001
+      - type: verifies
+        target: REQ-PASSTHROUGH-001
+      - type: verifies
+        target: REQ-INGEST-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-11T18:00:12Z
   - id: VER-REVIEW-V0-47-0
     type: verification
     title: "Independent clean-room review of v0.47.0 (so far): #335-#341"

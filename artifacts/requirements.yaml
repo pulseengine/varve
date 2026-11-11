@@ -4680,7 +4680,7 @@ artifacts:
   - id: REQ-SIGNEDSUMS-001
     type: requirement
     title: A digest list signed with PGP is a proof of origin, and is not confused with an unsigned one
-    status: proposed
+    status: verified
     description: |-
       The ingestion ladder has one rung for a publisher's own digest list — `upstream-sums` — and REQ-UPSTREAMSUMS-001 is explicit about what it does and does not establish: the bytes are the bytes that list names, and NOTHING about who produced them, because the same host serves the list and the bytes.
 
@@ -5420,7 +5420,7 @@ artifacts:
   - id: REQ-AGENTDOCS-005
     type: requirement
     title: varve-serve ask searches the TEXT of documentation pages, not only their titles and paths
-    status: approved
+    status: verified
     release: v0.47.0
     description: "Split from REQ-AGENTDOCS-002 clause 6 on 2026-10-29. Clauses: (1) Markdown, HTML and rustdoc HTML pages of a verified docs payload are searched by their text, ranked by best line as topics are. (2) Hits stay pointers: no page text is printed (the prompt-injection boundary REQ-AGENTDOCS-002 established), only the question's own words a line holds. (3) The index is built at query time, deterministic, offline."
     tags: [trimmed-from-v0.44.0]
@@ -5556,7 +5556,7 @@ artifacts:
   - id: REQ-PASSTHROUGH-001
     type: requirement
     title: A user may let a shim run an ambient binary for a tool the layer does not carry, and is told every time
-    status: approved
+    status: verified
     release: v0.47.0
     description: "Maintainer decision 2026-11-10, revising the 2026-10-21 decision recorded in REQ-SHIMFALLBACK-001 (refuse and list options) after user feedback that shims make locally installed tools unusable (varve#273). Clauses: (1) A USER-level configuration (outside every repository, e.g. the XDG config directory) may list tools, or '*', whose shims fall through to the executable on PATH outside the shim directory. A committed varve.toml cannot enable it; a repository therefore cannot switch it on for everyone. (2) A tool the pinned layer carries is NEVER passed through, whatever the configuration says: the REQ-SHADOW-001 property holds. (3) Every passthrough run prints one line on stderr naming the binary it ran and that it ran outside the layer. (4) varve status lists active passthroughs, and verify, exports and attestations record that the session allowed ambient tools. (5) Without the configuration, REQ-SHIMFALLBACK-001's refusal is unchanged."
     fields:
