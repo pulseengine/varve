@@ -1489,6 +1489,26 @@ mod pgp_sums_tests {
         }
     }
 
+    /// The assertion names the ref each vouching build ran from when gh reports
+    /// one, and claims no ref when it does not: a record that says "from ref"
+    /// with nothing after it, or drops a known ref, misstates the provenance.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_assertion_names_the_build_ref_only_when_there_is_one() {
+        let signer = "https://github.com/o/r/.github/workflows/release.yml@refs/tags/v1.2.3";
+        let with_ref = provenance_asserts(&[(signer, "refs/tags/v1.2.3", "abc123")], "v1.2.3");
+        assert!(
+            with_ref.contains("from ref refs/tags/v1.2.3 at source commit abc123"),
+            "{with_ref}"
+        );
+        let without_ref = provenance_asserts(&[(signer, "", "abc123")], "v1.2.3");
+        assert!(!without_ref.contains("from ref"), "{without_ref}");
+        assert!(
+            without_ref.contains(&format!("built by {signer} at source commit abc123")),
+            "{without_ref}"
+        );
+    }
+
     /// The recorded build-provenance signer is stable across the releases of a
     /// tag-signing upstream, and still moves when the signing ref class does:
     /// tag-signed to main-signed is the downgrade a delta must surface.
