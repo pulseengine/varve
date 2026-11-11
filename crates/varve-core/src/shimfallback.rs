@@ -305,8 +305,13 @@ pub fn config_path(xdg: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf>
     Some(base.join(USER_CONFIG_FILE))
 }
 
+/// What makes a directory a repository root: varve's own pin, and the marker
+/// of each version-control system a project is likely to live in.
+const REPOSITORY_MARKERS: [&str; 5] = ["varve.toml", ".git", ".hg", ".jj", ".svn"];
+
 /// The repository root above `cwd` that `config` lies inside, if any: the
-/// nearest ancestor holding a `varve.toml` or a `.git` that contains it.
+/// nearest ancestor holding a `varve.toml` or a version-control marker
+/// (`.git`, `.hg`, `.jj`, `.svn`) that contains it.
 /// Both sides are canonicalized, so a symlink (or a `..`) cannot launder a
 /// repository file into a "user" one.
 pub fn repository_holding(config: &Path, cwd: &Path) -> Option<PathBuf> {
@@ -314,8 +319,7 @@ pub fn repository_holding(config: &Path, cwd: &Path) -> Option<PathBuf> {
     let cwd = std::fs::canonicalize(cwd).ok()?;
     cwd.ancestors()
         .find(|dir| {
-            (dir.join("varve.toml").exists() || dir.join(".git").exists())
-                && config.starts_with(dir)
+            REPOSITORY_MARKERS.iter().any(|m| dir.join(m).exists()) && config.starts_with(dir)
         })
         .map(Path::to_path_buf)
 }
@@ -1169,5 +1173,24 @@ mod passthrough_tests {
             ambient_binary(Some(&both), "ghost", shims.path(), None),
             Some(ghost)
         );
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn every_common_version_control_marker_makes_a_directory_a_repository() {
+        for marker in [".git", ".hg", ".jj", ".svn", "varve.toml"] {
+            let repo = tempfile::tempdir().unwrap();
+            let repo_path = std::fs::canonicalize(repo.path()).unwrap();
+            let cfg = write_config(&repo_path.join("home/.config"), "");
+            let work = repo_path.join("work");
+            std::fs::create_dir_all(&work).unwrap();
+            assert_eq!(repository_holding(&cfg, &work), None, "no marker yet");
+            std::fs::create_dir(repo_path.join(marker)).unwrap();
+            assert_eq!(
+                repository_holding(&cfg, &work),
+                Some(repo_path.clone()),
+                "{marker} was not recognised as a repository"
+            );
+        }
     }
 }
