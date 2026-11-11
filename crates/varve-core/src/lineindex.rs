@@ -553,6 +553,20 @@ impl IndexCache {
         Ok(())
     }
 
+    /// The signed envelope bytes cached for a line, exactly as accepted — what
+    /// `varve seed` copies, never re-serialised (REQ-SEED-001).
+    pub fn envelope_bytes(&self, line: &str) -> Result<Option<Vec<u8>>, IndexError> {
+        let path = self.path(line);
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(IndexError::Io {
+                path: path.display().to_string(),
+                source,
+            }),
+        }
+    }
+
     fn path(&self, line: &str) -> PathBuf {
         self.dir.join(format!("{line}.dsse.json"))
     }
