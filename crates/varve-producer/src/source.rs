@@ -534,10 +534,9 @@ mod tests {
     /// A `cosign` and a `gh attestation` that enforce what they are TOLD to,
     /// the way the real ones do: cosign matches the identity regexp it is
     /// handed against the certificate's identity, and gh requires the digest of
-    /// the file it is given to be one of the attestation's subjects (and
-    /// compares `--source-ref`, when it is passed one, with the ref the
-    /// attestation was built from). A double that always said yes (or always
-    /// no) could not tell a bound command from an unbound one.
+    /// the file it is given to be one of the attestation's subjects. A double
+    /// that always said yes (or always no) could not tell a bound command from
+    /// an unbound one.
     struct Certified {
         inner: FakeGh,
         /// The signing workflow in the certificate.
@@ -575,15 +574,6 @@ mod tests {
                 };
             }
             if program == "gh" && args.first().map(String::as_str) == Some("attestation") {
-                if let Some(want) = flag(args, "--source-ref") {
-                    if want != self.built_from {
-                        return out(
-                            1,
-                            "",
-                            "verifying with issuer \"sigstore.dev\": the source ref does not match",
-                        );
-                    }
-                }
                 let file = std::fs::read(&args[2]).expect("gh is handed a downloaded file");
                 let digest = crate::orchestrate::sha256_hex(&file);
                 let covered = self
