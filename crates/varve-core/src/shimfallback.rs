@@ -408,17 +408,34 @@ pub fn ambient_binary(
         .find(|p| !is_varve(p, self_exe))
 }
 
+/// `text` with every control character (a newline above all) written as an
+/// escape, so a path or a name cannot split a line it is printed in.
+fn one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The one stderr line a passed-through run prints (REQ-PASSTHROUGH-001
-/// clause 3): the binary, and that it is not the layer's.
+/// clause 3): the binary, and that it is not the layer's. Everything that
+/// came from the environment is escaped so the line stays ONE line.
 pub fn notice(tool: &str, binary: &Path, layer: &str, config: Option<&Path>) -> String {
     let by = match config {
-        Some(c) => format!("allowed by {}", c.display()),
+        Some(c) => format!("allowed by {}", one_line(&c.display().to_string())),
         None => "allowed by your user configuration".to_string(),
     };
     format!(
-        "varve: passthrough: '{tool}' is not part of layer {layer}; running {} outside the \
+        "varve: passthrough: '{}' is not part of layer {}; running {} outside the \
          layer (not verified by varve; {by})",
-        binary.display()
+        one_line(tool),
+        one_line(layer),
+        one_line(&binary.display().to_string())
     )
 }
 
@@ -1090,5 +1107,21 @@ mod passthrough_tests {
             )
             .is_empty()
         );
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn the_notice_escapes_control_characters_and_stays_one_line() {
+        let n = notice(
+            "gh\nost",
+            Path::new("/opt/a\nb\r/ghost\u{1b}[0m"),
+            "2026\n.07",
+            Some(Path::new("/u/c\nonfig.toml")),
+        );
+        assert!(!n.chars().any(char::is_control), "{n:?}");
+        assert!(n.contains("/opt/a\\nb\\r/ghost\\u{1b}[0m"), "{n}");
+        assert!(n.contains("gh\\nost"), "{n}");
+        assert!(n.contains("2026\\n.07"), "{n}");
+        assert!(n.contains("/u/c\\nonfig.toml"), "{n}");
     }
 }

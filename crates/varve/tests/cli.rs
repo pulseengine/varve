@@ -10273,3 +10273,25 @@ fn verify_reports_that_a_carried_attestation_was_signed_in_an_ambient_session() 
             ),
         );
 }
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn the_notice_stays_one_line_when_a_path_directory_name_holds_a_newline() {
+    // Clause 3: exactly one stderr line. A directory called `a\nb` on PATH
+    // printed unescaped would split the notice and let its name forge a line.
+    let (fx, _bin, _marker) = passthrough_fixture();
+    let evil = fx.root.with_file_name("amb\nvarve forged line\nbin");
+    write_executable(&evil.join("ghost"), "#!/bin/sh\nexit 7\n");
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"ghost\"]\n");
+    let path = format!("{}:/usr/bin:/bin", evil.display());
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    assert_eq!(out.status.code(), Some(7), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
+    assert!(stderr.starts_with("varve: passthrough:"), "{stderr:?}");
+    assert!(
+        stderr.contains("\\n"),
+        "the newline must show escaped: {stderr:?}"
+    );
+}
