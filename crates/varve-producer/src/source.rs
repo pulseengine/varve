@@ -245,7 +245,8 @@ impl<R: CommandRunner> Source for GhSource<R> {
             let bundle = self.download(repo, version, BUNDLE)?;
             let argv = gh::cosign_verify_argv(
                 &bundle.to_string_lossy(),
-                &forge.identity_prefix(repo),
+                repo,
+                &forge.identity_regexp(repo, version),
                 &forge.oidc_issuer,
                 &sums.to_string_lossy(),
             );
@@ -277,6 +278,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
             crate::ingest::rung_cosign_sums(
                 forge,
                 repo,
+                version,
                 &ReleaseProbe {
                     published: Vec::new(),
                     has_sums,
@@ -527,6 +529,464 @@ mod tests {
         // None, not Some(Err(...)): never run, rather than run and failed.
         assert!(p.cosign.is_none(), "{:?}", p.cosign);
         assert_eq!(p.attestation, crate::ingest::AttestationProbe::NotAttested);
+    }
+
+    /// A `cosign` and a `gh attestation` that enforce what they are TOLD to,
+    /// the way the real ones do: cosign matches the identity regexp it is
+    /// handed against the certificate's identity, and gh requires the digest of
+    /// the file it is given to be one of the attestation's subjects. A double
+    /// that always said yes (or always no) could not tell a bound command from
+    /// an unbound one.
+    struct Certified {
+        inner: FakeGh,
+        /// The signing workflow in the certificate.
+        identity: String,
+        /// The repository the certificate says the workflow RAN in (the
+        /// caller's, for a reusable workflow).
+        run_in: String,
+        /// The ref the attestation was built from.
+        built_from: String,
+        /// The attestation's subjects: (name, sha256 hex).
+        subjects: Vec<(String, String)>,
+        /// Further attestations gh returns for the same digest (a list, as the
+        /// real one): (built from, subjects).
+        more: Vec<(String, Vec<(String, String)>)>,
+        /// The identity regexp cosign was last handed.
+        seen_identity: std::rc::Rc<RefCell<Option<String>>>,
+    }
+
+    impl CommandRunner for Certified {
+        fn run(&self, program: &str, args: &[String], env: &[(String, String)]) -> RunOutput {
+            if program == "cosign" {
+                let re = flag(args, "--certificate-identity-regexp").expect("an identity");
+                *self.seen_identity.borrow_mut() = Some(re.to_string());
+                let re = regex::Regex::new(re).expect("the regexp compiles");
+                let ran_in_the_right_repo = flag(args, "--certificate-github-workflow-repository")
+                    .is_none_or(|want| want == self.run_in);
+                return if re.is_match(&self.identity) && ran_in_the_right_repo {
+                    out(0, "Verified OK", "")
+                } else {
+                    out(
+                        1,
+                        "",
+                        "none of the expected identities matched what was in the certificate",
+                    )
+                };
+            }
+            if program == "gh" && args.first().map(String::as_str) == Some("attestation") {
+                let file = std::fs::read(&args[2]).expect("gh is handed a downloaded file");
+                let digest = crate::orchestrate::sha256_hex(&file);
+                let covered = self
+                    .subjects
+                    .iter()
+                    .chain(self.more.iter().flat_map(|(_, s)| s.iter()))
+                    .any(|(_, d)| *d == digest);
+                if !covered {
+                    return out(
+                        1,
+                        "",
+                        "verifying with issuer \"sigstore.dev\": the artifact's digest is not \
+                         a subject of any attestation",
+                    );
+                }
+                // Like gh: every attestation whose subjects include the file's
+                // digest, in order, each with its own certificate.
+                let all = std::iter::once((&self.built_from, &self.subjects))
+                    .chain(self.more.iter().map(|(r, s)| (r, s)));
+                let results: Vec<String> = all
+                    .filter(|(_, subjects)| subjects.iter().any(|(_, d)| *d == digest))
+                    .map(|(built_from, subjects)| {
+                        let subjects: Vec<String> = subjects
+                            .iter()
+                            .map(|(n, d)| {
+                                format!(r#"{{"name":"{n}","digest":{{"sha256":"{d}"}}}}"#)
+                            })
+                            .collect();
+                        format!(
+                            r#"{{"verificationResult":{{
+                              "statement":{{"subject":[{}]}},
+                              "signature":{{"certificate":{{
+                                "buildSignerURI":"https://github.com/o/r/.github/workflows/release.yml@{built_from}",
+                                "sourceRepositoryRef":"{built_from}",
+                                "sourceRepositoryDigest":"abc"}}}}}}}}"#,
+                            subjects.join(",")
+                        )
+                    })
+                    .collect();
+                return out(0, &format!("[{}]", results.join(",")), "");
+            }
+            self.inner.run(program, args, env)
+        }
+    }
+
+    fn certified(listing: &[&str], identity: &str, built_from: &str) -> Certified {
+        Certified {
+            inner: FakeGh::new()
+                .listing(listing)
+                .file(SUMS, SUMS_TEXT.as_bytes())
+                .file(BUNDLE, b"bundle")
+                .file("one.tar.gz", b"payload"),
+            identity: identity.into(),
+            run_in: "o/r".into(),
+            built_from: built_from.into(),
+            more: Vec::new(),
+            seen_identity: Default::default(),
+            subjects: vec![(
+                "one.tar.gz".into(),
+                crate::orchestrate::sha256_hex(b"payload"),
+            )],
+        }
+    }
+
+    impl Certified {
+        /// The attestation's subjects, replacing the default one.
+        fn attesting(mut self, subjects: &[(&str, &[u8])]) -> Self {
+            self.subjects = subjects
+                .iter()
+                .map(|(n, b)| (n.to_string(), crate::orchestrate::sha256_hex(b)))
+                .collect();
+            self
+        }
+        /// The repository the signing certificate says the workflow ran in.
+        fn running_in(mut self, repo: &str) -> Self {
+            self.run_in = repo.into();
+            self
+        }
+        /// A further attestation gh returns for the same digest.
+        fn also_attested(mut self, built_from: &str, subjects: &[(&str, &[u8])]) -> Self {
+            self.more.push((
+                built_from.into(),
+                subjects
+                    .iter()
+                    .map(|(n, b)| (n.to_string(), crate::orchestrate::sha256_hex(b)))
+                    .collect(),
+            ));
+            self
+        }
+        /// An asset the release serves under `name`.
+        fn serving(mut self, name: &str, bytes: &[u8]) -> Self {
+            self.inner = self.inner.file(name, bytes);
+            self
+        }
+    }
+
+    fn ladder_at(
+        runner: Certified,
+        repo: &str,
+        tag: &str,
+    ) -> Result<crate::ingest::Accepted, crate::ingest::IngestError> {
+        let dir = scratch("bound-ladder");
+        let forge = Forge::github_com();
+        let src = GhSource::new(runner, forge.clone(), &*dir);
+        let probe = src.probe(&forge, repo, tag).expect("probes");
+        crate::ingest::choose(&forge, repo, tag, &probe, &BTreeMap::new(), None)
+    }
+
+    const SIGNED_AT_V1: &str =
+        "https://github.com/o/r/.github/workflows/release.yml@refs/tags/v1.0.0";
+
+    /// Rung 1: sums signed for v1.0.0 are refused when presented as v2.0.0,
+    /// accepted as v1.0.0, and refused when the signing workflow belongs to a
+    /// different repository at the same tag.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn cosign_sums_signed_for_one_release_are_refused_for_another() {
+        let listing = [SUMS, BUNDLE, "one.tar.gz"];
+        let older = ladder_at(certified(&listing, SIGNED_AT_V1, ""), "o/r", "v2.0.0");
+        assert!(
+            matches!(
+                &older,
+                Err(crate::ingest::IngestError::ProofRejected { .. })
+            ),
+            "an older release's signature must not vouch for a newer tag: {older:?}"
+        );
+        let same = ladder_at(certified(&listing, SIGNED_AT_V1, ""), "o/r", "v1.0.0")
+            .expect("the same tag verifies");
+        assert_eq!(same.mechanism, crate::ingest::Mechanism::CosignSums);
+        assert!(
+            same.asserts.contains("v1.0.0"),
+            "the record names the release it was bound to: {}",
+            same.asserts
+        );
+        let elsewhere = SIGNED_AT_V1.replace("/o/r/", "/o/other/");
+        let other = ladder_at(certified(&listing, &elsewhere, ""), "o/r", "v1.0.0");
+        assert!(
+            matches!(
+                &other,
+                Err(crate::ingest::IngestError::ProofRejected { .. })
+            ),
+            "another repository's workflow at the same tag must be refused: {other:?}"
+        );
+        let branch = SIGNED_AT_V1.replace("refs/tags/v1.0.0", "refs/heads/main");
+        let on_a_branch = ladder_at(certified(&listing, &branch, ""), "o/r", "v1.0.0");
+        assert!(
+            matches!(
+                &on_a_branch,
+                Err(crate::ingest::IngestError::ProofRejected { .. })
+            ),
+            "a branch is not a release: {on_a_branch:?}"
+        );
+    }
+
+    /// The identity recorded in the signed manifest is the one cosign was told
+    /// to enforce, not text written beside the enforcement: the exact regexp
+    /// the command received, tag included, is in the recorded assertion, while
+    /// the signer stays the repository prefix.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_recorded_cosign_identity_is_the_regexp_cosign_enforced() {
+        let listing = [SUMS, BUNDLE, "one.tar.gz"];
+        let runner = certified(&listing, SIGNED_AT_V1, "");
+        let seen = runner.seen_identity.clone();
+        let accepted = ladder_at(runner, "o/r", "v1.0.0").expect("verifies");
+        let enforced = seen.borrow().clone().expect("cosign was run");
+        assert!(
+            accepted.asserts.contains(&enforced),
+            "the record must carry what cosign enforced: {enforced} not in {}",
+            accepted.asserts
+        );
+        assert!(enforced.ends_with(r"@refs/tags/v1\.0\.0$"), "{enforced}");
+        assert_eq!(accepted.signer.as_deref(), Some("https://github.com/o/r/"));
+    }
+
+    /// The cosign exemption from the name rule under `unbound-release-reason`
+    /// is safe only because of this: sums signed for the OLDER tag, with their
+    /// files, served under this tag with a versionless name, are refused by
+    /// the identity check itself.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn older_signed_sums_for_a_versionless_name_are_refused_by_the_tag_pin() {
+        let listing = [SUMS, BUNDLE, "one.tar.gz"];
+        let older = SIGNED_AT_V1;
+        let e = ladder_at(certified(&listing, older, ""), "o/r", "v2.0.0")
+            .expect_err("the older release's certificate must not verify for v2.0.0");
+        assert!(
+            matches!(e, crate::ingest::IngestError::ProofRejected { .. }),
+            "{e:?}"
+        );
+        ladder_at(certified(&listing, older, ""), "o/r", "v1.0.0").expect("its own tag verifies");
+    }
+
+    /// A reusable workflow of the upstream repository, called from ANOTHER
+    /// repository, yields a certificate whose workflow identity matches the
+    /// upstream's path and tag while the code that ran was the caller's. cosign
+    /// is told which repository the workflow must have run in.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn cosign_sums_signed_by_a_foreign_caller_of_the_workflow_are_refused() {
+        let listing = [SUMS, BUNDLE, "one.tar.gz"];
+        let foreign = ladder_at(
+            certified(&listing, SIGNED_AT_V1, "").running_in("evil/caller"),
+            "o/r",
+            "v1.0.0",
+        );
+        assert!(
+            matches!(
+                &foreign,
+                Err(crate::ingest::IngestError::ProofRejected { .. })
+            ),
+            "a certificate for a workflow run from another repository: {foreign:?}"
+        );
+        ladder_at(certified(&listing, SIGNED_AT_V1, ""), "o/r", "v1.0.0")
+            .expect("the repository's own run still verifies");
+    }
+
+    /// Verify a release the way a run does.
+    fn verified(
+        runner: Certified,
+        tag: &str,
+        asset: &str,
+    ) -> Result<crate::orchestrate::Verified, crate::orchestrate::RunError> {
+        let dir = scratch("bound-spend");
+        let forge = Forge::github_com();
+        let src = GhSource::new(runner, forge.clone(), &*dir);
+        crate::orchestrate::verify_release(
+            &src,
+            &forge,
+            "o/r",
+            tag,
+            &BTreeMap::new(),
+            &crate::orchestrate::Declared::default(),
+            &[asset.to_string()],
+        )
+    }
+
+    /// Verify a release the way a run does, then spend its proof on `bytes`
+    /// served as `asset`.
+    fn spend(
+        runner: Certified,
+        tag: &str,
+        asset: &str,
+        bytes: &[u8],
+    ) -> Result<String, crate::orchestrate::RunError> {
+        let v = verified(runner, tag, asset)?;
+        assert_eq!(
+            v.accepted.mechanism,
+            crate::ingest::Mechanism::BuildProvenance
+        );
+        crate::orchestrate::admit(&v, "o/r", asset, bytes)
+    }
+
+    /// Rung 2, with NO `--source-ref` (upstreams such as wasm-tools sign every
+    /// release from a branch workflow): the release binding is the subject
+    /// NAME. An attestation for 1.0.0's asset, whose bytes are served under
+    /// 2.0.0's name, is refused for 2.0.0; one that names 2.0.0's asset with
+    /// the matching digest is accepted even though it was built from a branch.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn build_provenance_for_one_release_is_refused_for_another() {
+        let old = b"the 1.0.0 build".as_slice();
+        let new = b"the 2.0.0 build".as_slice();
+        // The older release's attestation, replayed: its subject is the 1.0.0
+        // asset, and the 1.0.0 bytes are what the 2.0.0 name serves.
+        let replay = certified(&["one-2.0.0.tar.gz"], "", "refs/heads/main")
+            .attesting(&[("one-1.0.0.tar.gz", old)])
+            .serving("one-2.0.0.tar.gz", old);
+        let refused = spend(replay, "v2.0.0", "one-2.0.0.tar.gz", old);
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::orchestrate::RunError::NotCoveredByProof { .. })
+            ),
+            "an older release's attestation must not vouch for a newer asset: {refused:?}"
+        );
+        // The attestation that names this release's asset, built from a branch.
+        let good = certified(&["one-2.0.0.tar.gz"], "", "refs/heads/main")
+            .attesting(&[("one-2.0.0.tar.gz", new), ("one-1.0.0.tar.gz", old)])
+            .serving("one-2.0.0.tar.gz", new);
+        let digest = spend(good, "v2.0.0", "one-2.0.0.tar.gz", new).expect("named and matching");
+        assert_eq!(digest, crate::orchestrate::sha256_hex(new));
+        // Named correctly, but the served bytes are not the attested ones: gh
+        // refuses the file itself.
+        let swapped = certified(&["one-2.0.0.tar.gz"], "", "refs/heads/main")
+            .attesting(&[("one-2.0.0.tar.gz", new)])
+            .serving("one-2.0.0.tar.gz", old);
+        assert!(
+            spend(swapped, "v2.0.0", "one-2.0.0.tar.gz", old).is_err(),
+            "bytes that are not the named subject's digest must be refused"
+        );
+    }
+
+    const NEW: &[u8] = b"the 2.0.0 build";
+    const OLD: &[u8] = b"the 1.0.0 build";
+    const ASSET2: &str = "one-2.0.0.tar.gz";
+
+    fn serving_new(extra_first: &str, first: &[(&str, &[u8])]) -> Certified {
+        certified(&[ASSET2], "", extra_first)
+            .attesting(first)
+            .serving(ASSET2, NEW)
+    }
+
+    /// gh returns EVERY attestation for the digest. The first can be for
+    /// another asset's name (the same bytes attested under it); the one that
+    /// names this asset still vouches for it.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_attestation_after_the_first_can_vouch_for_the_asset_it_names() {
+        let r = serving_new("refs/heads/main", &[("misc.tar.gz", NEW)])
+            .also_attested("refs/heads/main", &[(ASSET2, NEW)]);
+        spend(r, "v2.0.0", ASSET2, NEW).expect("the second statement names the asset");
+    }
+
+    /// Two statements that disagree about one name's digest are refused, not
+    /// resolved by order: the first would have been taken alone before.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn statements_that_disagree_on_a_subjects_digest_are_refused() {
+        let r = serving_new("refs/heads/main", &[(ASSET2, NEW)])
+            .also_attested("refs/heads/main", &[(ASSET2, OLD), ("other.tar.gz", NEW)]);
+        let e = spend(r, "v2.0.0", ASSET2, NEW).expect_err("a disagreement is refused");
+        assert!(format!("{e}").contains(ASSET2), "{e}");
+    }
+
+    /// A pull-request build is never a release, however well it is signed.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_pull_request_build_never_vouches_for_a_release() {
+        let only = serving_new("refs/pull/7/merge", &[(ASSET2, NEW)]);
+        let e = spend(only, "v2.0.0", ASSET2, NEW).expect_err("a PR build is refused");
+        assert!(format!("{e}").contains("refs/pull/7/merge"), "{e}");
+        // Alongside a real build it is set aside, and the record names the
+        // statement that vouched.
+        let both = serving_new("refs/pull/7/merge", &[(ASSET2, NEW)])
+            .also_attested("refs/heads/main", &[(ASSET2, NEW)]);
+        let v = verified(both, "v2.0.0", ASSET2).expect("the real build vouches");
+        let signer = v.accepted.signer.expect("a signer");
+        assert!(signer.ends_with("@refs/heads/main"), "{signer}");
+        assert!(
+            v.accepted.asserts.contains("@refs/heads/main"),
+            "{}",
+            v.accepted.asserts
+        );
+        assert!(
+            !v.accepted.asserts.contains("refs/pull"),
+            "{}",
+            v.accepted.asserts
+        );
+    }
+
+    /// An upstream that signs from the release tag has a different
+    /// buildSignerURI (its `@<ref>` part) for every release; the recorded
+    /// `proof-signer` must not move with it, or a layer delta reports a moved
+    /// signer on every bump. The full URIs, refs included, are in the assertion.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_build_provenance_signer_is_the_same_for_two_releases() {
+        let release = |tag: &str, asset: &str, bytes: &[u8]| {
+            let r = certified(&[asset], "", &format!("refs/tags/{tag}"))
+                .attesting(&[(asset, bytes)])
+                .serving(asset, bytes);
+            verified(r, tag, asset).expect("verifies").accepted
+        };
+        let one = release("v1.0.0", "one-1.0.0.tar.gz", OLD);
+        let two = release("v2.0.0", "one-2.0.0.tar.gz", NEW);
+        assert_eq!(one.signer, two.signer, "{one:?} {two:?}");
+        assert_eq!(
+            one.signer.as_deref(),
+            Some("https://github.com/o/r/.github/workflows/release.yml@refs/tags/*")
+        );
+        assert!(
+            one.asserts.contains("release.yml@refs/tags/v1.0.0"),
+            "{}",
+            one.asserts
+        );
+        assert!(
+            two.asserts.contains("release.yml@refs/tags/v2.0.0"),
+            "{}",
+            two.asserts
+        );
+    }
+
+    /// The record names the buildSignerURI and ref of the statement that
+    /// vouched for the assets, not of whichever came first.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_record_names_the_statement_that_vouched() {
+        let r = serving_new("refs/heads/other", &[("misc.tar.gz", NEW)])
+            .also_attested("refs/heads/main", &[(ASSET2, NEW)]);
+        let v = verified(r, "v2.0.0", ASSET2).expect("verifies");
+        let signer = v.accepted.signer.expect("a signer");
+        assert_eq!(
+            signer,
+            "https://github.com/o/r/.github/workflows/release.yml@refs/heads/main"
+        );
+        let asserts = &v.accepted.asserts;
+        assert!(asserts.contains("refs/heads/main"), "{asserts}");
+        assert!(!asserts.contains("refs/heads/other"), "{asserts}");
+    }
+
+    /// An attestation built from a branch is accepted: the producer passes gh
+    /// no `--source-ref`, so wasm-tools-style releases are not refused.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn build_provenance_built_from_a_branch_is_accepted() {
+        let runner = certified(&["one.tar.gz"], "", "refs/heads/main");
+        let accepted =
+            ladder_at(runner, "o/r", "v1.0.0").expect("an attestation built from a branch");
+        assert_eq!(
+            accepted.mechanism,
+            crate::ingest::Mechanism::BuildProvenance
+        );
     }
 
     fn scratch(name: &str) -> crate::testscratch::Scratch {

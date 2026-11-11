@@ -336,7 +336,7 @@ impl fmt::Display for IngestError {
 impl std::error::Error for IngestError {}
 
 /// Rung 1 — a cosign-signed sums file.
-pub fn rung_cosign_sums(forge: &Forge, repo: &str, probe: &ReleaseProbe) -> Rung {
+pub fn rung_cosign_sums(forge: &Forge, repo: &str, release: &str, probe: &ReleaseProbe) -> Rung {
     if !(probe.has_sums && probe.has_cosign_bundle) {
         return Rung::NotOffered;
     }
@@ -348,18 +348,73 @@ pub fn rung_cosign_sums(forge: &Forge, repo: &str, probe: &ReleaseProbe) -> Rung
         ),
         Some(Err(e)) => Rung::Failed(e.clone()),
         Some(Ok(())) => {
+            // The signer stays the repository's identity prefix, stable from
+            // release to release (a delta reports a moved signer, and a tag in
+            // it would move on every bump). The exact regexp the probe
+            // enforced, tag included, is recorded in the assertion.
             let identity = forge.identity_prefix(repo);
+            let enforced = forge.identity_regexp(repo, release);
             Rung::Accepted {
                 signer: identity.clone(),
                 asserts: format!(
-                    "SHA256SUMS.txt signed by an identity under {identity} via \
-                     {}; this payload's recorded asset digest is transcribed \
-                     from it",
+                    "SHA256SUMS.txt signed by a workflow identity under {identity} that matched \
+                     the enforced pattern {enforced}, run in {repo}, via {}; this payload's \
+                     recorded asset digest is transcribed from it",
                     forge.oidc_issuer
                 ),
             }
         }
     }
+}
+
+/// The stable form of a build signer URI for the recorded signer: split at the
+/// LAST `@`, a ref of the form `refs/tags/<anything>` becomes `refs/tags/*`
+/// (the tag changes with every release of a tag-signing upstream, and a delta
+/// reports a moved signer), and every other ref is kept verbatim, so a signer
+/// that moves from tag-signed to `refs/heads/main`, or between branches, still
+/// shows as moved.
+pub fn stable_signer(uri: &str) -> String {
+    match uri.rsplit_once('@') {
+        Some((workflow, r)) if r.starts_with("refs/tags/") => format!("{workflow}@refs/tags/*"),
+        _ => uri.to_string(),
+    }
+}
+
+/// The recorded signer of a build-provenance proof: the workflow URLs of the
+/// statements that vouched in their [`stable_signer`] form, de-duplicated and
+/// sorted. The full
+/// URIs, refs included, are in the assertion ([`provenance_asserts`]).
+pub fn provenance_signer<'a>(signers: impl IntoIterator<Item = &'a str>) -> String {
+    let mut stable: Vec<String> = signers.into_iter().map(stable_signer).collect();
+    stable.sort_unstable();
+    stable.dedup();
+    stable.join(", ")
+}
+
+/// What a build-provenance record says about the statements that vouched: for
+/// each distinct (signer, ref, commit) the actual `buildSignerURI`, the ref the
+/// build ran from, and the commit, then the binding that was enforced. Used for
+/// the probe's first statement and, once the assets are covered, for the
+/// statements that actually vouched for them.
+pub fn provenance_asserts(builds: &[(&str, &str, &str)], version: &str) -> String {
+    let built: Vec<String> = builds
+        .iter()
+        .map(|(signer, source_ref, commit)| {
+            let mut t = format!("built by {signer}");
+            if !source_ref.is_empty() {
+                t.push_str(&format!(" from ref {source_ref}"));
+            }
+            t.push_str(&format!(" at source commit {commit}"));
+            t
+        })
+        .collect();
+    format!(
+        "{}; this payload's recorded asset digest is a subject of that attestation; bound to \
+         release {version} by asset name: each asset is vouched for only by the attestation \
+         subject carrying its own name and digest, and the attestation's source ref is not \
+         pinned (a pull-request build is refused)",
+        built.join("; ")
+    )
 }
 
 /// Rung 2 — a GitHub build attestation.
@@ -496,12 +551,17 @@ pub fn choose(
     optins: &BTreeMap<String, String>,
     upstream_sums: Option<&str>,
 ) -> Result<Accepted, IngestError> {
-    match rung_cosign_sums(forge, repo, probe) {
+    match rung_cosign_sums(forge, repo, version, probe) {
         Rung::Accepted { signer, asserts } => {
             return Ok(Accepted {
                 mechanism: Mechanism::CosignSums,
                 signer: Some(signer),
-                asserts,
+                // The probe pinned the certificate identity to this tag
+                // (`Forge::identity_regexp`); the record says so.
+                asserts: format!(
+                    "{asserts}; bound to release {version}: the signing workflow's identity \
+                     was required to be refs/tags/{version}"
+                ),
                 signing_key: None,
             });
         }
@@ -516,11 +576,19 @@ pub fn choose(
     }
 
     match rung_build_provenance(probe) {
-        Rung::Accepted { signer, asserts } => {
+        Rung::Accepted { signer, .. } => {
+            let commit = match &probe.attestation {
+                AttestationProbe::Verified { commit, .. } => commit.as_str(),
+                _ => "",
+            };
             return Ok(Accepted {
                 mechanism: Mechanism::BuildProvenance,
-                signer: Some(signer),
-                asserts,
+                signer: Some(provenance_signer([signer.as_str()])),
+                // No ref is pinned (see `gh::attestation_verify_argv`): the
+                // binding is the subject's name, enforced when the proof is
+                // spent. `verify_release` replaces this with the statements
+                // that vouched for the assets.
+                asserts: provenance_asserts(&[(signer.as_str(), "", commit)], version),
                 signing_key: None,
             });
         }
@@ -569,7 +637,14 @@ pub fn choose(
             return Ok(Accepted {
                 mechanism: Mechanism::UpstreamSums,
                 signer: Some(signer),
-                asserts,
+                // Nothing signed this list, so nothing proves which release
+                // it belongs to. The only binding is that every asset name
+                // must carry the release (checked at plan time and again at
+                // ingestion), which is a name heuristic.
+                asserts: format!(
+                    "{asserts}; release {version}: bound only by the asset name carrying it \
+                     (a name heuristic, not a proof)"
+                ),
                 signing_key: None,
             });
         }
@@ -685,7 +760,68 @@ mod tests {
         assert_eq!(a.mechanism, Mechanism::CosignSums);
         assert_eq!(
             a.signer.as_deref(),
-            Some("https://github.com/pulseengine/rivet/")
+            Some("https://github.com/pulseengine/rivet/"),
+            "the signer is stable across releases; the tag lives in the assertion"
+        );
+        let next = choose(
+            &f,
+            "pulseengine/rivet",
+            "v0.35.0",
+            &sums_ok(),
+            &no_optins(),
+            None,
+        )
+        .expect("accepts");
+        assert_eq!(a.signer, next.signer, "two releases, one signer");
+        assert_ne!(a.asserts, next.asserts, "the assertion names each tag");
+    }
+
+    /// The text each rung writes into the signed record about its release
+    /// binding, and nothing more: this checks what `choose` WRITES, and passes
+    /// whether or not the probe enforced anything. That the cosign identity is
+    /// pinned to the tag is proved where the command is built and run
+    /// (`source::tests::the_recorded_cosign_identity_is_the_regexp_cosign_enforced`
+    /// and `cosign_sums_signed_for_one_release_are_refused_for_another`);
+    /// the attestation binding in `build_provenance_for_one_release_is_refused_for_another`.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn every_rung_states_the_binding_it_relies_on_in_its_record() {
+        let f = Forge::github_com();
+        let cosign = choose(&f, "o/r", "v3.1.0", &sums_ok(), &no_optins(), None).expect("accepts");
+        assert!(
+            cosign.asserts.contains("refs/tags/v3.1.0"),
+            "{}",
+            cosign.asserts
+        );
+        let attested = ReleaseProbe {
+            published: vec!["a.tar.gz".into()],
+            attestation: AttestationProbe::Verified {
+                signer: "s".into(),
+                commit: "c".into(),
+            },
+            ..Default::default()
+        };
+        let prov = choose(&f, "o/r", "v3.1.0", &attested, &no_optins(), None).expect("accepts");
+        assert!(prov.asserts.contains("by asset name"), "{}", prov.asserts);
+        let unsigned = ReleaseProbe {
+            published: vec!["sha256.sum".into()],
+            attestation: AttestationProbe::NotAttested,
+            ..Default::default()
+        };
+        let up = choose(
+            &f,
+            "o/r",
+            "v3.1.0",
+            &unsigned,
+            &no_optins(),
+            Some("sha256.sum"),
+        )
+        .expect("accepts");
+        assert!(up.asserts.contains("v3.1.0"), "{}", up.asserts);
+        assert!(
+            up.asserts.contains("asset name"),
+            "the weaker binding is said to be the name only: {}",
+            up.asserts
         );
     }
 
@@ -853,7 +989,7 @@ mod tests {
             ..sums_ok()
         };
         assert!(matches!(
-            rung_cosign_sums(&Forge::github_com(), "r", &probe),
+            rung_cosign_sums(&Forge::github_com(), "r", "v1", &probe),
             Rung::Failed(_)
         ));
     }
@@ -872,7 +1008,7 @@ mod tests {
             pgp_sums: crate::ingest::PgpSumsProbe::NotDeclared,
         };
         assert_eq!(
-            rung_cosign_sums(&Forge::github_com(), "r", &probe),
+            rung_cosign_sums(&Forge::github_com(), "r", "v1", &probe),
             Rung::NotOffered
         );
         let err = choose(&Forge::github_com(), "r", "v1", &probe, &no_optins(), None)
@@ -1317,7 +1453,7 @@ mod pgp_sums_tests {
         let plain = probe(PgpSumsProbe::NotProbed);
         assert!(pgp_rung_is_reachable(&plain));
         assert_eq!(
-            rung_cosign_sums(&forge, "up/stream", &plain),
+            rung_cosign_sums(&forge, "up/stream", "v1", &plain),
             Rung::NotOffered
         );
         assert_eq!(rung_build_provenance(&plain), Rung::NotOffered);
@@ -1326,7 +1462,7 @@ mod pgp_sums_tests {
         sums_only.has_sums = true;
         assert!(pgp_rung_is_reachable(&sums_only));
         assert_eq!(
-            rung_cosign_sums(&forge, "up/stream", &sums_only),
+            rung_cosign_sums(&forge, "up/stream", "v1", &sums_only),
             Rung::NotOffered
         );
         let mut bundle_only = plain.clone();
@@ -1351,5 +1487,56 @@ mod pgp_sums_tests {
             assert!(!pgp_rung_is_reachable(&p), "{:?}", p.attestation);
             assert_ne!(rung_build_provenance(&p), Rung::NotOffered);
         }
+    }
+
+    /// The assertion names the ref each vouching build ran from when gh reports
+    /// one, and claims no ref when it does not: a record that says "from ref"
+    /// with nothing after it, or drops a known ref, misstates the provenance.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_assertion_names_the_build_ref_only_when_there_is_one() {
+        let signer = "https://github.com/o/r/.github/workflows/release.yml@refs/tags/v1.2.3";
+        let with_ref = provenance_asserts(&[(signer, "refs/tags/v1.2.3", "abc123")], "v1.2.3");
+        assert!(
+            with_ref.contains("from ref refs/tags/v1.2.3 at source commit abc123"),
+            "{with_ref}"
+        );
+        let without_ref = provenance_asserts(&[(signer, "", "abc123")], "v1.2.3");
+        assert!(!without_ref.contains("from ref"), "{without_ref}");
+        assert!(
+            without_ref.contains(&format!("built by {signer} at source commit abc123")),
+            "{without_ref}"
+        );
+    }
+
+    /// The recorded build-provenance signer is stable across the releases of a
+    /// tag-signing upstream, and still moves when the signing ref class does:
+    /// tag-signed to main-signed is the downgrade a delta must surface.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_build_provenance_signer_moves_with_the_ref_class_not_the_tag() {
+        let wf = "https://github.com/o/r/.github/workflows/release.yml";
+        let signer = |ref_: &str| provenance_signer([format!("{wf}@{ref_}").as_str()]);
+        assert_eq!(signer("refs/tags/v1"), signer("refs/tags/v2.0.0"));
+        assert_eq!(signer("refs/tags/v1"), format!("{wf}@refs/tags/*"));
+        assert_ne!(signer("refs/tags/v1"), signer("refs/heads/main"));
+        assert_ne!(signer("refs/heads/main"), signer("refs/heads/feature"));
+        assert_eq!(signer("refs/heads/main"), format!("{wf}@refs/heads/main"));
+        // Split at the LAST `@`.
+        let odd = "https://h/a@b/.github/workflows/w.yml@refs/tags/v9";
+        assert_eq!(
+            provenance_signer([odd]),
+            "https://h/a@b/.github/workflows/w.yml@refs/tags/*"
+        );
+        // No ref at all: kept whole. Duplicates fold; the result is sorted.
+        assert_eq!(provenance_signer(["https://h/w.yml"]), "https://h/w.yml");
+        assert_eq!(
+            provenance_signer([
+                "https://h/b.yml@refs/tags/v1",
+                "https://h/a.yml@refs/tags/v2",
+                "https://h/b.yml@refs/tags/v3",
+            ]),
+            "https://h/a.yml@refs/tags/*, https://h/b.yml@refs/tags/*"
+        );
     }
 }

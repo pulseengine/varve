@@ -176,6 +176,14 @@ pub fn release_download_argv(repo: &str, version: &str, asset: &str, dir: &str) 
 }
 
 /// `gh attestation verify <file> --repo <repo> --format json`
+///
+/// `--repo` says which repository built the file; it says nothing about which
+/// release. There is deliberately no `--source-ref`: some upstreams sign every
+/// release from a workflow on a branch (bytecodealliance/wasm-tools signs from
+/// `publish.yml@refs/heads/main`), and a tag pin would refuse all of them. The
+/// release binding for this rung is made later: the asset's name must carry the
+/// release, and the digest that vouches for an asset is the one of the
+/// attestation subject whose NAME is that asset (`orchestrate::admit`).
 pub fn attestation_verify_argv(file: &str, repo: &str) -> Vec<String> {
     vec![
         "attestation".into(),
@@ -188,11 +196,23 @@ pub fn attestation_verify_argv(file: &str, repo: &str) -> Vec<String> {
     ]
 }
 
-/// `cosign verify-blob --bundle … --certificate-identity-regexp … --certificate-oidc-issuer …`
+/// `cosign verify-blob --bundle … --certificate-identity-regexp … --certificate-oidc-issuer …
+/// --certificate-github-workflow-repository <owner>/<repo>`
+///
+/// The identity is the workflow's path, and a reusable workflow of the
+/// upstream repository called from ANOTHER repository carries the same path
+/// while running the caller's code. `--certificate-github-workflow-repository`
+/// pins the repository the workflow ran in.
 ///
 /// The identity and issuer come from the forge rather than being literals, so
 /// an enterprise instance is checked against its own authority.
-pub fn cosign_verify_argv(bundle: &str, identity: &str, issuer: &str, sums: &str) -> Vec<String> {
+pub fn cosign_verify_argv(
+    bundle: &str,
+    repo: &str,
+    identity: &str,
+    issuer: &str,
+    sums: &str,
+) -> Vec<String> {
     vec![
         "verify-blob".into(),
         "--bundle".into(),
@@ -201,6 +221,8 @@ pub fn cosign_verify_argv(bundle: &str, identity: &str, issuer: &str, sums: &str
         identity.into(),
         "--certificate-oidc-issuer".into(),
         issuer.into(),
+        "--certificate-github-workflow-repository".into(),
+        repo.into(),
         sums.into(),
     ]
 }
@@ -606,6 +628,13 @@ mod tests {
             argv.windows(2).any(|w| w == ["--repo", "o/r"]),
             "without --repo any repository's attestation would be accepted: {argv:?}"
         );
+        // No ref pin: some upstreams sign every release from a branch
+        // workflow. The release binding is the subject's name (orchestrate's
+        // `admit`), not the attestation's ref.
+        assert!(
+            !argv.iter().any(|a| a == "--source-ref"),
+            "a branch-signed release would be refused: {argv:?}"
+        );
         assert_eq!(&argv[..3], &["attestation", "verify", "a.tar.gz"]);
         // The JSON is what classify_attestation reads; human output would parse
         // to Rejected and read as a failure that never happened.
@@ -639,13 +668,16 @@ mod tests {
         let f = Forge::enterprise("ghe.example.com");
         let argv = cosign_verify_argv(
             "b.bundle",
-            &f.identity_prefix("acme/tool"),
+            "acme/tool",
+            &f.identity_regexp("acme/tool", "v1.0.0"),
             &f.oidc_issuer,
             "SHA256SUMS.txt",
         );
         let joined = argv.join(" ");
         assert!(
-            joined.contains("https://ghe.example.com/acme/tool/"),
+            joined.contains(
+                r"^https://ghe\.example\.com/acme/tool/\.github/workflows/[^@]+@refs/tags/v1\.0\.0$"
+            ),
             "{joined}"
         );
         assert!(
@@ -653,6 +685,11 @@ mod tests {
             "{joined}"
         );
         assert!(!joined.contains("githubusercontent"), "{joined}");
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--certificate-github-workflow-repository", "acme/tool"]),
+            "the caller repository of a reusable workflow must be pinned: {joined}"
+        );
     }
 
     /// `GH_HOST` is ALWAYS passed explicitly, including for public GitHub.

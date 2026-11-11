@@ -159,6 +159,18 @@ pub struct ManifestTool {
     /// layer.toml could not, so porting a realm to layer.toml LOST the payload.
     #[serde(rename = "release", default)]
     pub release: Option<String>,
+    /// Why an asset of this tool is NOT tied to its release by name.
+    ///
+    /// A proof says who published bytes, not which release they are for. The
+    /// producer therefore refuses an entry whose asset templates carry no
+    /// `%V` or `%R`, or whose version is a moving tag, because an older
+    /// release served under a newer tag would then be taken for the newer one.
+    /// An entry that cannot satisfy that (an upstream that names its binaries
+    /// with no version) states the reason here. It lets the entry through,
+    /// prints a warning at plan and deposit, and is signed into the layer
+    /// beside the proof, in the operator's words.
+    #[serde(rename = "unbound-release-reason", default)]
+    pub unbound_release_reason: Option<String>,
     /// The asset carrying this release's UNSIGNED digest list, when it
     /// publishes one (REQ-UPSTREAMSUMS-001).
     ///
@@ -431,6 +443,10 @@ pub struct ManifestDocs {
     /// The release tag to fetch, when it differs from the payload's version.
     #[serde(rename = "release", default)]
     pub release: Option<String>,
+    /// Why this entry's assets are not tied to their release by name; see
+    /// [`ManifestTool::unbound_release_reason`]. Signed into the layer.
+    #[serde(rename = "unbound-release-reason", default)]
+    pub unbound_release_reason: Option<String>,
 }
 
 /// A Rust crate carried BY the layer, as the `.crate` file a release publishes
@@ -462,6 +478,10 @@ pub struct ManifestCrate {
     /// `v0.36.0` and publishes the crate as `0.36.0`.
     #[serde(rename = "release", default)]
     pub release: Option<String>,
+    /// Why this entry's assets are not tied to their release by name; see
+    /// [`ManifestTool::unbound_release_reason`]. Signed into the layer.
+    #[serde(rename = "unbound-release-reason", default)]
+    pub unbound_release_reason: Option<String>,
 }
 
 /// Another realm's layer, composed into this one (REQ-COMPOSE-001).
@@ -576,6 +596,12 @@ pub enum LayerSpecError {
     SplitOptInNotEncodable { tool: String },
     /// An opt-in that states no reason.
     UnverifiedWithoutReason { tool: String },
+    /// `unbound-release-reason` states nothing: the reason is what is signed
+    /// beside the proof.
+    UnboundReleaseWithoutReason { tool: String },
+    /// The encoding has no field for `unbound-release-reason`, and dropping it
+    /// would lose the annotation from the signed layer.
+    UnboundReleaseNotEncodable { tool: String },
     /// An opt-in whose reason is about a DIFFERENT release than the one
     /// pinned (REQ-INGEST-001). The commonest way to get here is a version
     /// bump that left the justification behind.
@@ -676,6 +702,19 @@ impl fmt::Display for LayerSpecError {
                  ordinary.\n\n\
                  Deposit this realm with `varve-producer deposit --manifest \
                  layer.toml`, which reads the mechanism directly."
+            ),
+            LayerSpecError::UnboundReleaseWithoutReason { tool } => write!(
+                f,
+                "tool {tool:?} sets an empty `unbound-release-reason`. The reason is \
+                 what is signed beside the proof, where every consumer reads it: say \
+                 why this entry's assets cannot be tied to their release by name."
+            ),
+            LayerSpecError::UnboundReleaseNotEncodable { tool } => write!(
+                f,
+                "tool {tool:?} declares `unbound-release-reason`, which the \
+                 environment encoding cannot express. Dropping it would lose the \
+                 annotation from the signed layer. Deposit this realm with \
+                 `varve-producer deposit --manifest layer.toml`, which reads it directly."
             ),
             LayerSpecError::TwoOptInForms { tool } => write!(
                 f,
@@ -884,6 +923,21 @@ pub fn parse_layer_manifest(text: &str) -> Result<LayerManifest, LayerSpecError>
         toml::from_str(text).map_err(|e| LayerSpecError::Parse(e.to_string()))?;
     check_includes(&manifest.includes)?;
     check_unverified(&manifest.tools)?;
+    let others = manifest
+        .docs
+        .iter()
+        .map(|d| (&d.name, &d.unbound_release_reason))
+        .chain(
+            manifest
+                .crates
+                .iter()
+                .map(|c| (&c.name, &c.unbound_release_reason)),
+        );
+    for (name, reason) in others {
+        if reason.as_deref().is_some_and(|r| r.trim().is_empty()) {
+            return Err(LayerSpecError::UnboundReleaseWithoutReason { tool: name.clone() });
+        }
+    }
     Ok(manifest)
 }
 
@@ -904,6 +958,14 @@ pub fn parse_layer_manifest(text: &str) -> Result<LayerManifest, LayerSpecError>
 fn check_unverified(tools: &[ManifestTool]) -> Result<(), LayerSpecError> {
     let mut seen: Vec<(String, String)> = Vec::new();
     for t in tools {
+        if t.unbound_release_reason
+            .as_deref()
+            .is_some_and(|r| r.trim().is_empty())
+        {
+            return Err(LayerSpecError::UnboundReleaseWithoutReason {
+                tool: t.name.clone(),
+            });
+        }
         // BOTH forms is not a preference to resolve: it is two different
         // answers to "what does this layer say about these bytes", one of
         // which would disappear.
@@ -1113,6 +1175,11 @@ pub fn assembler_env(m: &LayerManifest) -> Result<AssemblerEnv, LayerSpecError> 
             || t.pgp_key_file.is_some()
         {
             return Err(LayerSpecError::PgpSumsNotEncodable {
+                tool: t.name.clone(),
+            });
+        }
+        if t.unbound_release_reason.is_some() {
+            return Err(LayerSpecError::UnboundReleaseNotEncodable {
                 tool: t.name.clone(),
             });
         }
@@ -2492,6 +2559,47 @@ binary=\"wac\"\nversion=\"v0.10.1\"\nasset=\"wac-%V-%T.tar.gz\"\n{field}\n"
             );
             assert!(e.to_string().contains("varve-producer deposit"), "{e}");
         }
+    }
+
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn an_unbound_release_reason_refuses_in_the_env_encoding_and_when_empty() {
+        let e = env_of(&format!(
+            "{HEAD}\n[[tool]]\nname=\"wac\"\nrepo=\"bytecodealliance/wac\"\n\
+binary=\"wac\"\nversion=\"v0.10.1\"\nasset=\"wac-%T\"\n\
+unbound-release-reason=\"upstream names no version\"\n"
+        ))
+        .expect_err("must refuse");
+        assert!(
+            matches!(&e, LayerSpecError::UnboundReleaseNotEncodable { tool } if tool == "wac"),
+            "{e}"
+        );
+        for bad in ["\"\"", "\"   \""] {
+            let text = format!(
+                "{HEAD}\n[[tool]]\nname = \"wac\"\nversion = \"v1\"\nunbound-release-reason = {bad}\n"
+            );
+            assert_eq!(
+                parse_layer_manifest(&text).unwrap_err(),
+                LayerSpecError::UnboundReleaseWithoutReason { tool: "wac".into() },
+                "{bad}"
+            );
+        }
+        for (table, extra) in [("docs", "format = \"pdf\"\n"), ("crate", "")] {
+            let text = format!(
+                "{HEAD}\n[[{table}]]\nname = \"x\"\nversion = \"1.0.0\"\n{extra}asset = \"a\"\n\
+                 unbound-release-reason = \" \"\n"
+            );
+            assert_eq!(
+                parse_layer_manifest(&text).unwrap_err(),
+                LayerSpecError::UnboundReleaseWithoutReason { tool: "x".into() },
+                "{table}"
+            );
+        }
+        let ok = format!(
+            "{HEAD}\n[[tool]]\nname = \"wac\"\nversion = \"v1\"\nunbound-release-reason = \"why\"\n"
+        );
+        let m = parse_layer_manifest(&ok).expect("a stated reason parses");
+        assert_eq!(m.tools[0].unbound_release_reason.as_deref(), Some("why"));
     }
 
     // rivet: verifies REQ-LAYERDOCS-001
