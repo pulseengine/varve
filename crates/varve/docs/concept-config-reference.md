@@ -70,7 +70,7 @@ path   = "before-shims"       # required with env; before-shims | after-shims
 
 ## config.toml — your user-level configuration
 
-Not committed, not in any repository: `$XDG_CONFIG_HOME/varve/config.toml` (absolute `XDG_CONFIG_HOME`), else `~/.config/varve/config.toml`. Unknown keys are errors. A file inside a repository is ignored.
+Not committed, not in any repository: `$XDG_CONFIG_HOME/varve/config.toml` (absolute `XDG_CONFIG_HOME`), else `~/.config/varve/config.toml`. Unknown keys are errors. A file inside a repository (a directory holding `varve.toml`, `.git`, `.hg`, `.jj` or `.svn`) is ignored, so a version-controlled `$HOME` refuses the default location: point `XDG_CONFIG_HOME` at a directory outside it.
 
 ```toml
 [shim]
@@ -78,6 +78,8 @@ passthrough = ["just"]   # tools the layer does not carry that a shim may run fr
 ```
 
 A `varve.toml` cannot carry this key. See `varve docs shim` (REQ-PASSTHROUGH-001).
+
+What a session allowed is recorded in exports and attestations. The export stamp is unsigned, so its ambient record can be stripped; the signed attestation is the durable record. A record reflects the configuration at the time the export ran or the statement was signed, not the configuration now.
 
 ## varve-realms.toml — the trust universe
 

@@ -9089,6 +9089,10 @@ fn star_passes_any_tool_the_layer_lacks() {
     assert!(marker.exists());
 }
 
+/// Guards an EXISTING property, not new evidence for #349: `pin.rs` has always
+/// been `deny_unknown_fields` (it is unchanged by that PR), so this passes on
+/// the code before passthrough existed too. It pins that no later change adds
+/// a `[shim]` table or a `passthrough` key to the pin.
 // rivet: verifies REQ-PASSTHROUGH-001
 #[test]
 fn a_varve_toml_key_cannot_enable_passthrough() {
