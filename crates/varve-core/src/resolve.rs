@@ -346,11 +346,18 @@ pub fn carried_tool_names(
                 .into_iter()
                 .map(|t| t.to_ascii_lowercase()),
         );
-        if let Ok(rd) = std::fs::read_dir(entry.root.join("bin")) {
-            names.extend(
-                rd.filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().to_ascii_lowercase()),
-            );
+        // A layer with no `bin/` carries nothing there; one that cannot be
+        // listed (or an entry that cannot be read) is "we could not tell".
+        let bin = entry.root.join("bin");
+        match std::fs::read_dir(&bin) {
+            Ok(rd) => {
+                for e in rd {
+                    let e = e.map_err(|e| format!("cannot list {}: {e}", bin.display()))?;
+                    names.insert(e.file_name().to_string_lossy().to_ascii_lowercase());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("cannot list {}: {e}", bin.display())),
         }
     }
     // Folding is ASCII only, and a filesystem may fold more (APFS: `ñ` is `Ñ`;
@@ -1089,5 +1096,52 @@ mod tests {
         let layer = resolve(&p, &store).unwrap().layer;
         let why = carried_tool_names(&p, &layer, &store).unwrap_err();
         assert!(why.contains("not ASCII"), "{why}");
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[cfg(unix)]
+    #[test]
+    fn carried_names_fail_closed_when_bin_cannot_be_listed() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &fixtures::manifest("2026.07.0", "qualified"),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let p = qualified_pin("2026.07.0");
+        let layer = resolve(&p, &store).unwrap().layer;
+        assert!(carried_tool_names(&p, &layer, &store).is_ok());
+        let bin = layer.root.join("bin");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unlistable = std::fs::read_dir(&bin).is_err();
+        let got = carried_tool_names(&p, &layer, &store);
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Skip only where permission bits are not enforced (running as root).
+        if !unlistable {
+            return;
+        }
+        assert!(
+            got.is_err(),
+            "an unlistable bin/ read as 'carries nothing there'"
+        );
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn a_layer_with_no_bin_directory_carries_just_its_manifest_names() {
+        // NotFound is the one error that is not an error: nothing is there.
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &fixtures::manifest("2026.07.0", "qualified"),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let p = qualified_pin("2026.07.0");
+        let layer = resolve(&p, &store).unwrap().layer;
+        std::fs::remove_dir_all(layer.root.join("bin")).unwrap();
+        assert!(carried_tool_names(&p, &layer, &store).is_ok());
     }
 }
