@@ -51,6 +51,9 @@ pub struct Verified {
     /// The digests the proof covers. `None` for an `unverified` opt-in, where
     /// nothing vouches for anything and saying otherwise would be the lie.
     pub sums: Option<Sums>,
+    /// For build provenance: asset name -> the source ref of every statement
+    /// that named it. Empty for every other mechanism.
+    pub vouching_refs: BTreeMap<String, Vec<String>>,
 }
 
 /// Everything this module needs from the outside world. The real
@@ -201,11 +204,11 @@ impl fmt::Display for RunError {
                 "{tool}: the asset {asset:?} does not carry release {release:?}, and the \
                  {mechanism} proof that vouches for this release signs a name and a digest \
                  for whichever release produced them: with a versionless name an older \
-                 release's file and proof would satisfy it. A signed proof cannot be bound \
-                 to the release by name, and `unbound-release-reason` does not waive that \
-                 here (it is honoured only where an unsigned list or nothing vouches). Name \
-                 the release in the asset (`%V` or `%R`), or drop the waiver and accept only \
-                 a proof whose identity names the release."
+                 release's file and attestation would satisfy it. A signed proof cannot be \
+                 bound to the release by name, and `unbound-release-reason` does not waive \
+                 that here. A tag-built attestation would be accepted: one whose every \
+                 statement for this asset was built from refs/tags/{release}. Otherwise \
+                 name the release in the asset (`%V` or `%R`)."
             ),
             RunError::GroupDisagrees {
                 repo,
@@ -447,6 +450,7 @@ pub fn verify_release<S: Source>(
     }
     let mut accepted =
         ingest::choose(forge, repo, version, &probe, optins, declared.upstream_sums)?;
+    let mut vouching_refs: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let sums = match accepted.mechanism {
         Mechanism::CosignSums => {
             let text = src.sums_text(repo, version)?;
@@ -537,6 +541,10 @@ pub fn verify_release<S: Source>(
             let mut builds: Vec<(String, String, String)> = Vec::new();
             for asset in wanted {
                 for st in covered.vouching(asset) {
+                    vouching_refs
+                        .entry(asset.clone())
+                        .or_default()
+                        .push(st.source_ref.clone());
                     let b = (
                         st.signer.clone(),
                         st.source_ref.clone(),
@@ -567,6 +575,7 @@ pub fn verify_release<S: Source>(
         accepted,
         published: probe.published,
         sums,
+        vouching_refs,
     })
 }
 
@@ -835,10 +844,11 @@ fn check_group_agrees(
 /// shown that version and tag to name the same release.
 ///
 /// Skipped only for (a) an entry that states `unbound-release-reason`, a
-/// recorded waiver honoured ONLY when an unsigned list (`upstream-sums`) is the
-/// mechanism: under cosign-sums or build-provenance a versionless name is
-/// refused ([`RunError::SignedProofNotBoundByName`]) because a signed name and
-/// digest vouch for whichever release made them, and under `pgp-sums` it is
+/// recorded waiver honoured under an unsigned list (`upstream-sums`), under
+/// cosign-sums (the certificate identity is pinned to the release tag) and
+/// under build-provenance only when every statement that vouched for the asset
+/// was built from exactly `refs/tags/<release>`; otherwise a versionless name
+/// is refused ([`RunError::SignedProofNotBoundByName`]), and under `pgp-sums` it
 /// never waived, (b) a release that was actually accepted as
 /// [`Mechanism::Unverified`], which is its own recorded exception, and (c) a
 /// Rust channel, which binds through the channel manifest's own version. An
@@ -853,6 +863,7 @@ fn check_assets_are_bound(
     plans: &[PayloadPlan],
     idxs: &[usize],
     mechanism: Mechanism,
+    vouching_refs: &BTreeMap<String, Vec<String>>,
 ) -> Result<(), RunError> {
     if mechanism == Mechanism::Unverified {
         return Ok(());
@@ -885,14 +896,21 @@ fn check_assets_are_bound(
             }
             if p.unbound_release_reason.is_some() {
                 match mechanism {
-                    // The waiver is honoured only where the name is the sole
-                    // binding there is: an unsigned list. (`Unverified`
-                    // returned above.)
+                    // The name is the only binding there is: waived.
                     Mechanism::UpstreamSums => continue,
+                    // The certificate identity is pinned to THIS release's
+                    // tag, so an older release's signed sums can never verify
+                    // here: the pin is the binding.
+                    Mechanism::CosignSums => continue,
                     // A signed name and digest vouch for whichever release
-                    // produced them: nothing but the name could tell this
-                    // release's file from an older one's.
-                    Mechanism::CosignSums | Mechanism::BuildProvenance => {
+                    // produced them. Only an attestation built from exactly
+                    // this release's tag says which release it is.
+                    Mechanism::BuildProvenance => {
+                        let tag = format!("refs/tags/{}", p.release);
+                        let refs = vouching_refs.get(&p.asset);
+                        if refs.is_some_and(|r| !r.is_empty() && r.iter().all(|x| *x == tag)) {
+                            continue;
+                        }
                         return Err(RunError::SignedProofNotBoundByName {
                             tool: p.name.clone(),
                             asset: p.asset.clone(),
@@ -966,7 +984,7 @@ pub fn run<S: Source>(
             pgp_sums: idxs.first().and_then(|i| plans[*i].pgp_sums.as_ref()),
         };
         let v = verify_release(src, forge, &repo, &version, optins, &declared, &wanted)?;
-        check_assets_are_bound(plans, &idxs, v.accepted.mechanism)?;
+        check_assets_are_bound(plans, &idxs, v.accepted.mechanism, &v.vouching_refs)?;
         seen.record(&repo, &version, v.accepted.clone())?;
 
         // Clause 4: a property of the RELEASE, ADMITTED through the same
@@ -2218,6 +2236,7 @@ mod tests {
     #[test]
     fn an_unverified_payload_records_the_digest_we_observed_and_claims_nothing() {
         let v = Verified {
+            vouching_refs: BTreeMap::new(),
             published: Vec::new(),
             accepted: Accepted {
                 mechanism: Mechanism::Unverified,
@@ -2453,6 +2472,7 @@ mod tests {
         f.blobs
             .insert("o/r@v1/r-v1.cdx.json".into(), b"{}".to_vec());
         let v = Verified {
+            vouching_refs: BTreeMap::new(),
             published: vec!["r-v1.cdx.json".into()],
             accepted: Accepted {
                 mechanism: Mechanism::Unverified,
@@ -3673,7 +3693,8 @@ mod tests {
         p.asset = "a.tar.gz".into();
         p.version = "2.0".into();
         p.release = "v2.0".into();
-        let e = check_assets_are_bound(&[p], &[0], Mechanism::PgpSums).expect_err("must refuse");
+        let e = check_assets_are_bound(&[p], &[0], Mechanism::PgpSums, &BTreeMap::new())
+            .expect_err("must refuse");
         assert!(
             matches!(&e, RunError::AssetNotBoundToRelease { asset, .. } if asset == "a.tar.gz"),
             "{e:?}"
@@ -3688,7 +3709,8 @@ mod tests {
         p.asset = "a-latest.tar.gz".into();
         p.version = "latest".into();
         p.release = "latest".into();
-        let e = check_assets_are_bound(&[p], &[0], Mechanism::PgpSums).expect_err("must refuse");
+        let e = check_assets_are_bound(&[p], &[0], Mechanism::PgpSums, &BTreeMap::new())
+            .expect_err("must refuse");
         assert!(
             matches!(e, RunError::AssetNotBoundToRelease { .. }),
             "{e:?}"
@@ -3760,7 +3782,7 @@ mod tests {
             p.version = version.into();
             p.release = version.into();
             p.pgp_sums = Some(pgp_spec("k.asc".into()));
-            check_assets_are_bound(&[p], &[0], Mechanism::PgpSums)
+            check_assets_are_bound(&[p], &[0], Mechanism::PgpSums, &BTreeMap::new())
         };
         for refused in [
             "tool-v1.2.3.tar.gz",
@@ -3792,7 +3814,7 @@ mod tests {
         p.version = "other".into();
         p.release = "1.2".into();
         p.pgp_sums = Some(pgp_spec("k.asc".into()));
-        check_assets_are_bound(&[p], &[0], Mechanism::PgpSums)
+        check_assets_are_bound(&[p], &[0], Mechanism::PgpSums, &BTreeMap::new())
             .expect_err("release 1.2 is not 1.2.3");
     }
 
@@ -3913,29 +3935,61 @@ mod tests {
         }
     }
 
-    /// The wac-shaped case: a versionless asset name under
-    /// `unbound-release-reason`, with an OLDER release's file served under the
-    /// newer tag and a signed proof for that older file. The name is the only
-    /// thing that could tell the releases apart, so a signed proof (cosign or
-    /// build provenance) cannot be bound to the release and is refused.
+    const WAC: &str = "wac-cli-x86_64-unknown-linux-gnu";
+
+    /// A waived plan for the wac-shaped entry: a versionless name.
+    fn wac_plan() -> PayloadPlan {
+        let mut p = bound_plan("wac", "o/r", "v0.11.0", WAC);
+        p.unbound_release_reason = Some("wac names its files with no version".into());
+        p
+    }
+
+    /// Rewrite the ref every attestation of a fixture was built from.
+    fn built_from(mut f: Fixture, to: &str) -> Fixture {
+        for doc in f.attestations.values_mut().chain(f.per_asset.values_mut()) {
+            *doc = doc.replace("@refs/tags/v1\"", &format!("@{to}\""));
+        }
+        f
+    }
+
+    /// cosign-sums under the waiver: the certificate identity is pinned to this
+    /// release's tag, so an older release's signed sums can never verify here
+    /// and the pin IS the binding; a versionless name is admitted.
     // rivet: verifies REQ-INGEST-001
     #[test]
-    fn a_versionless_name_under_the_waiver_is_refused_for_a_signed_proof() {
-        for (rung, f, _) in rung_fixtures("v0.11.0", "wac-cli-x86_64-unknown-linux-gnu") {
-            if rung == "upstream-sums" {
-                continue;
-            }
-            let mut p = bound_plan("wac", "o/r", "v0.11.0", "wac-cli-x86_64-unknown-linux-gnu");
-            p.unbound_release_reason = Some("wac names its files with no version".into());
-            let e = run_plan(&f, p).expect_err(rung);
-            let said = e.to_string();
-            assert!(
-                said.contains("cannot be bound to the release by name"),
-                "{rung}: {said}"
-            );
+    fn a_versionless_name_under_the_waiver_is_admitted_for_cosign_sums() {
+        let f = Fixture::signed("o/r", "v0.11.0", &[(WAC, A)]);
+        let got = run_plan(&f, wac_plan()).expect("the tag pin binds it");
+        assert_eq!(got[0].accepted.mechanism, Mechanism::CosignSums);
+        assert!(got[0].accepted.asserts.contains("WAIVED"));
+    }
+
+    /// build-provenance under the waiver: honoured only when every statement
+    /// that vouched for the asset was built from exactly this release's tag.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_versionless_name_under_the_waiver_needs_a_tag_built_attestation() {
+        let fixture = |to: &str| {
+            built_from(
+                Fixture::attested_as_one_batch("o/r", "v0.11.0", &[(WAC, A)]),
+                to,
+            )
+        };
+        let got = run_plan(&fixture("refs/tags/v0.11.0"), wac_plan())
+            .expect("a statement built from this tag binds the release");
+        assert_eq!(got[0].accepted.mechanism, Mechanism::BuildProvenance);
+        // Another tag, or a branch: the name is all there is, and it carries
+        // nothing.
+        for other in ["refs/heads/main", "refs/tags/v0.10.1"] {
+            let e = run_plan(&fixture(other), wac_plan()).expect_err(other);
             assert!(
                 matches!(e, RunError::SignedProofNotBoundByName { .. }),
-                "{rung}: {e:?}"
+                "{other}: {e:?}"
+            );
+            assert!(
+                e.to_string()
+                    .contains("tag-built attestation would be accepted"),
+                "{other}: {e}"
             );
         }
     }
@@ -4011,7 +4065,8 @@ mod tests {
         }
         let mut p = bound_plan("t", "o/r", "v1.2.3", "t-v1.2.3.tar.gz");
         p.version = "1.2.3".into();
-        check_assets_are_bound(&[p], &[0], Mechanism::CosignSums).expect("consistent pair");
+        check_assets_are_bound(&[p], &[0], Mechanism::CosignSums, &BTreeMap::new())
+            .expect("consistent pair");
     }
 
     /// An unverified opt-in carries its own recorded exception, and a Rust
@@ -4021,8 +4076,13 @@ mod tests {
     #[test]
     fn an_opt_in_and_a_rust_channel_are_not_subject_to_the_name_rule() {
         let mut p = bound_plan("t", "o/r", "v2.0.0", "t.tar.gz");
-        check_assets_are_bound(std::slice::from_ref(&p), &[0], Mechanism::CosignSums)
-            .expect_err("a bound plan is checked");
+        check_assets_are_bound(
+            std::slice::from_ref(&p),
+            &[0],
+            Mechanism::CosignSums,
+            &BTreeMap::new(),
+        )
+        .expect_err("a bound plan is checked");
         // An opt-in reason is no exemption from a SIGNED rung: only the
         // unverified mechanism actually accepted is its own exception.
         p.unverified_reason = Some("nothing published".into());
@@ -4032,14 +4092,19 @@ mod tests {
             Mechanism::PgpSums,
             Mechanism::UpstreamSums,
         ] {
-            check_assets_are_bound(std::slice::from_ref(&p), &[0], signed)
+            check_assets_are_bound(std::slice::from_ref(&p), &[0], signed, &BTreeMap::new())
                 .expect_err("an opt-in reason does not exempt a proven release");
         }
-        check_assets_are_bound(std::slice::from_ref(&p), &[0], Mechanism::Unverified)
-            .expect("an accepted opt-in is its own exception");
+        check_assets_are_bound(
+            std::slice::from_ref(&p),
+            &[0],
+            Mechanism::Unverified,
+            &BTreeMap::new(),
+        )
+        .expect("an accepted opt-in is its own exception");
         let mut p = bound_plan("t", "o/r", "v2.0.0", "rustc.tar.xz");
         p.pgp_sums = Some(rust_spec("k.asc".into()));
-        check_assets_are_bound(&[p], &[0], Mechanism::PgpSums)
+        check_assets_are_bound(&[p], &[0], Mechanism::PgpSums, &BTreeMap::new())
             .expect("a channel binds through its own version");
     }
 }

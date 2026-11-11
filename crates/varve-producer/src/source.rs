@@ -749,6 +749,24 @@ mod tests {
         assert_eq!(accepted.signer.as_deref(), Some("https://github.com/o/r/"));
     }
 
+    /// The cosign exemption from the name rule under `unbound-release-reason`
+    /// is safe only because of this: sums signed for the OLDER tag, with their
+    /// files, served under this tag with a versionless name, are refused by
+    /// the identity check itself.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn older_signed_sums_for_a_versionless_name_are_refused_by_the_tag_pin() {
+        let listing = [SUMS, BUNDLE, "one.tar.gz"];
+        let older = SIGNED_AT_V1;
+        let e = ladder_at(certified(&listing, older, ""), "o/r", "v2.0.0")
+            .expect_err("the older release's certificate must not verify for v2.0.0");
+        assert!(
+            matches!(e, crate::ingest::IngestError::ProofRejected { .. }),
+            "{e:?}"
+        );
+        ladder_at(certified(&listing, older, ""), "o/r", "v1.0.0").expect("its own tag verifies");
+    }
+
     /// A reusable workflow of the upstream repository, called from ANOTHER
     /// repository, yields a certificate whose workflow identity matches the
     /// upstream's path and tag while the code that ran was the caller's. cosign
