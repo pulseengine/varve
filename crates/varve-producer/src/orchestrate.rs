@@ -792,8 +792,9 @@ fn check_group_agrees(
 /// rung exempts nothing.
 ///
 /// This is a NAME HEURISTIC. For cosign and build provenance the proof itself
-/// is also pinned to the tag (`Forge::identity_regexp`,
-/// `gh attestation verify --source-ref`); for the lists it is all there is.
+/// is also pinned to the tag (`Forge::identity_regexp`); for build provenance
+/// the asset's subject name in the attestation (`admit`) binds it; for the
+/// lists the name is all there is.
 fn check_assets_are_bound(
     plans: &[PayloadPlan],
     idxs: &[usize],

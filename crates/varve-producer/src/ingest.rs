@@ -525,10 +525,13 @@ pub fn choose(
             return Ok(Accepted {
                 mechanism: Mechanism::BuildProvenance,
                 signer: Some(signer),
-                // `gh attestation verify --source-ref refs/tags/<tag>`.
+                // No ref is pinned (see `gh::attestation_verify_argv`): the
+                // binding is the subject's name, enforced when the proof is
+                // spent.
                 asserts: format!(
-                    "{asserts}; bound to release {version}: the attestation's source ref was \
-                     required to be refs/tags/{version}"
+                    "{asserts}; bound to release {version} by asset name: each asset is \
+                     vouched for only by the attestation subject carrying its own name and \
+                     digest; the attestation's source ref is not pinned"
                 ),
                 signing_key: None,
             });
@@ -707,8 +710,8 @@ mod tests {
 
     /// Each rung records WHICH release it was bound to, so a reader of the
     /// signed layer can see the proof was for this tag and how strong that
-    /// binding is: the cosign identity and the attestation's source ref are
-    /// pinned to the tag, the unsigned list only by the asset's name.
+    /// binding is: the cosign identity is pinned to the tag, an attestation by
+    /// the subject's name, the unsigned list only by the asset's name.
     // rivet: verifies REQ-INGEST-001
     #[test]
     fn every_rung_records_the_release_it_was_bound_to() {
@@ -728,11 +731,7 @@ mod tests {
             ..Default::default()
         };
         let prov = choose(&f, "o/r", "v3.1.0", &attested, &no_optins(), None).expect("accepts");
-        assert!(
-            prov.asserts.contains("refs/tags/v3.1.0"),
-            "{}",
-            prov.asserts
-        );
+        assert!(prov.asserts.contains("by asset name"), "{}", prov.asserts);
         let unsigned = ReleaseProbe {
             published: vec!["sha256.sum".into()],
             attestation: AttestationProbe::NotAttested,

@@ -27,7 +27,7 @@ therefore binds its proof to the release tag being ingested:
 | rung | binding |
 |---|---|
 | `cosign-sums` | the certificate identity must be the release tag's workflow: `^https://<host>/<owner>/<repo>/\.github/workflows/[^@]+@refs/tags/<tag>$`, with the host, repository and tag escaped. The repository's other workflows, other repositories, other tags and branches are refused. |
-| `build-provenance` | `gh attestation verify --repo <repo> --source-ref refs/tags/<tag>`: the attestation's source ref must be the release tag. |
+| `build-provenance` | `gh attestation verify --repo <repo>`, with **no** source-ref pin, and the attestation subject's name: the digest that vouches for an asset is the one of the subject whose name is that asset, and that name must carry the release (below). An attestation built from a branch is accepted when a subject names this release's asset with the matching digest; an older release's attestation names the older asset and cannot vouch for this release's. |
 | `pgp-sums` | the list and every asset name carry the release (see below), and a Rust channel's own version must match. |
 | `upstream-sums` | the asset names only. Nothing signed the list, so nothing else binds it. |
 
@@ -63,9 +63,19 @@ one release for payloads of several versions (`with-device` 0.2.2 under
 
 This is a **name heuristic**, not a cryptographic binding: a publisher who
 reuses a numbered tag, or who names an older asset after the newer version,
-defeats it. For `cosign-sums` and `build-provenance` the ref check on the proof
+defeats it. For `cosign-sums` the certificate-identity check on the proof
 itself is the stronger half, and it holds only for an upstream that releases
-from a tag: an upstream that signs from a branch is refused.
+from a tag: an upstream that signs from a branch is refused. For
+`build-provenance` the source ref is deliberately **not** pinned, because
+upstreams such as `bytecodealliance/wasm-tools` sign every release from a
+workflow on a branch (`publish.yml@refs/heads/main`) and a tag pin would refuse
+all of them. What binds that rung is the subject name: `gh` confirms an
+attestation from the named repository covers the downloaded bytes, and the
+digest recorded for an asset is then looked up by that asset's name among the
+attestation's subjects, so an attestation for an older release's asset (a
+different name, its own digest) never covers this release's asset. The recorded
+assertion says so: the binding is by asset name and the source ref is not
+pinned.
 
 The release each proof was bound to is part of the recorded assertion
 (`proof-asserts`).
@@ -90,7 +100,7 @@ warning at `plan` and `deposit`, and is signed into the layer: the entry's
 release it is. It is per entry, never inherited, and an empty reason is refused. It is accepted
 on `[[tool]]`, `[[docs]]` and `[[crate]]` entries.
 It can only be written in `layer.toml`; the environment encoding refuses it. It
-does not weaken the cosign and build-provenance ref checks.
+does not weaken the cosign identity check or the build-provenance subject-name match.
 
 ## `pgp-sums` — a digest list somebody signed
 

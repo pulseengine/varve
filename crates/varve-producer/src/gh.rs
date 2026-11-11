@@ -175,21 +175,22 @@ pub fn release_download_argv(repo: &str, version: &str, asset: &str, dir: &str) 
     ]
 }
 
-/// `gh attestation verify <file> --repo <repo> --source-ref refs/tags/<release> --format json`
+/// `gh attestation verify <file> --repo <repo> --format json`
 ///
 /// `--repo` says which repository built the file; it says nothing about which
-/// release, so an older release's attestation would verify for any tag.
-/// `--source-ref` makes gh compare the attestation's source ref with the tag
-/// this release is being ingested under.
-pub fn attestation_verify_argv(file: &str, repo: &str, release: &str) -> Vec<String> {
+/// release. There is deliberately no `--source-ref`: some upstreams sign every
+/// release from a workflow on a branch (bytecodealliance/wasm-tools signs from
+/// `publish.yml@refs/heads/main`), and a tag pin would refuse all of them. The
+/// release binding for this rung is made later: the asset's name must carry the
+/// release, and the digest that vouches for an asset is the one of the
+/// attestation subject whose NAME is that asset (`orchestrate::admit`).
+pub fn attestation_verify_argv(file: &str, repo: &str) -> Vec<String> {
     vec![
         "attestation".into(),
         "verify".into(),
         file.into(),
         "--repo".into(),
         repo.into(),
-        "--source-ref".into(),
-        format!("refs/tags/{release}"),
         "--format".into(),
         "json".into(),
     ]
@@ -608,16 +609,17 @@ mod tests {
     // rivet: verifies REQ-INGEST-001
     #[test]
     fn attestation_verify_is_bound_to_the_repository_that_must_have_built_it() {
-        let argv = attestation_verify_argv("a.tar.gz", "o/r", "v1.2.3");
+        let argv = attestation_verify_argv("a.tar.gz", "o/r");
         assert!(
             argv.windows(2).any(|w| w == ["--repo", "o/r"]),
             "without --repo any repository's attestation would be accepted: {argv:?}"
         );
-        // And to the TAG: the repository alone accepts any release's build.
+        // No ref pin: some upstreams sign every release from a branch
+        // workflow. The release binding is the subject's name (orchestrate's
+        // `admit`), not the attestation's ref.
         assert!(
-            argv.windows(2)
-                .any(|w| w == ["--source-ref", "refs/tags/v1.2.3"]),
-            "without --source-ref an older release's attestation would be accepted: {argv:?}"
+            !argv.iter().any(|a| a == "--source-ref"),
+            "a branch-signed release would be refused: {argv:?}"
         );
         assert_eq!(&argv[..3], &["attestation", "verify", "a.tar.gz"]);
         // The JSON is what classify_attestation reads; human output would parse
