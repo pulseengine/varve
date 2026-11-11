@@ -10183,6 +10183,56 @@ fn two_copies_of_varve_on_path_end_in_a_loop_error_not_a_hang() {
 // rivet: verifies REQ-PASSTHROUGH-001
 #[cfg(unix)]
 #[test]
+fn a_wrapper_script_around_a_second_varve_ends_in_a_loop_error_not_a_hang() {
+    // The landing check only fires when the running binary IS the one the
+    // previous passthrough exec'd. A wrapper (`~/bin/ghost` = `exec
+    // /opt/varve2/ghost "$@"`) breaks that: the recorded binary is the script,
+    // the second varve is a different file, and each round passes through to
+    // the script again. The per-tool hop counter bounds every such cycle.
+    let (fx, _bin, _marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let real = assert_cmd::cargo::cargo_bin("varve");
+    let second = fx.root.with_file_name("varve2");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::copy(&real, second.join("ghost")).unwrap();
+    let wrapper = fx.root.with_file_name("wrapper-bin");
+    write_executable(
+        &wrapper.join("ghost"),
+        &format!("#!/bin/sh\nexec {} \"$@\"\n", second.join("ghost").display()),
+    );
+    let log = fx.root.with_file_name("wrapper-loop-stderr");
+    let mut child = std::process::Command::new(fx.root.join("shims").join("ghost"))
+        .current_dir(&fx.project)
+        .env("VARVE_ROOT", &fx.root)
+        .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
+        .env("PATH", format!("{}:/usr/bin:/bin", wrapper.display()))
+        .env("HOME", fx.root.with_file_name("no-user-config"))
+        .env("XDG_CONFIG_HOME", &xdg)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let stderr = std::fs::read_to_string(&log).unwrap_or_default();
+    let status = status.unwrap_or_else(|| panic!("passthrough looped for 60s: {stderr:.600}"));
+    assert_eq!(status.code(), Some(1), "{stderr:.600}");
+    assert!(stderr.contains("passthrough loop"), "{stderr:.600}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
 fn a_passed_through_tool_that_calls_itself_nests_instead_of_looping() {
     // The loop guard must not fire for LEGITIMATE nesting: a recursive
     // `make -C sub`, a git hook calling `git`. The ambient `ghost` finds the

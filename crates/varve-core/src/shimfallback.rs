@@ -452,6 +452,57 @@ pub fn ambient_binary(
         .find(|p| !is_varve(p, self_exe))
 }
 
+/// How many passthroughs of one tool a single chain of processes may make.
+/// The landing check catches a passthrough that lands on varve itself; a
+/// wrapper script in between hides that, so every chain is also bounded by
+/// count. Legitimate nesting (a recursive `make`) is a handful of levels.
+pub const MAX_PASSTHROUGH_HOPS: u32 = 64;
+
+/// The key an entry of the hop counter is filed under: the name with every
+/// control character escaped, so one name is exactly one line.
+fn hop_key(tool: &str) -> String {
+    tool.escape_default().to_string()
+}
+
+/// The entries of a hop-counter value: (count, key), unparsable lines dropped.
+fn hop_entries(env: Option<&OsStr>) -> Vec<(u32, String)> {
+    let text = env.map(|e| e.to_string_lossy().into_owned());
+    text.as_deref()
+        .unwrap_or("")
+        .lines()
+        .filter_map(|line| {
+            let (n, key) = line.split_once(' ')?;
+            Some((n.parse::<u32>().ok()?, key.to_string()))
+        })
+        .collect()
+}
+
+/// Passthroughs of `tool` already made by the chain that `env` (the value of
+/// the hop-counter variable) describes.
+pub fn hops(env: Option<&OsStr>, tool: &str) -> u32 {
+    let key = hop_key(tool);
+    hop_entries(env)
+        .into_iter()
+        .find(|(_, k)| *k == key)
+        .map_or(0, |(n, _)| n)
+}
+
+/// The hop-counter value to hand to the next process: `env` with `tool`'s
+/// count one higher. Other tools' counts are kept, so A -> B -> A -> B climbs.
+pub fn with_hop(env: Option<&OsStr>, tool: &str) -> String {
+    let key = hop_key(tool);
+    let mut entries = hop_entries(env);
+    match entries.iter_mut().find(|(_, k)| *k == key) {
+        Some((n, _)) => *n = n.saturating_add(1),
+        None => entries.push((1, key)),
+    }
+    entries
+        .iter()
+        .map(|(n, k)| format!("{n} {k}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Format and separator characters that are not `char::is_control` but still
 /// reorder (bidi embeddings, overrides, isolates, marks) or split or hide
 /// (zero-width, line and paragraph separators, the byte-order mark) displayed
@@ -834,6 +885,38 @@ mod tests {
 
 #[cfg(test)]
 mod passthrough_tests {
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn hops_are_counted_per_tool_and_survive_interleaving() {
+        let os = |s: &str| std::ffi::OsString::from(s);
+        assert_eq!(hops(None, "ghost"), 0);
+        let one = with_hop(None, "ghost");
+        assert_eq!(hops(Some(&os(&one)), "ghost"), 1);
+        assert_eq!(hops(Some(&os(&one)), "other"), 0);
+        // A -> B -> A -> B: each tool's count keeps climbing.
+        let mut env = String::new();
+        for _ in 0..3 {
+            env = with_hop(Some(&os(&env)), "a");
+            env = with_hop(Some(&os(&env)), "b");
+        }
+        assert_eq!(hops(Some(&os(&env)), "a"), 3);
+        assert_eq!(hops(Some(&os(&env)), "b"), 3);
+        assert_eq!(hops(Some(&os(&env)), "c"), 0);
+        // A name that would split an entry is escaped, not parsed as two.
+        let odd = with_hop(None, "x\n5 y");
+        assert_eq!(hops(Some(&os(&odd)), "x\n5 y"), 1);
+        assert_eq!(hops(Some(&os(&odd)), "y"), 0);
+        // Garbage is ignored, not trusted and not fatal.
+        assert_eq!(hops(Some(&os("junk\n\n-3 ghost\nx ghost")), "ghost"), 0);
+        // The bound is reached after exactly MAX_PASSTHROUGH_HOPS hops.
+        let mut env = String::new();
+        for i in 0..MAX_PASSTHROUGH_HOPS {
+            assert!(hops(Some(&os(&env)), "t") < MAX_PASSTHROUGH_HOPS, "{i}");
+            env = with_hop(Some(&os(&env)), "t");
+        }
+        assert_eq!(hops(Some(&os(&env)), "t"), MAX_PASSTHROUGH_HOPS);
+    }
     use super::*;
     use std::ffi::OsString;
 

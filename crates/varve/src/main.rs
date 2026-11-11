@@ -2213,6 +2213,10 @@ fn launch(mut cmd: std::process::Command, tool: &str) -> anyhow::Result<()> {
 const PASSTHROUGH_MARK: &str = "VARVE_PASSTHROUGH";
 /// The canonical path of the binary a passthrough exec'd.
 const PASSTHROUGH_EXE: &str = "VARVE_PASSTHROUGH_EXE";
+/// Per-tool count of passthroughs in this chain of processes. The landing
+/// check cannot see through a wrapper script that execs a second varve, so
+/// every chain is also bounded by [`varve_core::shimfallback::MAX_PASSTHROUGH_HOPS`].
+const PASSTHROUGH_HOPS: &str = "VARVE_PASSTHROUGH_HOPS";
 
 /// Whether this process is the binary an earlier passthrough for `tool` ran.
 fn passthrough_landed_on_me(tool: &str) -> bool {
@@ -2329,6 +2333,17 @@ fn run_tool(
                                  again. Remove the extra varve shim for '{tool}' from PATH."
                             );
                         }
+                        let hops_env = std::env::var_os(PASSTHROUGH_HOPS);
+                        if varve_core::shimfallback::hops(hops_env.as_deref(), tool)
+                            >= varve_core::shimfallback::MAX_PASSTHROUGH_HOPS
+                        {
+                            bail!(
+                                "passthrough loop: '{tool}' has been passed through {} times in \
+                                 one chain of processes — a wrapper or script on PATH leads back \
+                                 to a varve shim for '{tool}'. Refusing to pass through again.",
+                                varve_core::shimfallback::MAX_PASSTHROUGH_HOPS
+                            );
+                        }
                         let me = std::env::current_exe().ok();
                         if let Some(binary) = varve_core::shimfallback::ambient_binary(
                             std::env::var_os("PATH").as_deref(),
@@ -2352,7 +2367,11 @@ fn run_tool(
                             let mut cmd = std::process::Command::new(binary);
                             cmd.args(args)
                                 .env(PASSTHROUGH_MARK, tool)
-                                .env(PASSTHROUGH_EXE, landed);
+                                .env(PASSTHROUGH_EXE, landed)
+                                .env(
+                                    PASSTHROUGH_HOPS,
+                                    varve_core::shimfallback::with_hop(hops_env.as_deref(), tool),
+                                );
                             return launch(cmd, tool);
                         }
                     }
