@@ -2134,6 +2134,7 @@ fn ambient_report(ctx: &ProjectCtx) -> AmbientReport {
             std::env::var_os("PATH").as_deref(),
             &shim_dir,
             me.as_deref(),
+            &std::env::current_dir().unwrap_or_default(),
         ),
         _ => Vec::new(),
     };
@@ -2334,6 +2335,7 @@ fn run_tool(
                             tool,
                             &store.root().join("shims"),
                             me.as_deref(),
+                            &std::env::current_dir().unwrap_or_default(),
                         ) {
                             eprintln!(
                                 "{}",

@@ -30,17 +30,18 @@ use crate::store::Store;
 /// symlinked or `..`-spelled route to it does not slip through. The same
 /// executable reached through two PATH entries is listed once.
 pub fn on_path(path_var: Option<&OsStr>, tool: &str, shim_dir: &Path) -> Vec<PathBuf> {
-    search_path(path_var, tool, shim_dir, false)
+    search_path(path_var, tool, shim_dir, None)
 }
 
-/// [`on_path`], optionally looking at absolute entries only. The filter has to
+/// [`on_path`], optionally looking at absolute entries only (`Some(cwd)`), and
+/// then not at those inside a repository above `cwd` either. The filter has to
 /// run BEFORE the de-duplication: otherwise a relative spelling of a directory
 /// listed ahead of its absolute one would swallow it.
 fn search_path(
     path_var: Option<&OsStr>,
     tool: &str,
     shim_dir: &Path,
-    absolute_only: bool,
+    absolute_only: Option<&Path>,
 ) -> Vec<PathBuf> {
     if tool.is_empty() || tool.contains('/') || tool.contains('\\') {
         return Vec::new();
@@ -49,10 +50,11 @@ fn search_path(
         return Vec::new();
     };
     let shim_canon = std::fs::canonicalize(shim_dir).ok();
+    let repos = absolute_only.map(repository_roots).unwrap_or_default();
     let mut out: Vec<PathBuf> = Vec::new();
     let mut seen: Vec<PathBuf> = Vec::new();
     for dir in std::env::split_paths(path_var) {
-        if absolute_only && !dir.is_absolute() {
+        if absolute_only.is_some() && !dir.is_absolute() {
             continue;
         }
         let dir = if dir.as_os_str().is_empty() {
@@ -62,6 +64,14 @@ fn search_path(
         };
         let dir_canon = std::fs::canonicalize(&dir).ok();
         if dir == shim_dir || (dir_canon.is_some() && dir_canon == shim_canon) {
+            continue;
+        }
+        // direnv's `PATH_add bin`: an absolute entry that is the repository's
+        // own, however spelt (symlinks and `..` resolved).
+        if dir_canon
+            .as_deref()
+            .is_some_and(|d| repos.iter().any(|r| d.starts_with(r)))
+        {
             continue;
         }
         let candidate = dir.join(tool);
@@ -316,12 +326,21 @@ const REPOSITORY_MARKERS: [&str; 5] = ["varve.toml", ".git", ".hg", ".jj", ".svn
 /// repository file into a "user" one.
 pub fn repository_holding(config: &Path, cwd: &Path) -> Option<PathBuf> {
     let config = std::fs::canonicalize(config).ok()?;
-    let cwd = std::fs::canonicalize(cwd).ok()?;
+    repository_roots(cwd)
+        .into_iter()
+        .find(|dir| config.starts_with(dir))
+}
+
+/// Every ancestor of `cwd` (canonical, `cwd` itself included) that holds a
+/// repository marker. Empty when `cwd` cannot be resolved.
+fn repository_roots(cwd: &Path) -> Vec<PathBuf> {
+    let Ok(cwd) = std::fs::canonicalize(cwd) else {
+        return Vec::new();
+    };
     cwd.ancestors()
-        .find(|dir| {
-            REPOSITORY_MARKERS.iter().any(|m| dir.join(m).exists()) && config.starts_with(dir)
-        })
+        .filter(|dir| REPOSITORY_MARKERS.iter().any(|m| dir.join(m).exists()))
         .map(Path::to_path_buf)
+        .collect()
 }
 
 /// Why the user configuration did not take effect.
@@ -421,11 +440,14 @@ pub fn ambient_binary(
     tool: &str,
     shim_dir: &Path,
     self_exe: Option<&Path>,
+    cwd: &Path,
 ) -> Option<PathBuf> {
     // ABSOLUTE entries only. An empty entry means the working directory, and
     // so does `.` or any relative one — and the working directory is the
     // repository, which could plant a `ghost` for the user to run unknowingly.
-    search_path(path_var, tool, shim_dir, true)
+    // An absolute entry inside a repository above `cwd` is skipped for the
+    // same reason (the rule that refuses a repository's configuration).
+    search_path(path_var, tool, shim_dir, Some(cwd))
         .into_iter()
         .find(|p| !is_varve(p, self_exe))
 }
@@ -495,6 +517,7 @@ pub fn active(
     path_var: Option<&OsStr>,
     shim_dir: &Path,
     self_exe: Option<&Path>,
+    cwd: &Path,
 ) -> Vec<Active> {
     // Folding is ASCII only: with a non-ASCII carried name nothing can be said
     // to be uncarried, and a non-ASCII candidate has no sound comparison. Both
@@ -513,7 +536,7 @@ pub fn active(
         .into_iter()
         .filter(|n| n.is_ascii() && !carried.iter().any(|c| c.eq_ignore_ascii_case(n)))
         .map(|tool| {
-            let binary = ambient_binary(path_var, &tool, shim_dir, self_exe);
+            let binary = ambient_binary(path_var, &tool, shim_dir, self_exe, cwd);
             Active { tool, binary }
         })
         .filter(|a| a.binary.is_some() || !matches!(allow, Allow::Everything))
@@ -1053,22 +1076,43 @@ mod passthrough_tests {
 
         // Only shims on PATH: nothing to run.
         assert_eq!(
-            ambient_binary(Some(&path), "ghost", shims.path(), Some(&varve)),
+            ambient_binary(
+                Some(&path),
+                "ghost",
+                shims.path(),
+                Some(&varve),
+                Path::new("/")
+            ),
             None
         );
         // Another root's shim is skipped by identity, the real one is found.
         let ghost = exe(real.path(), "ghost");
         let path = std::env::join_paths([other_shims.path(), real.path()]).unwrap();
         assert_eq!(
-            ambient_binary(Some(&path), "ghost", shims.path(), Some(&varve)),
+            ambient_binary(
+                Some(&path),
+                "ghost",
+                shims.path(),
+                Some(&varve),
+                Path::new("/")
+            ),
             Some(ghost.clone())
         );
         // Without a known self, only the shim directory itself is skipped.
         assert_eq!(
-            ambient_binary(Some(&path), "ghost", other_shims.path(), None),
+            ambient_binary(
+                Some(&path),
+                "ghost",
+                other_shims.path(),
+                None,
+                Path::new("/")
+            ),
             Some(ghost)
         );
-        assert_eq!(ambient_binary(None, "ghost", shims.path(), None), None);
+        assert_eq!(
+            ambient_binary(None, "ghost", shims.path(), None, Path::new("/")),
+            None
+        );
     }
 
     // rivet: verifies REQ-PASSTHROUGH-001
@@ -1103,7 +1147,17 @@ mod passthrough_tests {
         let path = os(bin.path());
         let carried = vec!["probe".to_string()];
         let names = vec!["ghost".to_string(), "probe".to_string(), "mute".to_string()];
-        let act = |allow: &Allow| active(allow, &carried, &names, Some(&path), shims.path(), None);
+        let act = |allow: &Allow| {
+            active(
+                allow,
+                &carried,
+                &names,
+                Some(&path),
+                shims.path(),
+                None,
+                Path::new("/"),
+            )
+        };
 
         assert!(act(&Allow::Nothing).is_empty());
         // Listed: carried tools drop out (clause 2); an unanswered name stays.
@@ -1147,6 +1201,7 @@ mod passthrough_tests {
                 Some(&path),
                 shims.path(),
                 None,
+                Path::new("/"),
             )
             .into_iter()
             .map(|a| a.tool)
@@ -1175,7 +1230,8 @@ mod passthrough_tests {
                 &names,
                 Some(&path),
                 shims.path(),
-                None
+                None,
+                Path::new("/")
             )
             .is_empty()
         );
@@ -1203,9 +1259,9 @@ mod passthrough_tests {
         // Bidi controls reorder what a terminal shows; zero-width and line or
         // paragraph separators split or hide text. None is `is_control`.
         let hostile = [
-            '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}',
-            '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2028}', '\u{2029}',
-            '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{feff}',
+            '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}',
+            '\u{202c}', '\u{202d}', '\u{202e}', '\u{2028}', '\u{2029}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{feff}',
         ];
         for c in hostile {
             let name = format!("a{c}b");
@@ -1216,6 +1272,42 @@ mod passthrough_tests {
         // Ordinary non-ASCII text is left readable.
         let n = notice("g\u{f1}", Path::new("/opt/x"), "2026.07.0", None);
         assert!(n.contains("g\u{f1}"), "{n}");
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[cfg(unix)]
+    #[test]
+    fn the_ambient_search_skips_absolute_entries_inside_the_repository() {
+        let shims = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(repo.path().join("varve.toml"), "").unwrap();
+        let inside = repo.path().join("bin");
+        std::fs::create_dir_all(&inside).unwrap();
+        exe(&inside, "ghost");
+        let outside = tempfile::tempdir().unwrap();
+        let real = exe(outside.path(), "ghost");
+        let link = outside.path().join("link");
+        std::os::unix::fs::symlink(&inside, &link).unwrap();
+        let find = |dirs: &[&Path], cwd: &Path| {
+            ambient_binary(
+                Some(&std::env::join_paths(dirs).unwrap()),
+                "ghost",
+                shims.path(),
+                None,
+                cwd,
+            )
+        };
+        // Inside the repository: skipped, whether spelt directly or by a link;
+        // the next entry is used.
+        assert_eq!(
+            find(&[&inside, outside.path()], repo.path()),
+            Some(real.clone())
+        );
+        assert_eq!(find(&[&link, outside.path()], repo.path()), Some(real));
+        assert_eq!(find(&[&inside], repo.path()), None);
+        assert_eq!(find(&[&link], &inside), None);
+        // The same directory is searched when cwd is in no repository.
+        assert_eq!(find(&[&inside], Path::new("/")), Some(inside.join("ghost")));
     }
 
     // rivet: verifies REQ-PASSTHROUGH-001
@@ -1236,12 +1328,12 @@ mod passthrough_tests {
         assert!(Path::new(&climb).join("ghost").exists());
         let relative = OsString::from(&climb);
         assert_eq!(
-            ambient_binary(Some(&relative), "ghost", shims.path(), None),
+            ambient_binary(Some(&relative), "ghost", shims.path(), None, Path::new("/")),
             None
         );
         let both = std::env::join_paths([OsString::from(&climb), os(real.path())]).unwrap();
         assert_eq!(
-            ambient_binary(Some(&both), "ghost", shims.path(), None),
+            ambient_binary(Some(&both), "ghost", shims.path(), None, Path::new("/")),
             Some(ghost)
         );
     }

@@ -10264,7 +10264,10 @@ fn a_requested_name_that_is_not_ascii_is_never_passed_through() {
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let out = run_shim(&fx, "\u{d1}", &path, Some(&xdg), &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!upper_marker.exists(), "a non-ASCII name was passed through");
+    assert!(
+        !upper_marker.exists(),
+        "a non-ASCII name was passed through"
+    );
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(!stderr.contains("varve: passthrough:"), "{stderr}");
     assert!(stderr.contains("not ASCII"), "{stderr}");
@@ -10306,6 +10309,37 @@ fn passthrough_is_refused_when_what_the_layer_carries_cannot_be_determined() {
     );
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(!stderr.contains("varve: passthrough:"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn passthrough_never_runs_a_binary_from_an_absolute_path_entry_inside_the_repository() {
+    // direnv's `PATH_add bin` puts the repository's own directory on PATH as an
+    // ABSOLUTE entry. It is still the repository's, so it is not searched —
+    // however it is spelt (here also through a symlink outside the repository).
+    let (fx, _bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let planted = fx.project.join("bin");
+    write_executable(
+        &planted.join("ghost"),
+        &format!("#!/bin/sh\necho planted > {}\n", marker.display()),
+    );
+    let link = fx.root.with_file_name("outside-link");
+    std::os::unix::fs::symlink(&planted, &link).unwrap();
+    for path in [
+        format!("{}:/usr/bin:/bin", planted.display()),
+        format!("{}:/usr/bin:/bin", link.display()),
+    ] {
+        let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+        assert!(
+            !marker.exists(),
+            "PATH={path:?} ran a binary planted in the repository"
+        );
+        assert_eq!(out.status.code(), Some(1), "PATH={path:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("varve: passthrough:"), "{stderr}");
+    }
 }
 
 // rivet: verifies REQ-PASSTHROUGH-001
