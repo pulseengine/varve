@@ -711,13 +711,16 @@ mod tests {
         );
     }
 
-    /// Each rung records WHICH release it was bound to, so a reader of the
-    /// signed layer can see the proof was for this tag and how strong that
-    /// binding is: the cosign identity is pinned to the tag, an attestation by
-    /// the subject's name, the unsigned list only by the asset's name.
+    /// The text each rung writes into the signed record about its release
+    /// binding, and nothing more: this checks what `choose` WRITES, and passes
+    /// whether or not the probe enforced anything. That the cosign identity is
+    /// pinned to the tag is proved where the command is built and run
+    /// (`source::tests::the_recorded_cosign_identity_is_the_regexp_cosign_enforced`
+    /// and `cosign_sums_signed_for_one_release_are_refused_for_another`);
+    /// the attestation binding in `build_provenance_for_one_release_is_refused_for_another`.
     // rivet: verifies REQ-INGEST-001
     #[test]
-    fn every_rung_records_the_release_it_was_bound_to() {
+    fn every_rung_states_the_binding_it_relies_on_in_its_record() {
         let f = Forge::github_com();
         let cosign = choose(&f, "o/r", "v3.1.0", &sums_ok(), &no_optins(), None).expect("accepts");
         assert!(

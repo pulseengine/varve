@@ -549,12 +549,15 @@ mod tests {
         built_from: String,
         /// The attestation's subjects: (name, sha256 hex).
         subjects: Vec<(String, String)>,
+        /// The identity regexp cosign was last handed.
+        seen_identity: std::rc::Rc<RefCell<Option<String>>>,
     }
 
     impl CommandRunner for Certified {
         fn run(&self, program: &str, args: &[String], env: &[(String, String)]) -> RunOutput {
             if program == "cosign" {
                 let re = flag(args, "--certificate-identity-regexp").expect("an identity");
+                *self.seen_identity.borrow_mut() = Some(re.to_string());
                 let re = regex::Regex::new(re).expect("the regexp compiles");
                 let ran_in_the_right_repo = flag(args, "--certificate-github-workflow-repository")
                     .is_none_or(|want| want == self.run_in);
@@ -621,6 +624,7 @@ mod tests {
             identity: identity.into(),
             run_in: "o/r".into(),
             built_from: built_from.into(),
+            seen_identity: Default::default(),
             subjects: vec![(
                 "one.tar.gz".into(),
                 crate::orchestrate::sha256_hex(b"payload"),
@@ -705,6 +709,26 @@ mod tests {
             ),
             "a branch is not a release: {on_a_branch:?}"
         );
+    }
+
+    /// The identity recorded in the signed manifest is the one cosign was told
+    /// to enforce, not text written beside the enforcement: the record, with
+    /// its pattern characters escaped, IS the regexp the command received.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_recorded_cosign_identity_is_the_regexp_cosign_enforced() {
+        let listing = [SUMS, BUNDLE, "one.tar.gz"];
+        let runner = certified(&listing, SIGNED_AT_V1, "");
+        let seen = runner.seen_identity.clone();
+        let accepted = ladder_at(runner, "o/r", "v1.0.0").expect("verifies");
+        let enforced = seen.borrow().clone().expect("cosign was run");
+        let recorded = accepted.signer.expect("a verified rung names who");
+        assert_eq!(
+            enforced,
+            format!("^{}$", recorded.replace('.', "\\.")),
+            "the record must be what cosign enforced"
+        );
+        assert!(recorded.ends_with("@refs/tags/v1.0.0"), "{recorded}");
     }
 
     /// A reusable workflow of the upstream repository, called from ANOTHER
