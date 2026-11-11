@@ -1371,4 +1371,29 @@ mod failover_class_tests {
             .fails_over()
         );
     }
+
+    // rivet: verifies REQ-SEED-001
+    #[test]
+    fn the_cached_envelope_is_absent_when_absent_and_an_error_when_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = IndexCache::at_root(tmp.path());
+        // Nothing cached: absent, which is not an error.
+        assert_eq!(cache.envelope_bytes("2026.08").unwrap(), None);
+        // Cached: the bytes exactly as written, however odd.
+        let dir = tmp.path().join("state").join("line-index");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("2026.08.dsse.json"), b" not json \r\n").unwrap();
+        assert_eq!(
+            cache.envelope_bytes("2026.08").unwrap(),
+            Some(b" not json \r\n".to_vec())
+        );
+        // Present but unreadable (a directory where the file should be) is an
+        // ERROR: reporting it as "no index" would let a seed be written
+        // without one for a realm that requires it.
+        std::fs::create_dir(dir.join("2026.09.dsse.json")).unwrap();
+        assert!(matches!(
+            cache.envelope_bytes("2026.09"),
+            Err(IndexError::Io { .. })
+        ));
+    }
 }
