@@ -434,6 +434,28 @@ mod tests {
         )
     }
 
+    /// Merging another file's verification adds its statements once: a
+    /// statement first seen in the merged result can vouch afterwards, and
+    /// merging the same result again adds nothing.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn merging_adds_each_new_statement_once() {
+        let a = r#"{"name":"a","digest":{"sha256":"1111111111111111111111111111111111111111111111111111111111111111"}}"#;
+        let b = r#"{"name":"b","digest":{"sha256":"2222222222222222222222222222222222222222222222222222222222222222"}}"#;
+        let tag = "https://h/o/r/.github/workflows/q.yml@refs/tags/v1";
+        let mut first = parse(&format!("[{}]", result(a, tag, "refs/tags/v1"))).expect("parses");
+        let second = parse(&format!("[{}]", result(b, tag, "refs/tags/v1"))).expect("parses");
+        first.merge(&second).expect("no conflicting digest");
+        assert_eq!(first.statements.len(), 2, "{first:?}");
+        assert_eq!(first.vouching("b").len(), 1, "{first:?}");
+        first.merge(&second).expect("no conflicting digest");
+        assert_eq!(
+            first.statements.len(),
+            2,
+            "a repeated statement is not added twice"
+        );
+    }
+
     /// Every result is read, the pull-request one is set aside, and each kept
     /// statement keeps its own signer and ref.
     // rivet: verifies REQ-INGEST-001
