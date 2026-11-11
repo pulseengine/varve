@@ -10309,6 +10309,11 @@ fn passthrough_is_refused_when_what_the_layer_carries_cannot_be_determined() {
     );
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(!stderr.contains("varve: passthrough:"), "{stderr}");
+    // The reason is the carried-set failure itself, not some earlier refusal.
+    assert!(
+        stderr.contains("could not be determined") && stderr.contains("cannot list"),
+        "{stderr}"
+    );
 }
 
 // rivet: verifies REQ-PASSTHROUGH-001
