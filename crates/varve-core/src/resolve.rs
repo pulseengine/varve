@@ -1005,7 +1005,7 @@ mod tests {
     // rivet: verifies REQ-PASSTHROUGH-001
     #[test]
     fn carried_names_cover_the_whole_composition_whatever_the_pin_selects() {
-        // Clause 2. The pin exposes `rivet` only; the layer also carries `loom`
+        // Clause 2. The pin exposes `rivet` only; the layer also carries `Loom`
         // (manifest only, no bytes on this host) and `ghost` (bin/ only), and
         // composes `Wasm-Tools`. All of them are CARRIED, folded to lower case.
         let (_tmp, store) = store();
@@ -1017,7 +1017,7 @@ mod tests {
             .unwrap();
         store
             .lay_down(
-                &manifest_composing("2026.07.0", &["rivet", "loom"], &up),
+                &manifest_composing("2026.07.0", &["rivet", "Loom"], &up),
                 &[("rivet", b"r"), ("ghost", b"g")],
             )
             .unwrap();

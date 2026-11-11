@@ -5288,11 +5288,6 @@ fn report_attestations(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> 
                 kind = r.kind,
                 producer = r.producer,
             );
-            // The signer's session, as recorded in the signed statement.
-            let ambient = ambient_sentence(&r.ambient_tools, "the signing session");
-            if !ambient.is_empty() {
-                println!("      {}", ambient.trim_start());
-            }
         } else {
             println!(
                 "    {kind} by {producer}: DOES NOT BIND — {reason}",
@@ -5300,6 +5295,13 @@ fn report_attestations(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> 
                 producer = r.producer,
                 reason = r.reason.as_deref().unwrap_or("unknown"),
             );
+        }
+        // The signer's session, as recorded in the signed statement. Printed
+        // for a statement that verifies whether or not it still binds: the
+        // record is about who signed it, not about this layer.
+        let ambient = ambient_sentence(&r.ambient_tools, "the signing session");
+        if !ambient.is_empty() {
+            println!("      {}", ambient.trim_start());
         }
     }
     Ok(())

@@ -481,6 +481,53 @@ mod tests {
         assert_eq!(reports[0].producer, "acme-ci");
     }
 
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn the_report_carries_the_signing_sessions_ambient_tools_binding_or_not() {
+        // Clause 4. A statement that verifies but no longer binds still says
+        // what its signer's session allowed; one that does not verify says
+        // nothing, because nothing it states can be trusted.
+        let (sk, pk) = generate_root_keypair();
+        let trust = crate::keyroles::test_support::rt(&pk);
+        let bytes = br#"{"_type":"https://in-toto.io/Statement/v1","subject":[]}"#;
+        let carry = |ambient: &[&str]| {
+            let st = statement(
+                LAYER,
+                LAYER_DIGEST,
+                AttestationKind::Provenance,
+                bytes,
+                "acme-ci",
+            )
+            .with_ambient_tools(ambient.iter().map(|s| s.to_string()).collect());
+            let envelope = sign(&st, &sk, "root-1").unwrap();
+            let tmp = layout();
+            attach(tmp.path(), envelope.as_bytes(), bytes).unwrap();
+            read_all(tmp.path(), LAYER).unwrap()
+        };
+        let pure = report(&carry(&[]), LAYER_DIGEST, LAYER, &trust);
+        assert!(pure[0].binds && pure[0].ambient_tools.is_empty());
+
+        let amb = carry(&["ghost"]);
+        let binding = report(&amb, LAYER_DIGEST, LAYER, &trust);
+        assert!(binding[0].binds);
+        assert_eq!(binding[0].ambient_tools, ["ghost"]);
+
+        let other = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        let stale = report(&amb, other, LAYER, &trust);
+        assert!(!stale[0].binds);
+        assert_eq!(stale[0].ambient_tools, ["ghost"]);
+
+        let (_, other_pk) = generate_root_keypair();
+        let forged = report(
+            &amb,
+            LAYER_DIGEST,
+            LAYER,
+            &crate::keyroles::test_support::rt(&other_pk),
+        );
+        assert!(!forged[0].binds);
+        assert!(forged[0].ambient_tools.is_empty());
+    }
+
     // rivet: verifies REQ-ATTEST-002
     #[test]
     fn a_statement_whose_evidence_did_not_travel_is_an_error_not_a_skip() {
