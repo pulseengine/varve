@@ -465,6 +465,12 @@ fn reorders_or_splits(c: char) -> bool {
             | '\u{2029}'
             | '\u{2066}'..='\u{2069}'
             | '\u{feff}'
+            | '\u{061c}'
+            | '\u{00ad}'
+            | '\u{180e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0000}'..='\u{e007f}'
     )
 }
 
@@ -1263,11 +1269,28 @@ mod passthrough_tests {
             '\u{202c}', '\u{202d}', '\u{202e}', '\u{2028}', '\u{2029}', '\u{2066}', '\u{2067}',
             '\u{2068}', '\u{2069}', '\u{feff}',
         ];
-        for c in hostile {
+        // Also: the Arabic letter mark, the soft hyphen, the word joiner and
+        // invisible operators, the Mongolian vowel separator, the interlinear
+        // annotation controls, and the whole tag block (invisible "ASCII").
+        let more = [0x61c_u32, 0xad, 0x180e]
+            .into_iter()
+            .chain(0x2060..=0x2064)
+            .chain(0xfff9..=0xfffb)
+            .chain(0xe0000..=0xe007f)
+            .map(|u| char::from_u32(u).unwrap());
+        for c in hostile.into_iter().chain(more) {
             let name = format!("a{c}b");
             let n = notice(&name, Path::new("/opt/x"), "2026.07.0", None);
             assert!(!n.contains(c), "U+{:04X} survived: {n:?}", c as u32);
             assert!(n.contains(&format!("a{}b", c.escape_default())), "{n}");
+        }
+        // The sets end where they end: neighbours are ordinary text.
+        for u in [
+            0x61b_u32, 0x61d, 0xac, 0xae, 0x180d, 0x180f, 0x205f, 0x2065, 0xfff8, 0xfffc, 0xe0080,
+        ] {
+            let c = char::from_u32(u).unwrap();
+            let n = notice(&format!("a{c}b"), Path::new("/opt/x"), "2026.07.0", None);
+            assert!(n.contains(c), "U+{u:04X} was escaped: {n:?}");
         }
         // Ordinary non-ASCII text is left readable.
         let n = notice("g\u{f1}", Path::new("/opt/x"), "2026.07.0", None);
