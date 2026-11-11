@@ -367,18 +367,25 @@ pub fn rung_cosign_sums(forge: &Forge, repo: &str, release: &str, probe: &Releas
     }
 }
 
-/// The stable part of a build signer URI: `<workflow URL>` without its
-/// `@<ref>`. The ref changes with every release of a tag-signing upstream, and
-/// a delta reports a moved signer.
-pub fn signer_without_ref(uri: &str) -> &str {
-    uri.split_once('@').map_or(uri, |(workflow, _)| workflow)
+/// The stable form of a build signer URI for the recorded signer: split at the
+/// LAST `@`, a ref of the form `refs/tags/<anything>` becomes `refs/tags/*`
+/// (the tag changes with every release of a tag-signing upstream, and a delta
+/// reports a moved signer), and every other ref is kept verbatim, so a signer
+/// that moves from tag-signed to `refs/heads/main`, or between branches, still
+/// shows as moved.
+pub fn stable_signer(uri: &str) -> String {
+    match uri.rsplit_once('@') {
+        Some((workflow, r)) if r.starts_with("refs/tags/") => format!("{workflow}@refs/tags/*"),
+        _ => uri.to_string(),
+    }
 }
 
 /// The recorded signer of a build-provenance proof: the workflow URLs of the
-/// statements that vouched, refs stripped, de-duplicated and sorted. The full
+/// statements that vouched in their [`stable_signer`] form, de-duplicated and
+/// sorted. The full
 /// URIs, refs included, are in the assertion ([`provenance_asserts`]).
 pub fn provenance_signer<'a>(signers: impl IntoIterator<Item = &'a str>) -> String {
-    let mut stable: Vec<&str> = signers.into_iter().map(signer_without_ref).collect();
+    let mut stable: Vec<String> = signers.into_iter().map(stable_signer).collect();
     stable.sort_unstable();
     stable.dedup();
     stable.join(", ")
@@ -1480,5 +1487,36 @@ mod pgp_sums_tests {
             assert!(!pgp_rung_is_reachable(&p), "{:?}", p.attestation);
             assert_ne!(rung_build_provenance(&p), Rung::NotOffered);
         }
+    }
+
+    /// The recorded build-provenance signer is stable across the releases of a
+    /// tag-signing upstream, and still moves when the signing ref class does:
+    /// tag-signed to main-signed is the downgrade a delta must surface.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_build_provenance_signer_moves_with_the_ref_class_not_the_tag() {
+        let wf = "https://github.com/o/r/.github/workflows/release.yml";
+        let signer = |ref_: &str| provenance_signer([format!("{wf}@{ref_}").as_str()]);
+        assert_eq!(signer("refs/tags/v1"), signer("refs/tags/v2.0.0"));
+        assert_eq!(signer("refs/tags/v1"), format!("{wf}@refs/tags/*"));
+        assert_ne!(signer("refs/tags/v1"), signer("refs/heads/main"));
+        assert_ne!(signer("refs/heads/main"), signer("refs/heads/feature"));
+        assert_eq!(signer("refs/heads/main"), format!("{wf}@refs/heads/main"));
+        // Split at the LAST `@`.
+        let odd = "https://h/a@b/.github/workflows/w.yml@refs/tags/v9";
+        assert_eq!(
+            provenance_signer([odd]),
+            "https://h/a@b/.github/workflows/w.yml@refs/tags/*"
+        );
+        // No ref at all: kept whole. Duplicates fold; the result is sorted.
+        assert_eq!(provenance_signer(["https://h/w.yml"]), "https://h/w.yml");
+        assert_eq!(
+            provenance_signer([
+                "https://h/b.yml@refs/tags/v1",
+                "https://h/a.yml@refs/tags/v2",
+                "https://h/b.yml@refs/tags/v3",
+            ]),
+            "https://h/a.yml@refs/tags/*, https://h/b.yml@refs/tags/*"
+        );
     }
 }

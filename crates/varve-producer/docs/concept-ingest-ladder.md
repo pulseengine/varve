@@ -108,10 +108,13 @@ For `cosign-sums` the recorded `proof-signer` is the repository's identity
 prefix, `https://<host>/<owner>/<repo>/`, the same from one release to the next
 (`varve diff` reports a moved signer, and a tag in it would move on every
 bump); the exact identity regexp that cosign enforced, tag included, is in
-`proof-asserts`. For `build-provenance` the signer is the workflow URL of the
-statements that vouched, with the `@<ref>` part stripped, de-duplicated and
-sorted (stable across the releases of a tag-signing upstream); the full build
-signer URIs, refs included, are in `proof-asserts`.
+`proof-asserts`. For `build-provenance` the signer is the build signer URI of the
+statements that vouched, split at the last `@`, with a tag ref
+(`refs/tags/<anything>`) written as `refs/tags/*` so that it is stable across the
+releases of a tag-signing upstream, every other ref kept verbatim (so a move from
+tag-signed to `refs/heads/main`, or between branches, shows as a moved signer),
+de-duplicated and sorted; the full build signer URIs, refs included, are in
+`proof-asserts`.
 
 The release each proof was bound to is part of the recorded assertion
 (`proof-asserts`).

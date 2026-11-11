@@ -912,7 +912,7 @@ mod tests {
             .also_attested("refs/heads/main", &[(ASSET2, NEW)]);
         let v = verified(both, "v2.0.0", ASSET2).expect("the real build vouches");
         let signer = v.accepted.signer.expect("a signer");
-        assert!(!signer.contains('@'), "{signer}");
+        assert!(signer.ends_with("@refs/heads/main"), "{signer}");
         assert!(
             v.accepted.asserts.contains("@refs/heads/main"),
             "{}",
@@ -943,7 +943,7 @@ mod tests {
         assert_eq!(one.signer, two.signer, "{one:?} {two:?}");
         assert_eq!(
             one.signer.as_deref(),
-            Some("https://github.com/o/r/.github/workflows/release.yml")
+            Some("https://github.com/o/r/.github/workflows/release.yml@refs/tags/*")
         );
         assert!(
             one.asserts.contains("release.yml@refs/tags/v1.0.0"),
@@ -968,7 +968,7 @@ mod tests {
         let signer = v.accepted.signer.expect("a signer");
         assert_eq!(
             signer,
-            "https://github.com/o/r/.github/workflows/release.yml"
+            "https://github.com/o/r/.github/workflows/release.yml@refs/heads/main"
         );
         let asserts = &v.accepted.asserts;
         assert!(asserts.contains("refs/heads/main"), "{asserts}");
