@@ -10198,7 +10198,10 @@ fn a_wrapper_script_around_a_second_varve_ends_in_a_loop_error_not_a_hang() {
     let wrapper = fx.root.with_file_name("wrapper-bin");
     write_executable(
         &wrapper.join("ghost"),
-        &format!("#!/bin/sh\nexec {} \"$@\"\n", second.join("ghost").display()),
+        &format!(
+            "#!/bin/sh\nexec {} \"$@\"\n",
+            second.join("ghost").display()
+        ),
     );
     let log = fx.root.with_file_name("wrapper-loop-stderr");
     let mut child = std::process::Command::new(fx.root.join("shims").join("ghost"))
