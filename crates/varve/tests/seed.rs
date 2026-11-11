@@ -334,6 +334,43 @@ fn a_fresh_store_installs_from_one_seeded_layout_and_verifies() {
         .success();
 }
 
+/// The limit, pinned so the docs cannot drift from it: a store that has NEVER
+/// installed a line does not take it from a MIRROR, seed or not, because a
+/// mirror cannot prove it is current (install.rs, first contact). A seed is
+/// that store's PRIMARY or the store installs once from the registry first.
+// rivet: verifies REQ-SEED-001
+#[test]
+fn a_never_installed_store_does_not_take_a_seed_through_mirrors() {
+    let w = World::new();
+    let g = w.generation(1);
+    let host = w.path("host-root");
+    let host_project = w.path("host-project");
+    w.install_gen(&host, &host_project, &g);
+    let seed = w.path("seed");
+    let out = w
+        .varve(&host, &host_project)
+        .args(["seed", "--json"])
+        .arg(&seed)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mirrors = mirrors_of(&out);
+    let mirror_paths: Vec<&Path> = mirrors.values().map(PathBuf::as_path).collect();
+
+    let fresh = w.path("fresh-root");
+    let fresh_project = w.path("fresh-project");
+    w.project(&fresh_project, DEAD, &mirror_paths, "2026.08.0", "");
+    w.varve(&fresh, &fresh_project)
+        .arg("install")
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("first contact"))
+        .stderr(predicate::str::contains("needs the realm's primary"));
+}
+
 // rivet: verifies REQ-SEED-001
 #[test]
 fn a_seed_is_transport_not_authority_one_flipped_byte_is_refused() {
@@ -430,9 +467,13 @@ fn a_seed_holds_no_absolute_path_of_the_store_it_came_from() {
     };
     let store_files = read_tree(&host);
     let shim_links = std::fs::read_dir(host.join("shims")).unwrap().count();
+    // Shims are links to the varve binary, so they prove nothing about the
+    // store's path. A FILE of the store must carry it, or the scan below
+    // could not fail.
+    assert!(shim_links > 0, "shim install wrote no shims");
     assert!(
-        in_store(&store_files) > 0 || shim_links > 0,
-        "the scan must have something to find in the source store"
+        in_store(&store_files) > 0,
+        "no file in the source store holds its path, so the scan could not fail"
     );
 
     let seed = w.path("seed");
@@ -476,6 +517,7 @@ fn a_relative_directory_is_refused_before_anything_is_written() {
         .args(["seed", "seed-here"])
         .assert()
         .failure()
+        .code(1)
         .stderr(predicate::str::contains("not an absolute path"))
         .stderr(predicate::str::contains("mirrors"));
     assert!(!host_project.join("seed-here").exists());
@@ -497,6 +539,7 @@ fn a_non_empty_directory_that_is_not_a_seed_is_refused_untouched() {
         .arg(&foreign)
         .assert()
         .failure()
+        .code(1)
         .stderr(predicate::str::contains("not a varve seed"));
     assert_eq!(read_tree(&foreign).len(), 1, "nothing was written");
 
@@ -535,6 +578,7 @@ fn a_realm_requiring_a_signed_index_refuses_a_seed_that_could_not_carry_it() {
         .arg(&seed)
         .assert()
         .failure()
+        .code(1)
         .stderr(predicate::str::contains("signed-index = true"))
         .stderr(predicate::str::contains("signed line index"));
     assert!(!seed.exists(), "a refusal leaves nothing behind");
@@ -555,6 +599,7 @@ fn one_layer_can_be_named_by_id_and_digest() {
         .arg(&seed)
         .assert()
         .failure()
+        .code(1)
         .stderr(predicate::str::contains("not 2026.08.9"));
     // A digest that is not installed is refused.
     w.varve(&host, &host_project)
@@ -563,6 +608,7 @@ fn one_layer_can_be_named_by_id_and_digest() {
         .arg(&seed)
         .assert()
         .failure()
+        .code(1)
         .stderr(predicate::str::contains("not installed"));
     // The real pair is seeded, with what it composes.
     let out = w
@@ -625,6 +671,7 @@ fn a_composed_layer_missing_from_the_store_is_named_not_skipped() {
         .arg(&seed)
         .assert()
         .failure()
+        .code(1)
         .stderr(predicate::str::contains("2026.09.0"))
         .stderr(predicate::str::contains("not installed"));
     assert!(!seed.exists());

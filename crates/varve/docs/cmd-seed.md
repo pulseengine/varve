@@ -1,6 +1,6 @@
 # varve seed <dir>
 
-Writes the layers this store has installed into a directory that another store can install from — with no network and no registry credential. The directory is in the form a realm's `mirrors` entry accepts: an absolute path.
+Writes the layers this store has installed into a directory that another store can install from — with no network and no registry credential. Each layer's directory inside it is in the form a realm's `mirrors` entry accepts: an absolute directory path.
 
 The case it exists for: a container's store (a Docker volume) is a separate store from its host's. After a pin change the container refetched a composed layer from the registry, and needed the registry credential, although the host store already held every byte. Seed from the host, name the seed as a mirror in the container, and the pin change installs from disk.
 
@@ -42,7 +42,7 @@ varve seed /srv/varve-seed --layer 2026.08.1 --digest sha256:<hex>
 
 `<dir>` must be new, empty, or a seed a previous `varve seed` wrote (it holds a `varve-seed.json`). Any other non-empty directory is refused untouched: mixing a seed into somebody else's files leaves a directory that is neither. Seeding the same layer again replaces its subdirectory and leaves the others.
 
-Each layer goes in its own subdirectory, `<layer>-<12 hex of its digest>`, and each subdirectory is one OCI image layout — the same shape `varve archive` writes and `varve install --from` reads. One layout per layer because a layout's referrers (the baseline status, the carried attestations) are not keyed by layer.
+Each layer goes in its own subdirectory, `<layer>-<12 hex of its digest>`, and each subdirectory is one OCI image layout — the same shape `varve archive` writes and `varve install --from` reads. `<dir>` itself is therefore not a `mirrors` entry — each subdirectory is, one entry per layer. One layout per layer because a layout's referrers (the baseline status, the carried attestations) are not keyed by layer.
 
 ## A seed is transport, not authority
 
@@ -58,8 +58,8 @@ Nothing in `varve seed` signs, re-encodes or vouches for anything. It copies the
 
 The store that reads the seed verifies every one of them against **its own realm's trust root**, exactly as it would from the registry (REQ-MIRROR-002). A seed altered in transit — one flipped byte in a payload or in the manifest envelope — is refused with the same verification error the registry would earn, and the next source is asked. The anti-rollback high-water mark, the first-contact rule and the realm's signed-index obligation all apply to a mirror unchanged, so:
 
-- a store that has **never** installed a line does not accept it from a mirror: first contact is the primary's, because a mirror cannot prove it is current. Use `varve install --from <mirror path>` for the very first install, or install once from the registry.
-- a realm that declares `signed-index = true` needs the index in the seed. `varve seed` carries the one this store cached; if the realm requires one and this store holds none, it refuses, naming the layer and the realm, and writes nothing. It never makes one up. Install the layer from a source that carries the index, then seed again.
+- a store that has **never** installed a line does not accept it from a mirror: first contact is the primary's, because a mirror cannot prove it is current (`first contact … needs the realm's primary`). That is the container-with-a-volume case the other way round: the seed serves a store that has been here before and whose pin moved. For a store's very first install, `varve install --from <mirror path>` makes the seed that install's only source, which works for a pin whose layer composes nothing. A pin that **composes** layers cannot be installed offline into a never-installed store this way: `--from` names the root layer only, and the layers it composes are fetched through the realm's own sources, where a seed is a mirror. Install once from the registry first.
+- a realm that declares `signed-index = true` needs the index in the seed. `varve seed` carries the one this store cached, and when it knows the layer's realm (the project's pin, or a composed layer whose realm the project's `varve-realms.toml` defines) and that realm requires one but this store holds none, it refuses, naming the layer and the realm, and writes nothing. It never makes one up. Install the layer from a source that carries the index, then seed again. It cannot refuse what it cannot see: with `--layer`/`--digest`, or for a composed layer whose realm is not defined here, it carries the index if the store holds one and says `no signed line index` if not, and the other store will then refuse the seed itself.
 
 ## What is not copied
 
