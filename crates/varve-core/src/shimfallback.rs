@@ -1068,4 +1068,27 @@ mod passthrough_tests {
             }]
         );
     }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[cfg(unix)]
+    #[test]
+    fn a_carried_name_blocks_a_spelling_in_another_case() {
+        let shims = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        exe(bin.path(), "PROBE");
+        let path = os(bin.path());
+        let carried = vec!["probe".to_string()];
+        let names = vec!["PROBE".to_string()];
+        assert!(
+            active(
+                &Allow::Everything,
+                &carried,
+                &names,
+                Some(&path),
+                shims.path(),
+                None
+            )
+            .is_empty()
+        );
+    }
 }

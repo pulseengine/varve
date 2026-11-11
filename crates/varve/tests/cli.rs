@@ -10092,3 +10092,36 @@ fn a_tool_the_layer_carries_but_the_pin_does_not_expose_is_never_passed_through(
     assert!(stderr.contains("is not part of layer"), "{stderr}");
     assert!(!stderr.contains("passthrough:"), "{stderr}");
 }
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_shim_spelt_in_another_case_does_not_pass_through_a_carried_tool() {
+    // Clause 2 on a case-insensitive filesystem: `shims/PROBE` IS `shims/probe`
+    // there, the layer carries `probe`, and an exact-case comparison called
+    // `PROBE` "not carried" and ran an ambient binary in its place. The
+    // comparison ignores ASCII case on every platform, so this runs on Linux
+    // too (where the `PROBE` link is made by hand).
+    let (fx, bin, _marker) = shim_fallback_fixture();
+    install_shims(&fx, &["probe"]);
+    let shims = fx.root.join("shims");
+    if !shims.join("PROBE").exists() {
+        let target = std::fs::read_link(shims.join("probe")).unwrap();
+        std::os::unix::fs::symlink(target, shims.join("PROBE")).unwrap();
+    }
+    let upper_marker = fx.root.with_file_name("upper-probe-ran");
+    write_executable(
+        &bin.join("PROBE"),
+        &format!("#!/bin/sh\necho ran > {}\n", upper_marker.display()),
+    );
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "PROBE", &path, Some(&xdg), &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !upper_marker.exists(),
+        "an ambient PROBE ran in place of the layer's probe: {stderr}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!stderr.contains("passthrough:"), "{stderr}");
+}
