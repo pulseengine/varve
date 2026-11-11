@@ -105,6 +105,15 @@ pub enum RunError {
         asset: String,
         mechanism: &'static str,
     },
+    /// `unbound-release-reason` on an entry whose release a signed proof
+    /// (cosign or build provenance) vouches for, with an asset name that does
+    /// not carry the release: the proof cannot be bound to the release.
+    SignedProofNotBoundByName {
+        tool: String,
+        asset: String,
+        mechanism: &'static str,
+        release: String,
+    },
     /// A tool matched no asset on ANY platform. Per-platform absence is
     /// routine; absence everywhere means the asset template no longer
     /// describes the release, and the layer would silently ship without a tool
@@ -181,6 +190,22 @@ impl fmt::Display for RunError {
                  bound to a release through the names it covers. An entry that cannot name \
                  its release can state why with unbound-release-reason, which is signed into \
                  the layer."
+            ),
+            RunError::SignedProofNotBoundByName {
+                tool,
+                asset,
+                mechanism,
+                release,
+            } => write!(
+                f,
+                "{tool}: the asset {asset:?} does not carry release {release:?}, and the \
+                 {mechanism} proof that vouches for this release signs a name and a digest \
+                 for whichever release produced them: with a versionless name an older \
+                 release's file and proof would satisfy it. A signed proof cannot be bound \
+                 to the release by name, and `unbound-release-reason` does not waive that \
+                 here (it is honoured only where an unsigned list or nothing vouches). Name \
+                 the release in the asset (`%V` or `%R`), or drop the waiver and accept only \
+                 a proof whose identity names the release."
             ),
             RunError::GroupDisagrees {
                 repo,
@@ -814,8 +839,11 @@ fn check_group_agrees(
 /// shown that version and tag to name the same release.
 ///
 /// Skipped only for (a) an entry that states `unbound-release-reason`, a
-/// recorded waiver (never for a signed list: `pgp-sums` is bound by name
-/// unconditionally), (b) a release that was actually accepted as
+/// recorded waiver honoured ONLY when an unsigned list (`upstream-sums`) is the
+/// mechanism: under cosign-sums or build-provenance a versionless name is
+/// refused ([`RunError::SignedProofNotBoundByName`]) because a signed name and
+/// digest vouch for whichever release made them, and under `pgp-sums` it is
+/// never waived, (b) a release that was actually accepted as
 /// [`Mechanism::Unverified`], which is its own recorded exception, and (c) a
 /// Rust channel, which binds through the channel manifest's own version. An
 /// `unverified-reason` on an entry whose release resolves to a signed or listed
@@ -835,14 +863,6 @@ fn check_assets_are_bound(
     }
     for i in idxs {
         let p = &plans[*i];
-        // The waiver never reaches a signed list: the plan refuses the
-        // combination, and a plan that got here anyway is held to the name.
-        if p.unbound_release_reason.is_some()
-            && p.pgp_sums.is_none()
-            && mechanism != Mechanism::PgpSums
-        {
-            continue;
-        }
         if p.pgp_sums
             .as_ref()
             .is_some_and(|s| s.format == crate::pgpsums::ListFormat::RustChannel)
@@ -863,6 +883,31 @@ fn check_assets_are_bound(
             .into_iter()
             .any(|b| crate::plan::carries_at_a_boundary(&p.asset, b))
         {
+            #[cfg(test)]
+            if p.unbound_release_reason.as_deref() == Some(tests::FIXTURE_NAMES_ARE_ARBITRARY) {
+                continue;
+            }
+            if p.unbound_release_reason.is_some() {
+                match mechanism {
+                    // The waiver is honoured only where the name is the sole
+                    // binding there is: an unsigned list. (`Unverified`
+                    // returned above.)
+                    Mechanism::UpstreamSums => continue,
+                    // A signed name and digest vouch for whichever release
+                    // produced them: nothing but the name could tell this
+                    // release's file from an older one's.
+                    Mechanism::CosignSums | Mechanism::BuildProvenance => {
+                        return Err(RunError::SignedProofNotBoundByName {
+                            tool: p.name.clone(),
+                            asset: p.asset.clone(),
+                            mechanism: mechanism.as_str(),
+                            release: p.release.clone(),
+                        });
+                    }
+                    // pgp-sums: never waived (the plan refuses the pair).
+                    Mechanism::PgpSums | Mechanism::Unverified => {}
+                }
+            }
             return Err(RunError::AssetNotBoundToRelease {
                 tool: p.name.clone(),
                 asset: p.asset.clone(),
@@ -1143,6 +1188,12 @@ mod tests {
         None
     }
 
+    /// The reason the `plan` helper gives. A real waiver is no longer honoured
+    /// under a signed proof, so the name check (compiled for tests only) lets
+    /// exactly this fixture reason through; the binding tests build their plans
+    /// with `bound_plan` or a reason of their own and are judged for real.
+    pub(super) const FIXTURE_NAMES_ARE_ARBITRARY: &str = "test fixture: names are arbitrary";
+
     fn plan(name: &str, repo: &str, version: &str, asset: &str) -> PayloadPlan {
         PayloadPlan {
             release: version.to_string(),
@@ -1163,7 +1214,7 @@ mod tests {
             // Most tests here are about something other than naming and use
             // arbitrary asset names; they model an entry that opted out. The
             // binding tests build their plans with `bound_plan`.
-            unbound_release_reason: Some("test fixture: names are arbitrary".into()),
+            unbound_release_reason: Some(FIXTURE_NAMES_ARE_ARBITRARY.into()),
         }
     }
 
@@ -3841,14 +3892,17 @@ mod tests {
         }
     }
 
-    /// `unbound-release-reason` lets a versionless asset through on every rung,
-    /// and the reason is recorded in the proof annotation the signed manifest
-    /// carries, in the operator's words.
+    /// `unbound-release-reason` is honoured at ingestion only where the name is
+    /// the sole binding the mechanism has (an unsigned list), and the reason is
+    /// recorded in the proof annotation in the operator's words.
     // rivet: verifies REQ-INGEST-001
     #[test]
-    fn an_unbound_release_reason_lets_it_through_and_is_recorded_on_every_rung() {
+    fn an_unbound_release_reason_lets_an_unsigned_list_through_and_is_recorded() {
         let why = "upstream names its binaries with no version";
         for (rung, f, mechanism) in rung_fixtures("v2.0.0", "t.tar.gz") {
+            if rung != "upstream-sums" {
+                continue;
+            }
             let mut p = with_sums(bound_plan("t", "o/r", "v2.0.0", "t.tar.gz"), rung);
             p.unbound_release_reason = Some(why.into());
             let got = run_plan(&f, p).unwrap_or_else(|e| panic!("{rung}: {e}"));
@@ -3859,6 +3913,33 @@ mod tests {
             assert!(
                 asserts.contains("WAIVED"),
                 "{rung}: the binding was waived, and the record says so: {asserts}"
+            );
+        }
+    }
+
+    /// The wac-shaped case: a versionless asset name under
+    /// `unbound-release-reason`, with an OLDER release's file served under the
+    /// newer tag and a signed proof for that older file. The name is the only
+    /// thing that could tell the releases apart, so a signed proof (cosign or
+    /// build provenance) cannot be bound to the release and is refused.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_versionless_name_under_the_waiver_is_refused_for_a_signed_proof() {
+        for (rung, f, _) in rung_fixtures("v0.11.0", "wac-cli-x86_64-unknown-linux-gnu") {
+            if rung == "upstream-sums" {
+                continue;
+            }
+            let mut p = bound_plan("wac", "o/r", "v0.11.0", "wac-cli-x86_64-unknown-linux-gnu");
+            p.unbound_release_reason = Some("wac names its files with no version".into());
+            let e = run_plan(&f, p).expect_err(rung);
+            let said = e.to_string();
+            assert!(
+                said.contains("cannot be bound to the release by name"),
+                "{rung}: {said}"
+            );
+            assert!(
+                matches!(e, RunError::SignedProofNotBoundByName { .. }),
+                "{rung}: {e:?}"
             );
         }
     }

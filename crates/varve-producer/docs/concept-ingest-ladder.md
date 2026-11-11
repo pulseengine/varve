@@ -112,18 +112,23 @@ layout = "raw-per-platform"
 unbound-release-reason = "upstream names its binaries with no version; tracked in <issue>"
 ```
 
-The reason lets the entry past the plan-time and ingestion name checks, prints a
-warning at `plan` and `deposit`, and is signed into the layer: the entry's
-`proof-asserts` ends with `NOT BOUND TO ITS RELEASE`, says the name binding was
-`WAIVED`, and gives the reason in the operator's words, so a consumer reads that this entry's proof does not say which
-release it is. It is per entry, never inherited, and an empty reason is refused. It is accepted
-on `[[tool]]`, `[[docs]]` and `[[crate]]` entries.
-It is refused together with `pgp-sums` (at `plan`, and ingestion never skips the
-name check for a signed list): a signed list is bound by name unconditionally.
-With `upstream-sums` it is accepted, because an unsigned list claims no signer
-and the proof annotation says the name binding was waived.
-It can only be written in `layer.toml`; the environment encoding refuses it. It
-does not weaken the cosign identity check or the build-provenance subject-name match.
+At `plan` the reason lets the entry past the name check, because the plan does
+not yet know which mechanism will vouch for the release. **Ingestion decides**,
+once the release is verified:
+
+| mechanism that vouched | a versionless name under the reason |
+|---|---|
+| `upstream-sums` | accepted; the name was the only binding there was, and it is waived |
+| `unverified` | accepted (the opt-in is its own recorded exception) |
+| `cosign-sums`, `build-provenance` | **refused**: a signed proof cannot be bound to the release by name. A signed name and digest vouch for whichever release produced them, so an older release's file and attestation would satisfy a versionless name |
+| `pgp-sums` | never waived; the combination is refused at `plan` |
+
+When it is honoured it prints a warning at `plan` and `deposit`, and is signed
+into the layer: the entry's `proof-asserts` ends with `NOT BOUND TO ITS
+RELEASE`, says the name binding was `WAIVED`, and gives the reason in the
+operator's words. It is per entry, never inherited, and an empty reason is
+refused. It is accepted on `[[tool]]`, `[[docs]]` and `[[crate]]` entries. It
+can only be written in `layer.toml`; the environment encoding refuses it.
 
 ## `pgp-sums` — a digest list somebody signed
 
