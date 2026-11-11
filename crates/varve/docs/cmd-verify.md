@@ -11,6 +11,8 @@ Re-checks the pinned layer offline — or every installed layer with `--all`.
 - **Every export the pin declares**, without being told to (REQ-EXPORTDECL-001). See below.
 - No binary earlier on `PATH` shadows a pinned tool (REQ-SHADOW-001) — unless the pin declared that it would.
 
+It also RECORDS, and does not fail on, whether the session allowed ambient tools (REQ-PASSTHROUGH-001): when your user-level configuration lets shims run PATH binaries for tools the layer does not carry, verify prints the allowed tools, and for each stamped export it reads it prints what the producing session allowed. The layer is verified; the binaries a passthrough would run are not. See `varve docs shim`.
+
 ## What it does not check
 
 - **Other platforms.** Entries annotated for another target triple are skipped silently and there is no `--platform` override on `verify`. A three-entry layer with one Linux entry reports `2 tool(s) match` and exits 0 on macOS. `verify` says nothing about the third.

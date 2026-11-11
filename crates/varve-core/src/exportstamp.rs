@@ -44,6 +44,9 @@ pub const STAMP_FILE: &str = ".varve-export.json";
 /// The recorded provenance of an export: which layer produced it, that layer's
 /// signed-manifest digest (the join key), and which export shape it is.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
+// A reader must not drop a field it does not know and call the stamp pure
+// (REQ-PASSTHROUGH-001): a future reader meeting a newer stamp fails closed.
+#[serde(deny_unknown_fields)]
 pub struct ExportStamp {
     /// The layer identity, e.g. `2026.08.0`.
     pub layer: String,
@@ -59,6 +62,20 @@ pub struct ExportStamp {
     /// Every file in the export except the stamp, sorted by path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<FileEntry>,
+    /// The tools the producing session allowed to run from PATH through a shim
+    /// (`["*"]` or names; REQ-PASSTHROUGH-001 clause 4). Absent for a session
+    /// that allowed none, so a pure export's stamp is byte-for-byte what it was.
+    /// It says what the SESSION permitted, not that anything ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ambient_tools: Vec<String>,
+}
+
+impl ExportStamp {
+    /// Record the ambient tools the producing session allowed.
+    pub fn with_ambient_tools(mut self, ambient_tools: Vec<String>) -> Self {
+        self.ambient_tools = ambient_tools;
+        self
+    }
 }
 
 /// One exported file: its path relative to the export root (`/`-separated) and
@@ -230,6 +247,7 @@ pub fn stamp_for(
         kind: kind.to_string(),
         content_digest: Some(tree_digest(&files)),
         files,
+        ambient_tools: Vec::new(),
     })
 }
 
@@ -359,7 +377,37 @@ mod tests {
             kind: "cargo".into(),
             content_digest: None,
             files: Vec::new(),
+            ambient_tools: Vec::new(),
         }
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn ambient_tools_round_trip_and_a_pure_stamp_never_mentions_them() {
+        let pure = serde_json::to_string(&sample()).unwrap();
+        assert!(!pure.contains("ambient_tools"), "{pure}");
+        let amb = sample().with_ambient_tools(vec!["ghost".into()]);
+        assert_eq!(amb.ambient_tools, ["ghost"]);
+        let text = serde_json::to_string(&amb).unwrap();
+        assert!(text.contains("\"ambient_tools\":[\"ghost\"]"), "{text}");
+        assert_eq!(serde_json::from_str::<ExportStamp>(&text).unwrap(), amb);
+        // A stamp from before the field parses as pure.
+        assert!(
+            serde_json::from_str::<ExportStamp>(&pure)
+                .unwrap()
+                .ambient_tools
+                .is_empty()
+        );
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn a_stamp_with_a_field_this_reader_does_not_know_is_refused() {
+        // A newer stamp's extra field must not be dropped and the stamp called
+        // pure: this is what keeps FUTURE readers fail-closed.
+        let mut v = serde_json::to_value(sample()).unwrap();
+        v["something_newer"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ExportStamp>(v).is_err());
     }
 
     fn put(dir: &Path, rel: &str, bytes: &[u8]) {

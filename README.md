@@ -244,7 +244,7 @@ projects is `cd`.
   checked-in file, reviewed like any other change. A background updater would be a
   defect, not a feature.
 - **No silent fallback.** If a pinned layer is missing, `varve` fails and tells you
-  how to install it. It never runs "whatever else is on `PATH`".
+  how to install it. It never runs "whatever else is on `PATH`" unless you opt in, from a file outside every repository, per tool, and it says so on every run (`varve docs shim`).
 - **No server of our own.** An OCI registry is the transport. Access control, when
   it is ever needed, is registry authentication — see below.
 
