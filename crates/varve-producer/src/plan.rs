@@ -209,6 +209,13 @@ pub enum PlanError {
     OptInWithSums {
         tool: String,
     },
+    /// An `unbound-release-reason` on an entry that also declares `pgp-sums`:
+    /// a signed list names a signer, and a waived name binding would let that
+    /// signature stand for a release it was never bound to
+    /// (REQ-SIGNEDSUMS-001 clause 7 refuses an unbound list unconditionally).
+    UnboundWithPgpSums {
+        tool: String,
+    },
     /// The payload's `version` and the release tag it is fetched under name
     /// different releases, so a name carrying either could belong to another.
     VersionReleaseMismatch {
@@ -310,6 +317,15 @@ impl std::fmt::Display for PlanError {
                  the release, the other names a list that does. An opt-in must never exempt \
                  an entry from the release-binding checks of a proof it also declares. Drop \
                  `unverified-reason`, or drop the list."
+            ),
+            PlanError::UnboundWithPgpSums { tool } => write!(
+                f,
+                "{tool:?} carries `unbound-release-reason` and also declares `pgp-sums`. A \
+                 signed digest list is bound to its release by name without exception: the \
+                 signature says who published the digests, not which release they belong to, \
+                 and a waiver would let an older release's signed list and bytes stand for \
+                 this one. Drop `unbound-release-reason` and name the release in the asset \
+                 templates (`%V` or `%R`), or drop `pgp-sums`."
             ),
             PlanError::VersionReleaseMismatch {
                 tool,
@@ -671,8 +687,8 @@ fn check_templates_bound(
 /// template for its layout) and every `asset-for` override.
 ///
 /// Not applied to an entry that is itself an unverified opt-in (it carries its
-/// own recorded exception), to one that states `unbound-release-reason`, or to
-/// a Rust channel (which binds through the channel manifest's own version).
+/// own recorded exception), to one that states `unbound-release-reason` (never
+/// together with `pgp-sums`, which is refused), or to a Rust channel (which binds through the channel manifest's own version).
 fn check_tool_binding(
     t: &ManifestTool,
     release: &str,
@@ -685,6 +701,12 @@ fn check_tool_binding(
     // that also declares a list: that combination is refused outright.
     if t.opt_in_reason().is_some() && (t.upstream_sums.is_some() || t.pgp_sums.is_some()) {
         return Err(PlanError::OptInWithSums {
+            tool: t.name.clone(),
+        });
+    }
+    // A signed list is never carried unbound: REQ-SIGNEDSUMS-001 clause 7.
+    if t.unbound_release_reason.is_some() && t.pgp_sums.is_some() {
+        return Err(PlanError::UnboundWithPgpSums {
             tool: t.name.clone(),
         });
     }
@@ -2806,6 +2828,54 @@ mod tests {
         )
         .expect_err("refuses");
         assert!(matches!(err, PlanError::OptInWithSums { .. }), "{err}");
+    }
+
+    /// REQ-SIGNEDSUMS-001 clause 7: pgp-sums is refused when an asset template
+    /// names no version, and a recorded `unbound-release-reason` is no way
+    /// round that. A signed list claims a signer; a waiver would let it vouch
+    /// for a release it was not bound to.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_unbound_release_reason_with_pgp_sums_is_refused_at_plan_time() {
+        let err = bare_tool(
+            "1.2.3",
+            "t-%T.tar.gz",
+            "pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n\
+             unbound-release-reason = \"x\"\n",
+        )
+        .expect_err("a waiver must not unbind a signed list");
+        assert!(matches!(err, PlanError::UnboundWithPgpSums { .. }), "{err}");
+        let said = err.to_string();
+        assert!(
+            said.contains("unbound-release-reason") && said.contains("pgp-sums"),
+            "{said}"
+        );
+        // Not only the versionless template: the combination itself is refused,
+        // even where the name carries the version.
+        assert!(
+            bare_tool(
+                "1.2.3",
+                "t-%V-%T.tar.gz",
+                "pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n\
+                 unbound-release-reason = \"x\"\n",
+            )
+            .is_err()
+        );
+        // A versioned pgp-sums entry without the waiver still plans.
+        bare_tool(
+            "1.2.3",
+            "t-%V-%T.tar.gz",
+            "pgp-sums = \"SUMS-%V\"\npgp-key-file = \"k.asc\"\n",
+        )
+        .expect("a bound pgp-sums entry plans");
+        // upstream-sums keeps the waiver: an unsigned list claims no signer,
+        // and the annotation states that its name binding was waived.
+        bare_tool(
+            "1.2.3",
+            "t-%T.tar.gz",
+            "upstream-sums = \"sha256.sum\"\nunbound-release-reason = \"x\"\n",
+        )
+        .expect("an unsigned list may be carried unbound, recorded");
     }
 
     /// A version and a release tag that name different releases are refused,

@@ -99,6 +99,10 @@ warning at `plan` and `deposit`, and is signed into the layer: the entry's
 `WAIVED`, and gives the reason in the operator's words, so a consumer reads that this entry's proof does not say which
 release it is. It is per entry, never inherited, and an empty reason is refused. It is accepted
 on `[[tool]]`, `[[docs]]` and `[[crate]]` entries.
+It is refused together with `pgp-sums` (at `plan`, and ingestion never skips the
+name check for a signed list): a signed list is bound by name unconditionally.
+With `upstream-sums` it is accepted, because an unsigned list claims no signer
+and the proof annotation says the name binding was waived.
 It can only be written in `layer.toml`; the environment encoding refuses it. It
 does not weaken the cosign identity check or the build-provenance subject-name match.
 

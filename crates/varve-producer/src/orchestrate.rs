@@ -785,7 +785,8 @@ fn check_group_agrees(
 /// shown that version and tag to name the same release.
 ///
 /// Skipped only for (a) an entry that states `unbound-release-reason`, a
-/// recorded waiver, (b) a release that was actually accepted as
+/// recorded waiver (never for a signed list: `pgp-sums` is bound by name
+/// unconditionally), (b) a release that was actually accepted as
 /// [`Mechanism::Unverified`], which is its own recorded exception, and (c) a
 /// Rust channel, which binds through the channel manifest's own version. An
 /// `unverified-reason` on an entry whose release resolves to a signed or listed
@@ -805,7 +806,12 @@ fn check_assets_are_bound(
     }
     for i in idxs {
         let p = &plans[*i];
-        if p.unbound_release_reason.is_some() {
+        // The waiver never reaches a signed list: the plan refuses the
+        // combination, and a plan that got here anyway is held to the name.
+        if p.unbound_release_reason.is_some()
+            && p.pgp_sums.is_none()
+            && mechanism != Mechanism::PgpSums
+        {
             continue;
         }
         if p.pgp_sums
@@ -3826,6 +3832,22 @@ mod tests {
                 "{rung}: the binding was waived, and the record says so: {asserts}"
             );
         }
+    }
+
+    /// Ingestion never skips the name check for a signed list, whatever the
+    /// plan says: a plan that reached `run` with `unbound-release-reason` and
+    /// `pgp-sums` (the plan refuses it) is still refused for a versionless name.
+    // rivet: verifies REQ-SIGNEDSUMS-001
+    #[test]
+    fn an_unbound_release_reason_never_waives_the_name_check_of_a_signed_list() {
+        let (f, pgp, _) = good_pgp_release(&[("a.tar.gz", A)]);
+        let mut p = pgp_plan("a.tar.gz", pgp.key_path());
+        p.unbound_release_reason = Some("x".into());
+        let e = run_pgp(&f, &[p], &BTreeMap::new()).expect_err("refused at ingestion");
+        assert!(
+            matches!(e, RunError::AssetNotBoundToRelease { .. }),
+            "{e:?}"
+        );
     }
 
     /// An `unverified-reason` on an entry whose release then resolves to a
