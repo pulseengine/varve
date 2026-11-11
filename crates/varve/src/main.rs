@@ -860,7 +860,7 @@ fn run() -> anyhow::Result<Outcome> {
         // `varve-bin` turned `varve-bin outdated` into "run the tool
         // varve-bin", and the only thing it said was "layer … is not
         // installed" (covalent-layers, 2026-10-14). True, and no help.
-        run_tool(&store, None, &tool, &rest).with_context(|| {
+        run_tool(&store, None, &tool, &rest, true).with_context(|| {
             let hint = if tool.starts_with("varve") {
                 " If you meant varve itself, name the binary 'varve'."
             } else {
@@ -911,7 +911,7 @@ fn run() -> anyhow::Result<Outcome> {
             let tool = tool
                 .to_str()
                 .context("tool name must be valid UTF-8 — it names an entry in the layer")?;
-            run_tool(&store, varve.as_deref(), tool, args)
+            run_tool(&store, varve.as_deref(), tool, args, false)
         }
         Cmd::Deposit {
             spec,
@@ -1503,6 +1503,7 @@ fn status(
         );
     }
     let verdict = doc.report_for(&pin.layer);
+    let ambient = ambient_report(&ctx);
     if json {
         println!(
             "{}",
@@ -1520,6 +1521,9 @@ fn status(
                 "support_standing": support_standing_json(verdict.support_until.as_deref()),
                 "known_problems": verdict.problems_total,
                 "known_problems_with_workaround": verdict.problems_with_workaround,
+                // REQ-PASSTHROUGH-001 clause 4: always present, so a script
+                // can tell "none allowed" from "this varve predates the field".
+                "ambient_tools": ambient.json,
                 "exit_code": if verdict.yanked_reason.is_some() {
                     Outcome::Yanked.code()
                 } else {
@@ -1553,6 +1557,9 @@ fn status(
             "  {} known problem(s) affect this layer, {} with workarounds",
             verdict.problems_total, verdict.problems_with_workaround
         );
+        for line in ambient.lines {
+            println!("{line}");
+        }
     }
     // The verdict IS the exit code (REQ-CIGATE-001). Note it is not an error:
     // stderr stays empty and the report above is complete, because varve
@@ -2066,11 +2073,142 @@ fn addressable(resolved: &varve_core::Resolved) -> String {
     }
 }
 
+/// The user-level configuration, read from the environment this process was
+/// started in (REQ-PASSTHROUGH-001). A file inside the repository is a
+/// problem, not a grant; so is one that does not parse.
+fn user_passthrough() -> Result<varve_core::shimfallback::UserPassthrough, String> {
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("cannot determine working directory: {e}"))?;
+    varve_core::shimfallback::load(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+        &cwd,
+    )
+    .map_err(|p| p.to_string())
+}
+
+/// What this session lets a shim run from PATH: `["*"]`, the tool names, or
+/// nothing. A configuration that is not in effect (in the repository, invalid)
+/// allows nothing, so nothing is recorded for it. Used by `verify`, exports
+/// and attestations so all of them say the same thing (clause 4).
+fn ambient_policy() -> Vec<String> {
+    user_passthrough()
+        .map(|p| p.allow.recorded())
+        .unwrap_or_default()
+}
+
+/// What `varve status` says about passthrough (REQ-PASSTHROUGH-001 clause 4):
+/// the same facts as JSON and as text lines.
+struct AmbientReport {
+    json: serde_json::Value,
+    lines: Vec<String>,
+}
+
+fn ambient_report(ctx: &ProjectCtx) -> AmbientReport {
+    let user = user_passthrough();
+    let (allowed, source, problem) = match &user {
+        Ok(u) => (u.allow.recorded(), u.source.clone(), None),
+        Err(p) => (Vec::new(), None, Some(p.clone())),
+    };
+    // Which names the layer carries decides which passthroughs are inert: a
+    // carried tool is never passed through, whatever the file says.
+    let mut carried: Vec<String> = Vec::new();
+    if let Ok(resolved) = varve_core::resolve(&ctx.pin, &ctx.store) {
+        carried.extend(resolved.tools.iter().map(|(n, _)| n.clone()));
+        carried.extend(resolved.qualified.iter().map(|(p, _)| p.tool.clone()));
+    }
+    let shim_dir = ctx.base_root.join("shims");
+    let shim_names: Vec<String> = std::fs::read_dir(&shim_dir)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let me = std::env::current_exe().ok();
+    let active = match &user {
+        Ok(u) => varve_core::shimfallback::active(
+            &u.allow,
+            &carried,
+            &shim_names,
+            std::env::var_os("PATH").as_deref(),
+            &shim_dir,
+            me.as_deref(),
+        ),
+        Err(_) => Vec::new(),
+    };
+    let json = serde_json::json!({
+        "allowed": allowed,
+        "source": source.as_ref().map(|p| p.display().to_string()),
+        "problem": problem,
+        "active": active.iter().map(|a| serde_json::json!({
+            "tool": a.tool,
+            "binary": a.binary.as_ref().map(|b| b.display().to_string()),
+        })).collect::<Vec<_>>(),
+    });
+    let mut lines = Vec::new();
+    if let Some(p) = &problem {
+        lines.push(format!("  shim passthrough is NOT in effect: {p}"));
+    }
+    if !allowed.is_empty() {
+        lines.push(format!(
+            "  shim passthrough allowed by {}: {}",
+            source
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "the user configuration".to_string()),
+            varve_core::shimfallback::describe_allow(&allowed)
+        ));
+        for a in &active {
+            lines.push(match &a.binary {
+                Some(b) => format!("    {} runs {} outside the layer", a.tool, b.display()),
+                None => format!(
+                    "    {}: nothing on PATH answers to this name, so its shim still refuses",
+                    a.tool
+                ),
+            });
+        }
+    }
+    AmbientReport { json, lines }
+}
+
+/// The sentence a record of ambient tools reads as, with a leading newline, or
+/// nothing when none were allowed. `who` names the session that recorded it.
+fn ambient_sentence(recorded: &[String], who: &str) -> String {
+    if recorded.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\nnote: ambient tools were allowed in {who}: {}. A shim there could run a binary \
+         from PATH outside the pinned layer, and varve does not vouch for what such a binary \
+         did.",
+        varve_core::shimfallback::describe_allow(recorded)
+    )
+}
+
+/// Replace this process with `cmd` (unix), or run it and exit with its status.
+fn launch(mut cmd: std::process::Command, tool: &str) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec: varve leaves the picture entirely; the tool IS the process.
+        Err(anyhow::Error::from(cmd.exec()).context(format!("failed to exec {tool}")))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = cmd
+            .status()
+            .with_context(|| format!("failed to run {tool}"))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
 fn run_tool(
     store: &Store,
     override_layer: Option<&str>,
     tool: &str,
     args: &[std::ffi::OsString],
+    via_shim: bool,
 ) -> anyhow::Result<()> {
     let ctx = dispatch_ctx(store)?;
     // Kept before the move: a refusal below names the pin that caused it, and
@@ -2116,6 +2254,44 @@ fn run_tool(
         // and runs nothing — an ambient binary never executes through varve —
         // but a refusal that hides the tool installed next door, or the layer
         // that carries it, sends people to edit PATH, which shadows the layer.
+        //
+        // The one exception is the user's own opt-in (REQ-PASSTHROUGH-001):
+        // only for a SHIM (`varve run` never passes through), only when the
+        // layer carries no provider of the name at all, and only when a file
+        // outside every repository says so. The layer is asked first, so a
+        // carried tool never even reads that file.
+        let mut config_note = String::new();
+        let carried = resolved.qualified.iter().any(|(p, _)| p.tool == tool);
+        if via_shim && override_layer.is_none() && !carried {
+            match user_passthrough() {
+                Ok(user) if user.allow.permits(tool) => {
+                    let me = std::env::current_exe().ok();
+                    if let Some(binary) = varve_core::shimfallback::ambient_binary(
+                        std::env::var_os("PATH").as_deref(),
+                        tool,
+                        &store.root().join("shims"),
+                        me.as_deref(),
+                    ) {
+                        eprintln!(
+                            "{}",
+                            varve_core::shimfallback::notice(
+                                tool,
+                                &binary,
+                                &resolved.layer.layer.to_string(),
+                                user.source.as_deref(),
+                            )
+                        );
+                        // No VARVE_LAYER*: the tool is not the layer's, and
+                        // saying otherwise would be the lie this prevents.
+                        let mut cmd = std::process::Command::new(binary);
+                        cmd.args(args);
+                        return launch(cmd, tool);
+                    }
+                }
+                Ok(_) => {}
+                Err(problem) => config_note = format!("\nNote: {problem}."),
+            }
+        }
         let args_quoted = args
             .iter()
             .map(|a| varve_core::shellquote::quote_sh(&a.to_string_lossy()))
@@ -2139,7 +2315,7 @@ fn run_tool(
              This directory is pinned by {}{}, which is why '{tool}' does not \
              resolve here even though a shim for it exists (one shim directory \
              serves every realm). `varve inspect` lists every payload in the \
-             pinned layer; `varve docs pins` explains switching.\n{options}",
+             pinned layer; `varve docs pins` explains switching.\n{options}{config_note}",
             resolved.layer.layer,
             addressable(&resolved),
             pin_file.display(),
@@ -2175,19 +2351,7 @@ fn run_tool(
     };
     cmd.env("VARVE_LAYER", resolved.layer.layer.to_string())
         .env("VARVE_LAYER_MANIFEST_DIGEST", &resolved.layer.digest);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // exec: varve leaves the picture entirely; the tool IS the process.
-        Err(anyhow::Error::from(cmd.exec()).context(format!("failed to exec {tool}")))
-    }
-    #[cfg(not(unix))]
-    {
-        let status = cmd
-            .status()
-            .with_context(|| format!("failed to run {tool}"))?;
-        std::process::exit(status.code().unwrap_or(1));
-    }
+    launch(cmd, tool)
 }
 
 /// Resolve which installed layer an export targets, and verify it (trust
@@ -2494,8 +2658,11 @@ fn write_export_stamp(
 ) -> anyhow::Result<()> {
     // Scanned AFTER the adapter finished writing: the stamp records the tree
     // as it now is, which is what `verify --export` re-hashes (varve#288).
+    // The session's ambient-tool policy is part of the provenance: an export
+    // made where shims could run PATH binaries says so (REQ-PASSTHROUGH-001).
     let stamp =
-        varve_core::exportstamp::stamp_for(out, &entry.layer.to_string(), &entry.digest, kind)?;
+        varve_core::exportstamp::stamp_for(out, &entry.layer.to_string(), &entry.digest, kind)?
+            .with_ambient_tools(ambient_policy());
     varve_core::exportstamp::write_stamp(out, &stamp)?;
     println!(
         "stamped {} — export bound to layer {} ({}); `varve verify --export {}` checks it",
@@ -2866,7 +3033,8 @@ fn sign_attestation(
         kind,
         &bytes,
         producer,
-    );
+    )
+    .with_ambient_tools(ambient_policy());
     let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Layer)?;
     let key_id = signer.realm_key_id();
     let key_id = key_id.as_str();
@@ -2953,7 +3121,8 @@ fn check_attestation(
          \u{20}\u{20}bound to layer     : {layer} ({ldigest})\n\
          note: varve verified the ASSOCIATION and the bytes' integrity, and re-verified the \
          layer itself. Any claim {producer} makes INSIDE the document is verified with \
-         {producer}'s own key, not this one.",
+         {producer}'s own key, not this one.{ambient}",
+        ambient = ambient_sentence(&st.ambient_tools, "the signing session"),
         kind = st.kind,
         producer = st.producer,
         n = bytes.len(),
@@ -4735,6 +4904,17 @@ fn verify(
     let ctx = project_ctx(store)?;
     let verifier = ctx_verifier(&ctx)?;
     let store = &ctx.store;
+    // Record, never fail (REQ-PASSTHROUGH-001 clause 4): a session that lets a
+    // shim run PATH binaries can still verify the layer, but a CI log that
+    // shows "verified" should also show that this was not a pure session.
+    let ambient = ambient_policy();
+    if !ambient.is_empty() {
+        println!(
+            "ambient tools allowed in this session: {} (user configuration; a shim may run a \
+             binary from PATH outside the layer — the layer is verified, those binaries are not)",
+            varve_core::shimfallback::describe_allow(&ambient)
+        );
+    }
     if all {
         // REQ-VERIFYALL-001: EVERY partition, each layer against ITS OWN
         // realm's root. `--help` has always promised "every installed layer";
@@ -5407,9 +5587,13 @@ fn verify_declared_exports(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()
         let status = varve_core::check_declared_export(decl, &ctx.root, &current);
         match status {
             varve_core::DeclaredExportStatus::Current => println!(
-                "declared export {} ({}) — fresh: bound to the layer the pin resolves",
+                "declared export {} ({}) — fresh: bound to the layer the pin resolves{}",
                 dir.display(),
-                decl.kind
+                decl.kind,
+                // Current means the stamp was readable a moment ago.
+                varve_core::exportstamp::read_stamp(&dir)
+                    .map(|s| ambient_sentence(&s.ambient_tools, "the session that produced it"))
+                    .unwrap_or_default()
             ),
             varve_core::DeclaredExportStatus::Missing => faults.push(format!(
                 "{} ({}) — MISSING: varve.toml declares this export and there is no \
@@ -5494,11 +5678,12 @@ fn verify_exports(current_digest: &str, exports: &[PathBuf]) -> anyhow::Result<(
         // re-hash it (varve#288).
         match verify_content(dir, &stamp)? {
             ContentStatus::Intact => println!(
-                "export {} — fresh: bound to layer {} ({}); {} file(s) unchanged",
+                "export {} — fresh: bound to layer {} ({}); {} file(s) unchanged{}",
                 dir.display(),
                 stamp.layer,
                 stamp.kind,
-                stamp.files.len()
+                stamp.files.len(),
+                ambient_sentence(&stamp.ambient_tools, "the session that produced it")
             ),
             ContentStatus::Unverifiable => {
                 eprintln!(

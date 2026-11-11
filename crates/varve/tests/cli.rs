@@ -101,7 +101,18 @@ fn varve(fx: &Fixture) -> Command {
     // the check doing its job; a suite whose result depends on what the person
     // running it happens to have installed is the defect.
     cmd.env("PATH", "/usr/bin:/bin");
+    hermetic_user_config(&mut cmd, fx);
     cmd
+}
+
+/// Point the USER-level configuration at a directory that holds none
+/// (REQ-PASSTHROUGH-001). Without it a developer's real
+/// `~/.config/varve/config.toml` listing `*` would turn the refusal tests red
+/// on one machine and green on another: the failure the PATH note above
+/// describes, in a new place.
+fn hermetic_user_config(cmd: &mut Command, fx: &Fixture) {
+    let none = fx.root.with_file_name("no-user-config");
+    cmd.env("XDG_CONFIG_HOME", &none).env("HOME", &none);
 }
 
 // rivet: verifies REQ-SHADOW-001
@@ -8881,6 +8892,8 @@ fn the_shim_directory_on_path_is_not_offered_as_the_way_around_itself() {
         .env("VARVE_ROOT", &fx.root)
         .env("VARVE_TRUST_ROOT", fixture_root_key(&fx))
         .env("PATH", format!("{}:/usr/bin:/bin", shims.display()))
+        .env("HOME", fx.root.with_file_name("no-user-config"))
+        .env("XDG_CONFIG_HOME", fx.root.with_file_name("no-user-config"))
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
@@ -8908,6 +8921,469 @@ fn a_refused_tool_nothing_provides_says_so_and_still_exits_1() {
     );
     assert!(!stderr.contains("Options"), "{stderr}");
     assert!(!marker.exists());
+}
+
+// ---------------------------------------------------------------------------
+// shim passthrough (REQ-PASSTHROUGH-001)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn write_executable(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A USER-level config (outside the repository) with `body`; returns the
+/// directory to name as XDG_CONFIG_HOME.
+fn user_config(fx: &Fixture, body: &str) -> std::path::PathBuf {
+    let xdg = fx.root.with_file_name("user-xdg");
+    std::fs::create_dir_all(xdg.join("varve")).unwrap();
+    std::fs::write(xdg.join("varve/config.toml"), body).unwrap();
+    xdg
+}
+
+/// Launch the shim for `tool` as a shell would: by its own path, with `path`
+/// as PATH and `xdg` as the user config home.
+#[cfg(unix)]
+fn run_shim(
+    fx: &Fixture,
+    tool: &str,
+    path: &str,
+    xdg: Option<&std::path::Path>,
+    args: &[&str],
+) -> std::process::Output {
+    let mut cmd = std::process::Command::new(fx.root.join("shims").join(tool));
+    cmd.current_dir(&fx.project)
+        .env("VARVE_ROOT", &fx.root)
+        .env("VARVE_TRUST_ROOT", fixture_root_key(fx))
+        .env("PATH", path)
+        .args(args);
+    let none = fx.root.with_file_name("no-user-config");
+    cmd.env("HOME", &none).env(
+        "XDG_CONFIG_HOME",
+        xdg.map(|p| p.to_path_buf()).unwrap_or(none),
+    );
+    cmd.output().unwrap()
+}
+
+#[cfg(unix)]
+fn install_shims(fx: &Fixture, tools: &[&str]) {
+    let mut cmd = varve(fx);
+    cmd.args(["shim", "install"]);
+    for t in tools {
+        cmd.args(["--tool", t]);
+    }
+    cmd.assert().success();
+}
+
+/// The July fixture plus `ghost` on a PATH directory that prints to STDOUT only
+/// (so stderr is exactly what varve said) and exits 7.
+#[cfg(unix)]
+fn passthrough_fixture() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
+    let (fx, bin, marker) = shim_fallback_fixture();
+    write_executable(
+        &bin.join("ghost"),
+        &format!(
+            "#!/bin/sh\necho ran > {}\necho \"ghost-out:$*\"\nexit 7\n",
+            marker.display()
+        ),
+    );
+    install_shims(&fx, &["ghost"]);
+    (fx, bin, marker)
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_listed_tool_the_layer_lacks_runs_from_path_and_says_so_once() {
+    let (fx, bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"ghost\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &["--version", "x y"]);
+    // The exit code and stdout are the ambient tool's, untouched.
+    assert_eq!(out.status.code(), Some(7), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "ghost-out:--version x y\n"
+    );
+    assert!(marker.exists(), "the ambient binary did not run");
+    // Clause 3: exactly ONE line, naming the binary and that it left the layer.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.contains(&bin.join("ghost").display().to_string()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("outside the layer"), "{stderr}");
+    assert!(stderr.starts_with("varve: passthrough:"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn star_never_lets_a_path_binary_replace_one_the_layer_carries() {
+    // Clause 2, and REQ-SHADOW-001 with it: `*` is the widest grant there is,
+    // and the layer's `probe` still wins over a different `probe` on PATH.
+    let fx = fixture(
+        Some(PIN_JULY),
+        &[(
+            MANIFEST_JULY,
+            &[("probe", b"#!/bin/sh\necho layer-probe\n".as_slice())],
+        )],
+    );
+    let bin = fx.root.with_file_name("ambient-bin");
+    write_executable(&bin.join("probe"), "#!/bin/sh\necho ambient-probe\n");
+    install_shims(&fx, &["probe"]);
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "probe", &path, Some(&xdg), &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim(), "layer-probe", "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("passthrough:"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn without_the_user_config_the_shim_refuses_exactly_as_before() {
+    // Clause 5.
+    let (fx, bin, marker) = passthrough_fixture();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "ghost", &path, None, &[]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("is not part of layer"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("on PATH at {}", bin.join("ghost").display())),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("passthrough:"), "{stderr}");
+    assert!(!marker.exists(), "an ambient binary ran without consent");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_config_that_lists_other_tools_does_not_pass_this_one_through() {
+    let (fx, bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"somethingelse\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!marker.exists());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is not part of layer"));
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn star_passes_any_tool_the_layer_lacks() {
+    let (fx, bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    assert_eq!(out.status.code(), Some(7), "{out:?}");
+    assert!(marker.exists());
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[test]
+fn a_varve_toml_key_cannot_enable_passthrough() {
+    // Clause 1: a repository cannot switch this on for everyone.
+    for pin in [
+        format!("{PIN_JULY}\n[shim]\npassthrough = [\"*\"]\n"),
+        PIN_JULY.replace("\nlayer", "\npassthrough = [\"*\"]\nlayer"),
+    ] {
+        let fx = fixture(
+            Some(&pin),
+            &[(MANIFEST_JULY, &[("probe", b"#!/bin/sh\n".as_slice())])],
+        );
+        varve(&fx)
+            .args(["which", "probe"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("unknown field"));
+    }
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_config_inside_the_repository_is_ignored() {
+    // Clause 1: XDG_CONFIG_HOME is an environment variable a repository's own
+    // `.envrc` can set. A file inside the repository is the repository
+    // speaking, whatever path variable pointed at it.
+    let (fx, bin, marker) = passthrough_fixture();
+    let in_repo = fx.project.join(".cfg");
+    std::fs::create_dir_all(in_repo.join("varve")).unwrap();
+    std::fs::write(
+        in_repo.join("varve/config.toml"),
+        "[shim]\npassthrough = [\"*\"]\n",
+    )
+    .unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "ghost", &path, Some(&in_repo), &[]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!marker.exists(), "a repository enabled passthrough");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("is not part of layer"), "{stderr}");
+    assert!(stderr.contains("inside the repository"), "{stderr}");
+    // Reached through a symlink, it is still the repository's file.
+    let link = fx.root.with_file_name("sneaky-xdg");
+    std::os::unix::fs::symlink(&in_repo, &link).unwrap();
+    let out = run_shim(&fx, "ghost", &path, Some(&link), &[]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!marker.exists(), "a symlink laundered a repository config");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_relative_config_home_is_not_a_user_level_location() {
+    // XDG: a relative XDG_CONFIG_HOME is invalid and must be ignored. It would
+    // otherwise resolve against the working directory — the repository.
+    let (fx, bin, marker) = passthrough_fixture();
+    std::fs::create_dir_all(fx.project.join("rel/varve")).unwrap();
+    std::fs::write(
+        fx.project.join("rel/varve/config.toml"),
+        "[shim]\npassthrough = [\"*\"]\n",
+    )
+    .unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "ghost", &path, Some(std::path::Path::new("rel")), &[]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!marker.exists());
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_malformed_user_config_refuses_and_says_why() {
+    let (fx, bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthru = [\"ghost\"]\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!marker.exists());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("config.toml"), "{stderr}");
+    assert!(stderr.contains("unknown field"), "{stderr}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn a_path_whose_only_match_is_a_shim_refuses_instead_of_looping() {
+    let (fx, _bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    // Another root's shim directory: a different path to the same varve.
+    let other = fx.root.with_file_name("other-shims");
+    std::fs::create_dir_all(&other).unwrap();
+    std::os::unix::fs::symlink(assert_cmd::cargo::cargo_bin("varve"), other.join("ghost")).unwrap();
+    let path = format!(
+        "{}:{}:/usr/bin:/bin",
+        fx.root.join("shims").display(),
+        other.display()
+    );
+    let out = run_shim(&fx, "ghost", &path, Some(&xdg), &[]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("is not part of layer"), "{stderr}");
+    assert!(!stderr.contains("passthrough:"), "{stderr}");
+    assert!(!marker.exists());
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn varve_run_never_passes_through_only_shims_do() {
+    let (fx, bin, marker) = passthrough_fixture();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"*\"]\n");
+    let out = varve(&fx)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("XDG_CONFIG_HOME", &xdg)
+        .args(["run", "ghost"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!marker.exists());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is not part of layer"));
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[cfg(unix)]
+#[test]
+fn status_lists_the_active_passthroughs() {
+    // Clause 4. `status` is a gate and a yanked layer exits 3; the report is
+    // what is under test.
+    let fx = fixture(Some(PIN_JULY), &[]);
+    let (trust, envelope) = yanked_project(&fx);
+    let bin = fx.root.with_file_name("ambient-bin");
+    write_executable(&bin.join("ghost"), "#!/bin/sh\n");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    // No config: nothing allowed, and the JSON says so.
+    let out = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .env("PATH", &path)
+        .args(["status", "--json", "--from-file"])
+        .arg(&envelope)
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ambient_tools"]["allowed"], serde_json::json!([]), "{v}");
+    assert_eq!(v["ambient_tools"]["active"], serde_json::json!([]), "{v}");
+    let text = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .env("PATH", &path)
+        .arg("status")
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&text.stdout).contains("passthrough"));
+
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"ghost\", \"absent\"]\n");
+    let out = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .env("PATH", &path)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .args(["status", "--json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["ambient_tools"]["allowed"],
+        serde_json::json!(["absent", "ghost"]),
+        "{v}"
+    );
+    let active = v["ambient_tools"]["active"].as_array().unwrap();
+    assert_eq!(active.len(), 2, "{v}");
+    assert_eq!(active[1]["tool"], "ghost");
+    assert_eq!(active[1]["binary"], bin.join("ghost").display().to_string());
+    assert_eq!(active[0]["tool"], "absent");
+    assert!(active[0]["binary"].is_null());
+    let text = varve(&fx)
+        .env("VARVE_TRUST_ROOT", &trust)
+        .env("PATH", &path)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .arg("status")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains("passthrough"), "{stdout}");
+    assert!(stdout.contains(&bin.join("ghost").display().to_string()));
+    assert!(stdout.contains("absent"), "{stdout}");
+}
+
+// rivet: verifies REQ-PASSTHROUGH-001
+#[test]
+fn verify_exports_and_attestations_record_that_ambient_tools_were_allowed() {
+    let (fx, root) = layer_for_every_adapter();
+    let parent = fx.project.parent().unwrap();
+    let xdg = user_config(&fx, "[shim]\npassthrough = [\"ghost\"]\n");
+
+    // A pure session: stamps carry no such field, verify says nothing.
+    let pure = parent.join("pure-vsix");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["export-vsix", "--layer", "2026.07.0", "--out"])
+        .arg(&pure)
+        .assert()
+        .success();
+    let stamp: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(pure.join(".varve-export.json")).unwrap()).unwrap();
+    assert!(stamp.get("ambient_tools").is_none(), "{stamp}");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ambient").not());
+
+    // An ambient session: the export says so, and so does verify.
+    let ambient = parent.join("ambient-vsix");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .args(["export-vsix", "--layer", "2026.07.0", "--out"])
+        .arg(&ambient)
+        .assert()
+        .success();
+    let stamp: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(ambient.join(".varve-export.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        stamp["ambient_tools"],
+        serde_json::json!(["ghost"]),
+        "{stamp}"
+    );
+    // The stamp is read back by verify, in a session that allowed nothing.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["verify", "--export"])
+        .arg(&ambient)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ambient tools were allowed"));
+    // And verify run in an ambient session records that of itself.
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .arg("verify")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ambient tools allowed")
+                .and(predicate::str::contains("ghost")),
+        );
+
+    // An attestation signed in an ambient session carries it, signed.
+    let sbom = parent.join("layer.cdx.json");
+    varve(&fx)
+        .env("VARVE_TRUST_ROOT", &root.trust_root)
+        .args(["sbom", "--out"])
+        .arg(&sbom)
+        .assert()
+        .success();
+    let sign = |xdg: Option<&std::path::Path>, out: &std::path::Path| {
+        let mut cmd = varve(&fx);
+        cmd.env("VARVE_TRUST_ROOT", &root.trust_root);
+        if let Some(x) = xdg {
+            cmd.env("XDG_CONFIG_HOME", x);
+        }
+        cmd.args([
+            "sign-attestation",
+            "--kind",
+            "sbom",
+            "--producer",
+            "varve",
+            "--file",
+        ])
+        .arg(&sbom)
+        .arg("--key")
+        .arg(&root.key)
+        .args(["--key-id", "test-root", "--out"])
+        .arg(out)
+        .assert()
+        .success();
+    };
+    let check = |stmt: &std::path::Path| {
+        varve(&fx)
+            .env("VARVE_TRUST_ROOT", &root.trust_root)
+            .args(["check-attestation", "--statement"])
+            .arg(stmt)
+            .arg("--file")
+            .arg(&sbom)
+            .assert()
+            .success()
+    };
+    let pure_stmt = parent.join("pure.statement");
+    sign(None, &pure_stmt);
+    check(&pure_stmt).stdout(predicate::str::contains("ambient").not());
+    let amb_stmt = parent.join("ambient.statement");
+    sign(Some(&xdg), &amb_stmt);
+    check(&amb_stmt).stdout(predicate::str::contains("ambient tools were allowed"));
 }
 
 // ---------------------------------------------------------------------------

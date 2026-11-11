@@ -68,6 +68,17 @@ path   = "before-shims"       # required with env; before-shims | after-shims
 
 **`select` does not shrink an export yet.** It parses and is validated, and no export adapter reads it: `varve export-vsix --out D` writes every extension in the layer whether or not the declaration names a subset, and `varve verify` reports that directory fresh. Declare it if you want the intent recorded; do not rely on it to keep a payload out. (`varve export-sdk --select <name>` is a *flag* on that one command and does work — it is what disambiguates a layer carrying several SDKs.)
 
+## config.toml — your user-level configuration
+
+Not committed, not in any repository: `$XDG_CONFIG_HOME/varve/config.toml` (absolute `XDG_CONFIG_HOME`), else `~/.config/varve/config.toml`. Unknown keys are errors. A file inside a repository is ignored.
+
+```toml
+[shim]
+passthrough = ["just"]   # tools the layer does not carry that a shim may run from PATH; ["*"] for any
+```
+
+A `varve.toml` cannot carry this key. See `varve docs shim` (REQ-PASSTHROUGH-001).
+
 ## varve-realms.toml — the trust universe
 
 Alongside the pin, found by the same upward walk. Nearest wins; definitions are not merged.
