@@ -245,6 +245,7 @@ impl<R: CommandRunner> Source for GhSource<R> {
             let bundle = self.download(repo, version, BUNDLE)?;
             let argv = gh::cosign_verify_argv(
                 &bundle.to_string_lossy(),
+                repo,
                 &forge.identity_regexp(repo, version),
                 &forge.oidc_issuer,
                 &sums.to_string_lossy(),
@@ -540,6 +541,9 @@ mod tests {
         inner: FakeGh,
         /// The signing workflow in the certificate.
         identity: String,
+        /// The repository the certificate says the workflow RAN in (the
+        /// caller's, for a reusable workflow).
+        run_in: String,
         /// The ref the attestation was built from.
         built_from: String,
         /// The attestation's subjects: (name, sha256 hex).
@@ -551,7 +555,9 @@ mod tests {
             if program == "cosign" {
                 let re = flag(args, "--certificate-identity-regexp").expect("an identity");
                 let re = regex::Regex::new(re).expect("the regexp compiles");
-                return if re.is_match(&self.identity) {
+                let ran_in_the_right_repo = flag(args, "--certificate-github-workflow-repository")
+                    .is_none_or(|want| want == self.run_in);
+                return if re.is_match(&self.identity) && ran_in_the_right_repo {
                     out(0, "Verified OK", "")
                 } else {
                     out(
@@ -612,6 +618,7 @@ mod tests {
                 .file(BUNDLE, b"bundle")
                 .file("one.tar.gz", b"payload"),
             identity: identity.into(),
+            run_in: "o/r".into(),
             built_from: built_from.into(),
             subjects: vec![(
                 "one.tar.gz".into(),
@@ -627,6 +634,11 @@ mod tests {
                 .iter()
                 .map(|(n, b)| (n.to_string(), crate::orchestrate::sha256_hex(b)))
                 .collect();
+            self
+        }
+        /// The repository the signing certificate says the workflow ran in.
+        fn running_in(mut self, repo: &str) -> Self {
+            self.run_in = repo.into();
             self
         }
         /// An asset the release serves under `name`.
@@ -692,6 +704,30 @@ mod tests {
             ),
             "a branch is not a release: {on_a_branch:?}"
         );
+    }
+
+    /// A reusable workflow of the upstream repository, called from ANOTHER
+    /// repository, yields a certificate whose workflow identity matches the
+    /// upstream's path and tag while the code that ran was the caller's. cosign
+    /// is told which repository the workflow must have run in.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn cosign_sums_signed_by_a_foreign_caller_of_the_workflow_are_refused() {
+        let listing = [SUMS, BUNDLE, "one.tar.gz"];
+        let foreign = ladder_at(
+            certified(&listing, SIGNED_AT_V1, "").running_in("evil/caller"),
+            "o/r",
+            "v1.0.0",
+        );
+        assert!(
+            matches!(
+                &foreign,
+                Err(crate::ingest::IngestError::ProofRejected { .. })
+            ),
+            "a certificate for a workflow run from another repository: {foreign:?}"
+        );
+        ladder_at(certified(&listing, SIGNED_AT_V1, ""), "o/r", "v1.0.0")
+            .expect("the repository's own run still verifies");
     }
 
     /// Verify a release the way a run does, then spend its proof on `bytes`

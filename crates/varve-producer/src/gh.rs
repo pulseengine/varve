@@ -196,11 +196,23 @@ pub fn attestation_verify_argv(file: &str, repo: &str) -> Vec<String> {
     ]
 }
 
-/// `cosign verify-blob --bundle … --certificate-identity-regexp … --certificate-oidc-issuer …`
+/// `cosign verify-blob --bundle … --certificate-identity-regexp … --certificate-oidc-issuer …
+/// --certificate-github-workflow-repository <owner>/<repo>`
+///
+/// The identity is the workflow's path, and a reusable workflow of the
+/// upstream repository called from ANOTHER repository carries the same path
+/// while running the caller's code. `--certificate-github-workflow-repository`
+/// pins the repository the workflow ran in.
 ///
 /// The identity and issuer come from the forge rather than being literals, so
 /// an enterprise instance is checked against its own authority.
-pub fn cosign_verify_argv(bundle: &str, identity: &str, issuer: &str, sums: &str) -> Vec<String> {
+pub fn cosign_verify_argv(
+    bundle: &str,
+    repo: &str,
+    identity: &str,
+    issuer: &str,
+    sums: &str,
+) -> Vec<String> {
     vec![
         "verify-blob".into(),
         "--bundle".into(),
@@ -209,6 +221,8 @@ pub fn cosign_verify_argv(bundle: &str, identity: &str, issuer: &str, sums: &str
         identity.into(),
         "--certificate-oidc-issuer".into(),
         issuer.into(),
+        "--certificate-github-workflow-repository".into(),
+        repo.into(),
         sums.into(),
     ]
 }
@@ -654,6 +668,7 @@ mod tests {
         let f = Forge::enterprise("ghe.example.com");
         let argv = cosign_verify_argv(
             "b.bundle",
+            "acme/tool",
             &f.identity_regexp("acme/tool", "v1.0.0"),
             &f.oidc_issuer,
             "SHA256SUMS.txt",
@@ -670,6 +685,11 @@ mod tests {
             "{joined}"
         );
         assert!(!joined.contains("githubusercontent"), "{joined}");
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--certificate-github-workflow-repository", "acme/tool"]),
+            "the caller repository of a reusable workflow must be pinned: {joined}"
+        );
     }
 
     /// `GH_HOST` is ALWAYS passed explicitly, including for public GitHub.

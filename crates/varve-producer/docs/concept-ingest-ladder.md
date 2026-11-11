@@ -26,7 +26,7 @@ therefore binds its proof to the release tag being ingested:
 
 | rung | binding |
 |---|---|
-| `cosign-sums` | the certificate identity must be the release tag's workflow: `^https://<host>/<owner>/<repo>/\.github/workflows/[^@]+@refs/tags/<tag>$`, with the host, repository and tag escaped. The repository's other workflows, other repositories, other tags and branches are refused. |
+| `cosign-sums` | the certificate identity must be the release tag's workflow: `^https://<host>/<owner>/<repo>/\.github/workflows/[^@]+@refs/tags/<tag>$`, with the host, repository and tag escaped. The repository's other workflows, other repositories, other tags and branches are refused. `--certificate-github-workflow-repository <owner>/<repo>` is passed too, so a reusable workflow of this repository called from another repository (same workflow path, the caller's code) is refused. |
 | `build-provenance` | `gh attestation verify --repo <repo>`, with **no** source-ref pin, and the attestation subject's name: the digest that vouches for an asset is the one of the subject whose name is that asset, and that name must carry the release (below). An attestation built from a branch is accepted when a subject names this release's asset with the matching digest; an older release's attestation names the older asset and cannot vouch for this release's. |
 | `pgp-sums` | the list and every asset name carry the release (see below), and a Rust channel's own version must match. |
 | `upstream-sums` | the asset names only. Nothing signed the list, so nothing else binds it. |
