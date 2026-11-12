@@ -6,6 +6,7 @@ Every variable varve reads, and which one wins.
 |---|---|---|
 | `VARVE_ROOT` | everything | `~/.varve` |
 | `VARVE_TRUST_ROOT` | verification, and `which` / `run` / the shims, when the pin names no realm | none — fails closed |
+| `XDG_CONFIG_HOME`, `HOME` | the user-level configuration (`varve/config.toml`, shim passthrough; see `varve docs shim`) — only a file outside every repository counts | `~/.config` |
 | `VARVE_REGISTRY_AUTH` | `oci://` pulls against a private registry | none |
 | `VARVE_UPDATE_API` | `varve self-update` only | the GitHub releases API |
 | `VARVE_INSTALL_DIR`, `VARVE_VERSION`, `VARVE_ALLOW_ROOT` | `install.sh` only, never the binary | `~/.varve/bin`, `latest`, refuse |

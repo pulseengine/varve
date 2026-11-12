@@ -68,6 +68,19 @@ path   = "before-shims"       # required with env; before-shims | after-shims
 
 **`select` does not shrink an export yet.** It parses and is validated, and no export adapter reads it: `varve export-vsix --out D` writes every extension in the layer whether or not the declaration names a subset, and `varve verify` reports that directory fresh. Declare it if you want the intent recorded; do not rely on it to keep a payload out. (`varve export-sdk --select <name>` is a *flag* on that one command and does work — it is what disambiguates a layer carrying several SDKs.)
 
+## config.toml — your user-level configuration
+
+Not committed, not in any repository: `$XDG_CONFIG_HOME/varve/config.toml` (absolute `XDG_CONFIG_HOME`), else `~/.config/varve/config.toml`. Unknown keys are errors. A file inside a repository (a directory holding `varve.toml`, `.git`, `.hg`, `.jj` or `.svn`) is ignored, so a version-controlled `$HOME` refuses the default location: point `XDG_CONFIG_HOME` at a directory outside it.
+
+```toml
+[shim]
+passthrough = ["just"]   # tools the layer does not carry that a shim may run from PATH; ["*"] for any
+```
+
+A `varve.toml` cannot carry this key. See `varve docs shim` (REQ-PASSTHROUGH-001).
+
+What a session allowed is recorded in exports and attestations. The export stamp is unsigned, so its ambient record can be stripped; the signed attestation is the durable record. A record reflects the configuration at the time the export ran or the statement was signed, not the configuration now.
+
 ## varve-realms.toml — the trust universe
 
 Alongside the pin, found by the same upward walk. Nearest wins; definitions are not merged.

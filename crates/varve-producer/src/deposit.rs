@@ -539,6 +539,7 @@ mod tests {
                 named_explicitly: false,
                 kind,
                 unverified_reason: None,
+                unbound_release_reason: None,
             },
             digest: "d".into(),
             accepted: crate::ingest::Accepted {
@@ -1586,6 +1587,7 @@ mod tests {
             named_explicitly: false,
             kind: PayloadKind::Tarball,
             unverified_reason: None,
+            unbound_release_reason: None,
         };
         let planned = vec![p("loom", "linux", "a"), p("loom", "darwin", "b")];
         let resolved = vec![Resolved {
@@ -1647,6 +1649,7 @@ mod tests {
             named_explicitly: named,
             kind: PayloadKind::Tarball,
             unverified_reason: None,
+            unbound_release_reason: None,
         };
         // Exactly 2026.09.18: darwin resolved from the default template,
         // linux was named through `asset-for` and never expanded.

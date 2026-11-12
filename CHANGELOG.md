@@ -1,14 +1,53 @@
 # Changelog
 
-## Unreleased
+## v0.47.0 — 2026-11-11
+
+*Every ingestion proof is bound to the release it is deposited for, a
+PGP-signed digest list is its own proof rung, and a shim may hand a tool the
+layer does not carry to PATH when the user's own config says so.*
+
+Scope chosen by the maintainer on 2026-11-07 (the lean cut): #331, #333,
+#246, #234, REQ-AGENTDOCS-005, REQ-SIGNEDSUMS-001 and clause 1 of
+REQ-VERIFYPAR-001; #286 was already fixed in v0.44.0. Added since: the
+release binding of every proof (#350), and shim passthrough (#349, #351),
+moved into v0.47.0 on 2026-11-11 because its code was already on main. The
+12 requirements planned for v0.47.0 that were not chosen moved to v0.48.0.
+
+### Upgrading: behaviour that changes
+
+- **Pinned upstreams must sign from their release tag** for the cosign rung.
+  ordeal v0.36.1, loom v1.5.1 and kiln v0.7.2 were released from their
+  tag-push runs for this, and pulseengine-layers#44 pins them. An entry whose
+  asset names carry no version (wsc and with-device in pulseengine-layers)
+  needs `unbound-release-reason`, which only this release's `varve-producer`
+  reads; the layers gain it when they move to v0.47.0.
+
+- A proof is now bound to the release it is ingested for, on every ingestion rung. `varve-producer` refuses an asset template (`asset` and every `asset-for` value, or the default template of the layout) that carries neither `%V` nor `%R`, and a version or release that does not name exactly one release (`latest`, `nightly`, `v4`, `3.x`), for every entry that is not an unverified opt-in; a payload `version` and its `release` tag must name the same release (a hub such as `with-device` 0.2.2 under `v0.7.2` needs the opt-out); an entry that combines `unverified-reason` with `pgp-sums` or `upstream-sums` is refused; an extension, document or crate entry is held to the same rule. The same check runs again at ingestion on each expanded asset name, after the release is verified, and an `unverified-reason` exempts nothing once a signed or listed rung vouches for the release. A layer manifest that used such a template now fails at `plan` and `deposit`. An upstream that really names its files with no version can be carried by stating why, per entry: `unbound-release-reason = "<why>"` lets the entry through at `plan` and is honoured at ingestion by mechanism: for `upstream-sums` and `unverified`, and for `cosign-sums` (its certificate identity is pinned to the release tag, provided the tag names exactly one release; a moving tag such as `nightly` is refused), but for `build-provenance` only when every statement for the asset was built from exactly the release tag (a versionless name under any other attestation is refused, because a signed proof cannot be bound to the release by name; with `pgp-sums` the pair is refused at plan time), prints a warning at plan and deposit, and is signed into the layer as part of the entry's proof annotation. The cosign rung now also requires the signing workflow's certificate identity to be `https://<host>/<owner>/<repo>/.github/workflows/<file>@refs/tags/<the release tag>` (it accepted any workflow at any ref of the repository), so an upstream that signs its release from a branch is refused until it signs from the tag (measured on the current pulseengine pins: ordeal, loom and kiln sign from `refs/heads/main`). The build-provenance rung pins no source ref (wasm-tools signs every release from `publish.yml@refs/heads/main`): the digest that vouches for an asset is the attestation subject carrying that asset's name, and the name must carry the release. Every attestation `gh` returns is read (a name given two digests is refused, a `refs/pull/*` build never vouches), and the record names the signer and ref of the statements that vouched; an attestation built from any branch is accepted when its subject names this release's asset with the matching digest. The binding is a name heuristic, plus the certificate-identity check for cosign (REQ-INGEST-001).
 
 ### Added
 
 - A `pgp-sums` ingestion rung, between `build-provenance` and `upstream-sums`: a `[[tool]]` entry in the producer input can name a digest list, optionally its detached signature and its format (`sha256sums` or `rust-channel`), and an OpenPGP certificate to check it against with `pgp-key-file`, a path relative to the input file. The key is the operator's committed input, never fetched and never read from beside the artifact; a signature that does not verify (another key, a revoked certificate, a text signature, a digest below SHA-256) aborts the run and never falls back to `upstream-sums`, and the signer is recorded by fingerprint. The list is bound to the declared release (a `sha256sums` entry's asset names and list name must carry `%V` or `%R` and expand from a version or date that names exactly one release, never a moving tag; a Rust channel's own version must match, and a prerelease binds by its date), and entries of one release that declare different lists are refused. A revoked or encryption-only subkey, or a primary whose newest self-signatures state flags without SIGN, does not vouch, and the key that signed is recorded as its own `proof-signing-key` annotation. `varve-producer plan` refuses `pgp-sums` without `pgp-key-file`, and the environment encoding refuses the fields (REQ-SIGNEDSUMS-001).
 - `varve-serve ask` now searches the text of documentation pages (Markdown, HTML and rustdoc HTML) of a verified docs payload, not only their titles and paths, and ranks a page by its best line as it does topics. A hit still prints no page text, only the question's own words a line holds; the index is built at query time, offline, and the first 512 KiB of a page is searched (REQ-AGENTDOCS-005).
 
+- Shim passthrough, opt-in from a user-level file (REQ-PASSTHROUGH-001, varve#273). `$XDG_CONFIG_HOME/varve/config.toml` (else `~/.config/varve/config.toml`) may list `[shim] passthrough = ["tool", ...]` or `["*"]`: the shim for a tool the pinned layer does not carry then runs the executable on PATH (never a shim or varve itself) and prints one `varve: passthrough:` line on stderr naming the binary and that it ran outside the layer. A tool the layer carries is never passed through, `varve run` never is, a `varve.toml` key for it is refused, and a config file inside a repository (symlinks resolved, even when `XDG_CONFIG_HOME` points at it) or an invalid one grants nothing and the refusal says why. Without the file the refusal of REQ-SHIMFALLBACK-001 is unchanged. `varve status` lists active passthroughs (`ambient_tools` in `--json`), `varve verify` prints the allowed tools, and export stamps and signed attestation statements record them as `ambient_tools`, absent when none were allowed. Older readers ignore that field; `ExportStamp` and `AttestationStatement` now refuse unknown fields, so later readers fail closed.
+
 ### Fixed
 
+- Shim passthrough (#351, fixing #349 against REQ-PASSTHROUGH-001 after three
+  fresh-context reviews). A tool name carried anywhere in the pinned layer
+  (its manifest, its `bin/`, every included or composed layer) is never
+  passed through, exposed by the pin or not, compared ignoring ASCII case; if
+  the carried set cannot be read, passthrough refuses; a requested or carried
+  name that is not ASCII refuses (APFS folds Unicode case and normalisation
+  beyond what varve can match). Two varve copies on PATH, or a wrapper script
+  around a second varve, end in a `passthrough loop` error instead of a hang
+  (a mark records the binary run, and a per-tool count refuses the 65th
+  passthrough of one tool in one chain), while a tool that calls itself
+  (recursive `make`, a git hook running `git`) still nests. Empty, relative and
+  in-repository PATH entries are not searched; `.hg`, `.jj` and `.svn` mark a
+  repository like `.git`. The notice escapes control, bidi, zero-width,
+  separator and tag characters so it stays one line. `varve verify` says when a
+  carried attestation was signed in a session that allowed ambient tools.
 - A realms file can now mark the fields an older varve may skip with `ignorable = [...]` (per realm, or at top level for top-level keys). An unknown field that is not marked is still refused, so a later security field cannot be dropped silently, and a field varve knows is always enforced even if listed. The refusal now names the running varve version and says the file may come from a newer varve. This takes effect from this release on: every varve before 0.47.0 refuses `ignorable` itself, so varve's published `varve-realms.toml` does not carry it (a test keeps it out), and already-released binaries, 0.29.0 included, are not helped (#234).
 - The refusal of an unknown key in a realms file no longer suggests `ignorable` where it cannot work: for a key nested inside a table such as a `retired-roots` entry it now says a nested field cannot be marked `ignorable`, and it names `ignorable` only for top-level and realm-level keys (REQ-REALM-001).
 - `varve inspect` and the manifest reader now recognise the `upstream-sums` proof they write, instead of reporting it as an unknown mechanism.
@@ -31,6 +70,80 @@
   concurrent runs of one test binary (two mutation shards on one host) no
   longer delete each other's staged files and cargo-mutants cannot count the
   collision as a kill (#246).
+
+### Independent review
+
+Two fresh-context, refute-framed reviews cover the whole scope.
+
+* **VER-REVIEW-V0-47-0** (#335-#341, at 6175ab9c): 1999 tests; every claim
+  confirmed after the fixes in #342.
+* **VER-REVIEW-V0-47-0-B** (#342-#351, at 369b2566): 2199 tests passed, 0
+  failed. Confirmed: the PGP rung, passthrough, the report-only gate probe, the
+  PR-gate YAML scanner, no regression. The release binding held (no older
+  release's proof was accepted for a newer tag); the claim was partial only on
+  wording, because `unbound-release-reason` is also honoured under
+  `upstream-sums`, as documented. Seven negative controls, all red, all
+  restored.
+* **Passthrough** went through three further review rounds before #351; each
+  found defects that were fixed test-first (see Fixed).
+
+### Gate potency
+
+Before tagging, the gates that changed since v0.46.0 and the gates guarding
+this release's claims were audited at 369b2566. Each had a violation injected
+beside a clean run, locally with CI's exact commands, not in GitHub's CI.
+
+* **13 potent:** `pr_gates_cannot_be_switched_off`; the change detector's
+  error paths; trace-gate's steps rule; the mutation-scope test; the mutation
+  verdict (made-up logs and a real cargo-mutants survivor) and the aggregate
+  shard gate (all 15 result and detector combinations); rivet validate; fmt,
+  clippy with `-D warnings`, and test; shellcheck and the Python 3.9 floor;
+  no-key-on-disk.
+* **1 inert by design:** review-check, advisory at v0.x.
+* **12 unproven:** MSRV, cargo deny, corrosion, coverage, SMT, the five fuzz
+  targets, the system tests and the macOS leg were not controlled this time.
+* **Weaker than they look (#352):** a repository variable read in a step's
+  `env` can still switch a PR gate off; the change detector fails open when
+  `git grep` errors; the mutation-scope test also counts a file named in a
+  ci.yml comment; no-key-on-disk misses one spelling. No v0.47.0 claim rests
+  on these, and none is exploited on main.
+
+### Known limits
+
+* **Build provenance trusts any branch build.** A workflow run on any
+  non-pull-request branch of the upstream can attest a subject name and digest
+  of its choosing, so push access to a branch plus write access to release
+  assets is enough for that rung. `pull_request_target` and `workflow_run`
+  builds report `refs/heads/<base>` and are not set aside. A branch pusher can
+  also block a release by attesting a second digest for one name.
+* **The release binding is a name heuristic** outside the cosign identity: a
+  publisher who reuses a numbered tag defeats it.
+* **OpenPGP key expiry is not checked** by the `pgp-sums` rung.
+* **A passthrough record in an export stamp is unsigned** and can be stripped;
+  the signed attestation is the durable record. `varve verify --all` and
+  included layers do not report carried attestations.
+* **A git-tracked `$HOME`** refuses the passthrough config (use
+  `XDG_CONFIG_HOME`), and makes `~/bin`, `~/.local/bin` and `~/.cargo/bin`
+  in-repository entries that passthrough skips.
+* A test-only seam, `FIXTURE_NAMES_ARE_ARBITRARY`, skips the ingestion name
+  check for about 28 older `orchestrate.rs` fixtures under `#[cfg(test)]`; it is
+  absent from release builds.
+
+### Falsification
+
+This release is wrong if any of these is observed in the field:
+
+* `varve-producer` deposits an asset whose cosign-signed digest list was signed
+  by a workflow at any ref other than `refs/tags/<this release's tag>` of the
+  upstream repository, or by another repository's workflow;
+* it deposits an asset under a release whose name the asset does not carry,
+  without an `unbound-release-reason` recorded in the signed manifest;
+* a `pgp-sums` entry is deposited after its signature failed to verify, or is
+  recorded as anything but `pgp-sums`;
+* a shim runs a binary from PATH for a tool name the pinned layer or any layer
+  it includes carries, or runs one without printing the `varve: passthrough:`
+  line, or runs one with no user-level config allowing it;
+* a passthrough chain runs indefinitely instead of ending in an error.
 
 ## v0.46.0 — 2026-11-07
 

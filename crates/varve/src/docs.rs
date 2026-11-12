@@ -1398,6 +1398,19 @@ mod tests {
                         .expect("the documented varve.toml must parse as a pin");
                     checked += 1;
                 }
+                // The USER-level config (REQ-PASSTHROUGH-001): `[shim]` is a
+                // table only that file has, and the real parser refuses
+                // unknown keys, so a misspelt example fails here.
+                "toml" if block.contains("[shim]") => {
+                    let allow = varve_core::shimfallback::parse_config(&block)
+                        .expect("the documented user config must parse");
+                    assert_ne!(
+                        allow,
+                        varve_core::shimfallback::Allow::Nothing,
+                        "a documented passthrough example must allow something"
+                    );
+                    checked += 1;
+                }
                 "toml" if block.contains("[realm.") => {
                     std::fs::write(tmp.join(varve_core::realm::REALMS_FILE), &block).unwrap();
                     let names = varve_core::realm::realm_names(&tmp)

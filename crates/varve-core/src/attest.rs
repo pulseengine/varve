@@ -72,6 +72,9 @@ impl std::str::FromStr for AttestationKind {
 /// claim, as a string varve copies rather than interprets: varve is asserting
 /// association and integrity, not endorsing the producer's conclusion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// A reader must not drop a field it does not know and call the statement pure
+// (REQ-PASSTHROUGH-001): a future reader meeting a newer statement fails closed.
+#[serde(deny_unknown_fields)]
 pub struct AttestationStatement {
     /// The layer these bytes accompany, e.g. `2026.08.0`.
     pub layer: String,
@@ -84,6 +87,21 @@ pub struct AttestationStatement {
     /// Who produced the underlying claim, verbatim and uninterpreted
     /// (e.g. `adacore`, `cargo-vet`, `varve`).
     pub producer: String,
+    /// The tools the signing session allowed to run from PATH through a shim
+    /// (`["*"]` or names; REQ-PASSTHROUGH-001 clause 4). Signed with the rest,
+    /// so it cannot be stripped without breaking the envelope. Absent when the
+    /// session allowed none. It says what the session permitted, not that
+    /// anything ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ambient_tools: Vec<String>,
+}
+
+impl AttestationStatement {
+    /// Record the ambient tools the signing session allowed.
+    pub fn with_ambient_tools(mut self, ambient_tools: Vec<String>) -> Self {
+        self.ambient_tools = ambient_tools;
+        self
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -127,6 +145,7 @@ pub fn statement(
         kind,
         digest: crate::store::manifest_digest(bytes),
         producer: producer.to_string(),
+        ambient_tools: Vec::new(),
     }
 }
 
@@ -220,6 +239,30 @@ mod tests {
             BYTES,
             "varve",
         )
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn a_statement_signed_in_an_ambient_session_says_so_and_a_pure_one_is_unchanged() {
+        let pure = serde_json::to_string(&st()).unwrap();
+        assert!(!pure.contains("ambient_tools"), "{pure}");
+        let amb = st().with_ambient_tools(vec!["*".into()]);
+        let text = serde_json::to_string(&amb).unwrap();
+        assert!(text.contains("\"ambient_tools\":[\"*\"]"), "{text}");
+        assert_eq!(
+            serde_json::from_str::<AttestationStatement>(&text).unwrap(),
+            amb
+        );
+        assert!(
+            serde_json::from_str::<AttestationStatement>(&pure)
+                .unwrap()
+                .ambient_tools
+                .is_empty()
+        );
+        // Future readers fail closed on a field they do not know.
+        let mut v = serde_json::to_value(st()).unwrap();
+        v["something_newer"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<AttestationStatement>(v).is_err());
     }
 
     // rivet: verifies REQ-ATTEST-001

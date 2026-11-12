@@ -572,13 +572,22 @@ jobs:
           # 90:17. Per-file counts from `cargo mutants --list`: the plan half
           # below holds 275 (plan 87, nextlayer 116, sums 35, stage 35, spec 2),
           # the rest 180.
+          # SPLIT AGAIN on 2026-11-10, measured. On main after #344 the (plan)
+          # shard held 275 mutants and took 83 minutes of the 90-minute cap;
+          # binding every ingestion rung's proof to its release grew plan.rs
+          # from 87 to 123, which would have taken it over. Per-file counts from
+          # `cargo mutants --list`: plan 123, nextlayer 116, sums 35, stage 35,
+          # spec 2. Each half now holds at most 160: (plan) 160 = plan 123 +
+          # sums 35 + spec 2, (nextlayer) 151 = nextlayer 116 + stage 35.
           - shard: varve-producer (plan)
             files: >-
               -f crates/varve-producer/src/plan.rs
-              -f crates/varve-producer/src/nextlayer.rs
               -f crates/varve-producer/src/sums.rs
-              -f crates/varve-producer/src/stage.rs
               -f crates/varve-producer/src/spec.rs
+          - shard: varve-producer (nextlayer)
+            files: >-
+              -f crates/varve-producer/src/nextlayer.rs
+              -f crates/varve-producer/src/stage.rs
           - shard: varve-producer
             files: >-
               -f crates/varve-producer/src/apply.rs

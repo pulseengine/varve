@@ -81,9 +81,42 @@ impl Forge {
         format!("https://{}/{}/", self.host, repo)
     }
 
+    /// The certificate identity a release's signing workflow must have, as the
+    /// anchored regexp `cosign verify-blob --certificate-identity-regexp` takes.
+    ///
+    /// `^https://<host>/<owner>/<repo>/\.github/workflows/[^@]+@refs/tags/<tag>$`
+    ///
+    /// A signature proves WHO signed, not which release it is for. The old
+    /// pattern was the repository URL as an unanchored prefix, which accepted
+    /// any workflow at any ref, so an older release's validly signed sums
+    /// served under a newer tag verified. Pinning the ref to the release tag
+    /// makes the certificate itself say which release it was issued for. The
+    /// host, repository and tag are escaped: they are data, not pattern.
+    pub fn identity_regexp(&self, repo: &str, release: &str) -> String {
+        format!(
+            "^https://{}/{}/\\.github/workflows/[^@]+@refs/tags/{}$",
+            regex_escape(&self.host),
+            regex_escape(repo),
+            regex_escape(release)
+        )
+    }
+
     pub fn is_public_github(&self) -> bool {
         self.host == "github.com"
     }
+}
+
+/// Escape every regex metacharacter, the way Go's `regexp.QuoteMeta` does
+/// (cosign is Go): `\.+*?()|[]{}^$`.
+fn regex_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if "\\.+*?()|[]{}^$".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 impl fmt::Display for Forge {
@@ -127,6 +160,118 @@ mod tests {
             Forge::enterprise("ghe.example.com").identity_prefix("acme/tool"),
             "https://ghe.example.com/acme/tool/"
         );
+    }
+
+    fn accepts(f: &Forge, repo: &str, release: &str, identity: &str) -> bool {
+        regex::Regex::new(&f.identity_regexp(repo, release))
+            .expect("the identity regexp compiles")
+            .is_match(identity)
+    }
+
+    /// A certificate is accepted only when its workflow ran from THIS release's
+    /// tag in THIS repository. Same repo and another tag, another repo and the
+    /// same tag, and a branch are all refused.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn the_identity_is_pinned_to_the_release_tag_and_the_repository() {
+        let f = Forge::github_com();
+        let id = |repo: &str, r: &str| {
+            format!("https://github.com/{repo}/.github/workflows/release.yml@{r}")
+        };
+        let ok = id("pulseengine/rivet", "refs/tags/v0.41.1");
+        assert!(accepts(&f, "pulseengine/rivet", "v0.41.1", &ok), "same tag");
+        // An older release's signature served under a newer tag.
+        let older = id("pulseengine/rivet", "refs/tags/v0.41.0");
+        assert!(!accepts(&f, "pulseengine/rivet", "v0.41.1", &older));
+        // Another repository's workflow at the same tag.
+        let other = id("pulseengine/spar", "refs/tags/v0.41.1");
+        assert!(!accepts(&f, "pulseengine/rivet", "v0.41.1", &other));
+        // A repository that merely starts with the same name.
+        let longer = id("pulseengine/rivet-evil", "refs/tags/v0.41.1");
+        assert!(!accepts(&f, "pulseengine/rivet", "v0.41.1", &longer));
+        // A branch, and a tag that merely begins with the release.
+        assert!(!accepts(
+            &f,
+            "pulseengine/rivet",
+            "v0.41.1",
+            &id("pulseengine/rivet", "refs/heads/main")
+        ));
+        assert!(!accepts(
+            &f,
+            "pulseengine/rivet",
+            "v0.41.1",
+            &id("pulseengine/rivet", "refs/tags/v0.41.10")
+        ));
+        assert!(!accepts(
+            &f,
+            "pulseengine/rivet",
+            "v0.41.1",
+            &id("pulseengine/rivet", "refs/tags/xv0.41.1")
+        ));
+        // The dot in the tag is a dot, and the workflow must live under
+        // .github/workflows of the repository.
+        assert!(!accepts(
+            &f,
+            "pulseengine/rivet",
+            "v0.41.1",
+            &id("pulseengine/rivet", "refs/tags/v0x41y1")
+        ));
+        assert!(!accepts(
+            &f,
+            "pulseengine/rivet",
+            "v0.41.1",
+            "https://github.com/pulseengine/rivet/other/release.yml@refs/tags/v0.41.1"
+        ));
+        // Another host.
+        assert!(!accepts(
+            &f,
+            "pulseengine/rivet",
+            "v0.41.1",
+            "https://github.example.com/pulseengine/rivet/.github/workflows/release.yml@refs/tags/v0.41.1"
+        ));
+        // Nothing before or after the identity.
+        assert!(!accepts(
+            &f,
+            "pulseengine/rivet",
+            "v0.41.1",
+            &format!("x{ok}")
+        ));
+        assert!(!accepts(
+            &f,
+            "pulseengine/rivet",
+            "v0.41.1",
+            &format!("{ok}/")
+        ));
+    }
+
+    /// The tag is DATA: regex metacharacters in it (`+` in build metadata, `.`)
+    /// are matched literally.
+    // rivet: verifies REQ-INGEST-001
+    #[test]
+    fn a_release_tag_with_regex_metacharacters_matches_only_itself() {
+        let f = Forge::enterprise("ghe.example.com");
+        let tag = "v1.0.0+b(1)[x]{2}|a*?^$";
+        let ok = format!("https://ghe.example.com/a/b/.github/workflows/r.yml@refs/tags/{tag}");
+        assert!(accepts(&f, "a/b", tag, &ok));
+        assert!(!accepts(
+            &f,
+            "a/b",
+            tag,
+            "https://ghe.example.com/a/b/.github/workflows/r.yml@refs/tags/v1.0.0"
+        ));
+        // A dot in the HOST or repo is literal too.
+        assert!(!accepts(
+            &f,
+            "a/b",
+            "v1",
+            "https://gheXexample.com/a/b/.github/workflows/r.yml@refs/tags/v1"
+        ));
+        assert!(!accepts(
+            &f,
+            "a.b/c",
+            "v1",
+            "https://ghe.example.com/aXb/c/.github/workflows/r.yml@refs/tags/v1"
+        ));
     }
 
     // rivet: verifies REQ-PRODUCER-002

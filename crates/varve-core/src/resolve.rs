@@ -275,6 +275,104 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
     })
 }
 
+/// Every tool name the pinned layer CARRIES: its signed manifest's tools, the
+/// files in its `bin/`, and the same for every layer it includes or composes —
+/// whether or not the pin's `tools` subset selects them (REQ-PASSTHROUGH-001
+/// clause 2). `Resolved::qualified` holds only what the pin EXPOSES, so a guard
+/// built on it lets a carried-but-unexposed tool through to an ambient binary.
+///
+/// Names are folded to ASCII lower case: on a case-insensitive filesystem the
+/// shim `PROBE` IS `probe`, so the comparison must not depend on the spelling.
+/// A carried name that is not ASCII is an `Err` too (no sound comparison
+/// exists), as is an unreadable `bin/`.
+///
+/// FAILS CLOSED: a manifest in the composition that cannot be read, or an
+/// included layer that cannot be found, is an `Err` — "we could not tell what
+/// the layer carries" must never read as "it carries nothing".
+pub fn carried_tool_names(
+    pin: &Pin,
+    layer: &InstalledLayer,
+    store: &Store,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let read = |entry: &InstalledLayer| -> Result<Vec<u8>, String> {
+        let path = entry.root.join("layer.json");
+        std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    };
+    let root_view = crate::compose::view(&read(layer)?).map_err(|e| e.to_string())?;
+    let mut unreadable: Vec<String> = Vec::new();
+    let walked = crate::compose::walk(
+        &layer.digest,
+        &pin.realm.clone().unwrap_or_default(),
+        &root_view,
+        |digest| {
+            let view = store
+                .find_anywhere(digest)
+                .ok()
+                .flatten()
+                .and_then(|(_, entry)| std::fs::read(entry.root.join("layer.json")).ok())
+                .and_then(|bytes| crate::compose::view(&bytes).ok());
+            if view.is_none() {
+                unreadable.push(digest.to_string());
+            }
+            view
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(digest) = unreadable.first() {
+        return Err(format!(
+            "an included layer ({digest}) is not installed or its manifest cannot be read"
+        ));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for step in &walked {
+        let entry = if step.digest == layer.digest {
+            layer.clone()
+        } else {
+            match store
+                .find_anywhere(&step.digest)
+                .map_err(|e| e.to_string())?
+            {
+                Some((_, entry)) => entry,
+                None => return Err(format!("layer {} is not installed", step.digest)),
+            }
+        };
+        // The signed manifest, re-read strictly even for the root.
+        read(&entry)?;
+        names.extend(step.view.tools.iter().map(|t| t.to_ascii_lowercase()));
+        names.extend(
+            store
+                .manifest_tool_names(&entry)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|t| t.to_ascii_lowercase()),
+        );
+        // A layer with no `bin/` carries nothing there; one that cannot be
+        // listed (or an entry that cannot be read) is "we could not tell".
+        let bin = entry.root.join("bin");
+        match std::fs::read_dir(&bin) {
+            Ok(rd) => {
+                for e in rd {
+                    let e = e.map_err(|e| format!("cannot list {}: {e}", bin.display()))?;
+                    names.insert(e.file_name().to_string_lossy().to_ascii_lowercase());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("cannot list {}: {e}", bin.display())),
+        }
+    }
+    // Folding is ASCII only, and a filesystem may fold more (APFS: `ñ` is `Ñ`;
+    // NFC is NFD; the Kelvin sign is `k`). A non-ASCII name cannot be compared
+    // soundly, so it is "we could not tell", never "not carried".
+    if let Some(odd) = names.iter().find(|n| !n.is_ascii()) {
+        return Err(format!(
+            "the layer carries a tool name that is not ASCII ({}), which cannot be \
+             compared safely with the name requested",
+            odd.escape_default()
+        ));
+    }
+    Ok(names)
+}
+
 /// The names a pin exposes, and the realm it CHOSE for each name it qualified
 /// (REQ-REALM2-001 clause 4a).
 ///
@@ -921,5 +1019,129 @@ mod tests {
             msg.contains("provided by more than one layer"),
             "a half-installed root must not silently yield the name: {msg}"
         );
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn carried_names_cover_the_whole_composition_whatever_the_pin_selects() {
+        // Clause 2. The pin exposes `rivet` only; the layer also carries `Loom`
+        // (manifest only, no bytes on this host) and `ghost` (bin/ only), and
+        // composes `Wasm-Tools`. All of them are CARRIED, folded to lower case.
+        let (_tmp, store) = store();
+        let up = store
+            .lay_down(
+                &fixtures::manifest("2026.08.0", "qualified"),
+                &[("Wasm-Tools", b"w")],
+            )
+            .unwrap();
+        store
+            .lay_down(
+                &manifest_composing("2026.07.0", &["rivet", "Loom"], &up),
+                &[("rivet", b"r"), ("ghost", b"g")],
+            )
+            .unwrap();
+        let mut p = qualified_pin("2026.07.0");
+        p.tools = Some(vec![crate::pin::ToolSelector {
+            name: "rivet".into(),
+            realm: None,
+        }]);
+        let layer = resolve(&p, &store).unwrap().layer;
+        let names = carried_tool_names(&p, &layer, &store).unwrap();
+        let got: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(got, ["ghost", "loom", "rivet", "wasm-tools"]);
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn carried_names_fail_closed_when_a_manifest_cannot_be_read() {
+        let (_tmp, store) = store();
+        let up = store
+            .lay_down(
+                &fixtures::manifest("2026.08.0", "qualified"),
+                &[("w", b"w")],
+            )
+            .unwrap();
+        store
+            .lay_down(
+                &manifest_composing("2026.07.0", &["rivet"], &up),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let p = qualified_pin("2026.07.0");
+        let layer = resolve(&p, &store).unwrap().layer;
+        assert!(carried_tool_names(&p, &layer, &store).is_ok());
+
+        // The included layer's manifest vanishes: we cannot say what it carries.
+        let inc = store.get(&up).unwrap().unwrap();
+        std::fs::remove_file(inc.root.join("layer.json")).unwrap();
+        assert!(carried_tool_names(&p, &layer, &store).is_err());
+
+        // So does the root's own.
+        std::fs::remove_file(layer.root.join("layer.json")).unwrap();
+        assert!(carried_tool_names(&p, &layer, &store).is_err());
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn a_carried_name_that_is_not_ascii_is_an_error_not_a_name() {
+        // ASCII folding cannot compare it with a filesystem's own folding.
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &fixtures::manifest("2026.07.0", "qualified"),
+                &[("rivet", b"r"), ("\u{f1}", b"n")],
+            )
+            .unwrap();
+        let p = qualified_pin("2026.07.0");
+        let layer = resolve(&p, &store).unwrap().layer;
+        let why = carried_tool_names(&p, &layer, &store).unwrap_err();
+        assert!(why.contains("not ASCII"), "{why}");
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[cfg(unix)]
+    #[test]
+    fn carried_names_fail_closed_when_bin_cannot_be_listed() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &fixtures::manifest("2026.07.0", "qualified"),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let p = qualified_pin("2026.07.0");
+        let layer = resolve(&p, &store).unwrap().layer;
+        assert!(carried_tool_names(&p, &layer, &store).is_ok());
+        let bin = layer.root.join("bin");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unlistable = std::fs::read_dir(&bin).is_err();
+        let got = carried_tool_names(&p, &layer, &store);
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Skip only where permission bits are not enforced (running as root).
+        if !unlistable {
+            return;
+        }
+        assert!(
+            got.is_err(),
+            "an unlistable bin/ read as 'carries nothing there'"
+        );
+    }
+
+    // rivet: verifies REQ-PASSTHROUGH-001
+    #[test]
+    fn a_layer_with_no_bin_directory_carries_just_its_manifest_names() {
+        // NotFound is the one error that is not an error: nothing is there.
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &fixtures::manifest("2026.07.0", "qualified"),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let p = qualified_pin("2026.07.0");
+        let layer = resolve(&p, &store).unwrap().layer;
+        std::fs::remove_dir_all(layer.root.join("bin")).unwrap();
+        assert!(carried_tool_names(&p, &layer, &store).is_ok());
     }
 }

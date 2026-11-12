@@ -484,6 +484,7 @@ mod seam_tests {
             kind: crate::attest::AttestationKind::Sbom,
             digest: "sha256:bb".into(),
             producer: "varve".into(),
+            ambient_tools: Vec::new(),
         }
     }
 
