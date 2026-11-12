@@ -861,3 +861,34 @@ fn a_failed_reseed_leaves_the_previous_seed_unchanged() {
         entries(&seed)
     );
 }
+
+/// F4: a composed layer's realm obligation is read from the include, not
+/// assumed away. The root is named by id and digest (no realm of its own), the
+/// composed layer's line has no cached signed index, and the realm requires one.
+// rivet: verifies REQ-SEED-001
+#[test]
+fn a_composed_layer_of_a_signed_index_realm_without_one_is_refused() {
+    let w = World::new();
+    let g = w.generation(1);
+    let host = w.path("host-root");
+    let host_project = w.path("host-project");
+    w.install_gen(&host, &host_project, &g);
+    w.project(
+        &host_project,
+        &g.up_layout.display().to_string(),
+        &[],
+        &g.root_layer,
+        "signed-index = true\n",
+    );
+    let seed = w.path("seed");
+    w.varve(&host, &host_project)
+        .args(["seed", "--layer", &g.root_layer, "--digest", &g.root_digest])
+        .arg(&seed)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("layer 2026.09.0 cannot be seeded"))
+        .stderr(predicate::str::contains("signed-index = true"));
+    assert!(!seed.exists(), "a refusal leaves nothing behind");
+}
+
