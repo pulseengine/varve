@@ -912,19 +912,8 @@ fn an_override_layer_installed_for_another_platform_is_refused_everywhere() {
     assert!(stdout(&run).starts_with("synth-0.57 "), "{}", stdout(&run));
 }
 
-/// The realm partition holding the pinned layer (its `state/` and `core/`).
-fn partition(w: &World) -> PathBuf {
-    walk_find(&w.root, &w.pinned_digest.replace(':', "-"))
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
-
 fn marks_file(w: &World) -> PathBuf {
-    partition(w).join("state").join("high-water-marks.json")
+    walk_find(&w.root, "high-water-marks.json").expect("an install has recorded marks")
 }
 
 /// Raise line `line`'s mark to `to` in the realm partition.
@@ -1094,8 +1083,9 @@ fn an_override_whose_runner_its_layer_does_not_carry_is_refused() {
     // With 2026.06.0 installed by pinning it directly, dispatch refuses too,
     // naming the layer and the runner, and runs nothing.
     pin_to("", "2026.06.0");
-    let a = varve(&w).arg("install").assert();
-    let _ = a; // its own synth lacks a runner here; installing is the point
+    // Pinned directly, with no override, nothing pairs it with a runner: it
+    // installs, which is what puts it in the store for the refusal below.
+    varve(&w).arg("install").assert().success();
     assert!(
         walk_has(&w.root, &alone.replace(':', "-")),
         "installed directly"
@@ -1646,4 +1636,233 @@ fn export_bazel_does_not_refuse_a_composition_conflict_over_an_overridden_tool()
         synth.contains(older.strip_prefix("sha256:").unwrap()),
         "{synth}"
     );
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn a_reexport_never_leaves_the_pins_registry_for_an_overridden_tool() {
+    // HIGH (third review): an export-bazel made while the project was pure
+    // wrote the pinned synth.json. Re-exported with an override whose layer
+    // records no provenance for synth, that file must not survive under a
+    // MIXED stamp: Bazel would fetch the pinned synth.
+    let w = world();
+    varve(&w).arg("install").assert().success();
+    let out = w.project.join("bazel");
+    varve(&w)
+        .args(["export-bazel", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    assert!(out.join("synth.json").exists(), "the pure export wrote it");
+    let (bare, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.09.0",
+        "qualified",
+        &[("synth", script("synth-0.60"), "!nosource")],
+        &[],
+        &[],
+    );
+    w.pin(&format!(
+        "[toolchain.override.synth]\nlayer = \"2026.09.0\"\ndigest = \"{bare}\"\n"
+    ));
+    varve(&w).arg("install").assert().success();
+    let a = varve(&w)
+        .args(["export-bazel", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    assert!(stderr(&a).contains("removed synth.json"), "{}", stderr(&a));
+    assert!(
+        !out.join("synth.json").exists(),
+        "the pinned registry survived"
+    );
+    let stamp: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join(".varve-export.json")).unwrap()).unwrap();
+    assert!(
+        !stamp["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "synth.json"),
+        "the stamp vouches for a stale registry: {stamp}"
+    );
+    varve(&w)
+        .args(["verify", "--export"])
+        .arg(&out)
+        .assert()
+        .success();
+    // A synth.json no earlier export of ours wrote is not ours to delete:
+    // refused, rather than sealed under the stamp.
+    let foreign = w.project.join("bazel-foreign");
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join("synth.json"), b"{}").unwrap();
+    assert_refused(
+        &w,
+        &["export-bazel", "--out", "bazel-foreign"],
+        "synth.json",
+    );
+    assert!(!foreign.join(".varve-export.json").exists());
+}
+
+/// A world whose pinned layer 2026.12.0 ships synth and wasmrun for this
+/// host AND another platform, and whose install for that other platform has
+/// already happened (marks recorded). Returns the marks' bytes.
+fn other_platform_pin(w: &World) -> Vec<u8> {
+    let other = other_platform();
+    let on_other = format!(r#","eu.pulseengine.platform":"{other}""#);
+    put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.12.0",
+        "qualified",
+        &[
+            ("synth", script("synth-host"), ""),
+            ("synth", script("synth-other"), on_other.as_str()),
+            ("wasmrun", script("wasmrun-other"), on_other.as_str()),
+        ],
+        &[],
+        &[],
+    );
+    std::fs::write(
+        w.project.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\n\
+         layer = \"2026.12.0\"\n",
+    )
+    .unwrap();
+    varve(w)
+        .args(["install", "--platform", other])
+        .assert()
+        .success();
+    std::fs::read(marks_file(w)).unwrap()
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn a_subset_name_the_layer_never_carried_is_refused_before_any_fetch() {
+    // MEDIUM (third review): `tools = ["ghost"]` plus an override of ghost.
+    // The pinned layer carries no ghost, so the override would ADD one.
+    for platform in [None, Some(other_platform())] {
+        let w = world();
+        let before = match platform {
+            None => {
+                varve(&w).arg("install").assert().success();
+                std::fs::read(marks_file(&w)).unwrap()
+            }
+            Some(_) => other_platform_pin(&w),
+        };
+        let pinned = if platform.is_some() {
+            "2026.12.0"
+        } else {
+            PINNED
+        };
+        let on_other = format!(r#","eu.pulseengine.platform":"{}""#, other_platform());
+        let (ghost, _) = put_layer_full(
+            &w.registry,
+            &w.sk,
+            "2026.09.0",
+            "qualified",
+            &[
+                ("ghost", script("ghost"), ""),
+                ("ghost", script("ghost-other"), on_other.as_str()),
+            ],
+            &[],
+            &[],
+        );
+        std::fs::write(
+            w.project.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\n\
+                 layer = \"{pinned}\"\ntools = [\"ghost\"]\n\
+                 [toolchain.override.ghost]\nlayer = \"2026.09.0\"\ndigest = \"{ghost}\"\n"
+            ),
+        )
+        .unwrap();
+        let mut args = vec!["install"];
+        if let Some(p) = platform {
+            args.extend(["--platform", p]);
+        }
+        assert_refused(&w, &args, "cannot add one");
+        assert_eq!(
+            std::fs::read(marks_file(&w)).unwrap(),
+            before,
+            "{platform:?}: mark moved"
+        );
+        assert!(
+            !walk_has(&w.root, &ghost.replace(':', "-")),
+            "{platform:?}: laid down"
+        );
+    }
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn an_override_of_a_held_payloads_name_is_refused_for_any_platform() {
+    // The pinned layer HOLDS a crate named acme-core; it does not dispatch
+    // it. An override layer shipping a TOOL of that name would add one.
+    let w = world();
+    let other = other_platform();
+    varve(&w)
+        .args(["install", "--platform", other])
+        .assert()
+        .success();
+    let before = std::fs::read(marks_file(&w)).unwrap();
+    let on_other = format!(r#","eu.pulseengine.platform":"{other}""#);
+    let (tool, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.09.0",
+        "qualified",
+        &[("acme-core", script("acme-core-tool"), on_other.as_str())],
+        &[],
+        &[],
+    );
+    w.pin(&format!(
+        "[toolchain.override.acme-core]\nlayer = \"2026.09.0\"\ndigest = \"{tool}\"\n"
+    ));
+    assert_refused(&w, &["install", "--platform", other], "cannot add one");
+    assert_eq!(std::fs::read(marks_file(&w)).unwrap(), before, "mark moved");
+    assert!(!walk_has(&w.root, &tool.replace(':', "-")), "laid down");
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn an_override_layer_already_installed_is_still_checked() {
+    // Installed earlier by pinning it directly, for another platform: the
+    // override's manifest checks (here: its runner) still apply, and on
+    // another platform nothing after them would.
+    let w = world();
+    other_platform_pin(&w);
+    let other = other_platform();
+    let on_other =
+        format!(r#","eu.pulseengine.platform":"{other}","eu.pulseengine.runner":"wasmrun""#);
+    let (alone, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.06.0",
+        "qualified",
+        &[("synth", script("synth-wasm-alone"), on_other.as_str())],
+        &[],
+        &[],
+    );
+    std::fs::write(
+        w.project.join("varve.toml"),
+        "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\n\
+         layer = \"2026.06.0\"\n",
+    )
+    .unwrap();
+    varve(&w)
+        .args(["install", "--platform", other])
+        .assert()
+        .success();
+    std::fs::write(
+        w.project.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\n\
+             layer = \"2026.12.0\"\n[toolchain.override.synth]\nlayer = \"2026.06.0\"\n\
+             digest = \"{alone}\"\n"
+        ),
+    )
+    .unwrap();
+    assert_refused(&w, &["install", "--platform", other], "runner 'wasmrun'");
 }

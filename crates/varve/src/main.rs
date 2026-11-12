@@ -3004,6 +3004,43 @@ fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
             ),
         }
     }
+    // An overridden tool with no registry of its own (its override layer
+    // records no provenance) must leave no registry behind: one a previous
+    // export of the PURE pin wrote would be sealed by the new stamp, and
+    // Bazel would fetch the pinned tool (REQ-OVERRIDE-001). Like the
+    // zephyr-module export's leftovers, a file an earlier export of ours
+    // recorded is removed; one we never wrote is not ours to delete, and is
+    // refused.
+    let ours: Vec<String> = varve_core::exportstamp::read_stamp(out)
+        .ok()
+        .filter(|s| s.kind == "bazel-registry")
+        .map(|s| s.files.into_iter().map(|f| f.path).collect())
+        .unwrap_or_default();
+    for (tool, _) in &target.override_layers {
+        if registries.contains_key(tool) {
+            continue;
+        }
+        let name = format!("{tool}.json");
+        let stale = out.join(&name);
+        if std::fs::symlink_metadata(&stale).is_err() {
+            continue;
+        }
+        if !ours.contains(&name) {
+            bail!(
+                "{} exists, and no earlier export-bazel here recorded it. '{tool}' is \
+                 overridden by a layer that records no provenance for it, so no registry may \
+                 describe it — refusing to seal this one under the stamp. Remove it, or export \
+                 into an empty directory.",
+                stale.display()
+            );
+        }
+        std::fs::remove_file(&stale)
+            .with_context(|| format!("cannot remove {}", stale.display()))?;
+        eprintln!(
+            "removed {name}: the earlier export's registry for '{tool}', which this project \
+             now overrides with a layer that records no provenance for it"
+        );
+    }
     std::fs::create_dir_all(out)?;
     for (tool, (json, _)) in &registries {
         let path = out.join(format!("{tool}.json"));
@@ -5437,9 +5474,17 @@ fn install(
     // Clause 4 from what the pinned layer CARRIES, not from what resolves
     // on this host: `install --platform <other>` must not be refused because
     // this machine has no build of a pinned tool.
-    if !pin.overrides.is_empty()
-        && let Some(pinned) = store.get(&outcome.digest)?
-    {
+    if !pin.overrides.is_empty() {
+        // "Could not tell" refuses: with the pinned layer's store entry gone,
+        // nothing says what the pin has, and an override must not pass on it.
+        let Some(pinned) = store.get(&outcome.digest)? else {
+            bail!(
+                "layer {} ({}) is not in the store it was just installed into, so what it \
+                 carries cannot be told — refusing every override rather than guessing",
+                outcome.layer,
+                outcome.digest
+            );
+        };
         varve_core::overrides_carried_by_pin(pin, &pinned, store)?;
     }
     let mut override_entries: Vec<varve_core::store::InstalledLayer> = Vec::new();
@@ -5450,6 +5495,27 @@ fn install(
         if let Some(have) = store.get(&o.digest)?
             && have.platform.as_deref().is_none_or(|p| p == platform)
         {
+            // Installed already — by an earlier install, or by pinning it
+            // directly — and still held to the same manifest checks: on
+            // another platform nothing after this would check it.
+            let bytes = std::fs::read(have.root.join("layer.json"))
+                .with_context(|| format!("cannot read layer {}'s manifest", have.layer))?;
+            let manifest = varve_core::LayerManifest::parse(&bytes)?;
+            varve_core::overrides::check_manifest(
+                &o.tool,
+                &o.layer,
+                pin.channel,
+                &platform,
+                &manifest,
+            )
+            .map_err(|why| {
+                anyhow::anyhow!(
+                    "override {}: layer {} ({}) is refused: {why}",
+                    o.tool,
+                    o.layer,
+                    o.digest
+                )
+            })?;
             override_entries.push(have);
             continue;
         }
