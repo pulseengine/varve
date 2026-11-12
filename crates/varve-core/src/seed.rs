@@ -469,20 +469,41 @@ mod tests {
         out
     }
 
+    /// Removes what a relative-destination probe may have created in the real
+    /// cwd, even if an assertion panics or a mutant made the claim succeed, so
+    /// no state outlives the test to poison the next run in the same tree.
+    struct RelativeProbeCleanup {
+        parent_existed: bool,
+    }
+
+    impl Drop for RelativeProbeCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all("relative/seed");
+            if !self.parent_existed {
+                let _ = std::fs::remove_dir("relative");
+            }
+        }
+    }
+
     // rivet: verifies REQ-SEED-001
     #[test]
     fn a_relative_destination_is_refused_and_names_why() {
+        let cleanup = RelativeProbeCleanup {
+            parent_existed: Path::new("relative").exists(),
+        };
+        // Clear leftovers of an earlier polluted run before probing.
+        let _ = std::fs::remove_dir_all("relative/seed");
         let err = claim_destination(Path::new("relative/seed")).unwrap_err();
+        let created = Path::new("relative/seed").exists();
+        // Remove before asserting, so a failing assertion leaves nothing behind.
+        drop(cleanup);
         assert!(matches!(err, SeedError::RelativeDestination { .. }));
         let msg = err.to_string();
         assert!(
             msg.contains("relative/seed") && msg.contains("absolute"),
             "{msg}"
         );
-        assert!(
-            !Path::new("relative/seed").exists(),
-            "a refusal must not create the directory"
-        );
+        assert!(!created, "a refusal must not create the directory");
     }
 
     // rivet: verifies REQ-SEED-001
