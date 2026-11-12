@@ -507,6 +507,7 @@ fn has_local_history(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_inner(
     pin: &Pin,
     source: &dyn LayerSource,
