@@ -52,9 +52,10 @@ fn put_layer(
 }
 
 /// The general form: a channel, an extra annotation string per tool (e.g. a
-/// runner contract), and `includes` as (digest, layer id) in realm `acme`.
-/// Every tool is stamped for THIS host and carries source provenance, so
-/// `export-bazel` has a checksum to write for it: the sha256 of its bytes.
+/// runner contract), and `includes` as (digest, layer id, realm). A tool is
+/// stamped for THIS host unless its extra names a platform, and carries
+/// source provenance — so `export-bazel` has a checksum to write, the sha256
+/// of its bytes — unless its extra contains the marker `!nosource`.
 fn put_layer_full(
     registry: &Path,
     sk: &[u8],
@@ -62,7 +63,7 @@ fn put_layer_full(
     channel: &str,
     tools: &[(&str, Vec<u8>, &str)],
     crates: &[(&str, &str, Vec<u8>)],
-    includes: &[(&str, &str)],
+    includes: &[(&str, &str, &str)],
 ) -> (String, Vec<(String, String)>) {
     let host = varve_core::host_platform();
     let mut entries = Vec::new();
@@ -70,8 +71,21 @@ fn put_layer_full(
     let mut digests = Vec::new();
     for (name, bytes, extra) in tools {
         let d = varve_core::manifest_digest(bytes);
+        let platform = if extra.contains("eu.pulseengine.platform") {
+            String::new()
+        } else {
+            format!(r#","eu.pulseengine.platform":"{host}""#)
+        };
+        let source = if extra.contains("!nosource") {
+            String::new()
+        } else {
+            format!(
+                r#","eu.pulseengine.source.repo":"acme/{name}","eu.pulseengine.source.asset":"{name}-{layer}.tar.gz","eu.pulseengine.source.sha256":"{d}""#
+            )
+        };
+        let extra = extra.replace("!nosource", "");
         entries.push(format!(
-            r#"{{"mediaType":"application/octet-stream","digest":"{d}","size":{},"annotations":{{"eu.pulseengine.tool":"{name}","eu.pulseengine.tool.version":"1.0.0","eu.pulseengine.platform":"{host}","eu.pulseengine.source.repo":"acme/{name}","eu.pulseengine.source.asset":"{name}-{layer}.tar.gz","eu.pulseengine.source.sha256":"{d}"{extra}}}}}"#,
+            r#"{{"mediaType":"application/octet-stream","digest":"{d}","size":{},"annotations":{{"eu.pulseengine.tool":"{name}","eu.pulseengine.tool.version":"1.0.0"{platform}{source}{extra}}}}}"#,
             bytes.len()
         ));
         digests.push((name.to_string(), d.clone()));
@@ -85,9 +99,9 @@ fn put_layer_full(
         ));
         blobs.push((d, bytes.clone()));
     }
-    for (digest, inc_layer) in includes {
+    for (digest, inc_layer, realm) in includes {
         entries.push(format!(
-            r#"{{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"{digest}","size":0,"annotations":{{"eu.pulseengine.varve.kind":"layer","eu.pulseengine.varve.include.realm":"acme","eu.pulseengine.varve.include.layer":"{inc_layer}"}}}}"#
+            r#"{{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"{digest}","size":0,"annotations":{{"eu.pulseengine.varve.kind":"layer","eu.pulseengine.varve.include.realm":"{realm}","eu.pulseengine.varve.include.layer":"{inc_layer}"}}}}"#
         ));
     }
     let line = &layer[..layer.rfind('.').unwrap()];
@@ -998,12 +1012,21 @@ fn the_runner_contract_comes_from_the_layer_whose_binary_runs() {
         &[],
         &[],
     );
+    // REQ-RUNNER-001: the runner is the OVERRIDE layer's own wasmrun, not
+    // the pin's — the pin's prints "wasmrun", this one "wasmrun-0.60".
     let (wrapped, _) = put_layer_full(
         &w.registry,
         &w.sk,
         "2026.09.0",
         "qualified",
-        &[("synth", script("synth-0.60-wasm"), runner)],
+        &[
+            ("synth", script("synth-0.60-wasm"), runner),
+            (
+                "wasmrun",
+                b"#!/bin/sh\necho \"wasmrun-0.60 $@\"\n".to_vec(),
+                "",
+            ),
+        ],
         &[],
         &[],
     );
@@ -1011,11 +1034,81 @@ fn the_runner_contract_comes_from_the_layer_whose_binary_runs() {
     varve(&w).arg("install").assert().success();
     let a = varve(&w).args(["run", "synth"]).assert().success();
     let out = stdout(&a);
-    assert!(out.starts_with("wasmrun "), "{out}");
+    assert!(
+        out.starts_with("wasmrun-0.60 "),
+        "the override layer's runner: {out}"
+    );
     assert!(
         out.contains(&wrapped.replace(':', "-")),
         "the override's bytes: {out}"
     );
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn an_override_whose_runner_its_layer_does_not_carry_is_refused() {
+    // The override layer's synth names the runner wasmrun, which only the
+    // PIN carries. Pairing them would run bytes no single layer vouched for
+    // together: refused at install (before lay-down) and at dispatch.
+    let w = world();
+    let runner = r#","eu.pulseengine.runner":"wasmrun""#;
+    let wasmrun = b"#!/bin/sh\necho \"wasmrun $@\"\n".to_vec();
+    put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.12.0",
+        "qualified",
+        &[
+            ("synth", script("synth-native"), ""),
+            ("wasmrun", wasmrun, ""),
+        ],
+        &[],
+        &[],
+    );
+    let (alone, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.06.0",
+        "qualified",
+        &[("synth", script("synth-wasm-alone"), runner)],
+        &[],
+        &[],
+    );
+    let pin_to = |extra: &str, layer: &str| {
+        std::fs::write(
+            w.project.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\n\
+                 layer = \"{layer}\"\n{extra}"
+            ),
+        )
+        .unwrap();
+    };
+    let ov = format!("[toolchain.override.synth]\nlayer = \"2026.06.0\"\ndigest = \"{alone}\"\n");
+    // Install the pin alone first, so the refusal below is the override's.
+    pin_to("", "2026.12.0");
+    varve(&w).arg("install").assert().success();
+    pin_to(&ov, "2026.12.0");
+    assert_refused(&w, &["install"], "runner 'wasmrun'");
+    assert!(!walk_has(&w.root, &alone.replace(':', "-")), "laid down");
+    // With 2026.06.0 installed by pinning it directly, dispatch refuses too,
+    // naming the layer and the runner, and runs nothing.
+    pin_to("", "2026.06.0");
+    let a = varve(&w).arg("install").assert();
+    let _ = a; // its own synth lacks a runner here; installing is the point
+    assert!(
+        walk_has(&w.root, &alone.replace(':', "-")),
+        "installed directly"
+    );
+    pin_to(&ov, "2026.12.0");
+    w.clear_marks();
+    let a = varve(&w).args(["run", "synth"]).assert().code(1);
+    let err = stderr(&a);
+    assert!(
+        err.contains("layer 2026.06.0 runs 'synth' through the runner 'wasmrun'"),
+        "{err}"
+    );
+    assert!(!w.ran("synth-wasm-alone") && !w.ran("synth-native"));
 }
 
 // rivet: verifies REQ-OVERRIDE-001
@@ -1331,17 +1424,20 @@ fn install_fetches_what_an_override_layer_composes_and_seed_carries_it() {
         "qualified",
         &[("synth", script("synth-0.60"), "")],
         &[],
-        &[(base.as_str(), "2026.07.0")],
+        &[(base.as_str(), "2026.07.0", "acme")],
     );
     w.pin(&format!(
         "[toolchain.override.synth]\nlayer = \"2026.09.0\"\ndigest = \"{composing}\"\n"
     ));
     let a = varve(&w).arg("install").assert().success();
+    let out = stdout(&a);
+    assert!(out.contains("fetched composed layer 2026.07.0"), "{out}");
+    // Counted as the OVERRIDE's, not as what the pinned layer composes.
     assert!(
-        stdout(&a).contains("fetched composed layer 2026.07.0"),
-        "{}",
-        stdout(&a)
+        out.contains("the override layer(s) compose 1 further installed layer(s)"),
+        "{out}"
     );
+    assert!(!out.contains("  composes 1 installed layer(s)"), "{out}");
     let dest = w.dir.join("seeded");
     let a = varve(&w)
         .args(["seed", "--json"])
@@ -1358,5 +1454,196 @@ fn install_fetches_what_an_override_layer_composes_and_seed_carries_it() {
     assert!(
         digests.contains(&composing.as_str()) && digests.contains(&base.as_str()),
         "{digests:?}"
+    );
+}
+
+/// Another platform than this host, with a Bazel key either way.
+fn other_platform() -> &'static str {
+    if varve_core::host_platform() == "x86_64-unknown-linux-gnu" {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    }
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn install_for_another_platform_decides_clause_four_without_the_host() {
+    // The pin exposes loom, which only this host has a build of; installing
+    // for another platform must not be refused because loom is not laid down.
+    let w = world();
+    let other = other_platform();
+    let on_other = format!(r#","eu.pulseengine.platform":"{other}""#);
+    put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.12.0",
+        "qualified",
+        &[
+            ("synth", script("synth-host"), ""),
+            ("synth", script("synth-other"), on_other.as_str()),
+            ("loom", script("loom-host"), ""),
+        ],
+        &[],
+        &[],
+    );
+    let (ov, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.09.0",
+        "qualified",
+        &[
+            ("synth", script("synth-0.60-host"), ""),
+            ("synth", script("synth-0.60-other"), on_other.as_str()),
+        ],
+        &[],
+        &[],
+    );
+    let pin_with = |tool: &str| {
+        std::fs::write(
+            w.project.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\n\
+                 layer = \"2026.12.0\"\ntools = [\"synth\", \"loom\"]\n\
+                 [toolchain.override.{tool}]\nlayer = \"2026.09.0\"\ndigest = \"{ov}\"\n"
+            ),
+        )
+        .unwrap();
+    };
+    pin_with("synth");
+    let a = varve(&w)
+        .args(["install", "--platform", other])
+        .assert()
+        .success();
+    assert!(
+        stdout(&a).contains("override synth: installed layer 2026.09.0"),
+        "{}",
+        stdout(&a)
+    );
+    // Clause 4 still holds for another platform: a tool the pin does not have.
+    pin_with("extra");
+    let a = varve(&w)
+        .args(["install", "--platform", other])
+        .assert()
+        .code(1);
+    assert!(stderr(&a).contains("cannot add one"), "{}", stderr(&a));
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn export_bazel_writes_no_registry_for_an_override_without_provenance() {
+    let w = world();
+    varve(&w).arg("install").assert().success();
+    let (bare, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.09.0",
+        "qualified",
+        &[("synth", script("synth-0.60"), "!nosource")],
+        &[],
+        &[],
+    );
+    w.pin(&format!(
+        "[toolchain.override.synth]\nlayer = \"2026.09.0\"\ndigest = \"{bare}\"\n"
+    ));
+    varve(&w).arg("install").assert().success();
+    let out = w.project.join("bazel");
+    let a = varve(&w)
+        .args(["export-bazel", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    assert!(stderr(&a).contains("skipped synth"), "{}", stderr(&a));
+    assert!(!out.join("synth.json").exists(), "never the pinned layer's");
+    assert!(out.join("loom.json").exists());
+}
+
+/// A pinned layer that composes a layer of realm `beta` shipping its own
+/// synth, with the pin choosing acme's synth and overriding it.
+fn two_realm_world() -> World {
+    let w = world();
+    let (beta_sk, beta_pk) = varve_core::generate_root_keypair();
+    let beta_registry = w.dir.join("beta-registry");
+    let (beta, _) = put_layer_full(
+        &beta_registry,
+        &beta_sk,
+        "2026.05.0",
+        "qualified",
+        &[("synth", script("synth-beta"), "")],
+        &[],
+        &[],
+    );
+    put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.12.0",
+        "qualified",
+        &[
+            ("synth", script("synth-pinned"), ""),
+            ("loom", script("loom-pinned"), ""),
+        ],
+        &[],
+        &[(beta.as_str(), "2026.05.0", "beta")],
+    );
+    let realms = std::fs::read_to_string(w.project.join("varve-realms.toml")).unwrap();
+    std::fs::write(
+        w.project.join("varve-realms.toml"),
+        format!(
+            "{realms}[realm.beta]\nregistry = \"{}\"\ntrust-root = \"{}\"\n",
+            beta_registry.display(),
+            hex::encode(&beta_pk)
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        w.project.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\n\
+             layer = \"2026.12.0\"\ntools = [\"acme/synth\", \"loom\"]\n\
+             [toolchain.override.synth]\nlayer = \"{OLDER}\"\ndigest = \"{}\"\n",
+            w.older_digest
+        ),
+    )
+    .unwrap();
+    varve(&w).arg("install").assert().success();
+    w
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn another_realms_real_provider_of_an_overridden_tool_is_refused() {
+    let w = two_realm_world();
+    assert_refused(&w, &["run", "beta/synth"], "has overridden");
+    assert_refused(&w, &["which", "beta/synth"], "has overridden");
+    let a = varve(&w).args(["run", "beta/synth"]).assert().code(1);
+    assert!(
+        stderr(&a).contains(&w.older_digest),
+        "names the override: {}",
+        stderr(&a)
+    );
+    assert!(!w.ran("synth-beta"));
+    // The pin's own address runs the override.
+    w.clear_marks();
+    let a = varve(&w).args(["run", "acme/synth"]).assert().success();
+    assert!(stdout(&a).starts_with("synth-0.57 "), "{}", stdout(&a));
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn export_bazel_does_not_refuse_a_composition_conflict_over_an_overridden_tool() {
+    // acme and beta both describe synth, differently: without the override
+    // that is a refusal. The override replaces synth, so it is not.
+    let w = two_realm_world();
+    let out = w.project.join("bazel");
+    varve(&w)
+        .args(["export-bazel", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    let synth = std::fs::read_to_string(out.join("synth.json")).unwrap();
+    let older = varve_core::manifest_digest(&script("synth-0.57"));
+    assert!(
+        synth.contains(older.strip_prefix("sha256:").unwrap()),
+        "{synth}"
     );
 }

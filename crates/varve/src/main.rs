@@ -2544,8 +2544,9 @@ fn run_tool(
     // Runnered entries (portable wasm) execute through their runner — from
     // the SAME verified layer, never from PATH (REQ-RUNNER-001).
     let mut cmd = if let Some(contract) = resolved.runners.get(tool) {
-        let Some((_, runner_path)) = resolved.tools.iter().find(|(n, _)| n == &contract.tool)
-        else {
+        // The runner of the SAME layer set as the tool (REQ-RUNNER-001):
+        // `resolve` paired each contract with its layer's runner binary.
+        let Some(runner_path) = contract.path.as_ref() else {
             bail!(
                 "tool '{tool}' runs via '{runner}' but the layer does not expose it — refusing",
                 runner = contract.tool
@@ -2959,6 +2960,12 @@ fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
         let manifest = varve_core::LayerManifest::parse(&payload)?;
         let export = varve_core::bazel::export(&manifest);
         for (tool, json) in export.registries {
+            // An overridden tool's registry comes from its override layer
+            // below; what the composition says about it is not exported, so
+            // two of its layers disagreeing about it refuses nothing.
+            if target.override_layers.iter().any(|(t, _)| *t == tool) {
+                continue;
+            }
             if let Some((first, first_realm)) = registries.get(&tool)
                 && first != &json
             {
@@ -2982,16 +2989,20 @@ fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
     for (tool, layer) in &target.override_layers {
         let payload = std::fs::read(layer.root.join("layer.json"))?;
         let manifest = varve_core::LayerManifest::parse(&payload)?;
-        let Some(json) = varve_core::bazel::export(&manifest).registries.remove(tool) else {
-            bail!(
-                "'{tool}' is overridden by layer {} ({}), which records no source provenance \
-                 for it — refusing to write the pinned layer's registry for a tool this \
-                 project does not run",
-                layer.layer,
-                layer.digest
-            );
-        };
-        registries.insert(tool.clone(), (json, target.realm.clone()));
+        match varve_core::bazel::export(&manifest).registries.remove(tool) {
+            Some(json) => {
+                registries.insert(tool.clone(), (json, target.realm.clone()));
+            }
+            // As for any tool without provenance: no registry file — and never
+            // the pinned layer's, which describes a tool this project does
+            // not run.
+            None => eprintln!(
+                "skipped {tool}: overridden by layer {} ({}), which records no source \
+                 provenance for it — no registry is written for it (the pinned layer's would \
+                 describe a tool this project does not run)",
+                layer.layer, layer.digest
+            ),
+        }
     }
     std::fs::create_dir_all(out)?;
     for (tool, (json, _)) in &registries {
@@ -5423,11 +5434,13 @@ fn install(
     //      this platform — asked of the VERIFIED manifest, before payloads are
     //      laid down or the line's high-water mark moves;
     //   3. anything else `resolve` decides is asked once all is installed.
-    if !pin.overrides.is_empty() {
-        let mut pure = pin.clone();
-        pure.overrides.clear();
-        let as_pinned = varve_core::resolve(&pure, store)?;
-        varve_core::overrides_in_pin(pin, &as_pinned.layer, &as_pinned.tools)?;
+    // Clause 4 from what the pinned layer CARRIES, not from what resolves
+    // on this host: `install --platform <other>` must not be refused because
+    // this machine has no build of a pinned tool.
+    if !pin.overrides.is_empty()
+        && let Some(pinned) = store.get(&outcome.digest)?
+    {
+        varve_core::overrides_carried_by_pin(pin, &pinned, store)?;
     }
     let mut override_entries: Vec<varve_core::store::InstalledLayer> = Vec::new();
     for o in &pin.overrides {
@@ -5483,7 +5496,12 @@ fn install(
         }
     }
     // What an override layer composes is installed with it, by the same walk
-    // the pinned layer's includes take — `seed` and `verify` follow it.
+    // the pinned layer's includes take, so `seed` (which carries an override
+    // layer's includes) finds them here. Dispatch takes only the tool from the
+    // override layer's own `bin/`, and `verify` checks that layer itself.
+    // Counted apart from the pin's: they are not what the pinned layer
+    // composes.
+    let mut override_composed = 0usize;
     if !override_entries.is_empty() {
         let missing = follow_includes_from(
             &ctx,
@@ -5493,7 +5511,7 @@ fn install(
             &now,
             pinned_origin.as_deref(),
             &mut seen,
-            &mut composed_count,
+            &mut override_composed,
         )?;
         if !missing.is_empty() {
             bail!(
@@ -5536,6 +5554,12 @@ fn install(
         println!(
             "  composes {composed_count} installed layer(s), transitively — `varve verify` \
              checks each against its own realm's trust root"
+        );
+    }
+    if override_composed > 0 {
+        println!(
+            "  the override layer(s) compose {override_composed} further installed layer(s), \
+             transitively — fetched from the realm each include names"
         );
     }
 
