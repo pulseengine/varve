@@ -787,3 +787,77 @@ fn a_reseed_does_not_follow_symlinks_planted_in_the_previous_seed() {
         .stderr(predicate::str::contains("symbolic link"));
     assert!(entries(&real).is_empty());
 }
+/// Tamper the installed tool payload of `layer` in the host store.
+fn tamper_installed_tool(host: &Path, layer: &str) {
+    let found = find_named(&host.join("realms"), &format!("tool-{layer}"));
+    assert!(!found.is_empty(), "no installed payload for {layer}");
+    for p in found {
+        let mut perm = std::fs::metadata(&p).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perm.set_readonly(false);
+        std::fs::set_permissions(&p, perm).unwrap();
+        std::fs::write(&p, b"#!/bin/sh\necho tampered\n").unwrap();
+    }
+}
+
+/// A refusal in a later layer leaves nothing of the earlier ones behind.
+// rivet: verifies REQ-SEED-001
+#[test]
+fn a_later_layer_refusal_writes_no_layer_and_keeps_a_previous_seed() {
+    let w = World::new();
+    let g = w.generation(1);
+    let host = w.path("host-root");
+    let host_project = w.path("host-project");
+    w.install_gen(&host, &host_project, &g);
+
+    // The upstream (composed) layer is written second; tamper it.
+    tamper_installed_tool(&host, "2026.09.0");
+
+    let fresh = w.path("fresh-seed");
+    w.varve(&host, &host_project)
+        .arg("seed")
+        .arg(&fresh)
+        .assert()
+        .failure()
+        .code(1);
+    assert!(
+        !fresh.exists(),
+        "a failed seed into a new directory left {:?}",
+        entries(&fresh)
+    );
+}
+
+/// A previous good seed survives a failed re-seed unchanged.
+// rivet: verifies REQ-SEED-001
+#[test]
+fn a_failed_reseed_leaves_the_previous_seed_unchanged() {
+    let w = World::new();
+    let g = w.generation(1);
+    let host = w.path("host-root");
+    let host_project = w.path("host-project");
+    w.install_gen(&host, &host_project, &g);
+    let seed = w.path("seed");
+    w.varve(&host, &host_project)
+        .arg("seed")
+        .arg(&seed)
+        .assert()
+        .success();
+    let before = read_tree(&seed);
+    assert!(!before.is_empty());
+
+    tamper_installed_tool(&host, "2026.09.0");
+    w.varve(&host, &host_project)
+        .arg("seed")
+        .arg(&seed)
+        .assert()
+        .failure()
+        .code(1);
+    assert_eq!(read_tree(&seed), before, "the previous seed was altered");
+    assert!(
+        entries(&seed)
+            .iter()
+            .all(|n| !n.starts_with(".varve-seed-staging")),
+        "{:?}",
+        entries(&seed)
+    );
+}
