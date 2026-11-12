@@ -45,9 +45,9 @@ Takes ONE tool the pin already has from another signed layer of the **pin's own 
 
 Refused with the reason, exit 1. **Where** each refusal happens matters, because a refusal that comes after a fetch has already changed the store:
 
-- **Before any override layer is fetched** (`install`), and before anything runs (every other command): a tool the pinned layer does not provide, or that the pin's `tools` leaves out — an override **replaces**, it never adds (use the passthrough, `varve docs shim`, or add the tool to a layer).
+- **Before any override layer is fetched** (`install`), and before anything runs (every other command): a tool the pinned layer does not provide, or that the pin's `tools` leaves out — an override **replaces**, it never adds (use the passthrough, `varve docs shim`, or add the tool to a layer). `install` decides this from what the pinned layer carries for every platform, so `install --platform <other>` is not refused for a pinned tool this host has no build of.
 - **When varve.toml is read**: the same tool overridden twice (names are compared without case), an override nested in another, a missing `layer` or `digest`, or any other key.
-- **On the verified manifest, before any payload is laid down or the line's anti-rollback mark moves** (`install`): a digest that is another layer than the one named, a layer on another channel than the pin's (naming both), a layer that does not carry the tool as a dispatched tool for this platform, and a layer that fails verification — it is never installed, and never fetched from anywhere else. A digest no source serves is refused there too. A layer below its line's anti-rollback mark is refused by the install pipeline before anything is laid down.
+- **On the verified manifest, before any payload is laid down or the line's anti-rollback mark moves** (`install`): a digest that is another layer than the one named, a layer on another channel than the pin's (naming both), a layer that does not carry the tool as a dispatched tool for this platform, or that runs it through a runner it does not carry, and a layer that fails verification — it is never installed, and never fetched from anywhere else. A digest no source serves is refused there too. A source that answers the digest with another, even validly signed, layer is a substitution, not a fault of the pin: the next source of the realm (a mirror) is asked, and the bytes that pass are exactly the bytes laid down — the manifest is fetched once. A layer below its line's anti-rollback mark is refused by the install pipeline before anything is laid down.
 - **At resolve time, before anything runs**: a digest no installed layer of the realm has, a layer installed only under another realm's root, and a layer installed for another platform (`varve install --platform …`): its payloads are that machine's, so every command refuses it, naming the platform, until `varve install` lays it down for this one. `resolve` repeats the manifest checks above against what is installed.
 
 The key is a plain tool name: no realm qualifier, no path. A varve older than v0.48.0 refuses a varve.toml with an override (unknown key) instead of running the pinned tool. What the override layer composes is installed with it, from the realm each include names, exactly as for the pinned layer.
@@ -60,7 +60,7 @@ While any override is active the toolchain is **MIXED**. These say so rather tha
 - `varve verify`: verifies each override layer and its anti-rollback mark, and ends with a `MIXED:` line, also under `--all`. A carried attestation made under another mix than the project's is reported as not matching this toolchain;
 - `varve run` (`VARVE_LAYER` stays the pinned layer; `VARVE_OVERRIDES=tool=layer@digest,…`);
 - `varve-serve context`;
-- `varve export-bazel` (the overridden tool's registry is the override layer's);
+- `varve export-bazel` (the overridden tool's registry is the override layer's, or none when that layer records no provenance for it);
 - export stamps (`layer = "<layer>+mixed"` plus the recorded overrides);
 - attestations: `check-attestation` refuses a statement that does not record the same overrides.
 
