@@ -1083,6 +1083,7 @@ mod tests {
                 layer: "2026.10.1".into(),
                 channel: "rolling".into(),
                 manifest_digest: "sha256:aa".into(),
+                overrides: Vec::new(),
             },
             tools,
             vec![crate::layers::Held {

@@ -344,14 +344,39 @@ pub fn render_md(c: &Context) -> String {
     let f = &c.facts;
     let l = layer_arg(c.layer_override.as_deref());
     let mut o = String::new();
-    o.push_str(&format!(
-        "# Pinned toolchain: realm {}, layer {} ({})\n\n",
-        f.realm, f.layer, f.channel
-    ));
-    o.push_str(&format!(
-        "Layer manifest digest: `{}` (what `varve which <tool>` reports for every tool below).\n\n",
-        f.manifest_digest
-    ));
+    if f.overrides.is_empty() {
+        o.push_str(&format!(
+            "# Pinned toolchain: realm {}, layer {} ({})\n\n",
+            f.realm, f.layer, f.channel
+        ));
+        o.push_str(&format!(
+            "Layer manifest digest: `{}` (what `varve which <tool>` reports for every tool below).\n\n",
+            f.manifest_digest
+        ));
+    } else {
+        // REQ-OVERRIDE-001 clause 3: never oriented as the pinned layer.
+        let n = f.overrides.len();
+        o.push_str(&format!(
+            "# MIXED toolchain: realm {}, layer {} ({}) with {n} overridden tool{}\n\n",
+            f.realm,
+            f.layer,
+            f.channel,
+            if n == 1 { "" } else { "s" }
+        ));
+        for ov in &f.overrides {
+            o.push_str(&format!(
+                "- `{}` runs from layer {} (`{}`), not from {}\n",
+                ov.tool, ov.layer, ov.digest, f.layer
+            ));
+        }
+        o.push_str(&format!(
+            "\nToolchain identity: `{}` (`VARVE_OVERRIDES={}`). Layer manifest digest: `{}` \
+             (what `varve which <tool>` reports for every tool below that is not overridden).\n\n",
+            varve_core::overrides::identity(&f.layer, &f.overrides),
+            varve_core::overrides::env_value(&f.overrides),
+            f.manifest_digest
+        ));
+    }
     o.push_str("## First move for any \"where is / how do I\" question\n\n");
     o.push_str(&format!(
         "Run `varve-serve ask{l} \"<a few words>\"` BEFORE answering. One call searches the \
@@ -531,6 +556,10 @@ pub fn render_json(c: &Context) -> String {
         "layer": f.layer,
         "channel": f.channel,
         "manifest_digest": f.manifest_digest,
+        // REQ-OVERRIDE-001 clause 3: always present, `pinned` or `mixed`.
+        "state": varve_core::overrides::state(&f.overrides),
+        "identity": varve_core::overrides::identity(&f.layer, &f.overrides),
+        "overrides": f.overrides,
         "first_move": format!(
             "varve-serve ask{} \"<a few words>\"",
             layer_arg(c.layer_override.as_deref())
@@ -556,7 +585,55 @@ pub(crate) mod tests {
             layer: "2026.10.31".into(),
             channel: "rolling".into(),
             manifest_digest: "sha256:f6bb".into(),
+            overrides: Vec::new(),
         }
+    }
+
+    fn mixed_facts() -> Facts {
+        Facts {
+            overrides: vec![varve_core::overrides::RecordedOverride {
+                tool: "meld".into(),
+                layer: "2026.09.0".into(),
+                digest: "sha256:0ld".into(),
+            }],
+            ..facts()
+        }
+    }
+
+    /// REQ-OVERRIDE-001 clause 3: a MIXED toolchain is never oriented as the
+    /// pinned layer — the header says MIXED and names each override.
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_mixed_orientation_says_so_in_the_header_and_in_json() {
+        let m = render_md(&build(mixed_facts(), vec![], vec![], vec![]));
+        assert!(
+            m.starts_with(
+                "# MIXED toolchain: realm pulseengine, layer 2026.10.31 (rolling) with 1 \
+                 overridden tool\n"
+            ),
+            "{m}"
+        );
+        assert!(
+            m.contains("- `meld` runs from layer 2026.09.0 (`sha256:0ld`), not from 2026.10.31"),
+            "{m}"
+        );
+        assert!(m.contains("Toolchain identity: `2026.10.31+mixed`"), "{m}");
+        let j: Value =
+            serde_json::from_str(&render_json(&build(mixed_facts(), vec![], vec![], vec![])))
+                .unwrap();
+        assert_eq!(j["state"], "mixed");
+        assert_eq!(j["identity"], "2026.10.31+mixed");
+        assert_eq!(j["layer"], "2026.10.31");
+        assert_eq!(j["overrides"][0]["tool"], "meld");
+        assert_eq!(j["overrides"][0]["digest"], "sha256:0ld");
+        // The pure orientation is unchanged, and says `pinned`.
+        let pure = render_md(&build(facts(), vec![], vec![], vec![]));
+        assert!(!pure.contains("MIXED"), "{pure}");
+        let j: Value =
+            serde_json::from_str(&render_json(&build(facts(), vec![], vec![], vec![]))).unwrap();
+        assert_eq!(j["state"], "pinned");
+        assert_eq!(j["identity"], "2026.10.31");
+        assert_eq!(j["overrides"], serde_json::json!([]));
     }
 
     fn input(name: &str, help: Option<&str>, topics: &[(&str, &str)]) -> ToolInput {
@@ -976,7 +1053,8 @@ pub(crate) mod tests {
             ),
             script_tool("mute", "1.0.0", "exit 0"),
         ]);
-        let pinned = crate::layers::pinned(&fx.composed(), &varve_core::host_platform()).unwrap();
+        let pinned =
+            crate::layers::pinned(&fx.composed(), &[], &varve_core::host_platform()).unwrap();
         let ctx = orient(pinned, &crate::harvest::Sandbox::default());
         assert_eq!(ctx.facts.manifest_digest, fx.digest);
         assert_eq!(ctx.tools.len(), 2);
@@ -988,7 +1066,8 @@ pub(crate) mod tests {
             "a tool that prints nothing has no help"
         );
         // and the second orientation is the first, from the cache
-        let again = crate::layers::pinned(&fx.composed(), &varve_core::host_platform()).unwrap();
+        let again =
+            crate::layers::pinned(&fx.composed(), &[], &varve_core::host_platform()).unwrap();
         let ctx2 = orient(again, &crate::harvest::Sandbox::default());
         assert_eq!(render_md(&ctx), render_md(&ctx2));
     }

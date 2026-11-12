@@ -22,6 +22,9 @@ pub struct Facts {
     pub channel: String,
     /// The pinned layer's manifest digest: what `varve which` reports.
     pub manifest_digest: String,
+    /// Tools the pin takes from OTHER layers of its realm (REQ-OVERRIDE-001).
+    /// Non-empty means the toolchain is MIXED, and the orientation says so.
+    pub overrides: Vec<varve_core::overrides::RecordedOverride>,
 }
 
 /// A payload the store holds and PATH does not reach.
@@ -93,9 +96,36 @@ pub fn docs_sources(layers: &[ComposedLayer], platform: &str) -> anyhow::Result<
     Ok(out)
 }
 
+/// One tool entry of a layer's signed manifest, as the orientation lists it.
+fn tool_source(
+    l: &ComposedLayer,
+    e: &varve_core::manifest::ManifestEntry,
+    name: String,
+) -> ToolSource {
+    ToolSource {
+        name,
+        version: varve_core::store::entry_version(e)
+            .unwrap_or("-")
+            .to_string(),
+        realm: l.realm.clone(),
+        layer: l.entry.layer.to_string(),
+        layer_digest: l.entry.digest.clone(),
+        digest: e.digest.clone(),
+        path: l.store.entry_path(&l.entry, e),
+        cache_file: Some(cache_file(l)),
+    }
+}
+
 /// Read the composition. `layers` must already be verified, pinned layer
-/// first (`walk_installed` returns them so).
-pub fn pinned(layers: &[ComposedLayer], platform: &str) -> anyhow::Result<Pinned> {
+/// first (`walk_installed` returns them so). `overrides` are the pin's
+/// `[toolchain.override.<tool>]` source layers (REQ-OVERRIDE-001), each
+/// already verified: the named tool is listed from THAT layer and from no
+/// other, and the facts record the mix.
+pub fn pinned(
+    layers: &[ComposedLayer],
+    overrides: &[(String, ComposedLayer)],
+    platform: &str,
+) -> anyhow::Result<Pinned> {
     let head = layers
         .first()
         .ok_or_else(|| anyhow::anyhow!("the composition has no layers"))?;
@@ -104,7 +134,18 @@ pub fn pinned(layers: &[ComposedLayer], platform: &str) -> anyhow::Result<Pinned
         layer: head.entry.layer.to_string(),
         channel: head.entry.channel.clone(),
         manifest_digest: head.entry.digest.clone(),
+        overrides: varve_core::overrides::sorted(
+            &overrides
+                .iter()
+                .map(|(tool, l)| varve_core::overrides::RecordedOverride {
+                    tool: tool.clone(),
+                    layer: l.entry.layer.to_string(),
+                    digest: l.entry.digest.clone(),
+                })
+                .collect::<Vec<_>>(),
+        ),
     };
+    let overridden = |name: &str| overrides.iter().any(|(tool, _)| tool == name);
     let mut tools: Vec<ToolSource> = Vec::new();
     let mut held: BTreeMap<(String, String, String), BTreeSet<String>> = BTreeMap::new();
     for l in layers {
@@ -114,6 +155,9 @@ pub fn pinned(layers: &[ComposedLayer], platform: &str) -> anyhow::Result<Pinned
                 .get("eu.pulseengine.tool")
                 .cloned()
                 .unwrap_or_else(|| "(unnamed entry)".into());
+            if e.kind() == Ok(PayloadKind::Tool) && overridden(&name) {
+                continue;
+            }
             let version = varve_core::store::entry_version(e)
                 .unwrap_or("-")
                 .to_string();
@@ -125,19 +169,7 @@ pub fn pinned(layers: &[ComposedLayer], platform: &str) -> anyhow::Result<Pinned
                 Ok(PayloadKind::Layer) => continue,
                 Ok(PayloadKind::Tool) => {
                     if varve_core::platform::entry_matches(platform_ann, platform) {
-                        add_tool(
-                            &mut tools,
-                            ToolSource {
-                                name,
-                                version,
-                                realm: l.realm.clone(),
-                                layer: l.entry.layer.to_string(),
-                                layer_digest: l.entry.digest.clone(),
-                                digest: e.digest.clone(),
-                                path: l.store.entry_path(&l.entry, e),
-                                cache_file: Some(cache_file(l)),
-                            },
-                        );
+                        add_tool(&mut tools, tool_source(l, e, name));
                     }
                     continue;
                 }
@@ -147,6 +179,28 @@ pub fn pinned(layers: &[ComposedLayer], platform: &str) -> anyhow::Result<Pinned
             held.entry((kind, name, version))
                 .or_default()
                 .insert(platform_ann.unwrap_or("any").to_string());
+        }
+    }
+    for (tool, l) in overrides {
+        let before = tools.len();
+        for e in &manifest_of(l)?.entries {
+            let platform_ann = e
+                .annotations
+                .get(varve_core::platform::ANN_PLATFORM)
+                .map(String::as_str);
+            if e.kind() == Ok(PayloadKind::Tool)
+                && e.annotations.get("eu.pulseengine.tool") == Some(tool)
+                && varve_core::platform::entry_matches(platform_ann, platform)
+            {
+                add_tool(&mut tools, tool_source(l, e, tool.clone()));
+            }
+        }
+        if tools.len() == before {
+            anyhow::bail!(
+                "the override for '{tool}' names layer {} ({}), which carries no '{tool}' for {platform}",
+                l.entry.layer,
+                l.entry.digest
+            );
         }
     }
     tools.sort_by(|a, b| (&a.name, &a.layer, &a.digest).cmp(&(&b.name, &b.layer, &b.digest)));
@@ -190,7 +244,7 @@ mod tests {
                 &[("a/index.html", "x")],
             ),
         ]);
-        let p = pinned(&fx.composed(), &varve_core::host_platform()).unwrap();
+        let p = pinned(&fx.composed(), &[], &varve_core::host_platform()).unwrap();
         assert_eq!(p.facts.layer, "2026.10.1");
         assert_eq!(p.facts.channel, "rolling");
         assert_eq!(p.facts.realm, "(this project)");
@@ -230,6 +284,85 @@ mod tests {
         );
     }
 
+    /// Install 2026.09.0 beside the fixture's layer, carrying an older `alpha`
+    /// and a `beta` the pin does not have, and return it as the composed
+    /// layer an override names.
+    fn override_layer(fx: &Fx) -> ComposedLayer {
+        fx.install_another(
+            "2026.09.0",
+            1,
+            vec![
+                script_tool("alpha", "1.0.0", "true"),
+                script_tool("beta", "1.0.0", "true"),
+            ],
+        );
+        let entry = fx
+            .store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.layer.to_string() == "2026.09.0")
+            .unwrap();
+        ComposedLayer {
+            store: fx.store.clone(),
+            entry,
+            realm: "(this project)".into(),
+        }
+    }
+
+    /// REQ-OVERRIDE-001: the overridden tool is the override layer's, every
+    /// other tool the pin's, and the facts record the mix.
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_overridden_tool_comes_from_its_layer_and_the_facts_say_mixed() {
+        let fx = install_layer(vec![
+            script_tool("zeta", "1.0.0", "true"),
+            script_tool("alpha", "2.0.0", "true"),
+        ]);
+        let ol = override_layer(&fx);
+        let host = varve_core::host_platform();
+        let p = pinned(&fx.composed(), &[("alpha".to_string(), ol.clone())], &host).unwrap();
+        assert_eq!(
+            p.facts.layer, "2026.10.1",
+            "the pinned layer stays the pinned layer"
+        );
+        assert_eq!(
+            p.facts.overrides,
+            [varve_core::overrides::RecordedOverride {
+                tool: "alpha".into(),
+                layer: "2026.09.0".into(),
+                digest: ol.entry.digest.clone(),
+            }]
+        );
+        let alpha: Vec<&ToolSource> = p.tools.iter().filter(|t| t.name == "alpha").collect();
+        assert_eq!(
+            alpha.len(),
+            1,
+            "one alpha, not the pin's beside the override's"
+        );
+        assert_eq!(alpha[0].version, "1.0.0");
+        assert_eq!(alpha[0].layer, "2026.09.0");
+        assert_eq!(alpha[0].layer_digest, ol.entry.digest);
+        assert!(alpha[0].path.as_ref().unwrap().starts_with(&ol.entry.root));
+        let names: Vec<&str> = p.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "zeta"], "beta is not added: {names:?}");
+        let zeta = p.tools.iter().find(|t| t.name == "zeta").unwrap();
+        assert_eq!(zeta.layer, "2026.10.1");
+        // No override: pure facts, the pin's alpha.
+        let pure = pinned(&fx.composed(), &[], &host).unwrap();
+        assert!(pure.facts.overrides.is_empty());
+        assert_eq!(
+            pure.tools
+                .iter()
+                .find(|t| t.name == "alpha")
+                .unwrap()
+                .version,
+            "2.0.0"
+        );
+        // An override layer without the tool is refused, not silently empty.
+        assert!(pinned(&fx.composed(), &[("zeta".to_string(), ol)], &host).is_err());
+    }
+
     // rivet: verifies REQ-AGENTDOCS-001
     #[test]
     fn a_tool_offered_twice_is_one_tool_and_different_bytes_are_two() {
@@ -260,8 +393,8 @@ mod tests {
         let mut other = script_tool("elsewhere", "1.0.0", "true");
         other.platform = Some("riscv64-unknown-linux-gnu".into());
         let fx = install_layer(vec![script_tool("here", "1.0.0", "true"), other]);
-        let p = pinned(&fx.composed(), &varve_core::host_platform()).unwrap();
+        let p = pinned(&fx.composed(), &[], &varve_core::host_platform()).unwrap();
         assert_eq!(p.tools.len(), 1, "{:?}", p.tools);
-        assert!(pinned(&[], "x").is_err());
+        assert!(pinned(&[], &[], "x").is_err());
     }
 }
