@@ -43,6 +43,7 @@ Refused, each before anything runs and naming the reason (exit 1):
 - the same tool overridden twice (names are compared without case) or an override nested in another;
 - a digest no installed layer of the realm has, a digest that is another layer than the one named, or a layer installed only under another realm's root;
 - a layer that fails verification — it is never installed, and never fetched from anywhere else;
+- a layer installed for another platform (`varve install --platform …`): its payloads are that machine's, so every command refuses it, naming the platform, until `varve install` lays it down for this one;
 - a missing `layer` or `digest`, or any other key.
 
 The key is a plain tool name: no realm qualifier, no path. A varve older than v0.48.0 refuses a varve.toml with an override (unknown key) instead of running the pinned tool.

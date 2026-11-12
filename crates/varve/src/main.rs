@@ -2617,10 +2617,7 @@ fn export_target(base: &Store, layer: Option<&str>) -> anyhow::Result<ExportTarg
                     &ctx.store,
                     &o.layer,
                     &verifier,
-                    o.layer
-                        .platform
-                        .as_deref()
-                        .unwrap_or(&varve_core::host_platform()),
+                    &varve_core::host_platform(),
                 )
                 .with_context(|| {
                     format!(
@@ -5316,7 +5313,12 @@ fn install(
     // no other way in: a digest no source serves, or bytes that fail the
     // root, refuse the install (clause 2).
     for o in &pin.overrides {
-        if store.get(&o.digest)?.is_some() {
+        // Already here FOR THIS PLATFORM: nothing to fetch. One laid down for
+        // another platform is fetched again for this one — the refusal that
+        // sends a user here must name a fix that works.
+        if let Some(have) = store.get(&o.digest)?
+            && have.platform.as_deref().is_none_or(|p| p == platform)
+        {
             continue;
         }
         let expected_line = o.layer.line().clone();
@@ -5356,7 +5358,10 @@ fn install(
     }
     // Every override refusal (DD-043 (3)) is decided by `resolve`; asking it
     // here makes `install` refuse what every later dispatch would.
-    if !pin.overrides.is_empty() {
+    // Only for THIS machine: `resolve` refuses an override layer installed
+    // for another platform, which is exactly what `install --platform <other>`
+    // lays down; the check then runs where the toolchain is dispatched.
+    if !pin.overrides.is_empty() && platform == varve_core::host_platform() {
         let resolved = varve_core::resolve(pin, store)?;
         println!(
             "  toolchain is MIXED: {} from other layers of the realm (VARVE_OVERRIDES={})",
@@ -5475,10 +5480,7 @@ fn verify(
             store,
             &o.layer,
             &verifier,
-            o.layer
-                .platform
-                .as_deref()
-                .unwrap_or(&varve_core::host_platform()),
+            &varve_core::host_platform(),
         )
         .with_context(|| {
             format!(

@@ -206,8 +206,9 @@ fn resolve_layers(
     // composition so the orientation lists its tool and says MIXED.
     let mut overrides = Vec::with_capacity(resolved.overrides.len());
     for o in &resolved.overrides {
-        let plat = o.layer.platform.as_deref().unwrap_or(&host);
-        varve_core::verify_installed(&store, &o.layer, &verifier, plat).with_context(|| {
+        // `resolve` refused an override installed for another platform, so
+        // this is the host's, as the orientation's own check requires.
+        varve_core::verify_installed(&store, &o.layer, &verifier, &host).with_context(|| {
             format!(
                 "override {}: layer {} {} does not verify",
                 o.tool, o.layer.layer, o.layer.digest

@@ -187,6 +187,19 @@ pub enum ResolveError {
         layer: String,
         digest: String,
     },
+    #[error(
+        "[toolchain.override.{tool}]: layer {layer} ({digest}) was installed for {platform}, not \
+         this machine ({host}) — its payloads were selected for that platform, so dispatching \
+         them here would run another machine's binary. `varve install` it in this project on \
+         this machine."
+    )]
+    OverrideForAnotherPlatform {
+        tool: String,
+        layer: String,
+        digest: String,
+        platform: String,
+        host: String,
+    },
 }
 
 /// Resolve a pin against the local core. Pure: consults nothing but its
@@ -418,6 +431,24 @@ fn resolve_overrides(
                 digest: o.digest.clone(),
             });
         };
+        // Parity with the pinned entry where a consumer refuses one installed
+        // for another platform (varve-serve): an override is refused here, at
+        // resolve time, so EVERY consumer refuses it — dispatch, verify,
+        // export, attestation and the viewer alike. A layer from before the
+        // platform was recorded has none, and is taken as this host's, as
+        // every layer is.
+        let host = crate::platform::host_platform();
+        if let Some(platform) = source.platform.as_deref()
+            && platform != host
+        {
+            return Err(ResolveError::OverrideForAnotherPlatform {
+                tool: o.tool.clone(),
+                layer: source.layer.to_string(),
+                digest: source.digest.clone(),
+                platform: platform.to_string(),
+                host,
+            });
+        }
         if source.layer != o.layer {
             return Err(ResolveError::OverrideNameDigestMismatch {
                 tool: o.tool.clone(),
@@ -1571,5 +1602,30 @@ mod tests {
             resolved.runners.get("synth").map(|c| c.tool.as_str()),
             Some("wasmtime")
         );
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_layer_installed_for_another_platform_is_refused() {
+        // Its bytes were selected for that platform: dispatching them here
+        // would run another machine's binary under this pin.
+        let (_tmp, store) = store();
+        let older = mixed_store(&store);
+        let entry = store.get(&older).unwrap().unwrap();
+        crate::store::record_install_platform(&entry.root, "riscv64-unknown-linux-gnu").unwrap();
+        let err = resolve(&pin_overriding("synth", "2026.08.0", &older), &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideForAnotherPlatform { tool, platform, .. }
+                if tool == "synth" && platform == "riscv64-unknown-linux-gnu"),
+            "got: {err}"
+        );
+        assert!(
+            err.to_string().contains("riscv64-unknown-linux-gnu"),
+            "{err}"
+        );
+        // Installed for THIS host is the ordinary case and resolves.
+        crate::store::record_install_platform(&entry.root, &crate::platform::host_platform())
+            .unwrap();
+        assert!(resolve(&pin_overriding("synth", "2026.08.0", &older), &store).is_ok());
     }
 }

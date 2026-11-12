@@ -835,3 +835,25 @@ fn walk_find(root: &Path, name: &str) -> Option<PathBuf> {
     }
     None
 }
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn an_override_layer_installed_for_another_platform_is_refused_everywhere() {
+    // Parity with the pinned entry: an override layer whose payloads were
+    // selected for another platform is refused by every consumer, naming the
+    // platform — never dispatched, verified, exported or attested here.
+    let w = installed_mixed();
+    let root = walk_find(&w.root, &w.older_digest.replace(':', "-")).unwrap();
+    varve_core::store::record_install_platform(&root, "riscv64-unknown-linux-gnu").unwrap();
+    let why = "installed for riscv64-unknown-linux-gnu";
+    assert_refused(&w, &["run", "synth"], why);
+    assert_refused(&w, &["run", "loom"], why);
+    assert_refused(&w, &["which", "synth"], why);
+    assert_refused(&w, &["verify"], why);
+    assert_refused(&w, &["export-cargo", "--out", "x"], why);
+    assert_refused(&w, &["sbom"], why);
+    // The fix the refusal names works: install lays it down for this host.
+    varve(&w).arg("install").assert().success();
+    let run = varve(&w).args(["run", "synth"]).assert().success();
+    assert!(stdout(&run).starts_with("synth-0.57 "), "{}", stdout(&run));
+}

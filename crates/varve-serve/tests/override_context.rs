@@ -101,3 +101,23 @@ fn context_refuses_a_tampered_override_layer_and_prints_nothing() {
         String::from_utf8_lossy(&o.stderr)
     );
 }
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn context_refuses_an_override_layer_installed_for_another_platform() {
+    let (fx, older) = mixed();
+    let root = fx.root.join("core").join(older.replace(':', "-"));
+    varve_core::store::record_install_platform(&root, "riscv64-unknown-linux-gnu").unwrap();
+    let o = fx.run(BIN, &["context"]);
+    assert!(!o.status.success());
+    assert!(
+        o.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("installed for riscv64-unknown-linux-gnu"),
+        "{err}"
+    );
+}
