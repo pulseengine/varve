@@ -62,6 +62,12 @@ pub enum SeedError {
     )]
     ForeignDestination { dest: String },
     #[error(
+        "{dest} is a symbolic link, so nothing was written: a seed directory that redirects \
+         somewhere else would put the seed (and replace files) wherever the link points. Name \
+         the real directory."
+    )]
+    SymlinkDestination { dest: String },
+    #[error(
         "layer {layer} cannot be seeded: realm '{realm}' declares `signed-index = true`, and this \
          store holds no signed line index for line {line}. A seed without it could not satisfy \
          that realm, and varve will not make one up — install the layer from a source that \
@@ -110,6 +116,9 @@ pub fn check_destination(dest: &Path) -> Result<(), SeedError> {
     let shown = dest.display().to_string();
     if !dest.is_absolute() {
         return Err(SeedError::RelativeDestination { dest: shown });
+    }
+    if std::fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(SeedError::SymlinkDestination { dest: shown });
     }
     match std::fs::read_dir(dest) {
         Ok(mut entries) => {
@@ -175,38 +184,133 @@ pub fn read_index(
     }
 }
 
-/// Write one installed layer into the seed at `dest`, which `claim_destination`
-/// has already accepted. `index` is what `read_index` returned.
+/// What a staging directory inside a seed is called. It never survives a run.
+const STAGING_PREFIX: &str = ".varve-seed-staging-";
+
+/// One layer to put in a seed: where it is installed, and the signed line index
+/// `read_index` returned for it.
+pub struct SeedItem<'a> {
+    pub store: &'a Store,
+    pub layer: &'a InstalledLayer,
+    pub index: Option<&'a [u8]>,
+}
+
+/// Write every layer into the seed at `dest`, or none of them.
+///
+/// Each layer is exported into a fresh staging directory inside `dest` (made
+/// with `create_dir`, so it cannot be a directory or a link somebody else
+/// left). Only when EVERY layer succeeded is each one moved into place: an
+/// existing `<layer>-<hex>` entry is removed first, WITHOUT following it if it
+/// is a symlink, and the marker is written last. Any error removes the staging
+/// directory (and `dest` if this run created it) and leaves what `dest` held
+/// before untouched — a refusal in the second layer does not leave the first.
+/// Nothing is ever written into an existing layer directory, so nothing a
+/// previous seed's directory now links to is followed.
+pub fn write_seed(
+    items: &[SeedItem<'_>],
+    dest: &Path,
+    platform: &str,
+) -> Result<Vec<SeedOutcome>, SeedError> {
+    check_destination(dest)?;
+    let io = |path: &Path| {
+        let path = path.display().to_string();
+        move |source| SeedError::Io { path, source }
+    };
+    let created = !dest.exists();
+    std::fs::create_dir_all(dest).map_err(io(dest))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let staging = dest.join(format!("{STAGING_PREFIX}{}-{nanos}", std::process::id()));
+    let result = std::fs::create_dir(&staging)
+        .map_err(io(&staging))
+        .and_then(|()| stage_and_commit(items, dest, &staging, platform));
+    if staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    if result.is_err() && created {
+        // Only if empty: never remove something this run did not make.
+        let _ = std::fs::remove_dir(dest);
+    }
+    result
+}
+
+fn stage_and_commit(
+    items: &[SeedItem<'_>],
+    dest: &Path,
+    staging: &Path,
+    platform: &str,
+) -> Result<Vec<SeedOutcome>, SeedError> {
+    let mut outcomes = Vec::new();
+    for item in items {
+        outcomes.push(seed_layer(
+            item.store, item.layer, dest, staging, platform, item.index,
+        )?);
+    }
+    for item in items {
+        let staged = layout_dir(staging, item.layer);
+        let target = layout_dir(dest, item.layer);
+        remove_entry(&target)?;
+        std::fs::rename(&staged, &target).map_err(|source| SeedError::Io {
+            path: target.display().to_string(),
+            source,
+        })?;
+    }
+    let marker = dest.join(MARKER_FILE);
+    remove_entry(&marker)?;
+    std::fs::write(&marker, MARKER_BODY).map_err(|source| SeedError::Io {
+        path: marker.display().to_string(),
+        source,
+    })?;
+    Ok(outcomes)
+}
+
+/// Remove whatever is at `path`, a symlink itself and never what it points at.
+fn remove_entry(path: &Path) -> Result<(), SeedError> {
+    let io = |source| SeedError::Io {
+        path: path.display().to_string(),
+        source,
+    };
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path).map_err(io),
+        Ok(_) => std::fs::remove_file(path).map_err(io),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io(e)),
+    }
+}
+
+/// Export one installed layer into `staging`; its final place is
+/// `layout_dir(dest, layer)`. `index` is what `read_index` returned.
 ///
 /// The layout itself is `archive`'s, written by the same code: the retained
 /// signature envelope verbatim, each payload re-hashed against the digest the
 /// manifest signs, the baseline status and the carried attestations. The one
-/// addition is the line index, attached verbatim. The directory is ours (the
-/// marker says so), so an earlier seed of the same layer is replaced.
-pub fn seed_layer(
+/// addition is the line index, attached verbatim.
+fn seed_layer(
     store: &Store,
     layer: &InstalledLayer,
     dest: &Path,
+    staging: &Path,
     platform: &str,
     index: Option<&[u8]>,
 ) -> Result<SeedOutcome, SeedError> {
-    let layout = layout_dir(dest, layer);
+    let staged = layout_dir(staging, layer);
     let summary = crate::archive::export_with_options(
         store,
         layer,
-        &layout,
+        &staged,
         platform,
         &ArchiveOptions {
-            // Replacing our own layout, not somebody else's signed work.
-            force: true,
+            // The staging directory is new; nothing is replaced.
+            force: false,
             allow_no_status: false,
         },
     )?;
     if let Some(envelope) = index {
-        crate::lineindex::attach_to_layout(&layout, &layer.layer.line().to_string(), envelope)?;
+        crate::lineindex::attach_to_layout(&staged, &layer.layer.line().to_string(), envelope)?;
     }
     Ok(SeedOutcome {
-        layout,
+        layout: layout_dir(dest, layer),
         payloads: summary.archived,
         omitted: summary.omitted.values().sum(),
         baseline_missing: summary.baseline_missing,
@@ -308,6 +412,22 @@ mod tests {
             envelope,
             tool: tools[0].1.to_vec(),
         }
+    }
+
+    /// One layer through `write_seed`, the way the command seeds it.
+    fn seed_layer(
+        store: &Store,
+        layer: &InstalledLayer,
+        dest: &Path,
+        platform: &str,
+        index: Option<&[u8]>,
+    ) -> Result<SeedOutcome, SeedError> {
+        let item = SeedItem {
+            store,
+            layer,
+            index,
+        };
+        Ok(write_seed(&[item], dest, platform)?.remove(0))
     }
 
     fn seed_dir(n: &Near) -> PathBuf {

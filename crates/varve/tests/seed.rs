@@ -693,3 +693,97 @@ fn help_exits_zero_and_an_unknown_flag_exits_two() {
         .failure()
         .code(2);
 }
+
+/// Every file under `root` whose name is `name`.
+fn find_named(root: &Path, name: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == name) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Names of the entries directly inside `dir`, sorted.
+fn entries(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// A re-seed must not follow anything a previous seed's directory now holds.
+// rivet: verifies REQ-SEED-001
+#[cfg(unix)]
+#[test]
+fn a_reseed_does_not_follow_symlinks_planted_in_the_previous_seed() {
+    use std::os::unix::fs::symlink;
+    let w = World::new();
+    let g = w.generation(1);
+    let host = w.path("host-root");
+    let host_project = w.path("host-project");
+    w.install_gen(&host, &host_project, &g);
+    let seed = w.path("seed");
+    let out = w
+        .varve(&host, &host_project)
+        .args(["seed", "--json"])
+        .arg(&seed)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mirrors = mirrors_of(&out);
+    let a = mirrors["2026.08.0"].clone();
+    let b = mirrors["2026.09.0"].clone();
+
+    let victim_file = w.path("victim-file");
+    std::fs::write(&victim_file, "precious").unwrap();
+    let victim_dir = w.path("victim-dir");
+    std::fs::create_dir(&victim_dir).unwrap();
+    std::fs::remove_file(a.join("index.json")).unwrap();
+    symlink(&victim_file, a.join("index.json")).unwrap();
+    std::fs::remove_dir_all(&b).unwrap();
+    symlink(&victim_dir, &b).unwrap();
+
+    w.varve(&host, &host_project)
+        .arg("seed")
+        .arg(&seed)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&victim_file).unwrap(), b"precious");
+    assert!(
+        entries(&victim_dir).is_empty(),
+        "nothing may be written through a planted directory symlink: {:?}",
+        entries(&victim_dir)
+    );
+    for layout in [&a, &b] {
+        let meta = std::fs::symlink_metadata(layout).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink());
+        let idx = std::fs::symlink_metadata(layout.join("index.json")).unwrap();
+        assert!(idx.is_file() && !idx.file_type().is_symlink());
+    }
+
+    // A seed directory that is itself a symlink is refused outright.
+    let real = w.path("real-seed");
+    std::fs::create_dir(&real).unwrap();
+    let link = w.path("link-seed");
+    symlink(&real, &link).unwrap();
+    w.varve(&host, &host_project)
+        .arg("seed")
+        .arg(&link)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("symbolic link"));
+    assert!(entries(&real).is_empty());
+}

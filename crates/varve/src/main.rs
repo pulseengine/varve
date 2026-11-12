@@ -4056,10 +4056,13 @@ struct SeedTarget {
 
 /// `varve seed` — REQ-SEED-001.
 ///
-/// Everything that can be refused is refused BEFORE the first byte is written:
-/// the destination, every layer being installed, and a realm's signed-index
-/// obligation. A seed that is half there fails on the far side of the gap, which
-/// is the place this command exists to avoid.
+/// Everything that can be refused up front is: the destination, every layer
+/// being installed, and a realm's signed-index obligation. What can only fail
+/// while exporting (a payload that no longer matches its signed digest, a
+/// missing payload or envelope) is caught by staging: every layer is written to
+/// a scratch directory inside DIR and moved into place only once all of them
+/// succeeded, so a seed is never half there — that fails on the far side of the
+/// gap, which is the place this command exists to avoid.
 fn seed(
     store: &Store,
     dir: &std::path::Path,
@@ -4163,14 +4166,21 @@ fn seed(
         indexes.push(varve_core::seed::read_index(&t.store, &t.layer, realm)?);
     }
 
-    // 3. Write.
-    varve_core::seed::claim_destination(dir)?;
+    // 3. Write: every layer into staging, then all into place, or none.
+    let items: Vec<varve_core::seed::SeedItem<'_>> = targets
+        .iter()
+        .zip(&indexes)
+        .map(|(t, index)| varve_core::seed::SeedItem {
+            store: &t.store,
+            layer: &t.layer,
+            index: index.as_deref(),
+        })
+        .collect();
+    let outcomes = varve_core::seed::write_seed(&items, dir, &platform)?;
     let mut human = String::new();
     let mut machine = Vec::new();
     let mut no_baseline: Vec<String> = Vec::new();
-    for (t, index) in targets.iter().zip(&indexes) {
-        let out =
-            varve_core::seed::seed_layer(&t.store, &t.layer, dir, &platform, index.as_deref())?;
+    for (t, out) in targets.iter().zip(&outcomes) {
         human.push_str(&format!(
             "seeded layer {} {}: {} payload{} for {platform}, {}, {}\n  mirror: {}\n",
             t.layer.layer,
