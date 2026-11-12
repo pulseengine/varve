@@ -481,6 +481,15 @@ jobs:
           - shard: varve-core (elf)
             files: >-
               -f crates/varve-core/src/elf.rs
+          # NEW at v0.48.0 (REQ-SEED-001), as its own shard rather than appended
+          # to one that is already split: `seed.rs` decides what may be written
+          # into a directory another store will install from, and refuses a
+          # signed-index realm whose index is missing. A mutant that lets a
+          # relative or foreign directory through, or drops the index, is a seed
+          # that fails on the far side of the gap — the place it exists to avoid.
+          - shard: varve-core (seed)
+            files: >-
+              -f crates/varve-core/src/seed.rs
           # NEW at v0.44.0 (REQ-AGENTDOCS-001/-002), as its own shard: the
           # orientation an agent is handed unasked, and the ranking that points
           # it at documentation. A wrong caveat dropped here is a tool an agent

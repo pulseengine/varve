@@ -211,6 +211,11 @@ const EMBEDDED_TOPICS: &[Topic] = &[
         "cmd-archive.md"
     ),
     topic!(
+        "seed",
+        "seed — layers another store installs from, offline",
+        "cmd-seed.md"
+    ),
+    topic!(
         "run",
         "run — dispatch a tool with layer provenance",
         "cmd-run.md"

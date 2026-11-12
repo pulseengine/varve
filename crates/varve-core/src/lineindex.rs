@@ -553,6 +553,20 @@ impl IndexCache {
         Ok(())
     }
 
+    /// The signed envelope bytes cached for a line, exactly as accepted — what
+    /// `varve seed` copies, never re-serialised (REQ-SEED-001).
+    pub fn envelope_bytes(&self, line: &str) -> Result<Option<Vec<u8>>, IndexError> {
+        let path = self.path(line);
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(IndexError::Io {
+                path: path.display().to_string(),
+                source,
+            }),
+        }
+    }
+
     fn path(&self, line: &str) -> PathBuf {
         self.dir.join(format!("{line}.dsse.json"))
     }
@@ -1356,5 +1370,30 @@ mod failover_class_tests {
             }
             .fails_over()
         );
+    }
+
+    // rivet: verifies REQ-SEED-001
+    #[test]
+    fn the_cached_envelope_is_absent_when_absent_and_an_error_when_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = IndexCache::at_root(tmp.path());
+        // Nothing cached: absent, which is not an error.
+        assert_eq!(cache.envelope_bytes("2026.08").unwrap(), None);
+        // Cached: the bytes exactly as written, however odd.
+        let dir = tmp.path().join("state").join("line-index");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("2026.08.dsse.json"), b" not json \r\n").unwrap();
+        assert_eq!(
+            cache.envelope_bytes("2026.08").unwrap(),
+            Some(b" not json \r\n".to_vec())
+        );
+        // Present but unreadable (a directory where the file should be) is an
+        // ERROR: reporting it as "no index" would let a seed be written
+        // without one for a realm that requires it.
+        std::fs::create_dir(dir.join("2026.09.dsse.json")).unwrap();
+        assert!(matches!(
+            cache.envelope_bytes("2026.09"),
+            Err(IndexError::Io { .. })
+        ));
     }
 }

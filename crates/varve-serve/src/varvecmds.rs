@@ -120,6 +120,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Emit an SBOM for a verified layer, transcribed from its SIGNED manifest rather than scanned from disk — every component, version and hash is copied from what the trust root anchored (REQ-SBOM-001)",
     ),
     (
+        "seed",
+        "Write the installed layers to a directory another store can install from — no network, no registry credential (REQ-SEED-001)",
+    ),
+    (
         "self-update",
         "Update varve itself: check the latest release, verify it with the RUNNING binary against the trust root (old-verifies-new), replace atomically",
     ),

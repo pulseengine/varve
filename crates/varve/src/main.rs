@@ -176,6 +176,39 @@ enum Cmd {
         #[arg(long)]
         allow_no_status: bool,
     },
+    /// Write the installed layers to a directory another store can install
+    /// from — no network, no registry credential (REQ-SEED-001).
+    ///
+    /// For a container's store, a CI cache or a second checkout: seed from the
+    /// store that already holds the layers, then name each printed path in the
+    /// other store's realm as a `mirrors` entry. The other store verifies every
+    /// manifest, blob, index and status against ITS realm's trust root, exactly
+    /// as from the registry — a seed is transport, not authority.
+    ///
+    /// By default the current project's pin and every layer it composes; or one
+    /// layer by `--layer` and `--digest`. Shims and anything else holding this
+    /// store's absolute paths are not copied.
+    Seed {
+        /// Absolute directory to write into: new, empty, or a previous seed.
+        /// Each layer goes in its own subdirectory, which is one `mirrors`
+        /// entry.
+        dir: PathBuf,
+        /// Seed this installed layer instead of the project's pin (with
+        /// `--digest`).
+        #[arg(long, value_name = "LAYER", requires = "digest")]
+        layer: Option<String>,
+        /// The manifest digest (`sha256:<hex>`) of the layer named by
+        /// `--layer`.
+        #[arg(long, value_name = "DIGEST", requires = "layer")]
+        digest: Option<String>,
+        /// The platform this store installed for (target triple) — the one
+        /// whose payloads the seed carries. Defaults to this machine.
+        #[arg(long, value_name = "TRIPLE")]
+        platform: Option<String>,
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Dispatch a tool from the pinned layer, with the layer identity in the
     /// environment (VARVE_LAYER, VARVE_LAYER_MANIFEST_DIGEST) so provenance
     /// tooling can record which qualified set produced the output.
@@ -901,6 +934,19 @@ fn run() -> anyhow::Result<Outcome> {
             force,
             allow_no_status,
         } => archive(&store, &layer, &dest, platform, force, allow_no_status),
+        Cmd::Seed {
+            dir,
+            layer,
+            digest,
+            platform,
+            json,
+        } => seed(
+            &store,
+            &dir,
+            layer.as_deref().zip(digest.as_deref()),
+            platform,
+            json,
+        ),
         Cmd::Run {
             varve,
             tool_and_args,
@@ -3993,6 +4039,203 @@ fn archive(
              with one attached) and archive again. Pass --allow-no-status to silence this if \
              you are shipping an archive that is not meant to receive advisories.",
             entry.layer.line()
+        );
+    }
+    Ok(())
+}
+
+/// One layer to seed: where it is installed, and what is known of its realm.
+struct SeedTarget {
+    /// The store partition holding it (a realm's own, for a cross-realm
+    /// include) — where its cached status and index are.
+    store: Store,
+    layer: varve_core::store::InstalledLayer,
+    /// `(realm name, signed-index)` when the realm is known here.
+    realm: Option<(String, bool)>,
+}
+
+/// `varve seed` — REQ-SEED-001.
+///
+/// Everything that can be refused up front is: the destination, every layer
+/// being installed, and a realm's signed-index obligation. What can only fail
+/// while exporting (a payload that no longer matches its signed digest, a
+/// missing payload or envelope) is caught by staging: every layer is written to
+/// a scratch directory inside DIR and moved into place only once all of them
+/// succeeded, so a seed is never half there — that fails on the far side of the
+/// gap, which is the place this command exists to avoid.
+fn seed(
+    store: &Store,
+    dir: &std::path::Path,
+    named: Option<(&str, &str)>,
+    platform: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let platform = platform.unwrap_or_else(varve_core::host_platform);
+    varve_core::seed::check_destination(dir)?;
+    let cwd = std::env::current_dir().context("cannot determine working directory")?;
+
+    // 1. Which layers: the roots, then everything they compose.
+    let mut queue: Vec<SeedTarget> = Vec::new();
+    match named {
+        Some((layer, digest)) => {
+            let wanted: varve_core::LayerId = layer.parse()?;
+            let (holder, entry) = store.find_anywhere(digest)?.with_context(|| {
+                format!("layer {layer} {digest} is not installed in this store — nothing to seed")
+            })?;
+            if entry.layer != wanted {
+                bail!(
+                    "{digest} is installed as layer {}, not {layer} — refusing to seed a layer \
+                     under a name it does not have",
+                    entry.layer
+                );
+            }
+            queue.push(SeedTarget {
+                store: holder,
+                layer: entry,
+                realm: None,
+            });
+        }
+        None => {
+            let ctx = project_ctx(store)?;
+            let resolved = varve_core::resolve(&ctx.pin, &ctx.store)?;
+            queue.push(SeedTarget {
+                store: ctx.store.clone(),
+                layer: resolved.layer,
+                realm: ctx.realm.as_ref().map(|r| (r.name.clone(), r.signed_index)),
+            });
+        }
+    }
+    let mut targets: Vec<SeedTarget> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut missing: Vec<String> = Vec::new();
+    let mut visits = 0usize;
+    while let Some(current) = queue.pop() {
+        if !seen.insert(current.layer.digest.clone()) {
+            continue;
+        }
+        visits += 1;
+        if visits > varve_core::compose::MAX_DEPTH * 64 {
+            bail!(
+                "composition graph has more than {} nodes to visit — refusing to walk further",
+                varve_core::compose::MAX_DEPTH * 64
+            );
+        }
+        let bytes = std::fs::read(current.layer.root.join("layer.json"))
+            .with_context(|| format!("cannot read layer {}", current.layer.layer))?;
+        let view = varve_core::compose::view(&bytes)
+            .with_context(|| format!("layer {} does not parse", current.layer.layer))?;
+        for inc in &view.includes {
+            if seen.contains(&inc.digest) {
+                continue;
+            }
+            let name = inc.layer.clone().unwrap_or_else(|| inc.digest.clone());
+            let Some((holder, found)) = current.store.find_anywhere(&inc.digest)? else {
+                missing.push(name);
+                continue;
+            };
+            // An include names the realm that vouches for it (`install`
+            // refuses one that names none). A realm defined nowhere this project
+            // can see states no obligation to check; a realms file that is
+            // broken is a refusal, never "unknown".
+            let realm = match inc.realm.as_ref() {
+                Some(r) => varve_core::seed::realm_obligation(varve_core::resolve_realm(&cwd, r))?,
+                None => None,
+            };
+            queue.push(SeedTarget {
+                store: holder,
+                layer: found,
+                realm,
+            });
+        }
+        targets.push(current);
+    }
+    if !missing.is_empty() {
+        bail!(
+            "cannot seed: {} composed layer(s) are not installed in this store: {}. A seed that \
+             lacked them would send the other store back to the registry for exactly those. Run \
+             `varve install` here first.",
+            missing.len(),
+            missing.join(", ")
+        );
+    }
+
+    // 2. Everything that can refuse, before anything is written.
+    let mut indexes: Vec<Option<Vec<u8>>> = Vec::new();
+    for t in &targets {
+        let realm = t.realm.as_ref().map(|(n, req)| (n.as_str(), *req));
+        indexes.push(varve_core::seed::read_index(&t.store, &t.layer, realm)?);
+    }
+
+    // 3. Write: every layer into staging, then all into place, or none.
+    let items: Vec<varve_core::seed::SeedItem<'_>> = targets
+        .iter()
+        .zip(&indexes)
+        .map(|(t, index)| varve_core::seed::SeedItem {
+            store: &t.store,
+            layer: &t.layer,
+            index: index.as_deref(),
+        })
+        .collect();
+    let outcomes = varve_core::seed::write_seed(&items, dir, &platform)?;
+    let mut human = String::new();
+    let mut machine = Vec::new();
+    let mut no_baseline: Vec<String> = Vec::new();
+    for (t, out) in targets.iter().zip(&outcomes) {
+        human.push_str(&format!(
+            "seeded layer {} {}: {} payload{} for {platform}, {}, {}\n  mirror: {}\n",
+            t.layer.layer,
+            t.layer.digest,
+            out.payloads,
+            if out.payloads == 1 { "" } else { "s" },
+            if out.baseline_missing {
+                "no baseline line-status"
+            } else {
+                "baseline line-status"
+            },
+            if out.index_carried {
+                "signed line index"
+            } else {
+                "no signed line index"
+            },
+            out.layout.display()
+        ));
+        if out.baseline_missing {
+            no_baseline.push(t.layer.layer.to_string());
+        }
+        machine.push(serde_json::json!({
+            "layer": t.layer.layer.to_string(),
+            "digest": t.layer.digest,
+            "realm": t.realm.as_ref().map(|(n, _)| n.clone()),
+            "mirror": out.layout.display().to_string(),
+            "payloads": out.payloads,
+            "omitted": out.omitted,
+            "baseline_status": !out.baseline_missing,
+            "line_index": out.index_carried,
+        }));
+    }
+    human.push_str(&format!(
+        "seeded {} layer(s) into {}\nIn the other store's varve-realms.toml, add each layer's \
+         `mirror` path above to the `mirrors` of the realm that signs it. Every document in it is \
+         still verified there against that realm's trust root.",
+        targets.len(),
+        dir.display()
+    ));
+    report(
+        json,
+        &human,
+        serde_json::json!({
+            "command": "seed",
+            "dir": dir.display().to_string(),
+            "platform": platform,
+            "layers": machine,
+        }),
+    );
+    if !no_baseline.is_empty() {
+        eprintln!(
+            "warning: this store cached no baseline line-status for {}, so the seed carries none: \
+             a store seeded from it has no `varve status` for those lines until it reaches the \
+             realm's registry.",
+            no_baseline.join(", ")
         );
     }
     Ok(())
