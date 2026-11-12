@@ -892,3 +892,47 @@ fn a_composed_layer_of_a_signed_index_realm_without_one_is_refused() {
     assert!(!seed.exists(), "a refusal leaves nothing behind");
 }
 
+/// Remove an installed layer's directory from the store.
+fn remove_installed(host: &Path, layer_id: &str) {
+    let mut removed = 0;
+    for part in std::fs::read_dir(host.join("realms"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+    {
+        for layer in std::fs::read_dir(part.join("core"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+        {
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(layer.join("layer.json")).unwrap()).unwrap();
+            if manifest["annotations"]["eu.pulseengine.varve.layer"] == layer_id {
+                std::fs::remove_dir_all(&layer).unwrap();
+                removed += 1;
+            }
+        }
+    }
+    assert_eq!(removed, 1, "the fixture must have removed {layer_id}");
+}
+
+/// F5: the same under --layer/--digest, where `resolve` does not refuse first.
+// rivet: verifies REQ-SEED-001
+#[test]
+fn a_missing_composed_layer_is_refused_when_the_root_is_named_by_digest() {
+    let w = World::new();
+    let g = w.generation(1);
+    let host = w.path("host-root");
+    let host_project = w.path("host-project");
+    w.install_gen(&host, &host_project, &g);
+    remove_installed(&host, "2026.09.0");
+    let seed = w.path("seed");
+    w.varve(&host, &host_project)
+        .args(["seed", "--layer", &g.root_layer, "--digest", &g.root_digest])
+        .arg(&seed)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("cannot seed: 1 composed layer(s)"))
+        .stderr(predicate::str::contains("2026.09.0"));
+    assert!(!seed.exists(), "a refusal leaves nothing behind");
+}
+
