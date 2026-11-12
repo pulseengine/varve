@@ -29,9 +29,16 @@ The qualifier is how a pin chooses between two realms shipping one name, which i
 ### `[toolchain.override.<tool>]` — one tool from another layer of the realm
 
 ```toml
+manifest-version = 1
+
+[toolchain]
+realm   = "pulseengine"
+channel = "rolling"
+layer   = "2026.11.0"
+
 [toolchain.override.synth]
 layer  = "2026.08.0"                 # required: the layer the tool comes from
-digest = "sha256:<hex>"              # required: that layer's manifest digest (`varve list`)
+digest = "sha256:83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"   # EXAMPLE — required: that layer's digest, from `varve list`
 ```
 
 Takes ONE tool the pin already has from another signed layer of the **pin's own realm** — gale's case, where committed objects must stay byte-identical with an older `synth` while the rest of the toolchain moves (REQ-OVERRIDE-001). Both fields are required: the id is what a reviewer reads in the diff, the digest is the artifact. `varve install` fetches that layer through the same path an `[[include]]` takes — signed manifest against the realm's root, its line index and anti-rollback mark checked (the override's digest is not consent to go below the mark), every payload against its signed digest. Nothing reaches the store another way.

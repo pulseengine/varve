@@ -61,9 +61,16 @@ you actually got.
 same realm, by layer id and digest; everything else stays the pinned layer's:
 
 ```toml
+manifest-version = 1
+
+[toolchain]
+realm   = "pulseengine"
+channel = "rolling"
+layer   = "2026.11.0"
+
 [toolchain.override.synth]
 layer  = "2026.08.0"
-digest = "sha256:<hex>"   # from `varve list`, after `varve install`
+digest = "sha256:83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"   # EXAMPLE — paste yours from `varve list`
 ```
 
 The toolchain is then MIXED, and `status`, `which`, `verify`, `run`'s
