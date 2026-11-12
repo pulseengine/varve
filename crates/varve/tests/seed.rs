@@ -936,3 +936,38 @@ fn a_missing_composed_layer_is_refused_when_the_root_is_named_by_digest() {
     assert!(!seed.exists(), "a refusal leaves nothing behind");
 }
 
+/// F6: an unreadable realm file is a refusal, not "realm unknown".
+// rivet: verifies REQ-SEED-001
+#[test]
+fn a_malformed_realms_file_is_a_refusal_not_an_unknown_realm() {
+    let w = World::new();
+    let g = w.generation(1);
+    let host = w.path("host-root");
+    let host_project = w.path("host-project");
+    w.install_gen(&host, &host_project, &g);
+    let seed = w.path("seed");
+    let args = ["seed", "--layer", &g.root_layer, "--digest", &g.root_digest];
+
+    // A cwd whose realm file cannot be parsed.
+    let broken = w.path("broken-project");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(broken.join("varve-realms.toml"), "[realm.acme\nnot toml").unwrap();
+    w.varve(&host, &broken)
+        .args(args)
+        .arg(&seed)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("varve-realms.toml"));
+    assert!(!seed.exists());
+
+    // Control: a realm that is genuinely not defined anywhere still means
+    // "no obligation to check", as before.
+    let bare = w.path("bare-project");
+    std::fs::create_dir_all(&bare).unwrap();
+    w.varve(&host, &bare)
+        .args(args)
+        .arg(&seed)
+        .assert()
+        .success();
+}

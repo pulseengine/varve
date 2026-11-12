@@ -4134,13 +4134,13 @@ fn seed(
                 continue;
             };
             // An include names the realm that vouches for it (`install`
-            // refuses one that names none). A realm this project cannot see is
-            // unknown, and an unknown realm states no obligation to check.
-            let realm = inc
-                .realm
-                .as_ref()
-                .and_then(|r| varve_core::resolve_realm(&cwd, r).ok())
-                .map(|realm| (realm.name.clone(), realm.signed_index));
+            // refuses one that names none). A realm defined nowhere this project
+            // can see states no obligation to check; a realms file that is
+            // broken is a refusal, never "unknown".
+            let realm = match inc.realm.as_ref() {
+                Some(r) => varve_core::seed::realm_obligation(varve_core::resolve_realm(&cwd, r))?,
+                None => None,
+            };
             queue.push(SeedTarget {
                 store: holder,
                 layer: found,

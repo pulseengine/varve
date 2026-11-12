@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 
 use crate::archive::{ArchiveError, ArchiveOptions};
 use crate::lineindex::{IndexCache, IndexError};
+use crate::realm::{Realm, RealmError};
 use crate::store::{InstalledLayer, Store};
 
 /// The file that says a directory is a seed. A directory without it, that is
@@ -84,6 +85,8 @@ pub enum SeedError {
         #[source]
         source: std::io::Error,
     },
+    #[error("cannot tell whether a composed layer's realm requires a signed index: {0}")]
+    Realm(#[source] RealmError),
     #[error(transparent)]
     Archive(#[from] ArchiveError),
     #[error(transparent)]
@@ -161,6 +164,22 @@ pub fn layout_dir(dest: &Path, layer: &InstalledLayer) -> PathBuf {
         .unwrap_or(&layer.digest);
     let short: String = hex.chars().take(12).collect();
     dest.join(format!("{}-{short}", layer.layer))
+}
+
+/// What a composed layer's realm obliges, from resolving it.
+///
+/// A realm that is not defined anywhere visible (no realms file, or none
+/// naming it) states no obligation, so `None`. A realms file that exists but
+/// cannot be read, parsed or used is NOT "unknown": treating it so would skip
+/// a `signed-index = true` the file may well declare, so it is a refusal.
+pub fn realm_obligation(
+    resolved: Result<Realm, RealmError>,
+) -> Result<Option<(String, bool)>, SeedError> {
+    match resolved {
+        Ok(realm) => Ok(Some((realm.name.clone(), realm.signed_index))),
+        Err(RealmError::NoRealmsFile { .. } | RealmError::Undefined { .. }) => Ok(None),
+        Err(e) => Err(SeedError::Realm(e)),
+    }
 }
 
 /// The signed line index this store holds for the layer's line, as the bytes it
@@ -851,5 +870,54 @@ mod tests {
         // protects somebody else's signed work.
         let again = seed_layer(&n.store, &n.layer, &dest, PLATFORM, None).unwrap();
         assert_eq!(again, out);
+    }
+
+    // rivet: verifies REQ-SEED-001
+    #[test]
+    fn a_realm_nobody_defines_states_no_obligation_but_a_broken_file_is_a_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, pk) = generate_root_keypair();
+        let hex: String = pk.iter().map(|b| format!("{b:02x}")).collect();
+
+        // No realms file at all, and a file that does not name the realm.
+        assert_eq!(
+            realm_obligation(crate::realm::resolve_realm(tmp.path(), "acme")).unwrap(),
+            None
+        );
+        std::fs::write(
+            tmp.path().join("varve-realms.toml"),
+            format!("[realm.other]\nregistry = \"r\"\ntrust-root = \"{hex}\"\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            realm_obligation(crate::realm::resolve_realm(tmp.path(), "acme")).unwrap(),
+            None
+        );
+
+        // Defined: the obligation is the realm's, either way round.
+        for required in [false, true] {
+            std::fs::write(
+                tmp.path().join("varve-realms.toml"),
+                format!(
+                    "[realm.acme]\nregistry = \"r\"\ntrust-root = \"{hex}\"\n\
+                     signed-index = {required}\n"
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                realm_obligation(crate::realm::resolve_realm(tmp.path(), "acme")).unwrap(),
+                Some(("acme".to_string(), required))
+            );
+        }
+
+        // Broken: parse error and a bad definition are refusals naming the file.
+        for body in ["[realm.acme\nnot toml", "[realm.acme]\nregistry = \"r\"\n"] {
+            std::fs::write(tmp.path().join("varve-realms.toml"), body).unwrap();
+            let err =
+                realm_obligation(crate::realm::resolve_realm(tmp.path(), "acme")).unwrap_err();
+            assert!(matches!(err, SeedError::Realm(_)), "{err}");
+            let full = format!("{err} / {:?}", std::error::Error::source(&err));
+            assert!(full.contains("varve-realms.toml"), "{full}");
+        }
     }
 }
