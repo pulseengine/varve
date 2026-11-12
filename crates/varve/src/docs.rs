@@ -85,6 +85,15 @@ A composed layer's payloads are part of what your pin delivers, so they are part
 of what `inspect` reports — each row names the layer and the realm it came from,
 and the composition block lists every layer that was followed. `varve sbom` is
 blind to composition; this is not.
+
+## A MIXED toolchain
+
+With `[toolchain.override.<tool>]` in varve.toml (REQ-OVERRIDE-001) the report
+opens with `MIXED toolchain <layer>+mixed` and names the layer each overridden
+tool is dispatched from. That layer's entry for the tool is listed as
+DISPATCHED, and the composition's own entry for it as OVERRIDDEN: carried and
+verified, not what runs. `--json` carries `state` (`pinned` or `mixed`),
+`overrides`, and an `overridden` count in `summary`.
 "#;
 
 /// The embedded topic registry. Command topics use the exact clap subcommand

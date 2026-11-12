@@ -37,9 +37,8 @@ fn script(id: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// A SIGNED layer of `tools` (name, bytes) and `crates` (name, version,
-/// bytes), written into the registry directory. Returns (manifest digest,
-/// [(tool, blob digest)]).
+/// A SIGNED layer of `tools` (name, bytes) and `crates`, written into the
+/// registry directory. Returns (manifest digest, [(tool, blob digest)]).
 fn put_layer(
     registry: &Path,
     sk: &[u8],
@@ -47,13 +46,32 @@ fn put_layer(
     tools: &[(&str, Vec<u8>)],
     crates: &[(&str, &str, Vec<u8>)],
 ) -> (String, Vec<(String, String)>) {
+    let tools: Vec<(&str, Vec<u8>, &str)> =
+        tools.iter().map(|(n, b)| (*n, b.clone(), "")).collect();
+    put_layer_full(registry, sk, layer, "qualified", &tools, crates, &[])
+}
+
+/// The general form: a channel, an extra annotation string per tool (e.g. a
+/// runner contract), and `includes` as (digest, layer id) in realm `acme`.
+/// Every tool is stamped for THIS host and carries source provenance, so
+/// `export-bazel` has a checksum to write for it: the sha256 of its bytes.
+fn put_layer_full(
+    registry: &Path,
+    sk: &[u8],
+    layer: &str,
+    channel: &str,
+    tools: &[(&str, Vec<u8>, &str)],
+    crates: &[(&str, &str, Vec<u8>)],
+    includes: &[(&str, &str)],
+) -> (String, Vec<(String, String)>) {
+    let host = varve_core::host_platform();
     let mut entries = Vec::new();
     let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
     let mut digests = Vec::new();
-    for (name, bytes) in tools {
+    for (name, bytes, extra) in tools {
         let d = varve_core::manifest_digest(bytes);
         entries.push(format!(
-            r#"{{"mediaType":"application/octet-stream","digest":"{d}","size":{},"annotations":{{"eu.pulseengine.tool":"{name}","eu.pulseengine.tool.version":"1.0.0"}}}}"#,
+            r#"{{"mediaType":"application/octet-stream","digest":"{d}","size":{},"annotations":{{"eu.pulseengine.tool":"{name}","eu.pulseengine.tool.version":"1.0.0","eu.pulseengine.platform":"{host}","eu.pulseengine.source.repo":"acme/{name}","eu.pulseengine.source.asset":"{name}-{layer}.tar.gz","eu.pulseengine.source.sha256":"{d}"{extra}}}}}"#,
             bytes.len()
         ));
         digests.push((name.to_string(), d.clone()));
@@ -67,9 +85,14 @@ fn put_layer(
         ));
         blobs.push((d, bytes.clone()));
     }
+    for (digest, inc_layer) in includes {
+        entries.push(format!(
+            r#"{{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"{digest}","size":0,"annotations":{{"eu.pulseengine.varve.kind":"layer","eu.pulseengine.varve.include.realm":"acme","eu.pulseengine.varve.include.layer":"{inc_layer}"}}}}"#
+        ));
+    }
     let line = &layer[..layer.rfind('.').unwrap()];
     let payload = format!(
-        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{layer}","eu.pulseengine.varve.line":"{line}","eu.pulseengine.varve.channel":"qualified","eu.pulseengine.varve.counter":"1","org.opencontainers.image.created":"2026-11-01T00:00:00Z"}},"manifests":[{}]}}"#,
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{layer}","eu.pulseengine.varve.line":"{line}","eu.pulseengine.varve.channel":"{channel}","eu.pulseengine.varve.counter":"1","org.opencontainers.image.created":"2026-11-01T00:00:00Z"}},"manifests":[{}]}}"#,
         entries.join(",")
     );
     let digest = varve_core::manifest_digest(payload.as_bytes());
@@ -330,6 +353,13 @@ fn an_override_layer_that_does_not_carry_the_tool_is_refused() {
         "{}",
         stderr(&a)
     );
+    // With 2026.08.0 installed (by the synth override), dispatch refuses too.
+    w.pin_synth_override();
+    varve(&w).arg("install").assert().success();
+    w.pin(&format!(
+        "[toolchain.override.loom]\nlayer = \"{OLDER}\"\ndigest = \"{}\"\n",
+        w.older_digest
+    ));
     assert_refused(&w, &["run", "loom"], "does not carry 'loom'");
 }
 
@@ -395,6 +425,16 @@ fn a_digest_matching_no_layer_or_another_layer_is_refused() {
         w.older_digest
     ));
     assert_refused(&w, &["install"], "refusing to guess");
+    // Refused on the verified manifest: nothing was laid down for it.
+    assert_refused(&w, &["run", "synth"], "is not installed");
+    // With 2026.08.0 installed, the same mislabelled override is refused at
+    // dispatch too.
+    w.pin_synth_override();
+    varve(&w).arg("install").assert().success();
+    w.pin(&format!(
+        "[toolchain.override.synth]\nlayer = \"2026.09.0\"\ndigest = \"{}\"\n",
+        w.older_digest
+    ));
     assert_refused(&w, &["run", "synth"], "refusing to guess");
 }
 
@@ -856,4 +896,467 @@ fn an_override_layer_installed_for_another_platform_is_refused_everywhere() {
     varve(&w).arg("install").assert().success();
     let run = varve(&w).args(["run", "synth"]).assert().success();
     assert!(stdout(&run).starts_with("synth-0.57 "), "{}", stdout(&run));
+}
+
+/// The realm partition holding the pinned layer (its `state/` and `core/`).
+fn partition(w: &World) -> PathBuf {
+    walk_find(&w.root, &w.pinned_digest.replace(':', "-"))
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+fn marks_file(w: &World) -> PathBuf {
+    partition(w).join("state").join("high-water-marks.json")
+}
+
+/// Raise line `line`'s mark to `to` in the realm partition.
+fn raise_mark(w: &World, line: &str, to: u64) {
+    let path = marks_file(w);
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    v[line] = serde_json::json!(to);
+    std::fs::write(&path, v.to_string()).unwrap();
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn a_qualified_address_of_an_overridden_tool_runs_the_override() {
+    // H1: `acme/synth` is the same tool as `synth`.
+    let w = installed_mixed();
+    w.clear_marks();
+    let a = varve(&w).args(["run", "acme/synth"]).assert().success();
+    assert!(stdout(&a).starts_with("synth-0.57 "), "{}", stdout(&a));
+    assert!(w.ran("synth-0.57") && !w.ran("synth-0.65"));
+    let a = varve(&w).args(["which", "acme/synth"]).assert().success();
+    let path = PathBuf::from(stdout(&a).trim());
+    assert_eq!(std::fs::read(&path).unwrap(), script("synth-0.57"));
+    assert!(
+        stderr(&a).contains(&format!("provided by realm 'acme' layer {OLDER}")),
+        "{}",
+        stderr(&a)
+    );
+    // Another realm's address of the tool is refused, naming the override.
+    assert_refused(&w, &["run", "beta/synth"], "overridden");
+    assert_refused(&w, &["which", "beta/synth"], "overridden");
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn the_runner_contract_comes_from_the_layer_whose_binary_runs() {
+    let w = world();
+    let runner = r#","eu.pulseengine.runner":"wasmrun""#;
+    let wasmrun = b"#!/bin/sh\necho \"wasmrun $@\"\n".to_vec();
+    // Pinned 2026.10.0 runs synth through wasmrun; the plain 0.57 override
+    // must run DIRECTLY, not be handed to the pin's runner.
+    let (pinned_runner, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.10.0",
+        "qualified",
+        &[
+            ("synth", script("synth-wasm"), runner),
+            ("wasmrun", wasmrun.clone(), ""),
+        ],
+        &[],
+        &[],
+    );
+    let _ = pinned_runner;
+    let pin = |layer: &str, ov_layer: &str, ov_digest: &str| {
+        std::fs::write(
+            w.project.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\n\
+                 layer = \"{layer}\"\n[toolchain.override.synth]\nlayer = \"{ov_layer}\"\n\
+                 digest = \"{ov_digest}\"\n"
+            ),
+        )
+        .unwrap();
+    };
+    pin("2026.10.0", OLDER, &w.older_digest);
+    varve(&w).arg("install").assert().success();
+    let a = varve(&w).args(["run", "synth"]).assert().success();
+    assert!(
+        stdout(&a).starts_with("synth-0.57 "),
+        "ran through the pin's runner: {}",
+        stdout(&a)
+    );
+
+    // Pinned 2026.12.0 runs synth natively; an override whose synth carries a
+    // runner contract runs through it, with the OVERRIDE's binary.
+    put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.12.0",
+        "qualified",
+        &[
+            ("synth", script("synth-native"), ""),
+            ("wasmrun", wasmrun, ""),
+        ],
+        &[],
+        &[],
+    );
+    let (wrapped, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.09.0",
+        "qualified",
+        &[("synth", script("synth-0.60-wasm"), runner)],
+        &[],
+        &[],
+    );
+    pin("2026.12.0", "2026.09.0", &wrapped);
+    varve(&w).arg("install").assert().success();
+    let a = varve(&w).args(["run", "synth"]).assert().success();
+    let out = stdout(&a);
+    assert!(out.starts_with("wasmrun "), "{out}");
+    assert!(
+        out.contains(&wrapped.replace(':', "-")),
+        "the override's bytes: {out}"
+    );
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn export_bazel_writes_the_override_layers_checksum_for_the_overridden_tool() {
+    // H2: a Bazel registry for a mixed toolchain must fetch the synth that
+    // `varve run synth` runs, not the pin's.
+    let w = installed_mixed();
+    let out = w.project.join("bazel");
+    varve(&w)
+        .args(["export-bazel", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    let synth = std::fs::read_to_string(out.join("synth.json")).unwrap();
+    let older_hex = varve_core::manifest_digest(&script("synth-0.57"));
+    let pinned_hex = varve_core::manifest_digest(&script("synth-0.65"));
+    let strip = |d: &str| d.strip_prefix("sha256:").unwrap().to_string();
+    assert!(synth.contains(&strip(&older_hex)), "{synth}");
+    assert!(!synth.contains(&strip(&pinned_hex)), "{synth}");
+    let loom = std::fs::read_to_string(out.join("loom.json")).unwrap();
+    assert!(
+        loom.contains(&strip(&varve_core::manifest_digest(&script("loom-pinned")))),
+        "{loom}"
+    );
+    assert!(
+        !out.join("extra.json").exists(),
+        "the override adds nothing else"
+    );
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn inspect_reports_which_layer_dispatches_an_overridden_tool() {
+    // M1.
+    let w = installed_mixed();
+    let a = varve(&w).arg("inspect").assert().success();
+    let out = stdout(&a);
+    assert!(
+        out.contains(&format!("MIXED toolchain {PINNED}+mixed")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "synth is dispatched from layer {OLDER} {}",
+            w.older_digest
+        )),
+        "{out}"
+    );
+    let a = varve(&w).args(["inspect", "--json"]).assert().success();
+    let j: serde_json::Value = serde_json::from_slice(&a.get_output().stdout).unwrap();
+    assert_eq!(j["state"], "mixed");
+    assert_eq!(j["overrides"][0]["digest"], w.older_digest.as_str());
+    let synths: Vec<&serde_json::Value> = j["payloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["name"] == "synth")
+        .collect();
+    let by_layer = |l: &str| synths.iter().find(|p| p["layer"] == l).unwrap()["dispatch"].clone();
+    assert_eq!(by_layer(OLDER), "dispatched");
+    assert_eq!(by_layer(PINNED), "overridden");
+    assert!(
+        !j["payloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "extra"),
+        "only the overridden tool of the override layer is listed"
+    );
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn verify_reports_a_carried_attestation_made_under_a_mix() {
+    // M2: a carried statement that records overrides is reported as made
+    // under that mix, and as not matching a toolchain with other overrides.
+    let w = installed_mixed();
+    let doc = w.dir.join("prov.json");
+    std::fs::write(&doc, br#"{"_type":"x"}"#).unwrap();
+    let st = w.dir.join("prov.dsse.json");
+    varve(&w)
+        .args(["sign-attestation", "--kind", "provenance", "--file"])
+        .arg(&doc)
+        .arg("--key")
+        .arg(w.dir.join("acme.key"))
+        .arg("--out")
+        .arg(&st)
+        .assert()
+        .success();
+    let envelope = std::fs::read(&st).unwrap();
+    let root = walk_find(&w.root, &w.pinned_digest.replace(':', "-")).unwrap();
+    varve_core::attestcarry::persist(
+        &root,
+        &[varve_core::attestcarry::CarriedAttestation {
+            statement_digest: varve_core::manifest_digest(&envelope),
+            statement: envelope,
+            bytes: std::fs::read(&doc).unwrap(),
+        }],
+    )
+    .unwrap();
+    let a = varve(&w).arg("verify").assert().success();
+    let out = stdout(&a);
+    assert!(
+        out.contains(&format!(
+            "made under MIXED toolchain {}",
+            override_record(&w)
+        )),
+        "{out}"
+    );
+    assert!(out.contains("matches this project's toolchain"), "{out}");
+    w.pin("");
+    let a = varve(&w).arg("verify").assert().success();
+    let out = stdout(&a);
+    assert!(
+        out.contains("does NOT match this project's toolchain"),
+        "{out}"
+    );
+    assert!(out.contains("none (the pinned layer alone)"), "{out}");
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn an_override_on_another_channel_is_refused_and_leaves_no_mark() {
+    // M3 and M4: refused on the verified manifest, before anything is laid
+    // down or marked.
+    let w = world();
+    varve(&w).arg("install").assert().success();
+    let before = std::fs::read(marks_file(&w)).unwrap();
+    let (rolling, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.09.0",
+        "rolling",
+        &[("synth", script("synth-rolling"), "")],
+        &[],
+        &[],
+    );
+    w.pin(&format!(
+        "[toolchain.override.synth]\nlayer = \"2026.09.0\"\ndigest = \"{rolling}\"\n"
+    ));
+    assert_refused(&w, &["install"], "channel 'rolling'");
+    assert_eq!(std::fs::read(marks_file(&w)).unwrap(), before, "mark moved");
+    assert!(!walk_has(&w.root, &rolling.replace(':', "-")), "laid down");
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn a_refused_override_is_refused_before_it_is_fetched_or_marked() {
+    // M4. Clause 4 is decided from the pin and the pinned layer: no fetch.
+    // The digest names nothing the registry has — a fetch would fail with
+    // "could not be installed", so the clause-4 message proves none happened.
+    let w = world();
+    varve(&w).arg("install").assert().success();
+    let before = std::fs::read(marks_file(&w)).unwrap();
+    let nowhere = format!("sha256:{}", "d".repeat(64));
+    w.pin(&format!(
+        "[toolchain.override.extra]\nlayer = \"{OLDER}\"\ndigest = \"{nowhere}\"\n"
+    ));
+    let a = varve(&w).arg("install").assert().code(1);
+    assert!(stderr(&a).contains("cannot add one"), "{}", stderr(&a));
+    assert!(
+        !stderr(&a).contains("could not be installed"),
+        "{}",
+        stderr(&a)
+    );
+    // A refusal that needs the source manifest (the layer does not carry
+    // loom) leaves no layer and no mark behind.
+    w.pin(&format!(
+        "[toolchain.override.loom]\nlayer = \"{OLDER}\"\ndigest = \"{}\"\n",
+        w.older_digest
+    ));
+    assert_refused(&w, &["install"], "does not carry 'loom'");
+    assert_eq!(std::fs::read(marks_file(&w)).unwrap(), before, "mark moved");
+    assert!(
+        !walk_has(&w.root, &w.older_digest.replace(':', "-")),
+        "laid down"
+    );
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn an_override_below_its_lines_mark_is_refused_by_install_and_by_verify() {
+    // Install: the override's digest is not consent to go below the mark.
+    let w = world();
+    varve(&w).arg("install").assert().success();
+    raise_mark(&w, "2026.08", 9);
+    w.pin_synth_override();
+    assert_refused(&w, &["install"], "rollback refused");
+    // Verify: a mark raised after the override was installed.
+    let w = installed_mixed();
+    varve(&w).arg("verify").assert().success();
+    raise_mark(&w, "2026.08", 9);
+    assert_refused(
+        &w,
+        &["verify"],
+        "override synth: layer 2026.08.0 presents counter 1",
+    );
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn an_export_refuses_a_tampered_override_layer() {
+    // export_target verifies the override layer's bytes itself: resolve
+    // does not read them, so nothing earlier would stop this.
+    let w = installed_mixed();
+    let bin = walk_find(&w.root, &w.older_digest.replace(':', "-"))
+        .unwrap()
+        .join("bin")
+        .join("synth");
+    std::fs::write(&bin, script("synth-evil")).unwrap();
+    assert_refused(&w, &["export-cargo", "--out", "c"], "override synth");
+    assert!(!w.project.join("c").join(".varve-export.json").exists());
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn a_realmless_store_vouches_for_the_override_layer_too() {
+    // With no realm, dispatch checks each layer's retained signature against
+    // VARVE_TRUST_ROOT. An override layer re-signed by another key is not
+    // vouched for, though the pinned layer is.
+    let w = world();
+    let pk = w.dir.join("acme.pub");
+    let realms: String = std::fs::read_to_string(w.project.join("varve-realms.toml")).unwrap();
+    let hexkey = realms
+        .split("trust-root = \"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    std::fs::write(&pk, hexkey).unwrap();
+    std::fs::write(
+        w.project.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"{PINNED}\"\n\
+             [toolchain.override.synth]\nlayer = \"{OLDER}\"\ndigest = \"{}\"\n",
+            w.older_digest
+        ),
+    )
+    .unwrap();
+    varve(&w)
+        .env("VARVE_TRUST_ROOT", &pk)
+        .args(["install", "--from"])
+        .arg(&w.registry)
+        .assert()
+        .success();
+    let a = varve(&w)
+        .env("VARVE_TRUST_ROOT", &pk)
+        .args(["run", "synth"])
+        .assert()
+        .success();
+    assert!(stdout(&a).starts_with("synth-0.57 "), "{}", stdout(&a));
+    // Re-sign the override layer's retained envelope with a stranger's key.
+    let root = w.root.join("core").join(w.older_digest.replace(':', "-"));
+    let payload = std::fs::read(root.join("layer.json")).unwrap();
+    let (stranger, _) = varve_core::generate_root_keypair();
+    std::fs::write(
+        root.join("layer.dsse.json"),
+        varve_core::sign_layer_manifest(&payload, &stranger, "stranger").unwrap(),
+    )
+    .unwrap();
+    w.clear_marks();
+    let a = varve(&w)
+        .env("VARVE_TRUST_ROOT", &pk)
+        .args(["run", "synth"])
+        .assert()
+        .code(1);
+    assert!(
+        stderr(&a).contains(&format!("layer {OLDER}")),
+        "{}",
+        stderr(&a)
+    );
+    assert!(!w.ran("synth-0.57"));
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn a_one_off_layer_beside_the_projects_overrides_is_refused() {
+    let w = installed_mixed();
+    assert_refused(&w, &["run", "--varve", OLDER, "--", "synth"], "--varve");
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn verify_all_says_the_project_is_mixed() {
+    let w = installed_mixed();
+    let a = varve(&w).args(["verify", "--all"]).assert().success();
+    assert!(
+        stdout(&a).contains(&format!(
+            "MIXED: this project's toolchain is {PINNED}+mixed"
+        )),
+        "{}",
+        stdout(&a)
+    );
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn install_fetches_what_an_override_layer_composes_and_seed_carries_it() {
+    let w = world();
+    let (base, _) = put_layer(
+        &w.registry,
+        &w.sk,
+        "2026.07.0",
+        &[("base", script("base"))],
+        &[],
+    );
+    let (composing, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.09.0",
+        "qualified",
+        &[("synth", script("synth-0.60"), "")],
+        &[],
+        &[(base.as_str(), "2026.07.0")],
+    );
+    w.pin(&format!(
+        "[toolchain.override.synth]\nlayer = \"2026.09.0\"\ndigest = \"{composing}\"\n"
+    ));
+    let a = varve(&w).arg("install").assert().success();
+    assert!(
+        stdout(&a).contains("fetched composed layer 2026.07.0"),
+        "{}",
+        stdout(&a)
+    );
+    let dest = w.dir.join("seeded");
+    let a = varve(&w)
+        .args(["seed", "--json"])
+        .arg(&dest)
+        .assert()
+        .success();
+    let j: serde_json::Value = serde_json::from_slice(&a.get_output().stdout).unwrap();
+    let digests: Vec<&str> = j["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["digest"].as_str().unwrap())
+        .collect();
+    assert!(
+        digests.contains(&composing.as_str()) && digests.contains(&base.as_str()),
+        "{digests:?}"
+    );
 }
