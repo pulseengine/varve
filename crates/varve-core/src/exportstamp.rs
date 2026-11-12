@@ -68,9 +68,24 @@ pub struct ExportStamp {
     /// It says what the SESSION permitted, not that anything ran.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ambient_tools: Vec<String>,
+    /// The tools the producing toolchain took from OTHER layers of the realm
+    /// (REQ-OVERRIDE-001, DD-043 (6)). Absent for a pure toolchain, so a pure
+    /// export's stamp is byte-for-byte what it was; present, `layer` reads
+    /// `<layer>+mixed`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<crate::overrides::RecordedOverride>,
 }
 
 impl ExportStamp {
+    /// Record the overrides of a MIXED toolchain, and say so in `layer`
+    /// (DD-043 (6)): `<layer>+mixed` matches no pin, so nothing that reads the
+    /// identity alone can take the export for the pinned layer's.
+    pub fn with_overrides(mut self, overrides: Vec<crate::overrides::RecordedOverride>) -> Self {
+        self.layer = crate::overrides::identity(&self.layer, &overrides);
+        self.overrides = crate::overrides::sorted(&overrides);
+        self
+    }
+
     /// Record the ambient tools the producing session allowed.
     pub fn with_ambient_tools(mut self, ambient_tools: Vec<String>) -> Self {
         self.ambient_tools = ambient_tools;
@@ -248,6 +263,7 @@ pub fn stamp_for(
         content_digest: Some(tree_digest(&files)),
         files,
         ambient_tools: Vec::new(),
+        overrides: Vec::new(),
     })
 }
 
@@ -333,14 +349,46 @@ pub fn read_stamp(dir: &Path) -> Result<ExportStamp, ExportStampError> {
         .map_err(|e| ExportStampError::Malformed(dir.display().to_string(), e.to_string()))
 }
 
-/// Compare a stamp against the current pin's manifest digest.
-pub fn status(stamp: &ExportStamp, current_manifest_digest: &str) -> ExportStatus {
-    if stamp.manifest_digest == current_manifest_digest {
+/// Compare a stamp against the current pin's manifest digest AND the
+/// overrides its toolchain has now (REQ-OVERRIDE-001).
+///
+/// Current only when both agree and the stamp's own identity agrees with what
+/// it records: an export of the pure pin is stale for a mixed toolchain, an
+/// export of one mix is stale for another, and a stamp labelled `+mixed` with
+/// no overrides recorded (or the reverse) is evidence of neither.
+pub fn status(
+    stamp: &ExportStamp,
+    current_manifest_digest: &str,
+    current_overrides: &[crate::overrides::RecordedOverride],
+) -> ExportStatus {
+    let describe = |digest: &str, overrides: &[crate::overrides::RecordedOverride]| {
+        if overrides.is_empty() {
+            digest.to_string()
+        } else {
+            format!(
+                "{digest} mixed with {}",
+                crate::overrides::env_value(overrides)
+            )
+        }
+    };
+    let consistent = crate::overrides::identity_consistent(&stamp.layer, &stamp.overrides);
+    if consistent
+        && stamp.manifest_digest == current_manifest_digest
+        && crate::overrides::mismatch(&stamp.overrides, current_overrides).is_none()
+    {
         ExportStatus::Current
     } else {
         ExportStatus::Stale {
-            stamped: stamp.manifest_digest.clone(),
-            current: current_manifest_digest.to_string(),
+            stamped: if consistent {
+                describe(&stamp.manifest_digest, &stamp.overrides)
+            } else {
+                format!(
+                    "{} (labelled {}, which disagrees with the overrides it records)",
+                    describe(&stamp.manifest_digest, &stamp.overrides),
+                    stamp.layer
+                )
+            },
+            current: describe(current_manifest_digest, current_overrides),
         }
     }
 }
@@ -378,7 +426,108 @@ mod tests {
             content_digest: None,
             files: Vec::new(),
             ambient_tools: Vec::new(),
+            overrides: Vec::new(),
         }
+    }
+
+    fn synth_override(digest: &str) -> crate::overrides::RecordedOverride {
+        crate::overrides::RecordedOverride {
+            tool: "synth".into(),
+            layer: "2026.07.0".into(),
+            digest: digest.into(),
+        }
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_mixed_export_is_stamped_layer_plus_mixed_and_records_its_overrides() {
+        // DD-043 (6): the single identity field never names the pinned layer
+        // alone for a mixed toolchain.
+        let mixed = sample().with_overrides(vec![synth_override("sha256:cc")]);
+        assert_eq!(mixed.layer, "2026.08.0+mixed");
+        assert_eq!(
+            mixed.manifest_digest, "sha256:aaaa",
+            "the join key is the pin's"
+        );
+        assert_eq!(mixed.overrides, [synth_override("sha256:cc")]);
+        let text = serde_json::to_string(&mixed).unwrap();
+        assert!(
+            text.contains("\"overrides\":[{\"tool\":\"synth\""),
+            "{text}"
+        );
+        assert_eq!(serde_json::from_str::<ExportStamp>(&text).unwrap(), mixed);
+        // A pure export's stamp is byte-for-byte what it was.
+        let pure = sample().with_overrides(Vec::new());
+        assert_eq!(pure, sample());
+        assert!(!serde_json::to_string(&pure).unwrap().contains("overrides"));
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_stamp_is_current_only_for_the_same_pin_and_the_same_overrides() {
+        let o = synth_override("sha256:cc");
+        let mixed = sample().with_overrides(vec![o.clone()]);
+        assert_eq!(
+            status(&mixed, "sha256:aaaa", std::slice::from_ref(&o)),
+            ExportStatus::Current
+        );
+        // A pure export, now that the project is mixed.
+        assert!(matches!(
+            status(&sample(), "sha256:aaaa", std::slice::from_ref(&o)),
+            ExportStatus::Stale { .. }
+        ));
+        // A mixed export, now that the project is pure.
+        let ExportStatus::Stale { stamped, current } = status(&mixed, "sha256:aaaa", &[]) else {
+            panic!("a mixed export is not current for the pure pin");
+        };
+        assert!(stamped.contains("synth=2026.07.0@sha256:cc"), "{stamped}");
+        assert_eq!(current, "sha256:aaaa");
+        // Another mix.
+        assert!(matches!(
+            status(&mixed, "sha256:aaaa", &[synth_override("sha256:dd")]),
+            ExportStatus::Stale { .. }
+        ));
+        // A label that disagrees with the record is not evidence of either.
+        let mut relabelled = mixed.clone();
+        relabelled.layer = "2026.08.0".into();
+        assert!(matches!(
+            status(&relabelled, "sha256:aaaa", std::slice::from_ref(&o)),
+            ExportStatus::Stale { .. }
+        ));
+        let mut unlabelled = sample();
+        unlabelled.layer = "2026.08.0+mixed".into();
+        assert!(matches!(
+            status(&unlabelled, "sha256:aaaa", &[]),
+            ExportStatus::Stale { .. }
+        ));
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_v047_reader_refuses_a_mixed_stamp_instead_of_calling_it_current() {
+        // DD-043 (6), the older-reader property. A copy of the v0.47.0
+        // ExportStamp, which denies unknown fields: it meets `overrides` and
+        // refuses the stamp (verify reports it unreadable, exit 1), so no
+        // v0.47.0 varve takes a mixed export for the pinned layer's.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct ExportStampV047 {
+            layer: String,
+            manifest_digest: String,
+            kind: String,
+            #[serde(default)]
+            content_digest: Option<String>,
+            #[serde(default)]
+            files: Vec<FileEntry>,
+            #[serde(default)]
+            ambient_tools: Vec<String>,
+        }
+        let mixed = sample().with_overrides(vec![synth_override("sha256:cc")]);
+        let text = serde_json::to_string(&mixed).unwrap();
+        assert!(serde_json::from_str::<ExportStampV047>(&text).is_err());
+        let pure = serde_json::to_string(&sample()).unwrap();
+        assert!(serde_json::from_str::<ExportStampV047>(&pure).is_ok());
     }
 
     // rivet: verifies REQ-PASSTHROUGH-001
@@ -492,14 +641,14 @@ mod tests {
     // rivet: verifies REQ-EXPORT-SYNC-001
     #[test]
     fn status_is_current_when_digests_match() {
-        assert_eq!(status(&sample(), "sha256:aaaa"), ExportStatus::Current);
+        assert_eq!(status(&sample(), "sha256:aaaa", &[]), ExportStatus::Current);
     }
 
     // rivet: verifies REQ-EXPORT-SYNC-001
     #[test]
     fn status_is_stale_when_digests_differ() {
         assert_eq!(
-            status(&sample(), "sha256:bbbb"),
+            status(&sample(), "sha256:bbbb", &[]),
             ExportStatus::Stale {
                 stamped: "sha256:aaaa".into(),
                 current: "sha256:bbbb".into(),

@@ -875,6 +875,7 @@ pub fn check_declared_export(
     decl: &ExportDecl,
     project_root: &Path,
     current_manifest_digest: &str,
+    current_overrides: &[crate::overrides::RecordedOverride],
 ) -> DeclaredExportStatus {
     use crate::exportstamp::{
         ContentStatus, ExportStampError, ExportStatus, read_stamp, status, verify_content,
@@ -890,7 +891,7 @@ pub fn check_declared_export(
                     stamped: stamp.kind,
                 };
             }
-            match status(&stamp, current_manifest_digest) {
+            match status(&stamp, current_manifest_digest, current_overrides) {
                 ExportStatus::Current => match verify_content(&dir, &stamp) {
                     Ok(ContentStatus::Intact) => DeclaredExportStatus::Current,
                     Ok(ContentStatus::Unverifiable) => DeclaredExportStatus::Unverifiable,
@@ -1555,7 +1556,7 @@ path   = "before-shims"
         // Nothing generated yet: every declared export fails, none is skipped.
         for decl in &pin.exports {
             assert_eq!(
-                check_declared_export(decl, root, current),
+                check_declared_export(decl, root, current, &[]),
                 DeclaredExportStatus::Missing,
                 "{} must fail while it does not exist",
                 decl.out
@@ -1565,7 +1566,7 @@ path   = "before-shims"
         // Generated against the current pin: fresh.
         for decl in &pin.exports {
             stamped(&decl.dir(root), decl.kind.as_str(), current);
-            let got = check_declared_export(decl, root, current);
+            let got = check_declared_export(decl, root, current, &[]);
             assert!(
                 got.is_current(),
                 "{} should be fresh, got {got:?}",
@@ -1576,7 +1577,7 @@ path   = "before-shims"
         // The pin moves on and the exports do not.
         let moved = "sha256:bbbb";
         assert_eq!(
-            check_declared_export(&pin.exports[0], root, moved),
+            check_declared_export(&pin.exports[0], root, moved, &[]),
             DeclaredExportStatus::Stale {
                 stamped: current.into(),
                 current: moved.into(),
@@ -1589,7 +1590,7 @@ path   = "before-shims"
         let vsix = &pin.exports[1];
         stamped(&vsix.dir(root), "cargo", current);
         assert_eq!(
-            check_declared_export(vsix, root, current),
+            check_declared_export(vsix, root, current, &[]),
             DeclaredExportStatus::KindMismatch {
                 declared: "vsix".into(),
                 stamped: "cargo".into(),
@@ -1605,7 +1606,7 @@ path   = "before-shims"
         )
         .unwrap();
         assert!(matches!(
-            check_declared_export(cargo, root, current),
+            check_declared_export(cargo, root, current, &[]),
             DeclaredExportStatus::Unreadable(_)
         ));
     }
@@ -1623,16 +1624,16 @@ path   = "before-shims"
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.json"), b"{}").unwrap();
         stamped(&dir, decl.kind.as_str(), current);
-        assert!(check_declared_export(decl, root, current).is_current());
+        assert!(check_declared_export(decl, root, current, &[]).is_current());
 
         std::fs::write(dir.join("index.json"), b"{ }").unwrap();
         assert_eq!(
-            check_declared_export(decl, root, current),
+            check_declared_export(decl, root, current, &[]),
             DeclaredExportStatus::ContentDrift(ContentDrift::Modified("index.json".into()))
         );
         // A stale pin is still reported as stale, not as content drift.
         assert!(matches!(
-            check_declared_export(decl, root, "sha256:bbbb"),
+            check_declared_export(decl, root, "sha256:bbbb", &[]),
             DeclaredExportStatus::Stale { .. }
         ));
 
@@ -1642,11 +1643,43 @@ path   = "before-shims"
         old.files.clear();
         std::fs::write(dir.join(STAMP_FILE), serde_json::to_vec(&old).unwrap()).unwrap();
         assert_eq!(
-            check_declared_export(decl, root, current),
+            check_declared_export(decl, root, current, &[]),
             DeclaredExportStatus::Unverifiable
         );
         assert!(!DeclaredExportStatus::Unverifiable.is_current());
         assert!(!DeclaredExportStatus::ContentDrift(ContentDrift::Extra("x".into())).is_current());
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_declared_export_is_checked_against_the_toolchains_overrides() {
+        use crate::exportstamp::{read_stamp, write_stamp};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let pin = parse(DECLARED).unwrap();
+        let decl = &pin.exports[0];
+        let dir = decl.dir(root);
+        let current = "sha256:aaaa";
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.json"), b"{}").unwrap();
+        stamped(&dir, decl.kind.as_str(), current);
+        let o = crate::overrides::RecordedOverride {
+            tool: "synth".into(),
+            layer: "2026.08.0".into(),
+            digest: "sha256:cc".into(),
+        };
+        // A pure export for a mixed toolchain is stale.
+        assert!(matches!(
+            check_declared_export(decl, root, current, std::slice::from_ref(&o)),
+            DeclaredExportStatus::Stale { .. }
+        ));
+        let mixed = read_stamp(&dir).unwrap().with_overrides(vec![o.clone()]);
+        write_stamp(&dir, &mixed).unwrap();
+        assert!(check_declared_export(decl, root, current, std::slice::from_ref(&o)).is_current());
+        assert!(matches!(
+            check_declared_export(decl, root, current, &[]),
+            DeclaredExportStatus::Stale { .. }
+        ));
     }
 
     // rivet: verifies REQ-EXPORTDECL-001

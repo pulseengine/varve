@@ -94,9 +94,21 @@ pub struct AttestationStatement {
     /// anything ran.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ambient_tools: Vec<String>,
+    /// The overrides of the MIXED toolchain this was signed in
+    /// (REQ-OVERRIDE-001, DD-043 (6)), signed with the rest. Absent for a
+    /// pure toolchain. `check-attestation` refuses a statement whose
+    /// overrides are not the project's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<crate::overrides::RecordedOverride>,
 }
 
 impl AttestationStatement {
+    /// Record the overrides of the toolchain the statement is signed in.
+    pub fn with_overrides(mut self, overrides: Vec<crate::overrides::RecordedOverride>) -> Self {
+        self.overrides = crate::overrides::sorted(&overrides);
+        self
+    }
+
     /// Record the ambient tools the signing session allowed.
     pub fn with_ambient_tools(mut self, ambient_tools: Vec<String>) -> Self {
         self.ambient_tools = ambient_tools;
@@ -146,6 +158,7 @@ pub fn statement(
         digest: crate::store::manifest_digest(bytes),
         producer: producer.to_string(),
         ambient_tools: Vec::new(),
+        overrides: Vec::new(),
     }
 }
 
@@ -239,6 +252,32 @@ mod tests {
             BYTES,
             "varve",
         )
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_statement_signed_for_a_mixed_toolchain_records_its_overrides() {
+        let o = crate::overrides::RecordedOverride {
+            tool: "synth".into(),
+            layer: "2026.07.0".into(),
+            digest: "sha256:cc".into(),
+        };
+        let pure = serde_json::to_string(&st()).unwrap();
+        assert!(
+            !pure.contains("overrides"),
+            "a pure statement is unchanged: {pure}"
+        );
+        let mixed = st().with_overrides(vec![o.clone()]);
+        assert_eq!(mixed.overrides, [o]);
+        let text = serde_json::to_string(&mixed).unwrap();
+        assert!(
+            text.contains("\"overrides\":[{\"tool\":\"synth\""),
+            "{text}"
+        );
+        assert_eq!(
+            serde_json::from_str::<AttestationStatement>(&text).unwrap(),
+            mixed
+        );
     }
 
     // rivet: verifies REQ-PASSTHROUGH-001
