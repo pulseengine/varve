@@ -167,9 +167,9 @@ mod tests {
             "mixed for pure"
         );
         let other_digest = o("synth", "2026.08.0", "sha256:cc");
-        assert!(mismatch(&[a.clone()], &[other_digest]).is_some());
+        assert!(mismatch(std::slice::from_ref(&a), &[other_digest]).is_some());
         assert!(
-            mismatch(&[a.clone()], &[a, b]).is_some(),
+            mismatch(std::slice::from_ref(&a), &[a.clone(), b]).is_some(),
             "a subset is not the set"
         );
     }

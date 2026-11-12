@@ -1964,7 +1964,7 @@ mod version_message_tests {
         // A digest alone is unreviewable in a diff; a layer id alone is a name,
         // and a name resolves to whatever was installed under it.
         for (body, missing) in [
-            (format!("layer = \"2026.08.0\"\n"), "digest"),
+            ("layer = \"2026.08.0\"\n".to_string(), "digest"),
             (format!("digest = \"sha256:{OVERRIDE_HEX}\"\n"), "layer"),
             (String::new(), "layer and digest"),
         ] {

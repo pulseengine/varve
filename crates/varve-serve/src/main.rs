@@ -118,17 +118,19 @@ fn main() -> anyhow::Result<()> {
     http::accept_loop(&site, &listener)
 }
 
+/// The pinned layer, its verified composition, and each override's tool with
+/// its verified source layer (REQ-OVERRIDE-001).
+type ResolvedLayers = (
+    varve_core::InstalledLayer,
+    Vec<varve_core::compose::ComposedLayer>,
+    Vec<(String, varve_core::compose::ComposedLayer)>,
+);
+
 /// The pinned layer and every layer it composes, each verified.
 ///
 /// Both the viewer and the orientation start here, so there is one answer to
 /// "what does this pin contain" (see `tests/follows_composition.rs`).
-fn resolve_layers(
-    layer: Option<&str>,
-) -> anyhow::Result<(
-    varve_core::InstalledLayer,
-    Vec<varve_core::compose::ComposedLayer>,
-    Vec<(String, varve_core::compose::ComposedLayer)>,
-)> {
+fn resolve_layers(layer: Option<&str>) -> anyhow::Result<ResolvedLayers> {
     // The BASE root. Named `base` because `effective_root` below maps a base
     // root to a realm partition, and handing it a partition instead nests them.
     let base = varve_core::Store::at(store_root()?);
