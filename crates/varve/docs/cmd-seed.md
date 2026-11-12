@@ -40,7 +40,9 @@ varve seed /srv/varve-seed --layer 2026.08.1 --digest sha256:<hex>
 
 `<dir>` must be an absolute path: a relative one is refused, because a realm's `mirrors` entry has to be absolute (it would otherwise resolve against whatever directory varve happens to run in).
 
-`<dir>` must be new, empty, or a seed a previous `varve seed` wrote (it holds a `varve-seed.json`). Any other non-empty directory is refused untouched: mixing a seed into somebody else's files leaves a directory that is neither. Seeding the same layer again replaces its subdirectory and leaves the others.
+`<dir>` must be new, empty, or a seed a previous `varve seed` wrote (it holds a `varve-seed.json`). Any other non-empty directory is refused untouched: mixing a seed into somebody else's files leaves a directory that is neither. Seeding the same layer again replaces its subdirectory and leaves the others. A `<dir>` that is itself a symbolic link is refused.
+
+All layers are written into a staging directory inside `<dir>` first (`.varve-seed-staging-…`), and moved into place only when every layer succeeded: a refusal in any layer leaves `<dir>` as it was. An existing layer subdirectory is removed and replaced, never written into, and a symbolic link in its place is removed, not followed. The final moves are not one atomic step: if one fails partway, the layers before it are already replaced. If the process is killed mid-seed into a new `<dir>`, a staging directory without `varve-seed.json` remains, and the next run refuses `<dir>` as not a seed; remove it and seed again.
 
 Each layer goes in its own subdirectory, `<layer>-<12 hex of its digest>`, and each subdirectory is one OCI image layout — the same shape `varve archive` writes and `varve install --from` reads. `<dir>` itself is therefore not a `mirrors` entry — each subdirectory is, one entry per layer. One layout per layer because a layout's referrers (the baseline status, the carried attestations) are not keyed by layer.
 
