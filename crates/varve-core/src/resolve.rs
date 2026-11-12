@@ -31,6 +31,40 @@ pub struct Resolved {
     /// Runner contracts (REQ-RUNNER-001): tool → (runner tool, prefix args,
     /// optional per-user-arg flag), from the signed manifest annotations.
     pub runners: std::collections::BTreeMap<String, RunnerContract>,
+    /// Tools dispatched from ANOTHER verified layer of the realm
+    /// (REQ-OVERRIDE-001, DD-043 (4)), sorted by tool. Each one's path is
+    /// already what `tools` holds for that name. Non-empty means the
+    /// toolchain is MIXED, and nothing may report it as `layer`.
+    pub overrides: Vec<ResolvedOverride>,
+}
+
+/// One `[toolchain.override.<tool>]`, resolved: the source layer as installed
+/// in the pin's own realm partition, and the binary dispatched for the tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedOverride {
+    pub tool: String,
+    pub layer: InstalledLayer,
+    pub path: PathBuf,
+}
+
+impl Resolved {
+    /// Is any tool dispatched from a layer other than the pinned one's
+    /// composition? (REQ-OVERRIDE-001 clause 3.)
+    pub fn is_mixed(&self) -> bool {
+        !self.overrides.is_empty()
+    }
+
+    /// The overrides as every report records them.
+    pub fn recorded_overrides(&self) -> Vec<crate::overrides::RecordedOverride> {
+        self.overrides
+            .iter()
+            .map(|o| crate::overrides::RecordedOverride {
+                tool: o.tool.clone(),
+                layer: o.layer.layer.to_string(),
+                digest: o.layer.digest.clone(),
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +133,59 @@ pub enum ResolveError {
         layer: String,
         missing: String,
         realm: String,
+    },
+    #[error(
+        "[toolchain.override.{tool}]: layer {layer} as pinned here does not provide '{tool}' \
+         (it provides: {available}). An override REPLACES a tool the pin already has; it \
+         cannot add one, or it would put on PATH a tool no reviewer pinned \
+         (REQ-OVERRIDE-001 clause 4). For a tool no layer carries see `varve docs \
+         passthrough`; to ship it, add it to a layer."
+    )]
+    OverrideNotInPin {
+        tool: String,
+        layer: String,
+        available: String,
+    },
+    #[error(
+        "[toolchain.override.{tool}]: layer {layer} ({digest}) does not carry '{tool}' — it \
+         carries: {available}. Name a layer that ships this tool."
+    )]
+    OverrideSourceLacksTool {
+        tool: String,
+        layer: String,
+        digest: String,
+        available: String,
+    },
+    #[error(
+        "[toolchain.override.{tool}]: layer {layer} ({digest}) is not installed — run `varve \
+         install` in this project: it fetches the override layer from this pin's realm and \
+         verifies it against the realm's trust root, exactly as it does the pinned layer"
+    )]
+    OverrideNotInstalled {
+        tool: String,
+        layer: String,
+        digest: String,
+    },
+    #[error(
+        "[toolchain.override.{tool}]: names layer {named} but its digest {digest} is layer \
+         {found} — the name is a label, the digest is the artifact; refusing to guess. Fix \
+         the override."
+    )]
+    OverrideNameDigestMismatch {
+        tool: String,
+        named: String,
+        digest: String,
+        found: String,
+    },
+    #[error(
+        "[toolchain.override.{tool}]: layer {layer} ({digest}) is installed only under another \
+         realm's trust root, not this pin's. An override comes from the pin's own realm and is \
+         verified against its root; another realm's word does not reach this toolchain."
+    )]
+    OverrideFromAnotherRealm {
+        tool: String,
+        layer: String,
+        digest: String,
     },
 }
 
@@ -240,6 +327,20 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
 
     // Runner contracts from the stored manifest's entry annotations —
     // lenient read: legacy layers without them simply have none.
+    let mut runners = runners_of(&layer);
+    let overrides = resolve_overrides(pin, &layer, store, &mut tools, &mut runners)?;
+    Ok(Resolved {
+        layer,
+        tools,
+        qualified,
+        runners,
+        overrides,
+    })
+}
+
+/// The runner contracts (REQ-RUNNER-001) a layer's signed manifest declares,
+/// per tool.
+fn runners_of(layer: &InstalledLayer) -> std::collections::BTreeMap<String, RunnerContract> {
     let mut runners = std::collections::BTreeMap::new();
     if let Ok(bytes) = std::fs::read(layer.root.join("layer.json"))
         && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -267,12 +368,93 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
             }
         }
     }
-    Ok(Resolved {
-        layer,
-        tools,
-        qualified,
-        runners,
-    })
+    runners
+}
+
+/// Apply the pin's overrides (REQ-OVERRIDE-001, DD-043 (3) and (4)): each
+/// replaces one EXPOSED tool's path with the binary of another layer installed
+/// in this pin's own realm partition. Every refusal happens here, at resolve
+/// time, so nothing is executed for a pin whose override cannot be honoured.
+///
+/// The source layer is looked up in `store` — this pin's partition — and
+/// nowhere else: that is what "from the pin's realm, verified against its
+/// root" means for an installed layer. One found only in another partition is
+/// named as such rather than reported as missing.
+fn resolve_overrides(
+    pin: &Pin,
+    pinned: &InstalledLayer,
+    store: &Store,
+    tools: &mut [(String, PathBuf)],
+    runners: &mut std::collections::BTreeMap<String, RunnerContract>,
+) -> Result<Vec<ResolvedOverride>, ResolveError> {
+    let mut out = Vec::with_capacity(pin.overrides.len());
+    for o in &pin.overrides {
+        // Clause 4 first: whether the pin has this tool does not depend on
+        // whether the override layer is installed.
+        let Some(slot) = tools.iter_mut().find(|(name, _)| *name == o.tool) else {
+            let mut available: Vec<&str> = tools.iter().map(|(n, _)| n.as_str()).collect();
+            available.sort();
+            return Err(ResolveError::OverrideNotInPin {
+                tool: o.tool.clone(),
+                layer: pinned.layer.to_string(),
+                available: if available.is_empty() {
+                    "nothing".into()
+                } else {
+                    available.join(", ")
+                },
+            });
+        };
+        let Some(source) = store.get(&o.digest)? else {
+            if store.find_anywhere(&o.digest)?.is_some() {
+                return Err(ResolveError::OverrideFromAnotherRealm {
+                    tool: o.tool.clone(),
+                    layer: o.layer.to_string(),
+                    digest: o.digest.clone(),
+                });
+            }
+            return Err(ResolveError::OverrideNotInstalled {
+                tool: o.tool.clone(),
+                layer: o.layer.to_string(),
+                digest: o.digest.clone(),
+            });
+        };
+        if source.layer != o.layer {
+            return Err(ResolveError::OverrideNameDigestMismatch {
+                tool: o.tool.clone(),
+                named: o.layer.to_string(),
+                digest: o.digest.clone(),
+                found: source.layer.to_string(),
+            });
+        }
+        let Some(path) = store.tool_path(&source, &o.tool) else {
+            let mut available = store.manifest_tool_names(&source).unwrap_or_default();
+            available.sort();
+            available.dedup();
+            return Err(ResolveError::OverrideSourceLacksTool {
+                tool: o.tool.clone(),
+                layer: source.layer.to_string(),
+                digest: source.digest.clone(),
+                available: if available.is_empty() {
+                    "nothing".into()
+                } else {
+                    available.join(", ")
+                },
+            });
+        };
+        slot.1 = path.clone();
+        // A runner contract was signed with the bytes it runs: the pin's
+        // contract for this tool goes, the source layer's (if any) applies.
+        runners.remove(&o.tool);
+        if let Some(contract) = runners_of(&source).remove(&o.tool) {
+            runners.insert(o.tool.clone(), contract);
+        }
+        out.push(ResolvedOverride {
+            tool: o.tool.clone(),
+            layer: source,
+            path,
+        });
+    }
+    Ok(out)
 }
 
 /// Every tool name the pinned layer CARRIES: its signed manifest's tools, the
@@ -1143,5 +1325,251 @@ mod tests {
         let layer = resolve(&p, &store).unwrap().layer;
         std::fs::remove_dir_all(layer.root.join("bin")).unwrap();
         assert!(carried_tool_names(&p, &layer, &store).is_ok());
+    }
+
+    /// A manifest declaring `tools`, with optional extra annotations per tool.
+    fn manifest_declaring(layer: &str, tools: &[(&str, &str)]) -> Vec<u8> {
+        let entries: Vec<String> = tools
+            .iter()
+            .map(|(t, extra)| {
+                format!(
+                    r#"{{"digest":"sha256:{t}","annotations":{{"eu.pulseengine.tool":"{t}"{extra}}}}}"#
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{layer}","eu.pulseengine.varve.channel":"qualified"}},"manifests":[{}]}}"#,
+            entries.join(",")
+        )
+        .into_bytes()
+    }
+
+    /// The pinned layer 2026.11.0 carries synth and loom; 2026.08.0 carries an
+    /// older synth and a tool the pin does not have. Returns the older layer's
+    /// digest.
+    fn mixed_store(store: &Store) -> String {
+        store
+            .lay_down(
+                &manifest_declaring("2026.11.0", &[("synth", ""), ("loom", "")]),
+                &[("synth", b"synth-0.65"), ("loom", b"loom-pinned")],
+            )
+            .unwrap();
+        store
+            .lay_down(
+                &manifest_declaring("2026.08.0", &[("synth", ""), ("extra", "")]),
+                &[("synth", b"synth-0.57"), ("extra", b"extra")],
+            )
+            .unwrap()
+    }
+
+    fn pin_overriding(tool: &str, layer: &str, digest: &str) -> Pin {
+        pin(&format!(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.11.0\"\n\
+             [toolchain.override.{tool}]\nlayer = \"{layer}\"\ndigest = \"{digest}\"\n"
+        ))
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_dispatches_that_tool_from_its_layer_and_the_rest_from_the_pin() {
+        // DD-043 (4): Resolved gains overrides, and the tool's path comes from
+        // the override layer.
+        let (_tmp, store) = store();
+        let older = mixed_store(&store);
+        let resolved = resolve(&pin_overriding("synth", "2026.08.0", &older), &store).unwrap();
+        assert_eq!(
+            resolved.layer.layer.to_string(),
+            "2026.11.0",
+            "the pin is the pin"
+        );
+        let path_of = |name: &str| {
+            resolved
+                .tools
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, p)| std::fs::read(p).unwrap())
+        };
+        assert_eq!(path_of("synth").as_deref(), Some(&b"synth-0.57"[..]));
+        assert_eq!(path_of("loom").as_deref(), Some(&b"loom-pinned"[..]));
+        assert_eq!(path_of("extra"), None, "an override adds nothing else");
+        assert_eq!(resolved.overrides.len(), 1);
+        let o = &resolved.overrides[0];
+        assert_eq!(o.tool, "synth");
+        assert_eq!(o.layer.layer.to_string(), "2026.08.0");
+        assert_eq!(o.layer.digest, older);
+        assert_eq!(std::fs::read(&o.path).unwrap(), b"synth-0.57");
+        assert!(resolved.is_mixed());
+        assert_eq!(
+            resolved.recorded_overrides(),
+            vec![crate::overrides::RecordedOverride {
+                tool: "synth".into(),
+                layer: "2026.08.0".into(),
+                digest: older.clone(),
+            }]
+        );
+        // The pure pin is not mixed and records nothing.
+        let pure = resolve(&qualified_pin("2026.11.0"), &store).unwrap();
+        assert!(!pure.is_mixed());
+        assert!(pure.overrides.is_empty() && pure.recorded_overrides().is_empty());
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_of_a_tool_the_pinned_layer_does_not_carry_is_refused() {
+        // Clause 4: the override layer HAS `extra`; the pin does not. An
+        // override replaces, it never adds, or it would smuggle a tool in.
+        let (_tmp, store) = store();
+        let older = mixed_store(&store);
+        let err = resolve(&pin_overriding("extra", "2026.08.0", &older), &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideNotInPin { tool, layer, .. }
+                if tool == "extra" && layer == "2026.11.0"),
+            "got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("passthrough"), "names the alternative: {msg}");
+        assert!(msg.contains("loom, synth"), "names what the pin has: {msg}");
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_of_a_tool_the_pin_restricts_away_is_refused_too() {
+        // `tools` exposes only loom; synth is carried but not exposed, so an
+        // override of it would put on PATH a name the pin left off.
+        let (_tmp, store) = store();
+        let older = mixed_store(&store);
+        let p = pin(&format!(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.11.0\"\n\
+             tools = [\"loom\"]\n[toolchain.override.synth]\nlayer = \"2026.08.0\"\ndigest = \"{older}\"\n"
+        ));
+        let err = resolve(&p, &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideNotInPin { tool, .. } if tool == "synth"),
+            "got: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_layer_that_does_not_carry_the_tool_is_refused() {
+        let (_tmp, store) = store();
+        mixed_store(&store);
+        let other = store
+            .lay_down(
+                &manifest_declaring("2026.09.0", &[("rivet", "")]),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let err = resolve(&pin_overriding("synth", "2026.09.0", &other), &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideSourceLacksTool { tool, layer, .. }
+                if tool == "synth" && layer == "2026.09.0"),
+            "got: {err}"
+        );
+        assert!(
+            err.to_string().contains("rivet"),
+            "names what it has: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_digest_that_is_not_installed_is_refused_with_the_fix() {
+        let (_tmp, store) = store();
+        mixed_store(&store);
+        let absent = format!("sha256:{}", "c".repeat(64));
+        let err = resolve(&pin_overriding("synth", "2026.08.0", &absent), &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideNotInstalled { tool, digest, .. }
+                if tool == "synth" && *digest == absent),
+            "got: {err}"
+        );
+        assert!(err.to_string().contains("varve install"), "{err}");
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_whose_digest_is_another_layer_is_refused() {
+        // The name is a label, the digest is the artifact: a disagreement is
+        // refused, never resolved by either half.
+        let (_tmp, store) = store();
+        let older = mixed_store(&store);
+        let err = resolve(&pin_overriding("synth", "2026.09.0", &older), &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideNameDigestMismatch { named, found, .. }
+                if named == "2026.09.0" && found == "2026.08.0"),
+            "got: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_layer_installed_under_another_realm_is_refused() {
+        // DD-043: the source layer is in the pin's OWN realm. A layer another
+        // realm's root vouched for lives in that realm's partition, and is not
+        // vouched for by this pin's root.
+        let (_tmp, store) = store();
+        mixed_store(&store);
+        let elsewhere = Store::at(store.root().join("realms").join("0123abcd"));
+        let foreign = elsewhere
+            .lay_down(
+                &manifest_declaring("2026.08.1", &[("synth", "")]),
+                &[("synth", b"foreign")],
+            )
+            .unwrap();
+        let err = resolve(&pin_overriding("synth", "2026.08.1", &foreign), &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideFromAnotherRealm { tool, .. } if tool == "synth"),
+            "got: {err}"
+        );
+        assert!(err.to_string().contains("realm"), "{err}");
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_overridden_tool_takes_its_runner_contract_from_the_override_layer() {
+        // A runner contract belongs to the bytes it was signed with: the pin's
+        // contract for synth must not wrap the override's synth, and the
+        // override layer's own contract must apply.
+        let (_tmp, store) = store();
+        let runner = format!(r#","{}":"wasmtime""#, crate::bazel::ANN_RUNNER);
+        store
+            .lay_down(
+                &manifest_declaring(
+                    "2026.11.0",
+                    &[
+                        ("synth", runner.as_str()),
+                        ("wasmtime", ""),
+                        ("loom", runner.as_str()),
+                    ],
+                ),
+                &[("synth", b"s"), ("wasmtime", b"w"), ("loom", b"l")],
+            )
+            .unwrap();
+        let older = store
+            .lay_down(
+                &manifest_declaring("2026.08.0", &[("synth", "")]),
+                &[("synth", b"native")],
+            )
+            .unwrap();
+        let resolved = resolve(&pin_overriding("synth", "2026.08.0", &older), &store).unwrap();
+        assert!(
+            !resolved.runners.contains_key("synth"),
+            "{:?}",
+            resolved.runners
+        );
+        assert!(resolved.runners.contains_key("loom"), "others keep theirs");
+
+        let wrapped = store
+            .lay_down(
+                &manifest_declaring("2026.09.0", &[("synth", runner.as_str())]),
+                &[("synth", b"wasm")],
+            )
+            .unwrap();
+        let resolved = resolve(&pin_overriding("synth", "2026.09.0", &wrapped), &store).unwrap();
+        assert_eq!(
+            resolved.runners.get("synth").map(|c| c.tool.as_str()),
+            Some("wasmtime")
+        );
     }
 }

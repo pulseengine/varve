@@ -352,11 +352,16 @@ jobs:
           # prescribes; raising the timeout would buy one release and hide the
           # next one. REQ-MUTATE-003 will grow this list further, so the shape
           # has to be one that keeps splitting.
+          # overrides.rs joined at v0.48.0 (REQ-OVERRIDE-001): it decides what
+          # a MIXED toolchain is called in every identity report and whether
+          # recorded evidence describes the toolchain, beside the resolve.rs
+          # that decides which binary an override dispatches.
           - shard: varve-core (trust)
             files: >-
               -f crates/varve-core/src/verify.rs
               -f crates/varve-core/src/pin.rs
               -f crates/varve-core/src/resolve.rs
+              -f crates/varve-core/src/overrides.rs
               -f crates/varve-core/src/consumer.rs
               -f crates/varve-core/src/mutationscope.rs
               -f crates/varve-core/src/shellquote.rs

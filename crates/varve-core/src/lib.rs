@@ -48,6 +48,7 @@ pub mod manifest;
 pub mod manifestversions;
 pub mod mirror;
 pub mod mutationscope;
+pub mod overrides;
 pub mod pin;
 pub mod platform;
 pub mod realm;
@@ -119,7 +120,9 @@ pub use referrers::{
     CarriedWork, WouldDestroy, guard as guard_layout, scan as scan_layout_referrers,
 };
 pub use registry::{RegistryRef, RegistrySource};
-pub use resolve::{ResolveError, Resolved, RunnerContract, carried_tool_names, resolve};
+pub use resolve::{
+    ResolveError, Resolved, ResolvedOverride, RunnerContract, carried_tool_names, resolve,
+};
 pub use reverify::{
     ReverifyError, VerifyTiming, verify_installed, verify_installed_timed, verify_retained_envelope,
 };
