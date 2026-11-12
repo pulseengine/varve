@@ -377,9 +377,18 @@ pub fn install_by_digest_checked(
     }
     let fetched = source.fetch_manifest(&LayerRef::Digest(digest.to_string()))?;
     let bytes = verifier.verify(&fetched)?;
+    // The digest FIRST: a source answering with another layer, however
+    // validly signed, is a substitution — the source's fault, so a fail-over
+    // `DigestMismatch` and the next source is asked. `check` judges only the
+    // bytes the digest names, and must never blame the pin for a substitute.
+    let got = manifest_digest(&bytes);
+    if got != digest {
+        return Err(InstallError::DigestMismatch {
+            pinned: digest.to_string(),
+            got,
+        });
+    }
     let manifest = LayerManifest::parse(&bytes)?;
-    // A substituted manifest is refused by `install_inner` (step 3) before
-    // anything moves, whatever `check` says about it.
     check(&manifest).map_err(|why| InstallError::Refused {
         digest: digest.to_string(),
         why,
@@ -418,6 +427,9 @@ pub fn install_by_digest_checked(
             digest_is_consent: false,
             source_is_primary,
         },
+        // The envelope already fetched and checked: `install_inner` verifies
+        // and lays down THESE bytes, and asks the source for no other.
+        Some(fetched),
     )
 }
 
@@ -466,6 +478,7 @@ pub fn install_from(
             digest_is_consent: true,
             source_is_primary,
         },
+        None,
     )
 }
 
@@ -502,6 +515,7 @@ fn install_inner(
     marks: &mut HighWaterMarks,
     policy: &InstallPolicy<'_>,
     via: Via,
+    prefetched: Option<Vec<u8>>,
 ) -> Result<InstallOutcome, InstallError> {
     let Via {
         digest_is_consent,
@@ -529,7 +543,13 @@ fn install_inner(
         Some(digest) => LayerRef::Digest(digest.clone()),
         None => LayerRef::Name(pin.layer.clone()),
     };
-    let fetched = source.fetch_manifest(&layer_ref)?;
+    // An install by digest has already fetched (and checked) the manifest;
+    // fetching again would let a source answer twice, and lay down bytes
+    // other than the ones that were checked.
+    let fetched = match prefetched {
+        Some(bytes) => bytes,
+        None => source.fetch_manifest(&layer_ref)?,
+    };
 
     // 2. Signature first: nothing else is read from unverified bytes, and no
     // blob is fetched on the strength of an unverified manifest. Only the
@@ -3520,6 +3540,127 @@ mod tests {
         .unwrap();
         assert!(f.store.get(&digest).unwrap().is_some());
         assert_eq!(f.marks.mark(&"2026.07".parse().unwrap()), Some(2));
+    }
+
+    /// A source whose `fetch_manifest` answers from a script: one answer per
+    /// call, the last repeated. Blobs come from `inner`.
+    struct Scripted {
+        inner: MemorySource,
+        answers: Vec<Vec<u8>>,
+        calls: std::cell::Cell<usize>,
+    }
+    impl LayerSource for Scripted {
+        fn fetch_manifest(&self, _layer: &LayerRef) -> Result<Vec<u8>, SourceError> {
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            Ok(self.answers[n.min(self.answers.len() - 1)].clone())
+        }
+        fn fetch_blob(&self, digest: &str) -> Result<Vec<u8>, SourceError> {
+            self.inner.fetch_blob(digest)
+        }
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001, REQ-MIRROR-002
+    #[test]
+    fn a_substituted_layer_under_a_digest_fails_over_and_is_never_checked() {
+        // The source answers the digest of 2026.07.1 with the validly signed
+        // 2026.07.0. That is a substitution, not a fault of the pin: it must
+        // be a fail-over DigestMismatch, decided before `check` sees anything,
+        // so a mirror holding the right bytes is asked next.
+        let mut f = consent_fixture();
+        let pk = f.pk.clone();
+        let wanted = manifest_digest(&f.newer);
+        let honest = std::mem::replace(&mut f.source, MemorySource::new());
+        // History for the line, so a mirror may answer.
+        install(
+            &pin("2026.07.0"),
+            &honest,
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+        )
+        .unwrap();
+        let substituting = Scripted {
+            inner: MemorySource::new(),
+            answers: vec![f.older.clone()],
+            calls: std::cell::Cell::new(0),
+        };
+        let checked = std::cell::Cell::new(false);
+        let check = |_: &LayerManifest| {
+            checked.set(true);
+            Err("the override names another layer".to_string())
+        };
+        let err = install_by_digest_checked(
+            &wanted,
+            &substituting,
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Primary,
+            &check,
+        )
+        .unwrap_err();
+        assert!(matches!(err, InstallError::DigestMismatch { .. }), "{err}");
+        assert!(err.fails_over(), "a substitution is the source's fault");
+        assert!(!checked.get(), "the check never sees substituted bytes");
+        // The mirror holding the right bytes is then asked, and installs.
+        let line: crate::layer::Line = "2026.07".parse().unwrap();
+        install_by_digest_checked(
+            &wanted,
+            &honest,
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Mirror {
+                expected_line: Ok(&line),
+            },
+            &|_: &LayerManifest| Ok(()),
+        )
+        .expect("the mirror's right bytes install");
+        assert!(f.store.get(&wanted).unwrap().is_some());
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn the_bytes_that_were_checked_are_the_bytes_laid_down_one_fetch_only() {
+        // A source that answers the right manifest first and another, validly
+        // signed one after. With a second fetch, the checked bytes and the
+        // laid-down bytes could differ; with one, they cannot.
+        let mut f = consent_fixture();
+        let pk = f.pk.clone();
+        let wanted = manifest_digest(&f.newer);
+        let honest = std::mem::replace(&mut f.source, MemorySource::new());
+        let fickle = Scripted {
+            inner: honest,
+            answers: vec![f.newer.clone(), f.older.clone()],
+            calls: std::cell::Cell::new(0),
+        };
+        let seen = std::cell::RefCell::new(Vec::new());
+        let outcome = install_by_digest_checked(
+            &wanted,
+            &fickle,
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&pk)),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Primary,
+            &|m: &LayerManifest| {
+                seen.borrow_mut().push(m.layer.to_string());
+                Ok(())
+            },
+        )
+        .expect("the checked bytes install");
+        assert_eq!(fickle.calls.get(), 1, "exactly one manifest fetch");
+        assert_eq!(outcome.digest, wanted);
+        assert_eq!(*seen.borrow(), ["2026.07.1"]);
+        let entry = f.store.get(&wanted).unwrap().unwrap();
+        assert_eq!(
+            std::fs::read(entry.root.join("layer.json")).unwrap(),
+            f.newer
+        );
     }
 
     // rivet: verifies REQ-ROLLBACK-002

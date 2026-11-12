@@ -79,6 +79,11 @@ pub struct RunnerContract {
     pub tool: String,
     pub args: Vec<String>,
     pub arg_prefix: Option<String>,
+    /// The runner's binary, from the SAME verified layer as the tool it runs
+    /// (REQ-RUNNER-001): the pinned composition's for a pinned tool, the
+    /// override layer's for an overridden one. `None` where that layer set
+    /// exposes no such runner — dispatch then refuses.
+    pub path: Option<PathBuf>,
 }
 
 /// Resolution failures. Every variant carries what the user must do next.
@@ -193,6 +198,22 @@ pub enum ResolveError {
         tool: String,
         layer: String,
         digest: String,
+    },
+    #[error(
+        "cannot tell what the pinned layer carries ({why}), so no override can be checked \
+         against it — refusing rather than guessing"
+    )]
+    CannotTellWhatThePinCarries { why: String },
+    #[error(
+        "[toolchain.override.{tool}]: layer {layer} runs '{tool}' through the runner \
+         '{runner}', which that layer does not carry — a runner comes from the same verified \
+         layer as the tool it runs (REQ-RUNNER-001), never from the pin's. Name a layer that \
+         carries both."
+    )]
+    OverrideRunnerMissing {
+        tool: String,
+        layer: String,
+        runner: String,
     },
     #[error(
         "[toolchain.override.{tool}]: layer {layer} is on channel '{installed}', but this \
@@ -360,6 +381,15 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
     // Runner contracts from the stored manifest's entry annotations —
     // lenient read: legacy layers without them simply have none.
     let mut runners = runners_of(&layer);
+    // A pinned tool's runner is the pinned composition's, decided BEFORE any
+    // override replaces a path: overriding the runner itself must not change
+    // what runs the pin's own tools.
+    for contract in runners.values_mut() {
+        contract.path = tools
+            .iter()
+            .find(|(name, _)| *name == contract.tool)
+            .map(|(_, p)| p.clone());
+    }
     let overrides = resolve_overrides(pin, &layer, store, &mut tools, &mut runners)?;
     // Every ADDRESS of an overridden tool reaches the override: its qualified
     // providers are replaced by one, the override layer in the pin's realm.
@@ -412,12 +442,53 @@ fn runners_of(layer: &InstalledLayer) -> std::collections::BTreeMap<String, Runn
                         arg_prefix: ann[crate::bazel::ANN_RUNNER_ARG_PREFIX]
                             .as_str()
                             .map(str::to_string),
+                        path: None,
                     },
                 );
             }
         }
     }
     runners
+}
+
+/// Clause 4 as `install` asks it BEFORE fetching any override layer, for any
+/// platform: from the pin and what the pinned layer CARRIES (its whole
+/// composition's signed manifests and `bin/`), never from what resolves on
+/// this host. `install --platform <other>` lays down another platform's
+/// payloads, and a pinned tool this host has no build of is still the pin's.
+/// A `tools` list decides what the pin exposes. `resolve` repeats the exact,
+/// host-side check (`overrides_in_pin`) before anything runs.
+pub fn overrides_carried_by_pin(
+    pin: &Pin,
+    pinned: &InstalledLayer,
+    store: &Store,
+) -> Result<(), ResolveError> {
+    let exposed: Vec<String> = match &pin.tools {
+        Some(subset) => subset.iter().map(|s| s.name.clone()).collect(),
+        None => carried_tool_names(pin, pinned, store)
+            .map_err(|why| ResolveError::CannotTellWhatThePinCarries { why })?
+            .into_iter()
+            .collect(),
+    };
+    for o in &pin.overrides {
+        let wanted = if pin.tools.is_some() {
+            o.tool.clone()
+        } else {
+            o.tool.to_ascii_lowercase()
+        };
+        if !exposed.contains(&wanted) {
+            return Err(ResolveError::OverrideNotInPin {
+                tool: o.tool.clone(),
+                layer: pinned.layer.to_string(),
+                available: if exposed.is_empty() {
+                    "nothing".into()
+                } else {
+                    exposed.join(", ")
+                },
+            });
+        }
+    }
+    Ok(())
 }
 
 /// REQ-OVERRIDE-001 clause 4: every override names a tool the pinned layer,
@@ -542,7 +613,18 @@ fn resolve_overrides(
         // A runner contract was signed with the bytes it runs: the pin's
         // contract for this tool goes, the source layer's (if any) applies.
         runners.remove(&o.tool);
-        if let Some(contract) = runners_of(&source).remove(&o.tool) {
+        if let Some(mut contract) = runners_of(&source).remove(&o.tool) {
+            // …and its runner is the override layer's own (REQ-RUNNER-001),
+            // or the override is refused: pairing it with the pin's runner
+            // would run bytes no single layer vouched for together.
+            let Some(runner) = store.tool_path(&source, &contract.tool) else {
+                return Err(ResolveError::OverrideRunnerMissing {
+                    tool: o.tool.clone(),
+                    layer: source.layer.to_string(),
+                    runner: contract.tool,
+                });
+            };
+            contract.path = Some(runner);
             runners.insert(o.tool.clone(), contract);
         }
         out.push(ResolvedOverride {
@@ -1657,10 +1739,12 @@ mod tests {
         );
         assert!(resolved.runners.contains_key("loom"), "others keep theirs");
 
+        // The override layer carries the runner its contract names: a runner
+        // comes from the same layer as the tool (REQ-RUNNER-001).
         let wrapped = store
             .lay_down(
-                &manifest_declaring("2026.09.0", &[("synth", runner.as_str())]),
-                &[("synth", b"wasm")],
+                &manifest_declaring("2026.09.0", &[("synth", runner.as_str()), ("wasmtime", "")]),
+                &[("synth", b"wasm"), ("wasmtime", b"w9")],
             )
             .unwrap();
         let resolved = resolve(&pin_overriding("synth", "2026.09.0", &wrapped), &store).unwrap();
@@ -1767,5 +1851,133 @@ mod tests {
             msg.contains("rolling") && msg.contains("qualified"),
             "{msg}"
         );
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001, REQ-RUNNER-001
+    #[test]
+    fn an_overridden_tools_runner_comes_from_the_override_layer_or_is_refused() {
+        // REQ-RUNNER-001: the runner comes from the SAME verified layer as the
+        // tool it runs. An override's contract is paired with the override
+        // layer's runner, never the pin's.
+        let (_tmp, store) = store();
+        let runner = format!(r#","{}":"wasmtime""#, crate::bazel::ANN_RUNNER);
+        store
+            .lay_down(
+                &manifest_declaring(
+                    "2026.11.0",
+                    &[("synth", ""), ("wasmtime", ""), ("loom", runner.as_str())],
+                ),
+                &[
+                    ("synth", b"s"),
+                    ("wasmtime", b"pin-wasmtime"),
+                    ("loom", b"l"),
+                ],
+            )
+            .unwrap();
+        // The override layer carries its own runner.
+        let carried = store
+            .lay_down(
+                &manifest_declaring("2026.09.0", &[("synth", runner.as_str()), ("wasmtime", "")]),
+                &[("synth", b"wasm"), ("wasmtime", b"own-wasmtime")],
+            )
+            .unwrap();
+        let resolved = resolve(&pin_overriding("synth", "2026.09.0", &carried), &store).unwrap();
+        let path = resolved.runners["synth"]
+            .path
+            .clone()
+            .expect("a runner path");
+        assert_eq!(std::fs::read(path).unwrap(), b"own-wasmtime");
+        // The pin's own contract keeps the pin's runner.
+        let loom = resolved.runners["loom"].path.clone().unwrap();
+        assert_eq!(std::fs::read(loom).unwrap(), b"pin-wasmtime");
+        // An override layer whose contract names a runner it does not carry
+        // is refused, naming the layer and the runner.
+        let bare = store
+            .lay_down(
+                &manifest_declaring("2026.08.0", &[("synth", runner.as_str())]),
+                &[("synth", b"wasm-alone")],
+            )
+            .unwrap();
+        let err = resolve(&pin_overriding("synth", "2026.08.0", &bare), &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideRunnerMissing { tool, layer, runner }
+                if tool == "synth" && layer == "2026.08.0" && runner == "wasmtime"),
+            "got: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001, REQ-RUNNER-001
+    #[test]
+    fn overriding_a_runner_does_not_change_what_runs_the_pins_tools() {
+        let (_tmp, store) = store();
+        let runner = format!(r#","{}":"wasmtime""#, crate::bazel::ANN_RUNNER);
+        store
+            .lay_down(
+                &manifest_declaring("2026.11.0", &[("wasmtime", ""), ("loom", runner.as_str())]),
+                &[("wasmtime", b"pin-wasmtime"), ("loom", b"l")],
+            )
+            .unwrap();
+        let other = store
+            .lay_down(
+                &manifest_declaring("2026.09.0", &[("wasmtime", "")]),
+                &[("wasmtime", b"other-wasmtime")],
+            )
+            .unwrap();
+        let resolved = resolve(&pin_overriding("wasmtime", "2026.09.0", &other), &store).unwrap();
+        let loom = resolved.runners["loom"].path.clone().unwrap();
+        assert_eq!(std::fs::read(loom).unwrap(), b"pin-wasmtime");
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn clause_four_before_any_fetch_does_not_depend_on_the_host() {
+        // `install --platform <other>` must decide clause 4 from the pin and
+        // what the pinned layer CARRIES, not from what resolves on this host:
+        // loom is declared for another platform only and laid down nowhere
+        // here, yet the pin exposes it and an override of it is legitimate.
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &manifest_declaring(
+                    "2026.11.0",
+                    &[
+                        ("synth", ""),
+                        (
+                            "loom",
+                            r#","eu.pulseengine.platform":"riscv64-unknown-linux-gnu""#,
+                        ),
+                    ],
+                ),
+                &[("synth", b"s")],
+            )
+            .unwrap();
+        let p = |tools: &str, tool: &str| {
+            pin(&format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.11.0\"\n\
+                 {tools}[toolchain.override.{tool}]\nlayer = \"2026.08.0\"\ndigest = \"sha256:{}\"\n",
+                "a".repeat(64)
+            ))
+        };
+        let layer = store.list().unwrap().remove(0);
+        assert!(overrides_carried_by_pin(&p("", "loom"), &layer, &store).is_ok());
+        assert!(overrides_carried_by_pin(&p("", "synth"), &layer, &store).is_ok());
+        let err = overrides_carried_by_pin(&p("", "extra"), &layer, &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideNotInPin { tool, .. } if tool == "extra"),
+            "{err}"
+        );
+        // A `tools` subset decides what the pin exposes, carried or not.
+        let subset = "tools = [\"loom\"]\n";
+        assert!(overrides_carried_by_pin(&p(subset, "loom"), &layer, &store).is_ok());
+        assert!(matches!(
+            overrides_carried_by_pin(&p(subset, "synth"), &layer, &store),
+            Err(ResolveError::OverrideNotInPin { .. })
+        ));
+        // "Could not tell" is a refusal, never "carried".
+        std::fs::remove_file(layer.root.join("layer.json")).unwrap();
+        assert!(matches!(
+            overrides_carried_by_pin(&p("", "synth"), &layer, &store),
+            Err(ResolveError::CannotTellWhatThePinCarries { .. })
+        ));
     }
 }

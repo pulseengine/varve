@@ -125,17 +125,31 @@ pub fn check_manifest(
             channel.as_str()
         ));
     }
-    let carries = manifest.entries.iter().any(|e| {
-        e.annotations.get("eu.pulseengine.tool").map(String::as_str) == Some(tool)
-            && crate::store::entry_is_dispatchable(e)
-            && crate::platform::entry_matches(
-                e.annotations
-                    .get(crate::platform::ANN_PLATFORM)
-                    .map(String::as_str),
-                platform,
-            )
-    });
-    if !carries {
+    let dispatched_here = |name: &str| {
+        manifest.entries.iter().find(|e| {
+            e.annotations.get("eu.pulseengine.tool").map(String::as_str) == Some(name)
+                && crate::store::entry_is_dispatchable(e)
+                && crate::platform::entry_matches(
+                    e.annotations
+                        .get(crate::platform::ANN_PLATFORM)
+                        .map(String::as_str),
+                    platform,
+                )
+        })
+    };
+    let entry = dispatched_here(tool);
+    // A runner contract is honoured only with the runner of the SAME layer
+    // (REQ-RUNNER-001): one this layer does not carry is refused here, before
+    // anything is laid down, as `resolve` refuses it at dispatch.
+    if let Some(runner) = entry.and_then(|e| e.annotations.get(crate::bazel::ANN_RUNNER))
+        && dispatched_here(runner).is_none()
+    {
+        return Err(format!(
+            "layer {layer} runs '{tool}' through the runner '{runner}', which it does not carry \
+             for {platform} — a runner comes from the same layer as the tool it runs"
+        ));
+    }
+    if entry.is_none() {
         let mut names: Vec<&str> = manifest
             .entries
             .iter()
@@ -304,6 +318,26 @@ mod tests {
         )
         .unwrap_err();
         assert!(why.contains(here), "names the platform: {why}");
+        // A runner contract naming a runner the layer does not carry: the
+        // runner comes from the same layer (REQ-RUNNER-001).
+        let runs = r#","eu.pulseengine.runner":"wasmtime""#;
+        let why = check(
+            &manifest("2026.08.0", "qualified", &[("synth", runs)]),
+            here,
+        )
+        .unwrap_err();
+        assert!(why.contains("runner 'wasmtime'"), "{why}");
+        assert_eq!(
+            check(
+                &manifest(
+                    "2026.08.0",
+                    "qualified",
+                    &[("synth", runs), ("wasmtime", "")]
+                ),
+                here
+            ),
+            Ok(())
+        );
         let mine = format!(r#","eu.pulseengine.platform":"{here}""#);
         assert_eq!(
             check(

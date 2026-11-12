@@ -122,8 +122,8 @@ pub use referrers::{
 };
 pub use registry::{RegistryRef, RegistrySource};
 pub use resolve::{
-    ResolveError, Resolved, ResolvedOverride, RunnerContract, carried_tool_names, overrides_in_pin,
-    resolve,
+    ResolveError, Resolved, ResolvedOverride, RunnerContract, carried_tool_names,
+    overrides_carried_by_pin, overrides_in_pin, resolve,
 };
 pub use reverify::{
     ReverifyError, VerifyTiming, verify_installed, verify_installed_timed, verify_retained_envelope,
