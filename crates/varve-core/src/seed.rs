@@ -941,4 +941,55 @@ mod tests {
             assert!(full.contains("varve-realms.toml"), "{full}");
         }
     }
+
+    /// Corrupt the installed payload so the export's re-hash refuses the layer.
+    fn break_payload(n: &Near) {
+        let path = n.store.tool_path(&n.layer, "synth").unwrap();
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"tampered").unwrap();
+    }
+
+    // rivet: verifies REQ-SEED-001
+    #[test]
+    fn a_destination_that_is_a_regular_file_is_foreign_not_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("afile");
+        std::fs::write(&file, "x").unwrap();
+        let err = check_destination(&file).unwrap_err();
+        assert!(matches!(err, SeedError::ForeignDestination { .. }), "{err}");
+    }
+
+    // rivet: verifies REQ-SEED-001
+    #[test]
+    fn removing_beneath_a_regular_file_is_an_error_not_an_absence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("afile");
+        std::fs::write(&file, "x").unwrap();
+        assert!(remove_entry(&file.join("child")).is_err());
+        // Control: a genuinely absent entry is fine.
+        remove_entry(&tmp.path().join("absent")).unwrap();
+    }
+
+    // rivet: verifies REQ-SEED-001
+    #[test]
+    fn a_failed_seed_removes_a_destination_it_created() {
+        let n = near();
+        break_payload(&n);
+        let dest = seed_dir(&n);
+        assert!(!dest.exists());
+        seed_layer(&n.store, &n.layer, &dest, PLATFORM, None).unwrap_err();
+        assert!(!dest.exists(), "a destination this run made must go");
+    }
+
+    // rivet: verifies REQ-SEED-001
+    #[test]
+    fn a_failed_seed_keeps_a_destination_it_did_not_create() {
+        let n = near();
+        break_payload(&n);
+        let dest = seed_dir(&n);
+        std::fs::create_dir(&dest).unwrap();
+        seed_layer(&n.store, &n.layer, &dest, PLATFORM, None).unwrap_err();
+        assert!(dest.is_dir(), "an empty destination that was there stays");
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0);
+    }
 }
