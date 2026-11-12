@@ -132,6 +132,8 @@ pub enum InstallError {
         "source returned manifest {got} where the pin demands {pinned} — refusing (the digest is the artifact)"
     )]
     DigestMismatch { pinned: String, got: String },
+    #[error("layer {digest} is refused: {why}")]
+    Refused { digest: String, why: String },
     #[error("manifest is for layer {got}, the pin names {pinned} — refusing")]
     LayerMismatch { pinned: String, got: String },
     #[error("manifest is on channel '{got}', the pin selects '{pinned}' — refusing")]
@@ -234,6 +236,7 @@ impl InstallError {
             | InstallError::IndexFirstContactNeedsPrimary { .. }
             | InstallError::LineUnknownForMirror { .. }
             | InstallError::ChannelMismatch { .. }
+            | InstallError::Refused { .. }
             | InstallError::NoPlatformEntry { .. }
             | InstallError::UnnamedEntry { .. }
             | InstallError::Store(_)
@@ -326,6 +329,35 @@ pub fn install_by_digest_from(
     policy: &InstallPolicy<'_>,
     role: DigestRole<'_>,
 ) -> Result<InstallOutcome, InstallError> {
+    install_by_digest_checked(
+        digest,
+        source,
+        verifier,
+        store,
+        marks,
+        policy,
+        role,
+        &|_: &LayerManifest| Ok(()),
+    )
+}
+
+/// [`install_by_digest_from`], with `check` asked about the VERIFIED manifest
+/// before anything is fetched beyond it, laid down, or marked
+/// (REQ-OVERRIDE-001). An override refuses here what it can decide from the
+/// signed manifest — another layer under the digest, another channel, no such
+/// tool for this platform — so a refused override leaves the store and the
+/// high-water mark exactly as they were.
+#[allow(clippy::too_many_arguments)]
+pub fn install_by_digest_checked(
+    digest: &str,
+    source: &dyn LayerSource,
+    verifier: &dyn ManifestVerifier,
+    store: &Store,
+    marks: &mut HighWaterMarks,
+    policy: &InstallPolicy<'_>,
+    role: DigestRole<'_>,
+    check: &dyn Fn(&LayerManifest) -> Result<(), String>,
+) -> Result<InstallOutcome, InstallError> {
     // First contact is decided BEFORE a mirror is contacted: reading the
     // manifest here would otherwise be a fetch from a source that may not be
     // allowed to answer. The line comes from the caller (the include that
@@ -346,6 +378,12 @@ pub fn install_by_digest_from(
     let fetched = source.fetch_manifest(&LayerRef::Digest(digest.to_string()))?;
     let bytes = verifier.verify(&fetched)?;
     let manifest = LayerManifest::parse(&bytes)?;
+    // A substituted manifest is refused by `install_inner` (step 3) before
+    // anything moves, whatever `check` says about it.
+    check(&manifest).map_err(|why| InstallError::Refused {
+        digest: digest.to_string(),
+        why,
+    })?;
     let channel = match manifest.channel.as_str() {
         "qualified" => crate::pin::Channel::Qualified,
         "rolling" => crate::pin::Channel::Rolling,
@@ -3428,6 +3466,59 @@ mod tests {
             )
             .is_err()
         );
+        assert_eq!(f.marks.mark(&"2026.07".parse().unwrap()), Some(2));
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_check_on_the_verified_manifest_refuses_before_anything_is_laid_down_or_marked() {
+        // An override's refusals that need the source layer's manifest run on
+        // the VERIFIED manifest, before payloads or the high-water mark move
+        // (REQ-OVERRIDE-001, the review's M4).
+        let mut f = consent_fixture();
+        let digest = manifest_digest(&f.newer);
+        let source = std::mem::replace(&mut f.source, MemorySource::new());
+        let seen = std::cell::RefCell::new(None);
+        let err = install_by_digest_checked(
+            &digest,
+            &source,
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Primary,
+            &|m: &LayerManifest| {
+                *seen.borrow_mut() = Some(m.layer.to_string());
+                Err("no synth here".to_string())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            seen.borrow().as_deref(),
+            Some("2026.07.1"),
+            "the check saw it"
+        );
+        assert!(
+            matches!(&err, InstallError::Refused { digest: d, why } if *d == digest && why == "no synth here"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("no synth here"), "{err}");
+        assert!(!err.fails_over(), "a verdict on verified bytes is terminal");
+        assert!(f.store.get(&digest).unwrap().is_none(), "nothing laid down");
+        assert_eq!(f.marks.mark(&"2026.07".parse().unwrap()), None, "no mark");
+        // A check that passes installs exactly as before.
+        install_by_digest_checked(
+            &digest,
+            &source,
+            &AcceptWithRoot(crate::keyroles::test_support::rt(&f.pk)),
+            &f.store,
+            &mut f.marks,
+            &policy(),
+            DigestRole::Primary,
+            &|_: &LayerManifest| Ok(()),
+        )
+        .unwrap();
+        assert!(f.store.get(&digest).unwrap().is_some());
         assert_eq!(f.marks.mark(&"2026.07".parse().unwrap()), Some(2));
     }
 

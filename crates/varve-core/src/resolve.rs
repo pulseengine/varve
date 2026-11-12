@@ -54,6 +54,13 @@ impl Resolved {
         !self.overrides.is_empty()
     }
 
+    /// The override an address names, bare (`synth`) or realm-qualified
+    /// (`acme/synth`): every address of an overridden tool is that override.
+    pub fn override_for(&self, address: &str) -> Option<&ResolvedOverride> {
+        let bare = address.rsplit('/').next().unwrap_or(address);
+        self.overrides.iter().find(|o| o.tool == bare)
+    }
+
     /// The overrides as every report records them.
     pub fn recorded_overrides(&self) -> Vec<crate::overrides::RecordedOverride> {
         self.overrides
@@ -186,6 +193,18 @@ pub enum ResolveError {
         tool: String,
         layer: String,
         digest: String,
+    },
+    #[error(
+        "[toolchain.override.{tool}]: layer {layer} is on channel '{installed}', but this \
+         project's pin selects '{pinned}' — refusing. An override is held to the pin's channel \
+         as the pinned layer is: a qualified line carries a support window and qualification \
+         evidence, a rolling one neither."
+    )]
+    OverrideChannelMismatch {
+        tool: String,
+        layer: String,
+        installed: String,
+        pinned: String,
     },
     #[error(
         "[toolchain.override.{tool}]: layer {layer} ({digest}) was installed for {platform}, not \
@@ -342,6 +361,23 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
     // lenient read: legacy layers without them simply have none.
     let mut runners = runners_of(&layer);
     let overrides = resolve_overrides(pin, &layer, store, &mut tools, &mut runners)?;
+    // Every ADDRESS of an overridden tool reaches the override: its qualified
+    // providers are replaced by one, the override layer in the pin's realm.
+    // Leaving them would let `realm/tool` run the pinned binary under a pin
+    // that overrides it (REQ-OVERRIDE-001).
+    let mut qualified = qualified;
+    for o in &overrides {
+        qualified.retain(|(p, _)| p.tool != o.tool);
+        qualified.push((
+            crate::compose::ToolProvider {
+                tool: o.tool.clone(),
+                realm: pin.realm.clone().unwrap_or_default(),
+                layer: o.layer.layer.to_string(),
+                digest: o.layer.digest.clone(),
+            },
+            o.path.clone(),
+        ));
+    }
     Ok(Resolved {
         layer,
         tools,
@@ -384,6 +420,35 @@ fn runners_of(layer: &InstalledLayer) -> std::collections::BTreeMap<String, Runn
     runners
 }
 
+/// REQ-OVERRIDE-001 clause 4: every override names a tool the pinned layer,
+/// as this pin exposes it, already provides — an override replaces, it never
+/// adds. Decidable from the pin and the pinned layer alone, so `install` asks
+/// it BEFORE fetching any override layer, and `resolve` before anything else.
+/// `tools` is what the pin exposes (`Resolved::tools` of the pin without its
+/// overrides).
+pub fn overrides_in_pin(
+    pin: &Pin,
+    pinned: &InstalledLayer,
+    tools: &[(String, PathBuf)],
+) -> Result<(), ResolveError> {
+    for o in &pin.overrides {
+        if !tools.iter().any(|(name, _)| *name == o.tool) {
+            let mut available: Vec<&str> = tools.iter().map(|(n, _)| n.as_str()).collect();
+            available.sort();
+            return Err(ResolveError::OverrideNotInPin {
+                tool: o.tool.clone(),
+                layer: pinned.layer.to_string(),
+                available: if available.is_empty() {
+                    "nothing".into()
+                } else {
+                    available.join(", ")
+                },
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Apply the pin's overrides (REQ-OVERRIDE-001, DD-043 (3) and (4)): each
 /// replaces one EXPOSED tool's path with the binary of another layer installed
 /// in this pin's own realm partition. Every refusal happens here, at resolve
@@ -400,22 +465,13 @@ fn resolve_overrides(
     tools: &mut [(String, PathBuf)],
     runners: &mut std::collections::BTreeMap<String, RunnerContract>,
 ) -> Result<Vec<ResolvedOverride>, ResolveError> {
+    // Clause 4 first, for every override: whether the pin has the tool does
+    // not depend on whether any override layer is installed.
+    overrides_in_pin(pin, pinned, tools)?;
     let mut out = Vec::with_capacity(pin.overrides.len());
     for o in &pin.overrides {
-        // Clause 4 first: whether the pin has this tool does not depend on
-        // whether the override layer is installed.
         let Some(slot) = tools.iter_mut().find(|(name, _)| *name == o.tool) else {
-            let mut available: Vec<&str> = tools.iter().map(|(n, _)| n.as_str()).collect();
-            available.sort();
-            return Err(ResolveError::OverrideNotInPin {
-                tool: o.tool.clone(),
-                layer: pinned.layer.to_string(),
-                available: if available.is_empty() {
-                    "nothing".into()
-                } else {
-                    available.join(", ")
-                },
-            });
+            continue;
         };
         let Some(source) = store.get(&o.digest)? else {
             if store.find_anywhere(&o.digest)?.is_some() {
@@ -447,6 +503,16 @@ fn resolve_overrides(
                 digest: source.digest.clone(),
                 platform: platform.to_string(),
                 host,
+            });
+        }
+        // The same channel rule the pinned layer obeys; a layer from before
+        // channel annotations states none and contradicts no pin.
+        if !source.channel.is_empty() && source.channel != pin.channel.as_str() {
+            return Err(ResolveError::OverrideChannelMismatch {
+                tool: o.tool.clone(),
+                layer: source.layer.to_string(),
+                installed: source.channel.clone(),
+                pinned: pin.channel.as_str().to_string(),
             });
         }
         if source.layer != o.layer {
@@ -1627,5 +1693,79 @@ mod tests {
         crate::store::record_install_platform(&entry.root, &crate::platform::host_platform())
             .unwrap();
         assert!(resolve(&pin_overriding("synth", "2026.08.0", &older), &store).is_ok());
+    }
+
+    fn realm_pin_overriding(tool: &str, layer: &str, digest: &str) -> Pin {
+        pin(&format!(
+            "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\n\
+             layer = \"2026.11.0\"\n[toolchain.override.{tool}]\nlayer = \"{layer}\"\n\
+             digest = \"{digest}\"\n"
+        ))
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_qualified_address_of_an_overridden_tool_reaches_the_override_layer() {
+        // `acme/synth` is the same tool as `synth`: every address of an
+        // overridden tool must reach the override's bytes, never the pin's.
+        let (_tmp, store) = store();
+        let older = mixed_store(&store);
+        let resolved =
+            resolve(&realm_pin_overriding("synth", "2026.08.0", &older), &store).unwrap();
+        let synths: Vec<_> = resolved
+            .qualified
+            .iter()
+            .filter(|(p, _)| p.tool == "synth")
+            .collect();
+        assert_eq!(synths.len(), 1, "one provider of synth: {synths:?}");
+        let (provider, path) = synths[0];
+        assert_eq!(provider.qualified().as_deref(), Some("acme/synth"));
+        assert_eq!(provider.layer, "2026.08.0");
+        assert_eq!(provider.digest, older);
+        assert_eq!(std::fs::read(path).unwrap(), b"synth-0.57");
+        // A tool that is not overridden keeps its provider.
+        let loom = resolved
+            .qualified
+            .iter()
+            .find(|(p, _)| p.tool == "loom")
+            .unwrap();
+        assert_eq!(loom.0.layer, "2026.11.0");
+        assert_eq!(std::fs::read(&loom.1).unwrap(), b"loom-pinned");
+        // Which override, if any, an address names — bare or qualified.
+        assert_eq!(resolved.override_for("synth").unwrap().tool, "synth");
+        assert_eq!(resolved.override_for("other/synth").unwrap().tool, "synth");
+        assert!(resolved.override_for("loom").is_none());
+        assert!(resolved.override_for("acme/loom").is_none());
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_layer_on_another_channel_is_refused_naming_both() {
+        // The pin's channel is part of the pin, for an override as for the
+        // pinned layer: a rolling synth must not enter a qualified toolchain.
+        let (_tmp, store) = store();
+        mixed_store(&store);
+        let rolling = store
+            .lay_down(
+                &manifest_declaring("2026.09.0", &[("synth", "")])
+                    .iter()
+                    .map(|b| *b as char)
+                    .collect::<String>()
+                    .replace("\"qualified\"", "\"rolling\"")
+                    .into_bytes(),
+                &[("synth", b"rolling-synth")],
+            )
+            .unwrap();
+        let err = resolve(&pin_overriding("synth", "2026.09.0", &rolling), &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideChannelMismatch { tool, installed, pinned, .. }
+                if tool == "synth" && installed == "rolling" && pinned == "qualified"),
+            "got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("rolling") && msg.contains("qualified"),
+            "{msg}"
+        );
     }
 }

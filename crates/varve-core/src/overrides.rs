@@ -99,6 +99,63 @@ pub fn mismatch(recorded: &[RecordedOverride], current: &[RecordedOverride]) -> 
     ))
 }
 
+/// Whether a VERIFIED source-layer manifest can honour an override of `tool`
+/// named as `layer`, for a pin on `channel`, installed for `platform`
+/// (REQ-OVERRIDE-001, DD-043 (3)). Asked by `install` before the layer is laid
+/// down or its line's high-water mark moves; `resolve` asks the same of the
+/// installed layer before anything runs.
+pub fn check_manifest(
+    tool: &str,
+    layer: &crate::layer::LayerId,
+    channel: crate::pin::Channel,
+    platform: &str,
+    manifest: &crate::LayerManifest,
+) -> Result<(), String> {
+    if manifest.layer != *layer {
+        return Err(format!(
+            "the override names layer {layer}, but its digest is layer {} — the name is a \
+             label, the digest is the artifact; refusing to guess",
+            manifest.layer
+        ));
+    }
+    if manifest.channel != channel.as_str() {
+        return Err(format!(
+            "layer {layer} is on channel '{}', but this project's pin selects '{}'",
+            manifest.channel,
+            channel.as_str()
+        ));
+    }
+    let carries = manifest.entries.iter().any(|e| {
+        e.annotations.get("eu.pulseengine.tool").map(String::as_str) == Some(tool)
+            && crate::store::entry_is_dispatchable(e)
+            && crate::platform::entry_matches(
+                e.annotations
+                    .get(crate::platform::ANN_PLATFORM)
+                    .map(String::as_str),
+                platform,
+            )
+    });
+    if !carries {
+        let mut names: Vec<&str> = manifest
+            .entries
+            .iter()
+            .filter_map(|e| e.annotations.get("eu.pulseengine.tool").map(String::as_str))
+            .collect();
+        names.sort();
+        names.dedup();
+        return Err(format!(
+            "layer {layer} does not carry '{tool}' as a dispatched tool for {platform} — it \
+             carries: {}",
+            if names.is_empty() {
+                "nothing".to_string()
+            } else {
+                names.join(", ")
+            }
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +228,89 @@ mod tests {
         assert!(
             mismatch(std::slice::from_ref(&a), &[a.clone(), b]).is_some(),
             "a subset is not the set"
+        );
+    }
+
+    fn manifest(layer: &str, channel: &str, entries: &[(&str, &str)]) -> crate::LayerManifest {
+        let entries: Vec<String> = entries
+            .iter()
+            .map(|(tool, extra)| {
+                format!(
+                    r#"{{"digest":"sha256:{tool}","annotations":{{"eu.pulseengine.tool":"{tool}"{extra}}}}}"#
+                )
+            })
+            .collect();
+        let line = &layer[..layer.rfind('.').unwrap()];
+        crate::LayerManifest::parse(
+            format!(
+                r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{layer}","eu.pulseengine.varve.line":"{line}","eu.pulseengine.varve.channel":"{channel}","eu.pulseengine.varve.counter":"1","org.opencontainers.image.created":"2026-08-01T00:00:00Z"}},"manifests":[{}]}}"#,
+                entries.join(",")
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    fn check(m: &crate::LayerManifest, platform: &str) -> Result<(), String> {
+        check_manifest(
+            "synth",
+            &"2026.08.0".parse().unwrap(),
+            crate::pin::Channel::Qualified,
+            platform,
+            m,
+        )
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn the_source_manifest_is_checked_before_anything_is_laid_down() {
+        let here = "x86_64-unknown-linux-gnu";
+        assert_eq!(
+            check(&manifest("2026.08.0", "qualified", &[("synth", "")]), here),
+            Ok(())
+        );
+        // Another layer under the named digest.
+        let why = check(&manifest("2026.09.0", "qualified", &[("synth", "")]), here).unwrap_err();
+        assert!(
+            why.contains("2026.09.0") && why.contains("2026.08.0"),
+            "{why}"
+        );
+        // Another channel.
+        let why = check(&manifest("2026.08.0", "rolling", &[("synth", "")]), here).unwrap_err();
+        assert!(
+            why.contains("rolling") && why.contains("qualified"),
+            "{why}"
+        );
+        // No synth at all.
+        let why = check(&manifest("2026.08.0", "qualified", &[("loom", "")]), here).unwrap_err();
+        assert!(
+            why.contains("does not carry 'synth'") && why.contains("loom"),
+            "{why}"
+        );
+        // A synth that is HELD, not dispatched.
+        let held = r#","eu.pulseengine.varve.kind":"crate""#;
+        assert!(
+            check(
+                &manifest("2026.08.0", "qualified", &[("synth", held)]),
+                here
+            )
+            .is_err()
+        );
+        // A synth for another platform only.
+        let other = r#","eu.pulseengine.platform":"riscv64-unknown-linux-gnu""#;
+        let why = check(
+            &manifest("2026.08.0", "qualified", &[("synth", other)]),
+            here,
+        )
+        .unwrap_err();
+        assert!(why.contains(here), "names the platform: {why}");
+        let mine = format!(r#","eu.pulseengine.platform":"{here}""#);
+        assert_eq!(
+            check(
+                &manifest("2026.08.0", "qualified", &[("synth", &mine)]),
+                here
+            ),
+            Ok(())
         );
     }
 

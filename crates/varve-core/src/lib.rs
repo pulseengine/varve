@@ -89,7 +89,8 @@ pub use ingest::{
 pub use install::{DigestConsent, cached_consent_why_not};
 pub use install::{
     DigestRole, InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, OmissionSkipped,
-    VerifyError, install, install_by_digest, install_by_digest_from, install_from,
+    VerifyError, install, install_by_digest, install_by_digest_checked, install_by_digest_from,
+    install_from,
 };
 pub use kind::{ANN_KIND, PayloadKind, UnknownKind};
 pub use layer::{LayerId, LayerIdError, Line};
@@ -121,7 +122,8 @@ pub use referrers::{
 };
 pub use registry::{RegistryRef, RegistrySource};
 pub use resolve::{
-    ResolveError, Resolved, ResolvedOverride, RunnerContract, carried_tool_names, resolve,
+    ResolveError, Resolved, ResolvedOverride, RunnerContract, carried_tool_names, overrides_in_pin,
+    resolve,
 };
 pub use reverify::{
     ReverifyError, VerifyTiming, verify_installed, verify_installed_timed, verify_retained_envelope,
