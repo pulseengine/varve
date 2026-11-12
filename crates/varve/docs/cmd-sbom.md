@@ -7,3 +7,5 @@ The document is a **transcription of the signed manifest**, not a scan. Every co
 Output is deterministic: components are ordered by digest, the serial number is derived from the manifest digest, and the timestamp is the layer's own issued-at rather than the wall clock. Re-emitting the same layer produces byte-identical output, so a diff means the layer changed.
 
 The document binds itself to what it describes — the manifest digest, channel and anti-rollback counter are recorded in its metadata — so an SBOM can be checked against the artifact it claims to cover.
+
+In a MIXED project (`[toolchain.override.<tool>]`, REQ-OVERRIDE-001) the default is refused: an SBOM transcribes one signed layer, and the pinned layer's would list a tool the project does not run. Emit one per layer with `--layer`.

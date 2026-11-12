@@ -10,6 +10,7 @@ Re-checks the pinned layer offline — or every installed layer with `--all`.
 - The pin does not resolve **below its line's high-water mark** — the anti-rollback verdict `install` applies, now applied here too (varve#76), so the CI gate and the install agree.
 - **Every export the pin declares**, without being told to (REQ-EXPORTDECL-001). See below.
 - No binary earlier on `PATH` shadows a pinned tool (REQ-SHADOW-001) — unless the pin declared that it would.
+- For a MIXED toolchain (`[toolchain.override.<tool>]`, REQ-OVERRIDE-001): each override's layer, signature and payloads, and its line's anti-rollback mark; a declared or `--export` directory must have been stamped with the SAME overrides. The last line is `MIXED: verified toolchain <layer>+mixed — …`.
 
 It also RECORDS, and does not fail on, whether the session allowed ambient tools (REQ-PASSTHROUGH-001): when your user-level configuration lets shims run PATH binaries for tools the layer does not carry, verify prints the allowed tools, and for each stamped export it reads it prints what the producing session allowed. The layer is verified; the binaries a passthrough would run are not. See `varve docs shim`.
 

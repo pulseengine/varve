@@ -26,6 +26,29 @@ A `tools` entry is either a plain name (`"rivet"`) or a **realm-qualified** one 
 
 The qualifier is how a pin chooses between two realms shipping one name, which is the ordinary case once a fork sits beside its upstream. It changes only what a **bare** name dispatches to; the layer you did not choose stays installed and verified, and `varve run pulseengine/wasm-tools` still reaches it. Where nothing collides, a bare name behaves exactly as it always did.
 
+### `[toolchain.override.<tool>]` — one tool from another layer of the realm
+
+```toml
+[toolchain.override.synth]
+layer  = "2026.08.0"                 # required: the layer the tool comes from
+digest = "sha256:<hex>"              # required: that layer's manifest digest (`varve list`)
+```
+
+Takes ONE tool the pin already has from another signed layer of the **pin's own realm** — gale's case, where committed objects must stay byte-identical with an older `synth` while the rest of the toolchain moves (REQ-OVERRIDE-001). Both fields are required: the id is what a reviewer reads in the diff, the digest is the artifact. `varve install` fetches that layer through the same path an `[[include]]` takes — signed manifest against the realm's root, its line index and anti-rollback mark checked (the override's digest is not consent to go below the mark), every payload against its signed digest. Nothing reaches the store another way.
+
+Refused, each before anything runs and naming the reason (exit 1):
+
+- a tool the pinned layer does not provide, or that the pin's `tools` leaves out — an override **replaces**, it never adds (use the passthrough, `varve docs shim`, or add the tool to a layer);
+- a tool the override layer does not carry;
+- the same tool overridden twice (names are compared without case) or an override nested in another;
+- a digest no installed layer of the realm has, a digest that is another layer than the one named, or a layer installed only under another realm's root;
+- a layer that fails verification — it is never installed, and never fetched from anywhere else;
+- a missing `layer` or `digest`, or any other key.
+
+The key is a plain tool name: no realm qualifier, no path. A varve older than v0.48.0 refuses a varve.toml with an override (unknown key) instead of running the pinned tool.
+
+While any override is active the toolchain is **MIXED**, and every identity report says so rather than naming the pinned layer: `varve status` (`state = "mixed"` in `--json`), `varve which <tool>` (both layers), `varve verify` (verifies the override's layer too and ends with a `MIXED:` line), `varve run` (`VARVE_LAYER` stays the pinned layer; `VARVE_OVERRIDES=tool=layer@digest,…`), `varve-serve context`, export stamps (`layer = "<layer>+mixed"` plus the recorded overrides) and attestations (`check-attestation` refuses a statement that does not record the same overrides). `varve sbom` of a mixed project is refused — ask for each layer with `--layer` — and `varve seed` carries the override layers with the pin.
+
 ### `[[export]]` — what this project materialises out of the layer
 
 The pin says which layer the project consumes; these say **how**. Declared means checked: `varve verify` looks at every one of them without being told (REQ-EXPORTDECL-001).

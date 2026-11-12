@@ -5539,7 +5539,7 @@ artifacts:
   - id: REQ-OVERRIDE-001
     type: requirement
     title: A project can pin one tool at another verified version, and every view says the toolchain is mixed
-    status: approved
+    status: implemented
     release: v0.48.0
     description: "Maintainer decision 2026-11-10 (v0.48.0 usability). Evidence: gale keeps eight toolchain pins that cannot see each other (gale#323) and its dissolve pipeline downloads synth 0.57.0 as a tarball outside varve while the pin carries synth 0.65.0 (gale#386), because committed objects must stay byte-identical; varve cannot say 'this tool at another version'. Clauses: (1) varve.toml may declare, per tool, a version from a layer of a realm the project trusts (layer id and manifest digest, or a version varve resolves to one through the realm's signed line index); the binary is fetched and verified exactly like a pinned layer's, against that realm's trust root. (2) Nothing unverified can enter through this: a version no signed layer carries, or a layer that fails verification, is refused, never fetched another way. (3) The project's state is MIXED while any override is active: varve status, varve which <tool> (naming both layers) and every export and attestation state it; a MIXED toolchain is never reported as the pinned layer. (4) An override of a tool the pinned layer does not carry is refused (use the passthrough or add it to a layer), so an override cannot smuggle a tool in. (5) Measured on gale's case: with one override, gale's dissolve pipeline resolves synth 0.57.0 through varve and its tarball download can be removed."
     fields:

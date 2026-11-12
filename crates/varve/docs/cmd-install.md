@@ -10,3 +10,5 @@ Two consequences worth knowing before you rely on the count:
 - `varve archive` on such a layer **succeeds, carrying one platform**: it exports the payloads this core actually holds, then reports what it omitted and names the platform the archive installs on. It does not fail, and you do not need per-platform layers. To archive for a platform other than this machine's, `varve install --platform <triple>` first and pass the same `--platform` to `archive`.
 
 A layer whose entries name *no* entry for this platform is refused outright rather than installed empty.
+
+A pin with `[toolchain.override.<tool>]` (REQ-OVERRIDE-001) also installs each override's layer, by digest, from the same sources and through the same verified path an `[[include]]` takes (`override synth: installed layer …`), then refuses — exit 1 — any override that cannot be honoured. A layer that fails verification is never installed. See `varve docs config-reference`.
