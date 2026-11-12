@@ -363,6 +363,7 @@ pub fn install_by_digest_from(
         digest: Some(digest.to_string()),
         tools: None,
         exports: Vec::new(),
+        overrides: Vec::new(),
     };
     // The digest here comes from a composing layer, not from a project's pin,
     // so it is NOT consent to go below the mark (REQ-ROLLBACK-002 speaks of

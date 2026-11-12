@@ -110,7 +110,8 @@ pub use linestatus::{
 pub use manifest::{LayerManifest, ManifestError};
 pub use pin::{
     Channel, DeclaredExportStatus, ExportDecl, ExportEnv, ExportKind, Pin, PinError,
-    ShadowDeclaration, ShimOrder, check_declared_export, classify_shadowing, env_lines,
+    ShadowDeclaration, ShimOrder, ToolOverride, check_declared_export, classify_shadowing,
+    env_lines,
 };
 pub use platform::host_platform;
 pub use realm::{Realm, RealmError, resolve_realm};
