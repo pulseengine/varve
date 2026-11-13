@@ -14,13 +14,15 @@
 # build from this working tree, or the gate proves nothing. The pin covers the
 # tools the loop USES (rivet, ordeal), never the artifact it PRODUCES.
 #
-# 2026.09.12 and not the newest tag: this is the layer whose rivet 0.38.0 was
-# actually run against this repository's artifacts before pinning it —
-# `validate` PASS, `check verification-evidence` ✓ 373 named-test steps. Pin
-# what you verified is the rule varve asks of everyone else.
+# 2026.11.14: this layer's rivet 0.41.1 was run against this repository's
+# artifacts before pinning it — `validate` PASS, `check verification-evidence`
+# ✓ 373 named-test steps. Pin what you verified is the rule varve asks of
+# everyone else. The previous pin, 2026.09.12 (rivet 0.38.0), could no longer
+# be installed on a machine that had seen 2026.09.16: its counter is below the
+# line's high-water mark (varve#256).
 manifest-version = 1
 
 [toolchain]
 realm   = "pulseengine"
 channel = "rolling"
-layer   = "2026.09.12"
+layer   = "2026.11.14"
