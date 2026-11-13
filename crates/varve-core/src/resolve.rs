@@ -2124,5 +2124,4 @@ mod tests {
         assert!(overrides_carried_by_pin(&p("rivet"), &layer, &store).is_ok());
         assert!(overrides_carried_by_pin(&p("ghost"), &layer, &store).is_err());
     }
-
 }
