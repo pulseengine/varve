@@ -2088,4 +2088,41 @@ mod tests {
             overrides_carried_by_pin(&p("tools = [\"synth\"]\n", "synth"), &layer, &store).is_ok()
         );
     }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn clause_four_before_any_fetch_counts_what_an_included_layer_carries() {
+        // A tool the pin has through its COMPOSITION is the pin's: an
+        // override of the included layer's wasm-tools is a replacement.
+        let (_tmp, store) = store();
+        let up = store
+            .lay_down(
+                &manifest_declaring("2026.08.0", &[("wasm-tools", "")]),
+                &[("wasm-tools", b"w")],
+            )
+            .unwrap();
+        store
+            .lay_down(
+                &manifest_composing("2026.11.0", &["rivet"], &up),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let layer = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.layer.to_string() == "2026.11.0")
+            .unwrap();
+        let p = |tool: &str| {
+            pin(&format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.11.0\"\n\
+                 [toolchain.override.{tool}]\nlayer = \"2026.09.0\"\ndigest = \"sha256:{}\"\n",
+                "a".repeat(64)
+            ))
+        };
+        assert!(overrides_carried_by_pin(&p("wasm-tools"), &layer, &store).is_ok());
+        assert!(overrides_carried_by_pin(&p("rivet"), &layer, &store).is_ok());
+        assert!(overrides_carried_by_pin(&p("ghost"), &layer, &store).is_err());
+    }
+
 }
