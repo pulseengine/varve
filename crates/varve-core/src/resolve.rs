@@ -451,40 +451,56 @@ fn runners_of(layer: &InstalledLayer) -> std::collections::BTreeMap<String, Runn
     runners
 }
 
-/// Every DISPATCHABLE tool name the pinned layer's composition declares in its
-/// signed manifests, for any platform. Fails closed: a layer of the
-/// composition that is not installed, or whose manifest cannot be read, is
-/// "could not tell", never "carries nothing".
-fn dispatchable_tool_names(
-    pin: &Pin,
-    layer: &InstalledLayer,
-    store: &Store,
-) -> Result<std::collections::BTreeSet<String>, String> {
-    // Dispatchable as the store decides it (`entry_is_dispatchable`): no kind
-    // annotation means a tool, an unknown kind is not dispatchable.
-    let dispatchable_names_of = |entry: &InstalledLayer| -> Result<Vec<String>, String> {
-        let path = entry.root.join("layer.json");
-        let bytes =
-            std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let json: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-        Ok(json["manifests"]
-            .as_array()
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|e| match e["annotations"][crate::kind::ANN_KIND].as_str() {
+/// The tool names a layer's signed manifest declares as DISPATCHABLE for
+/// `platform`: dispatchable as the store decides it (`entry_is_dispatchable` —
+/// no kind annotation is a tool, an unknown kind is not), and an entry whose
+/// platform annotation `platform::entry_matches` the target. Read leniently,
+/// like `compose::view`, so a manifest this varve stored is never re-judged.
+fn dispatchable_names_of(entry: &InstalledLayer, platform: &str) -> Result<Vec<String>, String> {
+    let path = entry.root.join("layer.json");
+    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    Ok(json["manifests"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|e| {
+                    let ann = &e["annotations"];
+                    let tool = match ann[crate::kind::ANN_KIND].as_str() {
                         None => true,
                         Some(kind) => kind
                             .parse::<crate::kind::PayloadKind>()
                             .is_ok_and(|k| k.is_dispatchable()),
-                    })
-                    .filter_map(|e| e["annotations"]["eu.pulseengine.tool"].as_str())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default())
-    };
+                    };
+                    tool && crate::platform::entry_matches(
+                        ann[crate::platform::ANN_PLATFORM].as_str(),
+                        platform,
+                    )
+                })
+                .filter_map(|e| e["annotations"]["eu.pulseengine.tool"].as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// Every DISPATCHABLE tool name the pinned layer's composition declares in its
+/// signed manifests for `platform` — the install's TARGET, which is what
+/// `resolve` exposes on the machine that runs it.
+///
+/// An include that is not installed is SKIPPED here, as `compose::walk` skips
+/// it (it cannot be read), not reported as "could not tell": the caller asks
+/// this only after `install` has fetched the pinned layer's includes and
+/// refused if any is missing. A layer that IS reached but whose manifest
+/// cannot be read is an error, never "carries nothing".
+fn dispatchable_tool_names(
+    pin: &Pin,
+    layer: &InstalledLayer,
+    store: &Store,
+    platform: &str,
+) -> Result<std::collections::BTreeSet<String>, String> {
     let root_bytes = std::fs::read(layer.root.join("layer.json"))
         .map_err(|e| format!("cannot read the pinned layer's manifest: {e}"))?;
     let root_view = crate::compose::view(&root_bytes).map_err(|e| e.to_string())?;
@@ -510,28 +526,30 @@ fn dispatchable_tool_names(
                 .map(|(_, entry)| entry)
                 .ok_or_else(|| format!("included layer {} is not installed", step.digest))?
         };
-        names.extend(dispatchable_names_of(&entry)?);
+        names.extend(dispatchable_names_of(&entry, platform)?);
     }
     Ok(names)
 }
 
-/// Clause 4 as `install` asks it BEFORE fetching any override layer, for any
-/// platform: from the pin and what the pinned layer CARRIES (its whole
-/// composition's signed manifests and `bin/`), never from what resolves on
-/// this host. `install --platform <other>` lays down another platform's
-/// payloads, and a pinned tool this host has no build of is still the pin's.
-/// A `tools` list decides what the pin exposes. `resolve` repeats the exact,
+/// Clause 4 as `install` asks it BEFORE fetching any override layer, for the
+/// install's TARGET `platform`: from the pin and what the pinned composition's
+/// signed manifests declare as a dispatchable tool for that target — never
+/// from what resolves on this host. `install --platform <other>` is not
+/// refused for a pinned tool only this host lacks, and a tool the pinned layer
+/// ships for some other platform only is not the pin's on this target. A
+/// `tools` list narrows what the pin exposes. `resolve` repeats the exact,
 /// host-side check (`overrides_in_pin`) before anything runs.
 pub fn overrides_carried_by_pin(
     pin: &Pin,
     pinned: &InstalledLayer,
     store: &Store,
+    platform: &str,
 ) -> Result<(), ResolveError> {
     // A tool the pin has: one the composition's signed manifests declare as
     // DISPATCHABLE, for some platform — a held payload's name (a crate) is not
     // a tool, and neither is a stray file — and, where the pin lists `tools`,
     // one it lists. A subset name the layer never carried is no tool either.
-    let carried = dispatchable_tool_names(pin, pinned, store)
+    let carried = dispatchable_tool_names(pin, pinned, store, platform)
         .map_err(|why| ResolveError::CannotTellWhatThePinCarries { why })?;
     let exposed: Vec<String> = match &pin.tools {
         Some(subset) => subset
@@ -660,7 +678,15 @@ fn resolve_overrides(
                 found: source.layer.to_string(),
             });
         }
-        let Some(path) = store.tool_path(&source, &o.tool) else {
+        // The tool must be one the override layer's SIGNED manifest declares
+        // as dispatchable for this host — what `install` checked before laying
+        // it down (`overrides::check_manifest`) — and its binary must be on
+        // disk. A file in `bin/` alone is not a tool; a manifest this varve
+        // cannot read declares nothing (fail closed).
+        let declared = dispatchable_names_of(&source, &crate::platform::host_platform())
+            .unwrap_or_default()
+            .contains(&o.tool);
+        let Some(path) = store.tool_path(&source, &o.tool).filter(|_| declared) else {
             let mut available = store.manifest_tool_names(&source).unwrap_or_default();
             available.sort();
             available.dedup();
@@ -944,6 +970,7 @@ fn composition_offers(
 
 #[cfg(test)]
 mod tests {
+    const RISCV: &str = "riscv64-unknown-linux-gnu";
     use super::*;
     use crate::pin::Pin;
     use crate::store::{Store, fixtures, manifest_digest};
@@ -2025,24 +2052,48 @@ mod tests {
             ))
         };
         let layer = store.list().unwrap().remove(0);
-        assert!(overrides_carried_by_pin(&p("", "loom"), &layer, &store).is_ok());
-        assert!(overrides_carried_by_pin(&p("", "synth"), &layer, &store).is_ok());
-        let err = overrides_carried_by_pin(&p("", "extra"), &layer, &store).unwrap_err();
+        assert!(overrides_carried_by_pin(&p("", "loom"), &layer, &store, RISCV).is_ok());
+        assert!(
+            overrides_carried_by_pin(
+                &p("", "synth"),
+                &layer,
+                &store,
+                &crate::platform::host_platform()
+            )
+            .is_ok()
+        );
+        let err = overrides_carried_by_pin(
+            &p("", "extra"),
+            &layer,
+            &store,
+            &crate::platform::host_platform(),
+        )
+        .unwrap_err();
         assert!(
             matches!(&err, ResolveError::OverrideNotInPin { tool, .. } if tool == "extra"),
             "{err}"
         );
         // A `tools` subset decides what the pin exposes, carried or not.
         let subset = "tools = [\"loom\"]\n";
-        assert!(overrides_carried_by_pin(&p(subset, "loom"), &layer, &store).is_ok());
+        assert!(overrides_carried_by_pin(&p(subset, "loom"), &layer, &store, RISCV).is_ok());
         assert!(matches!(
-            overrides_carried_by_pin(&p(subset, "synth"), &layer, &store),
+            overrides_carried_by_pin(
+                &p(subset, "synth"),
+                &layer,
+                &store,
+                &crate::platform::host_platform()
+            ),
             Err(ResolveError::OverrideNotInPin { .. })
         ));
         // "Could not tell" is a refusal, never "carried".
         std::fs::remove_file(layer.root.join("layer.json")).unwrap();
         assert!(matches!(
-            overrides_carried_by_pin(&p("", "synth"), &layer, &store),
+            overrides_carried_by_pin(
+                &p("", "synth"),
+                &layer,
+                &store,
+                &crate::platform::host_platform()
+            ),
             Err(ResolveError::CannotTellWhatThePinCarries { .. })
         ));
     }
@@ -2078,14 +2129,26 @@ mod tests {
             ("", "acme-core"),
             ("tools = [\"acme-core\"]\n", "acme-core"),
         ] {
-            let err = overrides_carried_by_pin(&p(tools, tool), &layer, &store).unwrap_err();
+            let err = overrides_carried_by_pin(
+                &p(tools, tool),
+                &layer,
+                &store,
+                &crate::platform::host_platform(),
+            )
+            .unwrap_err();
             assert!(
                 matches!(&err, ResolveError::OverrideNotInPin { tool: t, .. } if t == tool),
                 "{tools}{tool}: {err}"
             );
         }
         assert!(
-            overrides_carried_by_pin(&p("tools = [\"synth\"]\n", "synth"), &layer, &store).is_ok()
+            overrides_carried_by_pin(
+                &p("tools = [\"synth\"]\n", "synth"),
+                &layer,
+                &store,
+                &crate::platform::host_platform()
+            )
+            .is_ok()
         );
     }
 
@@ -2120,8 +2183,93 @@ mod tests {
                 "a".repeat(64)
             ))
         };
-        assert!(overrides_carried_by_pin(&p("wasm-tools"), &layer, &store).is_ok());
-        assert!(overrides_carried_by_pin(&p("rivet"), &layer, &store).is_ok());
-        assert!(overrides_carried_by_pin(&p("ghost"), &layer, &store).is_err());
+        assert!(
+            overrides_carried_by_pin(
+                &p("wasm-tools"),
+                &layer,
+                &store,
+                &crate::platform::host_platform()
+            )
+            .is_ok()
+        );
+        assert!(
+            overrides_carried_by_pin(
+                &p("rivet"),
+                &layer,
+                &store,
+                &crate::platform::host_platform()
+            )
+            .is_ok()
+        );
+        assert!(
+            overrides_carried_by_pin(
+                &p("ghost"),
+                &layer,
+                &store,
+                &crate::platform::host_platform()
+            )
+            .is_err()
+        );
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn clause_four_before_any_fetch_counts_tools_for_the_target_platform() {
+        // A tool the pinned layer ships only for ANOTHER platform is not one
+        // the pin has on THIS target: an override of it would add one here.
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &manifest_declaring(
+                    "2026.11.0",
+                    &[
+                        ("synth", ""),
+                        (
+                            "loom",
+                            r#","eu.pulseengine.platform":"riscv64-unknown-linux-gnu""#,
+                        ),
+                    ],
+                ),
+                &[("synth", b"s")],
+            )
+            .unwrap();
+        let layer = store.list().unwrap().remove(0);
+        let p = pin(&format!(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.11.0\"\n\
+             [toolchain.override.loom]\nlayer = \"2026.08.0\"\ndigest = \"sha256:{}\"\n",
+            "a".repeat(64)
+        ));
+        let err = overrides_carried_by_pin(&p, &layer, &store, "aarch64-apple-darwin").unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideNotInPin { tool, .. } if tool == "loom"),
+            "{err}"
+        );
+        assert!(overrides_carried_by_pin(&p, &layer, &store, RISCV).is_ok());
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn resolve_refuses_an_installed_override_entry_that_is_not_a_tool_for_this_host() {
+        // What resolve enforces on the INSTALLED override layer: its signed
+        // manifest declares the tool as dispatchable for this host. A file in
+        // bin/ is not enough.
+        for extra in [
+            r#","eu.pulseengine.varve.kind":"crate""#,
+            r#","eu.pulseengine.platform":"riscv64-unknown-linux-gnu""#,
+        ] {
+            let (_tmp, store) = store();
+            mixed_store(&store);
+            let odd = store
+                .lay_down(
+                    &manifest_declaring("2026.09.0", &[("synth", extra)]),
+                    &[("synth", b"not-a-host-tool")],
+                )
+                .unwrap();
+            let err = resolve(&pin_overriding("synth", "2026.09.0", &odd), &store).unwrap_err();
+            assert!(
+                matches!(&err, ResolveError::OverrideSourceLacksTool { tool, .. } if tool == "synth"),
+                "{extra}: {err}"
+            );
+        }
     }
 }

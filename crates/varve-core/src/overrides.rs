@@ -102,8 +102,13 @@ pub fn mismatch(recorded: &[RecordedOverride], current: &[RecordedOverride]) -> 
 /// Whether a VERIFIED source-layer manifest can honour an override of `tool`
 /// named as `layer`, for a pin on `channel`, installed for `platform`
 /// (REQ-OVERRIDE-001, DD-043 (3)). Asked by `install` before the layer is laid
-/// down or its line's high-water mark moves; `resolve` asks the same of the
-/// installed layer before anything runs.
+/// down or its line's high-water mark moves, and of an override layer already
+/// installed. `resolve` does not call this: it enforces the same four rules on
+/// the INSTALLED layer with its own checks before anything runs — the named
+/// layer (`OverrideNameDigestMismatch`), the pin's channel
+/// (`OverrideChannelMismatch`), the tool declared dispatchable for this host
+/// and on disk (`OverrideSourceLacksTool`), and its runner carried
+/// (`OverrideRunnerMissing`).
 pub fn check_manifest(
     tool: &str,
     layer: &crate::layer::LayerId,
