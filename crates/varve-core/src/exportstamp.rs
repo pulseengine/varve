@@ -393,6 +393,59 @@ pub fn status(
     }
 }
 
+/// Why an `export-bazel` re-export refuses to clean its directory.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum StaleRegistry {
+    /// A top-level `*.json` this export does not write and no earlier
+    /// `export-bazel` here recorded: not ours to delete, and sealing it under
+    /// the new stamp would vouch for a registry varve never wrote.
+    #[error(
+        "{0} is in the export directory, this export does not write it, and no earlier \
+         export-bazel here recorded it — refusing to delete it or to seal it under the stamp. \
+         Remove it, or export into an empty directory."
+    )]
+    Foreign(String),
+    /// One an earlier export recorded, changed since: someone edited it, and
+    /// deleting their edit silently is not this command's call.
+    #[error(
+        "{0} was written by an earlier export-bazel and has been modified since — refusing to \
+         delete an edited registry. Restore or remove it, then re-run the export."
+    )]
+    Edited(String),
+}
+
+/// The registries an `export-bazel` re-export must REMOVE from its directory
+/// (REQ-OVERRIDE-001; the export-sync rule of REQ-EXPORT-SYNC-001): every
+/// top-level `*.json` in `present` that this export will not write
+/// (`written`), when the previous `bazel-registry` stamp (`prior`) recorded it
+/// with the same digest. Whatever the reason a tool's registry is not written
+/// this time — an override added, removed or swapped, a pin moved to a layer
+/// without provenance for it — the last export's file must not survive for
+/// the new stamp to seal: Bazel would fetch a tool this project does not run.
+///
+/// Pure, and decided in full BEFORE anything is deleted: a refusal leaves the
+/// directory as it was. `present` is `scan_tree` of the directory (the stamp
+/// itself excluded); nested files and other extensions are not registries.
+pub fn stale_registries(
+    prior: Option<&ExportStamp>,
+    present: &[FileEntry],
+    written: &std::collections::BTreeSet<String>,
+) -> Result<Vec<String>, StaleRegistry> {
+    let recorded = prior.filter(|s| s.kind == "bazel-registry");
+    let mut remove = Vec::new();
+    for f in present {
+        if f.path.contains('/') || !f.path.ends_with(".json") || written.contains(&f.path) {
+            continue;
+        }
+        match recorded.and_then(|s| s.files.iter().find(|r| r.path == f.path)) {
+            None => return Err(StaleRegistry::Foreign(f.path.clone())),
+            Some(r) if r.digest != f.digest => return Err(StaleRegistry::Edited(f.path.clone())),
+            Some(_) => remove.push(f.path.clone()),
+        }
+    }
+    Ok(remove)
+}
+
 #[cfg(test)]
 mod tests {
     /// True when mode 000 does not actually deny a read here (running as root,
@@ -528,6 +581,122 @@ mod tests {
         assert!(serde_json::from_str::<ExportStampV047>(&text).is_err());
         let pure = serde_json::to_string(&sample()).unwrap();
         assert!(serde_json::from_str::<ExportStampV047>(&pure).is_ok());
+    }
+
+    fn entry(path: &str, digest: &str) -> FileEntry {
+        FileEntry {
+            path: path.into(),
+            digest: digest.into(),
+        }
+    }
+
+    fn bazel_stamp(files: &[(&str, &str)]) -> ExportStamp {
+        ExportStamp {
+            kind: "bazel-registry".into(),
+            files: files.iter().map(|(p, d)| entry(p, d)).collect(),
+            ..sample()
+        }
+    }
+
+    fn written(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_reexport_removes_every_registry_the_last_export_wrote_and_this_one_does_not() {
+        // Whatever the reason a tool's registry is not written this time — an
+        // override removed or swapped, a pin moved — the last export's file
+        // for it must not survive to be sealed by the new stamp.
+        let prior = bazel_stamp(&[("synth.json", "sha256:s"), ("loom.json", "sha256:l")]);
+        let present = [
+            entry("loom.json", "sha256:l"),
+            entry("synth.json", "sha256:s"),
+        ];
+        assert_eq!(
+            stale_registries(Some(&prior), &present, &written(&["loom.json"])),
+            Ok(vec!["synth.json".to_string()])
+        );
+        // Written again: overwritten, not removed.
+        assert_eq!(
+            stale_registries(
+                Some(&prior),
+                &present,
+                &written(&["loom.json", "synth.json"])
+            ),
+            Ok(vec![])
+        );
+        // Nothing there, nothing to do — with or without a prior stamp.
+        assert_eq!(
+            stale_registries(None, &[], &written(&["synth.json"])),
+            Ok(vec![])
+        );
+        // Not a registry: other files and nested ones are not this rule's.
+        let other = [
+            entry("README.md", "sha256:r"),
+            entry("sub/x.json", "sha256:x"),
+        ];
+        assert_eq!(stale_registries(None, &other, &written(&[])), Ok(vec![]));
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_registry_no_export_recorded_or_one_edited_since_is_refused() {
+        let prior = bazel_stamp(&[("synth.json", "sha256:s")]);
+        // Never recorded: not ours to delete, and not ours to seal.
+        assert_eq!(
+            stale_registries(
+                Some(&prior),
+                &[entry("foo.json", "sha256:f")],
+                &written(&[])
+            ),
+            Err(StaleRegistry::Foreign("foo.json".into()))
+        );
+        assert_eq!(
+            stale_registries(None, &[entry("synth.json", "sha256:s")], &written(&[])),
+            Err(StaleRegistry::Foreign("synth.json".into()))
+        );
+        // Recorded by an export of ANOTHER kind: not a registry we wrote.
+        let cargo = ExportStamp {
+            kind: "cargo".into(),
+            ..bazel_stamp(&[("synth.json", "sha256:s")])
+        };
+        assert_eq!(
+            stale_registries(
+                Some(&cargo),
+                &[entry("synth.json", "sha256:s")],
+                &written(&[])
+            ),
+            Err(StaleRegistry::Foreign("synth.json".into()))
+        );
+        // Recorded, then hand-edited: refused rather than deleted.
+        assert_eq!(
+            stale_registries(
+                Some(&prior),
+                &[entry("synth.json", "sha256:EDITED")],
+                &written(&[])
+            ),
+            Err(StaleRegistry::Edited("synth.json".into()))
+        );
+        // A foreign file that will be overwritten is no obstacle.
+        assert_eq!(
+            stale_registries(
+                Some(&prior),
+                &[entry("foo.json", "sha256:f")],
+                &written(&["foo.json"])
+            ),
+            Ok(vec![])
+        );
+        assert!(
+            StaleRegistry::Foreign("a.json".into())
+                .to_string()
+                .contains("a.json")
+        );
+        assert!(
+            StaleRegistry::Edited("b.json".into())
+                .to_string()
+                .contains("b.json")
+        );
     }
 
     // rivet: verifies REQ-PASSTHROUGH-001
