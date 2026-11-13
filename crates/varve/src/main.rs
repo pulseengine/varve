@@ -3004,49 +3004,9 @@ fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
             ),
         }
     }
-    // An overridden tool with no registry of its own (its override layer
-    // records no provenance) must leave no registry behind: one a previous
-    // export of the PURE pin wrote would be sealed by the new stamp, and
-    // Bazel would fetch the pinned tool (REQ-OVERRIDE-001). Like the
-    // zephyr-module export's leftovers, a file an earlier export of ours
-    // recorded is removed; one we never wrote is not ours to delete, and is
-    // refused.
-    let ours: Vec<String> = varve_core::exportstamp::read_stamp(out)
-        .ok()
-        .filter(|s| s.kind == "bazel-registry")
-        .map(|s| s.files.into_iter().map(|f| f.path).collect())
-        .unwrap_or_default();
-    for (tool, _) in &target.override_layers {
-        if registries.contains_key(tool) {
-            continue;
-        }
-        let name = format!("{tool}.json");
-        let stale = out.join(&name);
-        if std::fs::symlink_metadata(&stale).is_err() {
-            continue;
-        }
-        if !ours.contains(&name) {
-            bail!(
-                "{} exists, and no earlier export-bazel here recorded it. '{tool}' is \
-                 overridden by a layer that records no provenance for it, so no registry may \
-                 describe it — refusing to seal this one under the stamp. Remove it, or export \
-                 into an empty directory.",
-                stale.display()
-            );
-        }
-        std::fs::remove_file(&stale)
-            .with_context(|| format!("cannot remove {}", stale.display()))?;
-        eprintln!(
-            "removed {name}: the earlier export's registry for '{tool}', which this project \
-             now overrides with a layer that records no provenance for it"
-        );
-    }
-    std::fs::create_dir_all(out)?;
-    for (tool, (json, _)) in &registries {
-        let path = out.join(format!("{tool}.json"));
-        std::fs::write(&path, serde_json::to_vec_pretty(json)?)?;
-        println!("wrote {}", path.display());
-    }
+    // Everything that can refuse is decided BEFORE the directory changes, so
+    // a refusal leaves it as it was: first whether there is anything to
+    // export at all, then every stale registry to remove.
     if registries.is_empty() {
         bail!(
             "nothing exported — no entry in layer {} (or the {} layer(s) it composes) carries \
@@ -3054,6 +3014,37 @@ fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
             target.entry.layer,
             layers.len() - 1
         );
+    }
+    // A re-export removes every registry the last export here wrote and this
+    // one does not — an override added, removed or swapped, a pin moved —
+    // so the new stamp never seals a registry for a tool this project does
+    // not run (REQ-OVERRIDE-001, REQ-EXPORT-SYNC-001). A `*.json` no export
+    // recorded, or one edited since, is refused rather than deleted.
+    let written: std::collections::BTreeSet<String> = registries
+        .keys()
+        .map(|tool| format!("{tool}.json"))
+        .collect();
+    let present = if out.is_dir() {
+        varve_core::exportstamp::scan_tree(out)?
+    } else {
+        Vec::new()
+    };
+    let prior = varve_core::exportstamp::read_stamp(out).ok();
+    let stale = varve_core::exportstamp::stale_registries(prior.as_ref(), &present, &written)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?;
+    for name in &stale {
+        let path = out.join(name);
+        std::fs::remove_file(&path).with_context(|| format!("cannot remove {}", path.display()))?;
+        eprintln!(
+            "removed {name}: the earlier export's registry for a tool this export does not \
+             write"
+        );
+    }
+    std::fs::create_dir_all(out)?;
+    for (tool, (json, _)) in &registries {
+        let path = out.join(format!("{tool}.json"));
+        std::fs::write(&path, serde_json::to_vec_pretty(json)?)?;
+        println!("wrote {}", path.display());
     }
     write_export_stamp(out, &target, "bazel-registry")?;
     Ok(())
@@ -5485,7 +5476,7 @@ fn install(
                 outcome.digest
             );
         };
-        varve_core::overrides_carried_by_pin(pin, &pinned, store)?;
+        varve_core::overrides_carried_by_pin(pin, &pinned, store, &platform)?;
     }
     let mut override_entries: Vec<varve_core::store::InstalledLayer> = Vec::new();
     for o in &pin.overrides {
@@ -5557,9 +5548,18 @@ fn install(
             "  override {}: installed layer {} (counter {}) {}",
             o.tool, fetched.layer, fetched.counter, fetched.digest
         );
-        if let Some(entry) = store.get(&fetched.digest)? {
-            override_entries.push(entry);
-        }
+        // Just installed into this store, so it must be there; if it is not,
+        // its includes cannot be followed — "could not tell" refuses.
+        let Some(entry) = store.get(&fetched.digest)? else {
+            bail!(
+                "override {}: layer {} ({}) is not in the store it was just installed into, so \
+                 what it composes cannot be followed — refusing",
+                o.tool,
+                fetched.layer,
+                fetched.digest
+            );
+        };
+        override_entries.push(entry);
     }
     // What an override layer composes is installed with it, by the same walk
     // the pinned layer's includes take, so `seed` (which carries an override

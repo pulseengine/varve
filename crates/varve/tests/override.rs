@@ -1866,3 +1866,225 @@ fn an_override_layer_already_installed_is_still_checked() {
     .unwrap();
     assert_refused(&w, &["install", "--platform", other], "runner 'wasmrun'");
 }
+
+/// Pinned 2026.12.0 whose OWN synth records no provenance (so a pure export
+/// writes no synth.json) and whose loom does. Installed, pinned pure.
+fn no_provenance_pin_world() -> World {
+    let w = world();
+    put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.12.0",
+        "qualified",
+        &[
+            ("synth", script("synth-pinned"), "!nosource"),
+            ("loom", script("loom-pinned"), ""),
+        ],
+        &[],
+        &[],
+    );
+    w.pin_layer("2026.12.0", "");
+    varve(&w).arg("install").assert().success();
+    w
+}
+
+impl World {
+    fn pin_layer(&self, layer: &str, extra: &str) {
+        std::fs::write(
+            self.project.join("varve.toml"),
+            format!(
+                "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\n\
+                 layer = \"{layer}\"\n{extra}"
+            ),
+        )
+        .unwrap();
+    }
+}
+
+fn export_bazel(w: &World) -> assert_cmd::assert::Assert {
+    varve(w).args(["export-bazel", "--out", "bazel"]).assert()
+}
+
+fn sha_hex(bytes: &[u8]) -> String {
+    varve_core::manifest_digest(bytes)
+        .strip_prefix("sha256:")
+        .unwrap()
+        .to_string()
+}
+
+fn override_synth_older(w: &World) -> String {
+    format!(
+        "[toolchain.override.synth]\nlayer = \"{OLDER}\"\ndigest = \"{}\"\n",
+        w.older_digest
+    )
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn removing_an_override_removes_its_registry_from_the_next_export() {
+    // Round 5 #1: the override's synth.json was written by the mixed export;
+    // with the override gone and the pin's synth carrying no provenance,
+    // nothing writes synth.json — so the old one must go, or the pure stamp
+    // seals the override's synth for Bazel to fetch.
+    let w = no_provenance_pin_world();
+    w.pin_layer("2026.12.0", &override_synth_older(&w));
+    varve(&w).arg("install").assert().success();
+    export_bazel(&w).success();
+    let synth = w.project.join("bazel").join("synth.json");
+    assert!(
+        std::fs::read_to_string(&synth)
+            .unwrap()
+            .contains(&sha_hex(&script("synth-0.57")))
+    );
+    w.pin_layer("2026.12.0", "");
+    let a = export_bazel(&w).success();
+    assert!(stderr(&a).contains("removed synth.json"), "{}", stderr(&a));
+    assert!(
+        !synth.exists(),
+        "the override's registry survived its override"
+    );
+    varve(&w)
+        .args(["verify", "--export", "bazel"])
+        .assert()
+        .success();
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn swapping_one_override_for_another_removes_the_first_ones_registry() {
+    let w = no_provenance_pin_world();
+    w.pin_layer("2026.12.0", &override_synth_older(&w));
+    varve(&w).arg("install").assert().success();
+    export_bazel(&w).success();
+    let (ov, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.09.0",
+        "qualified",
+        &[("loom", script("loom-0.60"), "")],
+        &[],
+        &[],
+    );
+    w.pin_layer(
+        "2026.12.0",
+        &format!("[toolchain.override.loom]\nlayer = \"2026.09.0\"\ndigest = \"{ov}\"\n"),
+    );
+    varve(&w).arg("install").assert().success();
+    export_bazel(&w).success();
+    let out = w.project.join("bazel");
+    assert!(
+        !out.join("synth.json").exists(),
+        "the swapped-out override's registry survived"
+    );
+    assert!(
+        std::fs::read_to_string(out.join("loom.json"))
+            .unwrap()
+            .contains(&sha_hex(&script("loom-0.60")))
+    );
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn a_refused_reexport_leaves_the_directory_as_it_was() {
+    // Round 5 #5: every removal and refusal is decided before anything is
+    // deleted, and "nothing exported" is decided first of all.
+    let w = no_provenance_pin_world();
+    w.pin_layer("2026.12.0", &override_synth_older(&w));
+    varve(&w).arg("install").assert().success();
+    export_bazel(&w).success();
+    let out = w.project.join("bazel");
+    let snapshot = |d: &Path| -> Vec<(String, Vec<u8>)> {
+        let mut v: Vec<_> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    // (a) A foreign registry: refused, and synth.json (stale once the
+    // override is gone) is NOT deleted first.
+    std::fs::write(out.join("foo.json"), b"{}").unwrap();
+    w.pin_layer("2026.12.0", "");
+    let before = snapshot(&out);
+    assert_refused(&w, &["export-bazel", "--out", "bazel"], "foo.json");
+    assert_eq!(
+        snapshot(&out),
+        before,
+        "the directory changed before the refusal"
+    );
+    std::fs::remove_file(out.join("foo.json")).unwrap();
+    // (b) A recorded registry edited by hand: refused, not deleted.
+    std::fs::write(out.join("synth.json"), b"{\"edited\":true}").unwrap();
+    let before = snapshot(&out);
+    assert_refused(&w, &["export-bazel", "--out", "bazel"], "modified");
+    assert_eq!(snapshot(&out), before);
+    // (c) Nothing to export at all (loom overridden by a layer with no
+    // provenance either): refused before any registry is removed.
+    let (bare, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.09.0",
+        "qualified",
+        &[("loom", script("loom-bare"), "!nosource")],
+        &[],
+        &[],
+    );
+    w.pin_layer(
+        "2026.12.0",
+        &format!("[toolchain.override.loom]\nlayer = \"2026.09.0\"\ndigest = \"{bare}\"\n"),
+    );
+    varve(&w).arg("install").assert().success();
+    let before = snapshot(&out);
+    assert_refused(&w, &["export-bazel", "--out", "bazel"], "nothing exported");
+    assert_eq!(snapshot(&out), before, "removed before 'nothing exported'");
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
+fn a_pinned_tool_for_another_platform_only_is_refused_before_any_fetch() {
+    // Round 5 #2: the pinned layer ships loom only for another platform;
+    // on this host the pin has no loom, so an override of it adds one.
+    let w = world();
+    let other = other_platform();
+    put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.12.0",
+        "qualified",
+        &[
+            ("synth", script("synth-host"), ""),
+            (
+                "loom",
+                script("loom-other"),
+                &format!(r#","eu.pulseengine.platform":"{other}""#),
+            ),
+        ],
+        &[],
+        &[],
+    );
+    w.pin_layer("2026.12.0", "");
+    varve(&w).arg("install").assert().success();
+    let before = std::fs::read(marks_file(&w)).unwrap();
+    let (ov, _) = put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.09.0",
+        "qualified",
+        &[("loom", script("loom-host"), "")],
+        &[],
+        &[],
+    );
+    w.pin_layer(
+        "2026.12.0",
+        &format!("[toolchain.override.loom]\nlayer = \"2026.09.0\"\ndigest = \"{ov}\"\n"),
+    );
+    assert_refused(&w, &["install"], "cannot add one");
+    assert_eq!(std::fs::read(marks_file(&w)).unwrap(), before, "mark moved");
+    assert!(!walk_has(&w.root, &ov.replace(':', "-")), "laid down");
+}
