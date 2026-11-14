@@ -619,10 +619,11 @@ jobs:
       # ── varve-native release signature (DD-009 / REQ-SELF-001) ─────────
       # A DSSE envelope over SHA256SUMS.txt with the PulseEngine root key,
       # so `varve self-verify` can check a release offline against the same
-      # pinned root that verifies layers. Activates when the root ceremony
-      # provisions the VARVE_ROOT_KEY secret (the v1.0 gate); until then the
-      # step reports loudly that the asset is absent — a missing artifact is
-      # visible to consumers, unlike a silently-skipped gate.
+      # pinned root that verifies layers. VARVE_ROOT_KEY arrives with the
+      # root ceremony (the v1.0 gate); until then the provisional rolling key
+      # signs. Every run of this workflow is a release build, and a release
+      # without the envelope fails closed in every consumer's self-update, so
+      # a missing key fails the run here instead (#366).
       - name: Sign SHA256SUMS with the varve root (DSSE)
         env:
           VARVE_ROOT_KEY: ${{ secrets.VARVE_ROOT_KEY }}
@@ -642,9 +643,9 @@ jobs:
             SIGNING_KEY="$VARVE_ROLLING_KEY"; KEY_ID=varve-rolling-1
             echo "::notice::release sums signed with the PROVISIONAL rolling root (ceremony pending)"
           else
-            echo "::warning::no signing key provisioned — release ships without \
-          SHA256SUMS.txt.dsse.json; varve self-update/self-verify will fail closed on it."
-            exit 0
+            echo "::error::no signing key provisioned (VARVE_ROOT_KEY or VARVE_ROLLING_KEY); \
+          refusing to publish a release without SHA256SUMS.txt.dsse.json."
+            exit 1
           fi
           cargo build --release -p varve
           # File descriptor, never a file (REQ-NOKEYDISK-001) -- see the same

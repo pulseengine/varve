@@ -8928,6 +8928,31 @@ fn a_refused_tool_nothing_provides_says_so_and_still_exits_1() {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
+/// Wait until a binary this test just wrote can be exec'd. While the copy's
+/// write descriptor is open, another test thread may fork, and the child holds
+/// that descriptor until its own exec closes it; exec'ing the copy in that
+/// window fails with ETXTBSY ("Text file busy", seen on #369's CI). Only that
+/// error is retried, for at most 5 s; anything else fails at once.
+#[cfg(unix)]
+fn wait_until_executable(path: &std::path::Path) {
+    const ETXTBSY: i32 = 26;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match std::process::Command::new(path)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(_) => return,
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            Err(e) => panic!("cannot exec {}: {e}", path.display()),
+        }
+    }
+}
+
 fn write_executable(path: &std::path::Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -10195,6 +10220,7 @@ fn a_wrapper_script_around_a_second_varve_ends_in_a_loop_error_not_a_hang() {
     let second = fx.root.with_file_name("varve2");
     std::fs::create_dir_all(&second).unwrap();
     std::fs::copy(&real, second.join("ghost")).unwrap();
+    wait_until_executable(&second.join("ghost"));
     let wrapper = fx.root.with_file_name("wrapper-bin");
     write_executable(
         &wrapper.join("ghost"),
