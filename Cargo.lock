@@ -3138,6 +3138,7 @@ dependencies = [
  "hex",
  "lzma-rs",
  "proptest",
+ "rustix",
  "serde",
  "serde-saphyr",
  "serde_json",

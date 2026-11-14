@@ -656,7 +656,7 @@ fn a_script_calling_the_tool_by_name_gets_the_override_and_nothing_persists() {
         format!("script with=synth@0.57.0 overrides=synth={OLDER}@{d}"),
         synth.clone(),
         synth,
-        format!("loom-1.0 layer={PINNED} overrides= with="),
+        format!("loom-1.0 layer={PINNED} overrides=synth={OLDER}@{d} with=synth@0.57.0"),
     ];
     let lines: Vec<String> = out.lines().map(str::to_string).collect();
     assert_eq!(lines, expected, "{out}");
@@ -711,7 +711,28 @@ fn the_exit_status_passes_through_and_the_directory_goes_either_way() {
             "kill -TERM $$",
         ])
         .assert()
-        .code(128 + 15);
+        .failure();
+    {
+        use std::os::unix::process::ExitStatusExt;
+        let status = varve(&w)
+            .args([
+                "run",
+                "--with",
+                "synth@0.57.0",
+                "--",
+                "sh",
+                "-c",
+                "kill -TERM $$",
+            ])
+            .output()
+            .unwrap()
+            .status;
+        assert_eq!(
+            status.signal(),
+            Some(15),
+            "varve dies of the child's signal: {status:?}"
+        );
+    }
     assert!(w.tmp_is_empty());
     // A command that cannot be started: refused, directory gone.
     varve(&w)
@@ -788,7 +809,12 @@ fn a_signal_to_varve_is_forwarded_and_the_directory_is_removed() {
     // TERM sent to varve alone is forwarded. INT and HUP come from a terminal
     // to the whole process group, so the child has them already: varve does
     // not forward them, and survives them to clean up.
-    for (sig, n, group) in [("-TERM", 15, false), ("-INT", 2, true), ("-HUP", 1, true)] {
+    for (sig, n, group) in [
+        ("-TERM", 15, false),
+        ("-INT", 2, true),
+        ("-HUP", 1, true),
+        ("-QUIT", 3, true),
+    ] {
         let w = world();
         let ready = w.dir.join("ready");
         // `exec sleep`: the child IS the sleep, so a forwarded signal ends it.
@@ -809,7 +835,12 @@ fn a_signal_to_varve_is_forwarded_and_the_directory_is_removed() {
             send(sig, child.id());
         }
         let status = child.wait().unwrap();
-        assert_eq!(status.code(), Some(128 + n), "{sig}: {status:?}");
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            status.signal(),
+            Some(n),
+            "{sig}: varve dies of it: {status:?}"
+        );
         assert!(!dir.exists(), "{sig}: the shim directory is removed");
         assert!(w.tmp_is_empty(), "{sig}");
     }
@@ -1068,30 +1099,6 @@ fn a_temp_dir_inside_the_project_or_the_varve_root_is_refused() {
 
 // rivet: verifies REQ-RUNWITH-001
 #[test]
-fn one_terminal_sigint_reaches_the_child_once() {
-    // Finding 6: a terminal signals the whole process group; varve must not
-    // forward a second copy.
-    let w = world();
-    let ready = w.dir.join("ready");
-    let count = w.dir.join("count");
-    let script = format!(
-        "n=0; trap 'n=$((n+1))' INT; echo ready > '{}'; i=0; \
-         while [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; echo $n > '{}'",
-        ready.display(),
-        count.display()
-    );
-    let mut child = spawn_varve(&w, &script);
-    wait_for(&ready);
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    send_group("-INT", child.id());
-    let status = child.wait().unwrap();
-    assert_eq!(wait_for(&count).trim(), "1", "the child counted SIGINTs");
-    assert_eq!(status.code(), Some(0));
-    assert!(w.tmp_is_empty());
-}
-
-// rivet: verifies REQ-RUNWITH-001
-#[test]
 fn a_nested_with_is_refused() {
     // Finding 7: an inner --with inside an outer one would report only its
     // own override while bare calls still get the outer's (clause 3).
@@ -1232,4 +1239,259 @@ fn a_tmpdir_below_a_directory_others_can_write_is_refused() {
         .assert()
         .success();
     assert!(std::fs::read_dir(&inner).unwrap().next().is_none());
+}
+
+// ---- second review (2026-11-14): signal semantics and the outer tree ----
+
+/// `/bin/sh -c <outer>` in its own process group, with varve as `$VARVE`.
+fn spawn_sh(w: &World, outer: &str) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    let none = w.dir.join("no-user-config");
+    std::process::Command::new("/bin/sh")
+        .args(["-c", outer])
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE", assert_cmd::cargo::cargo_bin("varve"))
+        .env("VARVE_ROOT", &w.root)
+        .env("XDG_CONFIG_HOME", &none)
+        .env("HOME", &none)
+        .env("RUNWITH_TEST_MARKS", w.marks())
+        .env("TMPDIR", w.tmp())
+        .env_remove("VARVE_TRUST_ROOT")
+        .env_remove("VARVE_WITH")
+        .env_remove("VARVE_OVERRIDES")
+        .current_dir(&w.project)
+        .process_group(0)
+        .spawn()
+        .unwrap()
+}
+
+/// Wait (bounded, 60 s) for a process to exit.
+fn wait_exit(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    for _ in 0..1200 {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    None
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_signal_ignored_when_varve_starts_stays_ignored_in_the_child() {
+    // `nohup`, `trap '' HUP`, `cmd &` in a non-interactive shell: an ignored
+    // signal survives exec into the command, as it would without varve.
+    for sig in ["HUP", "INT"] {
+        let w = world();
+        let ready = w.dir.join("ready");
+        let stop = w.dir.join("stop");
+        let survived = w.dir.join("survived");
+        let outer = format!(
+            "trap '' {sig}; exec \"$VARVE\" run --with synth@0.57.0 -- sh -c \
+             \"echo r > '{}'; while [ ! -e '{}' ]; do sleep 0.05; done; echo s > '{}'\"",
+            ready.display(),
+            stop.display(),
+            survived.display()
+        );
+        let mut child = spawn_sh(&w, &outer);
+        wait_for(&ready);
+        send_group(&format!("-{sig}"), child.id());
+        // Give a would-be death every chance, then let a survivor finish.
+        let early = {
+            let mut done = None;
+            for _ in 0..20 {
+                if let Some(status) = child.try_wait().unwrap() {
+                    done = Some(status);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            done
+        };
+        std::fs::write(&stop, "").unwrap();
+        let status = early
+            .or_else(|| wait_exit(&mut child))
+            .expect("varve never exited");
+        assert!(
+            survived.exists(),
+            "{sig}: the child died of a signal its parent ignored ({status:?})"
+        );
+        assert_eq!(status.code(), Some(0), "{sig}");
+        assert!(w.tmp_is_empty(), "{sig}");
+    }
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn ctrl_c_stops_a_shell_loop_around_with() {
+    // bash aborts a loop on Ctrl-C only if the foreground child died OF
+    // SIGINT; varve, after cleaning up, dies of the signal its child died of.
+    let w = world();
+    let log = w.dir.join("log");
+    let stop = w.dir.join("stop");
+    let bash = format!(
+        "exec bash -c 'for i in 1 2; do \"$VARVE\" run --with synth@0.57.0 -- sh -c \
+         \"echo r$i >> {l}; while [ ! -e {s} ]; do sleep 0.05; done\"; done; echo finished >> {l}'",
+        l = log.display(),
+        s = stop.display()
+    );
+    let mut child = spawn_sh(&w, &bash);
+    wait_for(&log);
+    send_group("-INT", child.id());
+    // Either bash stops, or it starts round 2 (the failure); never hang.
+    let mut status = None;
+    for _ in 0..1200 {
+        if let Some(s) = child.try_wait().unwrap() {
+            status = Some(s);
+            break;
+        }
+        if std::fs::read_to_string(&log).unwrap().contains("r2") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::fs::write(&stop, "").unwrap();
+    let status = status.or_else(|| wait_exit(&mut child));
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(text, "r1\n", "Ctrl-C did not stop the loop ({status:?})");
+    assert!(w.tmp_is_empty());
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_terminal_signal_sent_to_varve_alone_never_reaches_the_child() {
+    // INT, QUIT and HUP reach a child through the terminal's process group,
+    // never from varve: sent to varve's pid alone, the child must not see
+    // them (a forwarding varve would hand them on). varve survives them and
+    // the child finishes normally.
+    let w = world();
+    let ready = w.dir.join("ready");
+    let stop = w.dir.join("stop");
+    let seen = w.dir.join("seen");
+    let script = format!(
+        "for s in INT QUIT HUP; do trap \"echo $s >> '{seen}'\" $s; done; \
+         echo r > '{ready}'; while [ ! -e '{stop}' ]; do sleep 0.05; done; echo done >> '{seen}'",
+        seen = seen.display(),
+        ready = ready.display(),
+        stop = stop.display()
+    );
+    let mut child = spawn_varve(&w, &script);
+    wait_for(&ready);
+    for sig in ["-INT", "-QUIT", "-HUP"] {
+        send(sig, child.id());
+    }
+    // A forwarded signal arrives in microseconds; two seconds is generous.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "varve died of a terminal signal"
+    );
+    std::fs::write(&stop, "").unwrap();
+    let status = wait_exit(&mut child).expect("varve never exited");
+    assert_eq!(status.code(), Some(0));
+    assert_eq!(
+        wait_for(&seen),
+        "done\n",
+        "the child saw a signal sent to varve alone"
+    );
+    assert!(w.tmp_is_empty());
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_dead_shim_directory_on_path_is_not_an_outer_run() {
+    // A leaked directory still on PATH is not a live outer --with: a fresh
+    // --with runs, and a plain run gets the pin.
+    let w = world();
+    let dir = leak_a_shim_dir(&w);
+    let path = format!("{}:/usr/bin:/bin", dir.display());
+    let a = varve(&w)
+        .env("PATH", &path)
+        .args(["run", "--with", "synth@0.57.0", "--", "synth"])
+        .assert()
+        .success();
+    assert!(stdout(&a).starts_with("synth-0.57 "), "{}", stderr(&a));
+    let a = varve(&w)
+        .env("PATH", &path)
+        .args(["run", "--", "synth"])
+        .assert()
+        .success();
+    assert!(
+        stdout(&a).contains("synth-0.65 layer=2026.11.0 overrides= with="),
+        "{}",
+        stdout(&a)
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn plain_runs_and_regular_shims_inside_a_with_tree_tell_the_truth() {
+    // Inside a --with command, a plain `varve run` or a regular shim reached
+    // by its path runs and reports what bare calls in that tree get (clause 3).
+    let w = world();
+    let path = with_regular_shims(&w);
+    let v = assert_cmd::cargo::cargo_bin("varve");
+    let shim = w.root.join("shims").join("synth");
+    let a = varve(&w)
+        .env("PATH", &path)
+        .args([
+            "run",
+            "--with",
+            "synth@0.57.0",
+            "--",
+            "sh",
+            "-c",
+            &format!(
+                "'{v}' run -- loom; '{v}' run -- synth; '{shim}'",
+                v = v.display(),
+                shim = shim.display()
+            ),
+        ])
+        .assert()
+        .success();
+    let d = &w.older_digest;
+    let lines: Vec<String> = stdout(&a).lines().map(str::to_string).collect();
+    let tail = format!("layer={PINNED} overrides=synth={OLDER}@{d} with=synth@0.57.0");
+    assert_eq!(
+        lines,
+        vec![
+            format!("loom-1.0 {tail}"),
+            format!("synth-0.57 {tail}"),
+            format!("synth-0.57 {tail}"),
+        ],
+        "{}",
+        stderr(&a)
+    );
+    assert!(!w.ran("synth-0.65"));
+    // `--varve` inside the tree would drop the outer override: refused.
+    let a = varve(&w)
+        .env("PATH", &path)
+        .args([
+            "run",
+            "--with",
+            "synth@0.57.0",
+            "--",
+            "sh",
+            "-c",
+            &format!("'{}' run --varve {OLDER} -- loom", v.display()),
+        ])
+        .assert()
+        .code(1);
+    assert!(stderr(&a).contains("--varve"), "{}", stderr(&a));
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_relative_path_entry_is_never_searched_for_the_command() {
+    // `.` on PATH would run a file from the repository under a bare name.
+    let w = world();
+    executable(&w.project.join("zzmake"), "#!/bin/sh\necho REPO-FILE-RAN\n");
+    let a = varve(&w)
+        .env("PATH", ".:/usr/bin:/bin")
+        .args(["run", "--with", "synth@0.57.0", "--", "zzmake"])
+        .assert()
+        .code(1);
+    assert!(!stdout(&a).contains("REPO-FILE-RAN"), "{}", stdout(&a));
+    assert!(w.tmp_is_empty());
 }
