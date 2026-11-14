@@ -17,7 +17,9 @@ downward, not configuration read upward (`varve docs run`). In a mixed
 toolchain they add `VARVE_OVERRIDES`, and `varve run --with` adds `VARVE_WITH`
 (`tool@version`) and puts a private shim directory first on the command's
 `PATH`; varve never reads either variable back, and a shim finds an override
-only through the directory it sits in (`varve docs run`).
+only through the directory it sits in. Ambient state — PATH and the
+environment — can make varve refuse, never select a different tool
+(`varve docs run`).
 
 ## VARVE_ROOT
 

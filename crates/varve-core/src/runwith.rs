@@ -373,10 +373,10 @@ pub fn choose(
 // ---- the private shim directory a `--with` command gets first on PATH ----
 //
 // `varve run --with` spawns its command with a directory of its own first on
-// PATH. For each overridden tool the directory holds a wrapper that execs
-// `varve run --with-shim-dir <that directory> -- <tool>`: the directory is
-// named in the wrapper's own text, never in the environment, so no inherited
-// variable can point a shim at an override. The directory also holds the
+// PATH. For each overridden tool the directory holds a wrapper, a one-line
+// script whose first line names varve itself (`SHIM_MARKER`): run, it hands
+// varve its own path, so the directory is known from where the wrapper IS,
+// never from the environment, and no shell ever reads it. The directory also holds the
 // record of what the run resolved (`RECORD_FILE`) and a lock the run holds
 // for its whole life (`LOCK_FILE`).
 //
@@ -404,31 +404,173 @@ pub struct ShimRecord {
     pub with: Vec<WithRequest>,
 }
 
-/// The wrapper a private shim directory holds for `tool`. Paths that are not
-/// UTF-8 cannot be quoted for `sh` faithfully and are refused.
-pub fn wrapper_script(
-    varve: &std::path::Path,
+/// The first argument of a private shim's invocation. A wrapper is a one-line
+/// script, `#!<varve> --varve-with-shim`: the kernel runs
+/// `<varve> --varve-with-shim <the wrapper's path> <args…>`, so varve learns
+/// the directory and the tool from the path it was run as. No shell reads the
+/// wrapper — `SHELLOPTS`, `BASH_FUNC_*`, `ENV` and `BASH_ENV` cannot reach it.
+pub const SHIM_MARKER: &str = "--varve-with-shim";
+/// The first argument of the gate (`varve run --with`'s own binary, re-run).
+pub const GATE_MARKER: &str = "--varve-with-gate";
+/// A wrapper that only proves programs in the directory can be executed.
+pub const PROBE: &str = ".varve-probe";
+/// Written last; the gate execs the command only once it exists.
+pub const GO_FILE: &str = ".go";
+
+/// The text of every wrapper in a private shim directory. The shebang line
+/// holds varve's absolute path and the marker and nothing else: a kernel
+/// takes the interpreter up to the first blank, and Linux reads at most 255
+/// bytes of the line, so a path with a blank or control character, or one
+/// too long, is refused rather than truncated into another program.
+pub fn wrapper_text(varve: &std::path::Path) -> Result<String, String> {
+    let shown = varve
+        .to_str()
+        .filter(|s| varve.is_absolute() && !s.chars().any(|c| c.is_whitespace() || c.is_control()))
+        .ok_or_else(|| {
+            format!(
+                "{} cannot be named in a script's first line (it must be an absolute path \
+                 without blanks or control characters) — --with cannot make its shims",
+                varve.display()
+            )
+        })?;
+    let line = format!("#!{shown} {SHIM_MARKER}\n");
+    if line.len() > 255 {
+        return Err(format!(
+            "{} is too long to name in a script's first line (at most 255 bytes) — --with \
+             cannot make its shims",
+            varve.display()
+        ));
+    }
+    Ok(line)
+}
+
+/// The name of a private shim directory, from two random words.
+pub fn shim_dir_name(a: u64, b: u64) -> String {
+    format!("varve-with-{a:016x}{b:016x}")
+}
+
+/// A directory that is put on PATH must not contain `:` (PATH's separator)
+/// or a newline: either would split it into other, unchecked directories.
+pub fn check_path_chars(path: &std::path::Path) -> Result<(), String> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    match bytes.iter().find(|b| matches!(b, b':' | b'\n' | 0)) {
+        Some(_) => Err(format!(
+            "{} (TMPDIR) contains ':' or a newline, which would split PATH into other, \
+             unchecked directories — point TMPDIR elsewhere",
+            path.display()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The gate's arguments: `--varve-with-gate <varve's pid> <dir> -- <program> <args…>`.
+pub fn gate_args(
+    parent: u32,
     dir: &std::path::Path,
-    tool: &str,
-) -> Result<String, String> {
-    let text = |p: &std::path::Path| {
-        p.to_str()
-            .map(crate::shellquote::quote_sh)
-            .ok_or_else(|| format!("{} is not UTF-8", p.display()))
-    };
-    Ok(format!(
-        "#!/bin/sh\n# varve run --with: a private shim, honoured only while that run lives \
-         (REQ-RUNWITH-001).\nexec {} run --with-shim-dir {} -- {} \"$@\"\n",
-        text(varve)?,
-        text(dir)?,
-        crate::shellquote::quote_sh(tool)
-    ))
+    program: &std::ffi::OsStr,
+    args: &[std::ffi::OsString],
+) -> Vec<std::ffi::OsString> {
+    let mut out: Vec<std::ffi::OsString> = vec![
+        GATE_MARKER.into(),
+        parent.to_string().into(),
+        dir.as_os_str().to_os_string(),
+        "--".into(),
+        program.to_os_string(),
+    ];
+    out.extend(args.iter().cloned());
+    out
+}
+
+/// The gate's request, parsed back: (varve's pid, dir, program, args).
+pub type GateRequest = (
+    u32,
+    std::path::PathBuf,
+    std::ffi::OsString,
+    Vec<std::ffi::OsString>,
+);
+
+/// Parse what follows `--varve-with-gate`.
+pub fn parse_gate_args(rest: &[std::ffi::OsString]) -> Result<GateRequest, String> {
+    match rest {
+        [parent, dir, sep, program, args @ ..] if sep == "--" => {
+            let parent = parent
+                .to_str()
+                .and_then(|p| p.parse::<u32>().ok())
+                .filter(|p| *p > 1)
+                .ok_or("the gate needs varve's pid")?;
+            Ok((parent, dir.into(), program.clone(), args.to_vec()))
+        }
+        _ => Err("usage: varve --varve-with-gate <pid> <dir> -- <program> [args…]".into()),
+    }
+}
+
+/// What the gate does next: wait, give up (varve is gone, so nobody will
+/// release it or clean up), or go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateStep {
+    Wait,
+    Abandon,
+    Go,
+}
+
+pub fn gate_step(parent: u32, parent_now: u32, released: bool) -> GateStep {
+    if parent_now != parent {
+        GateStep::Abandon
+    } else if released {
+        GateStep::Go
+    } else {
+        GateStep::Wait
+    }
+}
+
+/// Before the gate execs, the directory and its release marker must be this
+/// user's own: the directory a real directory, mode 0700, the marker a
+/// regular file. The directory's name is visible to other users (the gate's
+/// arguments); one they made in its place is never run from.
+pub fn check_gate_dir(
+    dir: &std::path::Path,
+    dir_is_dir: bool,
+    dir_owner: u32,
+    dir_mode: u32,
+    go_is_file: bool,
+    go_owner: u32,
+    uid: u32,
+) -> Result<(), String> {
+    if dir_is_dir && dir_owner == uid && dir_mode & 0o777 == 0o700 && go_is_file && go_owner == uid
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is not the private shim directory this run made — refusing to run from it",
+            dir.display()
+        ))
+    }
+}
+
+/// The command's PATH: the private directory, then the inherited PATH. An
+/// empty or absent inherited PATH adds nothing — an empty entry would mean
+/// the working directory.
+pub fn gate_path(
+    dir: &std::path::Path,
+    inherited: Option<&std::ffi::OsStr>,
+) -> Result<std::ffi::OsString, String> {
+    let mut entries = vec![dir.to_path_buf()];
+    if let Some(inherited) = inherited.filter(|p| !p.is_empty()) {
+        entries.extend(std::env::split_paths(inherited));
+    }
+    std::env::join_paths(entries).map_err(|e| e.to_string())
+}
+
+/// Does a record override `tool`, named bare or realm-qualified?
+pub fn overrides_tool(record: &ShimRecord, tool: &str) -> bool {
+    let bare = tool.rsplit('/').next().unwrap_or(tool);
+    record.overrides.iter().any(|o| o.tool == bare)
 }
 
 /// Fill `dir` (created 0700 by the caller): take the lock FIRST, so no
 /// wrapper ever exists without a live owner, then the record, then one
-/// wrapper (0700) per override. Returns the lock: the directory is honoured
-/// exactly as long as it is held.
+/// wrapper (0700) per override and the probe wrapper. Returns the lock: the
+/// directory is honoured exactly as long as it is held.
 #[cfg(unix)]
 pub fn fill_shim_dir(
     dir: &std::path::Path,
@@ -437,23 +579,75 @@ pub fn fill_shim_dir(
 ) -> Result<std::fs::File, String> {
     use std::os::unix::fs::PermissionsExt;
     let io = |what: &str, e: std::io::Error| format!("{what} in {}: {e}", dir.display());
+    let text = wrapper_text(varve)?;
     let lock = std::fs::File::create(dir.join(LOCK_FILE)).map_err(|e| io("lock", e))?;
     lock.lock().map_err(|e| io("lock", e))?;
     let json = serde_json::to_vec_pretty(record).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(RECORD_FILE), json).map_err(|e| io("record", e))?;
-    for o in &record.overrides {
-        let path = dir.join(&o.tool);
-        std::fs::write(&path, wrapper_script(varve, dir, &o.tool)?).map_err(|e| io("shim", e))?;
+    let names = record
+        .overrides
+        .iter()
+        .map(|o| o.tool.as_str())
+        .chain(std::iter::once(PROBE));
+    for name in names {
+        let path = dir.join(name);
+        std::fs::write(&path, &text).map_err(|e| io("shim", e))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| io("shim", e))?;
     }
     Ok(lock)
 }
 
+/// `O_NONBLOCK | O_NOFOLLOW` for opening a lock file: a FIFO planted under
+/// that name must not hang the probe, and a symlink must not redirect it.
+/// (Checked against the platform's values by varve's own tests.)
+#[cfg(target_os = "linux")]
+pub const LOCK_OPEN_FLAGS: i32 = 0o4000 | 0o400000;
+#[cfg(target_os = "macos")]
+pub const LOCK_OPEN_FLAGS: i32 = 0x0004 | 0x0100;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub const LOCK_OPEN_FLAGS: i32 = 0;
+
+/// What a directory's lock says about its run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockState {
+    /// Held exclusively: its run is alive.
+    Held,
+    /// Free: its run is gone.
+    Free,
+    /// Missing, not a regular file, or not probeable.
+    Unusable,
+}
+
+/// Probe a directory's lock with a SHARED lock, never blocking: probers
+/// never block each other, so only the live run's exclusive lock can fail
+/// the probe (an exclusive probe made a dead directory look alive to every
+/// other prober at that instant — 149 of 1200 concurrent calls ran).
+#[cfg(unix)]
+pub fn lock_state(dir: &std::path::Path) -> LockState {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(LOCK_OPEN_FLAGS)
+        .open(dir.join(LOCK_FILE))
+    else {
+        return LockState::Unusable;
+    };
+    if !lock.metadata().is_ok_and(|m| m.is_file()) {
+        return LockState::Unusable;
+    }
+    match lock.try_lock_shared() {
+        Ok(()) => LockState::Free,
+        Err(std::fs::TryLockError::WouldBlock) => LockState::Held,
+        Err(std::fs::TryLockError::Error(_)) => LockState::Unusable,
+    }
+}
+
 /// Read a private shim directory, or refuse. Refused: a path that is not a
 /// directory of `uid`'s, or that group or others can write or read; a
 /// directory whose run is gone (its lock is not held) — then the record is
-/// never read; a record this varve cannot read whole.
+/// never read; a lock that is not a regular file; a record this varve cannot
+/// read whole.
 #[cfg(unix)]
 pub fn read_shim_dir(dir: &std::path::Path, uid: u32) -> Result<ShimRecord, String> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -468,24 +662,17 @@ pub fn read_shim_dir(dir: &std::path::Path, uid: u32) -> Result<ShimRecord, Stri
             dir.display()
         ));
     }
-    let lock = std::fs::File::open(dir.join(LOCK_FILE))
-        .map_err(|e| format!("{}: no lock: {e}", dir.display()))?;
-    // A SHARED probe: probers never block each other, so only the live run's
-    // exclusive lock can fail it. An exclusive probe made a dead directory
-    // look alive to every other prober holding it at that instant (review,
-    // 2026-11-14: 149 of 1200 concurrent calls into a leaked directory ran).
-    match lock.try_lock_shared() {
-        // Taken: nobody holds it exclusively, so the run that made this is gone.
-        Ok(()) => {
+    match lock_state(dir) {
+        LockState::Held => {}
+        LockState::Free => {
             return Err(format!(
                 "{} outlived the `varve run --with` that made it — its shims grant nothing \
                  after that run ends. Remove the directory.",
                 dir.display()
             ));
         }
-        Err(std::fs::TryLockError::WouldBlock) => {}
-        Err(std::fs::TryLockError::Error(e)) => {
-            return Err(format!("{}: cannot check its lock: {e}", dir.display()));
+        LockState::Unusable => {
+            return Err(format!("{}: no usable lock", dir.display()));
         }
     }
     let bytes = std::fs::read(dir.join(RECORD_FILE))
@@ -494,19 +681,28 @@ pub fn read_shim_dir(dir: &std::path::Path, uid: u32) -> Result<ShimRecord, Stri
 }
 
 /// How `varve run --with` ends once its child has: with the child's exit
-/// code, or — for a child killed by signal N — by dying of N itself, after
-/// cleaning up. A shell running `varve run --with` in a loop stops on Ctrl-C
-/// only if its foreground child died OF SIGINT; exiting 130 would not do.
+/// code; for a child killed by a signal that terminates without a core dump
+/// (SIGHUP, SIGINT, SIGKILL, SIGPIPE, SIGALRM, SIGTERM), by dying of it
+/// itself, after cleaning up — a shell running `varve run --with` in a loop
+/// stops on Ctrl-C only if its foreground child died OF SIGINT. For any
+/// other signal (the core-dumping SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE,
+/// SIGQUIT, SIGTRAP, SIGSYS, and the rest) varve exits 128 + N instead:
+/// re-raising those would crash varve and blame it for its child's fault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ending {
     Exit(i32),
     Die(i32),
 }
 
+/// The signals varve dies of when its child did: terminating, no core dump,
+/// and numbered the same on Linux and macOS.
+pub const REDELIVERED: [i32; 6] = [1, 2, 9, 13, 14, 15];
+
 pub fn ending(code: Option<i32>, signal: Option<i32>) -> Ending {
     match (code, signal) {
         (Some(code), _) => Ending::Exit(code),
-        (None, Some(signal)) => Ending::Die(signal),
+        (None, Some(signal)) if REDELIVERED.contains(&signal) => Ending::Die(signal),
+        (None, Some(signal)) => Ending::Exit(128 + signal),
         (None, None) => Ending::Exit(1),
     }
 }
@@ -534,13 +730,6 @@ pub const CAUGHT: [i32; 4] = [SIGHUP, SIGINT, SIGQUIT, SIGTERM];
 /// that signals varve alone waiting on a child that never heard.
 pub fn forwards(signal: i32) -> bool {
     signal == SIGTERM
-}
-
-/// A caught signal that arrived while the run was being set up — handlers
-/// installed, command not yet started. The run is then abandoned (the command
-/// never starts) and varve dies of that signal.
-pub fn interrupted_setup(pending: &[i32]) -> Option<i32> {
-    pending.iter().copied().find(|s| CAUGHT.contains(s))
 }
 
 /// May `varve run --with` run `name` as a program the layer does not carry?
@@ -640,35 +829,6 @@ pub fn find_program(
         .find(|candidate| is_program(candidate))
 }
 
-/// The gate a `varve run --with` command is started through. varve spawns
-/// `sh -c GATE varve-run-with <fd> <program> <args…>` BEFORE it installs any
-/// signal handler, so the gate — and the program it execs — inherits varve's
-/// signal dispositions exactly (a signal ignored under `nohup` or `cmd &`
-/// stays ignored; POSIX sh keeps an inherited ignore). The gate waits for the
-/// private shim directory's path on fd <fd>, puts it first on PATH and execs
-/// the program. If varve dies or abandons the run first, the read fails and
-/// nothing runs.
-pub const GATE: &str = "fd=$1; shift; IFS= read -r d <&\"$fd\" || exit 125; \
-eval \"exec $fd<&-\"; [ -n \"$d\" ] || exit 125; \
-PATH=\"$d${PATH:+:$PATH}\"; export PATH; exec \"$@\"";
-
-/// The arguments of `sh` for the gate.
-pub fn gate_args(
-    fd: i32,
-    program: &std::ffi::OsStr,
-    args: &[std::ffi::OsString],
-) -> Vec<std::ffi::OsString> {
-    let mut out: Vec<std::ffi::OsString> = vec![
-        "-c".into(),
-        GATE.into(),
-        "varve-run-with".into(),
-        fd.to_string().into(),
-        program.to_os_string(),
-    ];
-    out.extend(args.iter().cloned());
-    out
-}
-
 /// The directory just created for the private shims is the one this run
 /// made: a real directory (not a link), owned by `uid`, mode exactly 0700.
 pub fn check_created_dir(
@@ -708,20 +868,24 @@ pub fn check_not_inside(
     }
 }
 
-/// A LIVE private shim directory of an outer `varve run --with` on `path`, if
-/// any: a PATH entry holding a record and a lock its run still holds (the same
-/// shared-lock probe as `read_shim_dir`). A leaked directory is not one. A
-/// lock that cannot be probed counts as held: the callers then refuse, or
-/// read the record and refuse, rather than ignore a tree that may be live.
-pub fn outer_shim_dir(path: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
-    std::env::split_paths(path?).find(|dir| {
-        dir.is_absolute()
-            && dir.join(RECORD_FILE).is_file()
-            && match std::fs::File::open(dir.join(LOCK_FILE)) {
-                Err(_) => false,
-                Ok(lock) => !matches!(lock.try_lock_shared(), Ok(())),
-            }
-    })
+/// The LIVE private shim directories on `path`: absolute entries holding a
+/// record and a lock its run still holds. A leaked directory, a FIFO or link
+/// planted as the lock, or an entry that cannot be read is skipped — never an
+/// error, so a stray entry cannot make every run fail. What callers do with
+/// one can only be to refuse, never to select a tool: ambient state (PATH,
+/// the environment) never chooses what varve runs.
+#[cfg(unix)]
+pub fn outer_shim_dirs(path: Option<&std::ffi::OsStr>) -> Vec<std::path::PathBuf> {
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    std::env::split_paths(path)
+        .filter(|dir| {
+            dir.is_absolute()
+                && std::fs::symlink_metadata(dir.join(RECORD_FILE)).is_ok_and(|m| m.is_file())
+                && lock_state(dir) == LockState::Held
+        })
+        .collect()
 }
 
 /// Does a live record say exactly what its `with` resolves to now? `chosen`
@@ -1173,27 +1337,6 @@ mod tests {
 
     // rivet: verifies REQ-RUNWITH-001
     #[test]
-    fn a_wrapper_names_its_directory_in_its_own_text_and_quotes_everything() {
-        let s = wrapper_script(
-            std::path::Path::new("/opt/v arve/varve"),
-            std::path::Path::new("/tmp/varve-with-x'y"),
-            "synth",
-        )
-        .unwrap();
-        assert_eq!(
-            s,
-            "#!/bin/sh\n# varve run --with: a private shim, honoured only while that run lives \
-             (REQ-RUNWITH-001).\nexec '/opt/v arve/varve' run --with-shim-dir \
-             '/tmp/varve-with-x'\\''y' -- 'synth' \"$@\"\n"
-        );
-        use std::os::unix::ffi::OsStrExt;
-        let bad = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff"));
-        assert!(wrapper_script(bad, std::path::Path::new("/d"), "synth").is_err());
-        assert!(wrapper_script(std::path::Path::new("/v"), bad, "synth").is_err());
-    }
-
-    // rivet: verifies REQ-RUNWITH-001
-    #[test]
     fn a_live_directory_is_read_and_a_leaked_one_grants_nothing() {
         let _serial = serial();
         let dir = private_dir();
@@ -1206,11 +1349,11 @@ mod tests {
             std::fs::metadata(&shim).unwrap().permissions().mode() & 0o777,
             0o700
         );
-        assert!(
-            std::fs::read_to_string(&shim)
-                .unwrap()
-                .contains("--with-shim-dir")
+        assert_eq!(
+            std::fs::read_to_string(&shim).unwrap(),
+            "#!/v --varve-with-shim\n"
         );
+        assert!(dir.path().join(PROBE).is_file(), "the probe wrapper");
         assert_eq!(read_shim_dir(dir.path(), uid), Ok(record()));
         // Another user's directory, or one others can read, is refused.
         let why = read_shim_dir(dir.path(), uid + 1).unwrap_err();
@@ -1233,7 +1376,7 @@ mod tests {
         assert!(
             read_shim_dir(dir.path(), uid)
                 .unwrap_err()
-                .contains("no lock")
+                .contains("no usable lock")
         );
         assert!(read_shim_dir(&shim, uid).is_err());
         assert!(read_shim_dir(&dir.path().join("absent"), uid).is_err());
@@ -1353,16 +1496,6 @@ mod tests {
 
     // rivet: verifies REQ-RUNWITH-001
     #[test]
-    fn a_child_killed_by_a_signal_makes_varve_die_of_it() {
-        assert_eq!(ending(Some(0), None), Ending::Exit(0));
-        assert_eq!(ending(Some(7), None), Ending::Exit(7));
-        assert_eq!(ending(None, Some(15)), Ending::Die(15));
-        assert_eq!(ending(None, Some(2)), Ending::Die(2));
-        assert_eq!(ending(None, None), Ending::Exit(1));
-    }
-
-    // rivet: verifies REQ-RUNWITH-001
-    #[test]
     fn only_sigterm_is_forwarded() {
         // A mutant forwarding SIGINT (or any terminal signal) fails here.
         assert!(forwards(SIGTERM));
@@ -1372,22 +1505,6 @@ mod tests {
         assert!(!forwards(10) && !forwards(0));
         assert_eq!(CAUGHT, [SIGHUP, SIGINT, SIGQUIT, SIGTERM]);
         assert_eq!((SIGHUP, SIGINT, SIGQUIT, SIGTERM), (1, 2, 3, 15));
-    }
-
-    // rivet: verifies REQ-RUNWITH-001
-    #[test]
-    fn a_caught_signal_during_setup_abandons_the_run() {
-        assert_eq!(interrupted_setup(&[]), None);
-        assert_eq!(interrupted_setup(&[SIGINT]), Some(SIGINT));
-        assert_eq!(
-            interrupted_setup(&[28, SIGHUP]),
-            Some(SIGHUP),
-            "28 is not caught"
-        );
-        assert_eq!(interrupted_setup(&[28]), None);
-        for s in CAUGHT {
-            assert_eq!(interrupted_setup(&[s]), Some(s));
-        }
     }
 
     // rivet: verifies REQ-RUNWITH-001
@@ -1523,12 +1640,57 @@ mod tests {
 
     // rivet: verifies REQ-RUNWITH-001
     #[test]
-    fn the_gate_runs_the_program_only_after_it_is_given_the_directory() {
-        let _serial = serial();
+    fn a_wrapper_is_one_shebang_line_naming_varve_and_nothing_a_shell_reads() {
+        assert_eq!(
+            wrapper_text(std::path::Path::new("/opt/varve/bin/varve")),
+            Ok("#!/opt/varve/bin/varve --varve-with-shim\n".to_string())
+        );
+        // A blank would end the interpreter early; a relative path or a
+        // control character cannot be named; too long is truncated by Linux.
+        for bad in ["/opt/v arve/varve", "varve", "/opt/v\tarve", "/opt/v\narve"] {
+            assert!(wrapper_text(std::path::Path::new(bad)).is_err(), "{bad:?}");
+        }
+        let long = format!("/{}", "x".repeat(240));
+        assert!(wrapper_text(std::path::Path::new(&long)).is_err());
+        let fits = format!("/{}", "x".repeat(255 - 4 - SHIM_MARKER.len() - 1));
+        assert!(
+            wrapper_text(std::path::Path::new(&fits)).is_ok(),
+            "exactly 255"
+        );
+        let over = format!("/{}", "x".repeat(255 - 4 - SHIM_MARKER.len()));
+        assert!(wrapper_text(std::path::Path::new(&over)).is_err(), "256");
+        use std::os::unix::ffi::OsStrExt;
+        let not_utf8 = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/opt/\xff"));
+        assert!(wrapper_text(not_utf8).is_err());
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_shim_directory_name_is_two_random_words() {
+        assert_eq!(
+            shim_dir_name(1, 0xabc),
+            "varve-with-00000000000000010000000000000abc"
+        );
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_directory_put_on_path_holds_no_separator_or_newline() {
+        assert_eq!(check_path_chars(std::path::Path::new("/tmp/x")), Ok(()));
+        for bad in ["/tmp/a:b", "/tmp/a\nb", "/t:"] {
+            let why = check_path_chars(std::path::Path::new(bad)).unwrap_err();
+            assert!(why.contains("split PATH"), "{bad:?}: {why}");
+        }
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn the_gate_is_told_its_parent_directory_and_program() {
         let args = gate_args(
-            7,
+            4242,
+            std::path::Path::new("/t/varve-with-x"),
             std::ffi::OsStr::new("/bin/prog"),
-            &["a b".into(), "-x".into()],
+            &["a b".into(), "--".into()],
         );
         let shown: Vec<String> = args
             .iter()
@@ -1536,78 +1698,167 @@ mod tests {
             .collect();
         assert_eq!(
             shown,
-            ["-c", GATE, "varve-run-with", "7", "/bin/prog", "a b", "-x"]
-        );
-        // Run the gate for real: the program runs with the directory first on
-        // PATH; given nothing (EOF), it runs nothing and exits 125.
-        let run = |input: &[u8]| {
-            use std::io::Write;
-            let (reader, mut writer) = std::io::pipe().unwrap();
-            let fd = {
-                use std::os::fd::AsRawFd;
-                reader.as_raw_fd()
-            };
-            // The read end must survive exec, as varve arranges.
-            rustix::io::fcntl_setfd(&reader, rustix::io::FdFlags::empty()).unwrap();
-            let child = std::process::Command::new("/bin/sh")
-                .args(gate_args(
-                    fd,
-                    std::ffi::OsStr::new("/bin/sh"),
-                    &["-c".into(), "echo \"${PATH%%:*}\"".into()],
-                ))
-                .env("PATH", "/usr/bin:/bin")
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
-            drop(reader);
-            writer.write_all(input).unwrap();
-            drop(writer);
-            let out = child.wait_with_output().unwrap();
-            (
-                out.status.code(),
-                String::from_utf8_lossy(&out.stdout).into_owned(),
-            )
-        };
-        assert_eq!(run(b"/private/dir\n"), (Some(0), "/private/dir\n".into()));
-        assert_eq!(
-            run(b""),
-            (Some(125), String::new()),
-            "varve gone: nothing runs"
+            [
+                GATE_MARKER,
+                "4242",
+                "/t/varve-with-x",
+                "--",
+                "/bin/prog",
+                "a b",
+                "--"
+            ]
         );
         assert_eq!(
-            run(b"\n"),
-            (Some(125), String::new()),
-            "no directory: nothing runs"
+            parse_gate_args(&args[1..]),
+            Ok((
+                4242,
+                "/t/varve-with-x".into(),
+                "/bin/prog".into(),
+                vec!["a b".into(), "--".into()]
+            ))
+        );
+        let s = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert!(
+            parse_gate_args(&s(&["4242", "/d", "/bin/p"])).is_err(),
+            "no --"
+        );
+        assert!(
+            parse_gate_args(&s(&["x", "/d", "--", "/bin/p"])).is_err(),
+            "pid"
+        );
+        assert!(
+            parse_gate_args(&s(&["1", "/d", "--", "/bin/p"])).is_err(),
+            "init"
+        );
+        assert!(parse_gate_args(&s(&["0", "/d", "--", "/bin/p"])).is_err());
+        assert!(
+            parse_gate_args(&s(&["4242", "/d", "--"])).is_err(),
+            "no program"
         );
     }
 
     // rivet: verifies REQ-RUNWITH-001
     #[test]
-    fn only_a_live_outer_shim_directory_on_path_counts() {
+    fn the_gate_goes_only_when_released_and_gives_up_when_varve_is_gone() {
+        assert_eq!(gate_step(100, 100, false), GateStep::Wait);
+        assert_eq!(gate_step(100, 100, true), GateStep::Go);
+        assert_eq!(gate_step(100, 1, false), GateStep::Abandon);
+        assert_eq!(
+            gate_step(100, 1, true),
+            GateStep::Abandon,
+            "orphaned: never go"
+        );
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn the_gate_runs_only_from_a_directory_and_marker_of_its_own() {
+        let d = std::path::Path::new("/t/varve-with-x");
+        let ok = |is_dir, dir_owner, mode, go_file, go_owner| {
+            check_gate_dir(d, is_dir, dir_owner, mode, go_file, go_owner, 501)
+        };
+        assert_eq!(ok(true, 501, 0o40700, true, 501), Ok(()));
+        assert_eq!(ok(true, 501, 0o42700, true, 501), Ok(()), "setgid parent");
+        assert!(ok(false, 501, 0o40700, true, 501).is_err());
+        assert!(
+            ok(true, 502, 0o40700, true, 501).is_err(),
+            "another user's dir"
+        );
+        assert!(ok(true, 501, 0o40755, true, 501).is_err());
+        assert!(ok(true, 501, 0o40700, false, 501).is_err());
+        assert!(
+            ok(true, 501, 0o40700, true, 502).is_err(),
+            "another user's marker"
+        );
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn the_commands_path_is_the_directory_then_the_inherited_path() {
+        let d = std::path::Path::new("/t/d");
+        assert_eq!(
+            gate_path(d, Some(std::ffi::OsStr::new("/usr/bin:/bin"))),
+            Ok("/t/d:/usr/bin:/bin".into())
+        );
+        assert_eq!(
+            gate_path(d, Some(std::ffi::OsStr::new(""))),
+            Ok("/t/d".into())
+        );
+        assert_eq!(gate_path(d, None), Ok("/t/d".into()));
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_record_overrides_a_tool_by_its_bare_name() {
+        assert!(overrides_tool(&record(), "synth"));
+        assert!(overrides_tool(&record(), "acme/synth"));
+        assert!(!overrides_tool(&record(), "loom"));
+        assert!(!overrides_tool(&record(), "synthx"));
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn only_non_core_terminating_signals_are_died_of() {
+        assert_eq!(ending(Some(0), None), Ending::Exit(0));
+        assert_eq!(ending(Some(7), None), Ending::Exit(7));
+        for s in [1, 2, 9, 13, 14, 15] {
+            assert_eq!(ending(None, Some(s)), Ending::Die(s), "{s}");
+        }
+        // Core-dumping (and anything else): exit 128 + N, never a crash of varve.
+        for s in [3, 4, 5, 6, 8, 10, 11, 12, 24, 31] {
+            assert_eq!(ending(None, Some(s)), Ending::Exit(128 + s), "{s}");
+        }
+        assert_eq!(ending(None, None), Ending::Exit(1));
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn only_a_live_shim_directory_on_path_counts_and_nothing_can_hang_or_fail_the_probe() {
         let _serial = serial();
-        let outer = private_dir();
-        let plain = private_dir();
-        std::fs::write(outer.path().join(RECORD_FILE), "{}").unwrap();
-        let lock = std::fs::File::create(outer.path().join(LOCK_FILE)).unwrap();
+        let live = private_dir();
+        let dead = private_dir();
+        let fifo = private_dir();
+        let link = private_dir();
+        for d in [&live, &dead, &fifo, &link] {
+            std::fs::write(d.path().join(RECORD_FILE), "{}").unwrap();
+        }
+        let lock = std::fs::File::create(live.path().join(LOCK_FILE)).unwrap();
         lock.lock().unwrap();
-        std::fs::write(plain.path().join(RECORD_FILE), "{}").unwrap();
-        let path = std::env::join_paths([plain.path(), outer.path()]).unwrap();
+        std::fs::File::create(dead.path().join(LOCK_FILE)).unwrap();
+        // A FIFO named like the lock: opening it blocking would hang forever.
+        let made = std::process::Command::new("mkfifo")
+            .arg(fifo.path().join(LOCK_FILE))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // A link to the live lock is not a lock of its own.
+        std::os::unix::fs::symlink(live.path().join(LOCK_FILE), link.path().join(LOCK_FILE))
+            .unwrap();
+        let path = std::env::join_paths([
+            fifo.path(),
+            dead.path(),
+            link.path(),
+            std::path::Path::new("relative-dir"),
+            live.path(),
+        ])
+        .unwrap();
         assert_eq!(
-            outer_shim_dir(Some(&path)),
-            Some(outer.path().to_path_buf())
+            outer_shim_dirs(Some(&path)),
+            vec![live.path().to_path_buf()]
         );
-        // Leaked: its run is gone, the lock released. Not an outer run.
+        assert_eq!(lock_state(fifo.path()), LockState::Unusable);
+        assert_eq!(lock_state(link.path()), LockState::Unusable);
+        assert_eq!(lock_state(dead.path()), LockState::Free);
+        assert_eq!(lock_state(live.path()), LockState::Held);
         drop(lock);
-        assert_eq!(outer_shim_dir(Some(&path)), None, "a dead directory");
-        let path = std::env::join_paths([plain.path()]).unwrap();
-        assert_eq!(
-            outer_shim_dir(Some(&path)),
-            None,
-            "a record alone is not one"
+        assert!(outer_shim_dirs(Some(&path)).is_empty(), "its run ended");
+        assert!(outer_shim_dirs(None).is_empty());
+        // read_shim_dir does not hang on a FIFO either.
+        let uid = uid_of(fifo.path());
+        assert!(
+            read_shim_dir(fifo.path(), uid)
+                .unwrap_err()
+                .contains("no usable lock")
         );
-        assert_eq!(outer_shim_dir(None), None);
-        // A relative entry is never taken for one, live or not.
-        let rel = std::env::join_paths(["relative-dir"]).unwrap();
-        assert_eq!(outer_shim_dir(Some(&rel)), None);
     }
 }

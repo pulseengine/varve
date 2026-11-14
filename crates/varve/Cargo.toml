@@ -23,16 +23,17 @@ varve-core.workspace = true
 # already in the graph as a dev-dependency.
 tempfile = "3.27.0"
 
-# `varve run --with` spawns its command through a gate instead of exec'ing it,
-# catches SIGHUP/SIGINT/SIGQUIT/SIGTERM to outlive them and remove the shim
-# directory, forwards SIGTERM, and dies of the signal its child died of. This
-# crate forbids unsafe code, so the handling is signal-hook's safe iterator
-# and `emulate_default_handler`, and rustix supplies `kill_process`, `waitid`
-# and the fd flag that lets the gate's pipe end survive exec (already in the
-# graph via tempfile; only its `process` feature is added).
+# `varve run --with` starts its command through a gate (this binary, run
+# again) instead of exec'ing it, catches SIGHUP/SIGINT/SIGQUIT/SIGTERM (and
+# SIGCHLD) to outlive them and remove the shim directory, forwards SIGTERM,
+# and dies of the signal its child died of where that is not a core dump.
+# This crate forbids unsafe code, so the handling is signal-hook's safe
+# iterator, flag and `emulate_default_handler`, and rustix supplies
+# `kill_process`, `waitid`, the parent pid for the gate and the lock-open
+# flags (already in the graph via tempfile; its `fs` and `process` features).
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.4.6"
-rustix = { version = "1.1.4", features = ["process"] }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
 
 [dev-dependencies]
 flate2 = "1.1.9"

@@ -227,16 +227,6 @@ enum Cmd {
         /// `VARVE_WITH` and `VARVE_OVERRIDES`.
         #[arg(long = "with", value_name = "TOOL@VERSION")]
         with: Vec<String>,
-        /// (internal) Run as a private shim of a `varve run --with` that is
-        /// still running: named in the wrapper's own text, never read from the
-        /// environment, and refused once that run has ended.
-        #[arg(
-            long = "with-shim-dir",
-            value_name = "DIR",
-            hide = true,
-            conflicts_with_all = ["varve", "with"]
-        )]
-        with_shim_dir: Option<PathBuf>,
         /// Tool and its arguments, after `--`. The tool may be realm-qualified
         /// (`bytecodealliance/wasm-tools`) to reach one specific provider where
         /// two realms of the composition ship the same name. `OsString`, so an
@@ -926,6 +916,23 @@ fn run() -> anyhow::Result<Outcome> {
         })?;
         return Ok(Outcome::Ok);
     }
+    // A private shim (`#!<varve> --varve-with-shim`) and the gate of a
+    // `varve run --with` are this binary run again with a marker first
+    // (REQ-RUNWITH-001). Neither goes through the CLI parser, and neither
+    // takes the environment's word for what to run.
+    let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if rest
+        .first()
+        .is_some_and(|a| a == varve_core::runwith::SHIM_MARKER)
+    {
+        return run_marked_shim(&rest[1..]).map(|()| Outcome::Ok);
+    }
+    if rest
+        .first()
+        .is_some_and(|a| a == varve_core::runwith::GATE_MARKER)
+    {
+        run_gate(&rest[1..]);
+    }
     let cli = Cli::parse();
     let store = Store::at(store_root()?);
     // Two commands report a VERDICT rather than merely succeeding or failing —
@@ -970,7 +977,6 @@ fn run() -> anyhow::Result<Outcome> {
         Cmd::Run {
             varve,
             with,
-            with_shim_dir,
             tool_and_args,
         } => {
             let (tool, args) = tool_and_args.split_first().context(
@@ -980,9 +986,6 @@ fn run() -> anyhow::Result<Outcome> {
             let tool = tool
                 .to_str()
                 .context("tool name must be valid UTF-8 — it names an entry in the layer")?;
-            if let Some(dir) = with_shim_dir {
-                return run_private_shim(&store, &dir, tool, args).map(|()| Outcome::Ok);
-            }
             let with = with
                 .iter()
                 .map(|spec| varve_core::runwith::parse_request(spec))
@@ -1538,6 +1541,7 @@ fn status(
     from_file: Option<&std::path::Path>,
     json: bool,
 ) -> anyhow::Result<Outcome> {
+    note_live_tree();
     let ctx = project_ctx(store)?;
     let pin = &ctx.pin;
     let trust = ctx_trust(&ctx)?;
@@ -2424,6 +2428,95 @@ fn run_tool_with(
 /// call cannot nest. Anywhere else (another project, or none) it does what a
 /// regular shim does there, passthrough included, with its own directory left
 /// out of the PATH that is searched.
+/// A wrapper in a private shim directory was run: the kernel handed us its
+/// path, which names the directory and the tool. The probe wrapper only
+/// proves programs in the directory can run, and exits 0.
+fn run_marked_shim(rest: &[std::ffi::OsString]) -> anyhow::Result<()> {
+    let (script, args) = rest
+        .split_first()
+        .context("a private shim is run as its own script")?;
+    let script = std::path::Path::new(script);
+    let tool = script
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("a private shim's name is a tool name")?;
+    if tool == varve_core::runwith::PROBE {
+        return Ok(());
+    }
+    let dir = std::fs::canonicalize(script.parent().unwrap_or(std::path::Path::new(".")))
+        .context("cannot locate the private shim's directory")?;
+    let store = Store::at(store_root()?);
+    run_private_shim(&store, &dir, tool, args)
+}
+
+/// The gate of a `varve run --with` (`runwith::GATE_MARKER`): started by
+/// varve BEFORE it installs any signal handler, so it holds varve's
+/// inherited signal dispositions. It waits until varve has made, checked and
+/// released the private directory, then execs the command with that
+/// directory first on PATH. No shell: nothing in the environment can change
+/// what runs. If varve is gone first, it exits 125 and runs nothing.
+#[cfg(unix)]
+fn run_gate(rest: &[std::ffi::OsString]) -> ! {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::process::CommandExt;
+    use varve_core::runwith::{self, GateStep};
+    let fail = |why: String, code: i32| -> ! {
+        eprintln!("varve: {why}");
+        std::process::exit(code)
+    };
+    let (parent, dir, program, args) =
+        runwith::parse_gate_args(rest).unwrap_or_else(|why| fail(why, 125));
+    let go = dir.join(runwith::GO_FILE);
+    let mut delay = std::time::Duration::from_millis(1);
+    loop {
+        let now = rustix::process::Pid::as_raw(rustix::process::getppid()) as u32;
+        match runwith::gate_step(parent, now, std::fs::symlink_metadata(&go).is_ok()) {
+            GateStep::Wait => {
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_millis(20));
+            }
+            GateStep::Abandon => std::process::exit(125),
+            GateStep::Go => break,
+        }
+    }
+    let uid = rustix::process::getuid().as_raw();
+    let (dir_meta, go_meta) = match (
+        std::fs::symlink_metadata(&dir),
+        std::fs::symlink_metadata(&go),
+    ) {
+        (Ok(d), Ok(g)) => (d, g),
+        _ => fail(
+            format!("{} vanished before the command started", dir.display()),
+            125,
+        ),
+    };
+    runwith::check_gate_dir(
+        &dir,
+        dir_meta.file_type().is_dir(),
+        dir_meta.uid(),
+        dir_meta.permissions().mode(),
+        go_meta.file_type().is_file(),
+        go_meta.uid(),
+        uid,
+    )
+    .unwrap_or_else(|why| fail(why, 125));
+    let path = runwith::gate_path(&dir, std::env::var_os("PATH").as_deref())
+        .unwrap_or_else(|why| fail(why, 125));
+    let err = std::process::Command::new(&program)
+        .args(&args)
+        .env("PATH", path)
+        .exec();
+    fail(
+        format!("cannot run {}: {err}", program.to_string_lossy()),
+        127,
+    )
+}
+
+#[cfg(not(unix))]
+fn run_gate(_rest: &[std::ffi::OsString]) -> ! {
+    std::process::exit(125)
+}
+
 fn run_private_shim(
     store: &Store,
     dir: &std::path::Path,
@@ -2607,33 +2700,40 @@ fn dispatch(
     // Kept before the move: a refusal below names the pin that caused it, and
     // the realm is what makes that sentence answer the user's real question.
     let pin_file = ctx.root.join("varve.toml");
-    // A plain `varve run` or a regular shim inside a LIVE `varve run --with`
-    // tree of THIS project (its private directory on PATH, its lock held)
-    // runs and reports what bare calls in that tree get (clause 3): the
-    // outer record is applied exactly as its private shims apply it —
-    // re-checked against what its --with resolves to now, then re-verified by
-    // `resolve`. A leaked directory is not live and changes nothing; finding
-    // one grants nothing a PATH entry did not already decide.
-    let outer_record = if with.is_empty() && recorded.is_none() {
-        let here = std::fs::canonicalize(&pin_file).ok();
-        outer_tree()?.filter(|record| here.as_deref() == Some(record.pin.as_path()))
+    // Inside a LIVE `varve run --with` tree of this project (its private
+    // directory on PATH, its lock held), a plain run or a regular shim never
+    // applies that tree's record: ambient state (PATH, the environment) may
+    // make varve REFUSE, never select a different tool. A tool the tree
+    // overrides is refused — its bare name already resolves to the override
+    // through PATH. Any other tool runs from the pin, and the VARVE_WITH and
+    // VARVE_OVERRIDES the tree set are passed through unchanged, so its
+    // subtree still reports what its bare calls get.
+    let outer = if recorded.is_none() {
+        same_project_tree(&pin_file)
     } else {
         None
     };
-    let (with, recorded) = match &outer_record {
-        Some(record) => {
-            if let Some(layer) = override_layer {
-                bail!(
-                    "--varve {layer} inside a running `varve run --with {}` would drop its \
-                     override for this command, while every other call in that command keeps \
-                     it. Run it outside that command.",
-                    varve_core::runwith::env_value(&record.with)
-                );
-            }
-            (record.with.as_slice(), Some(record))
+    if let (true, Some(record)) = (with.is_empty(), &outer) {
+        if varve_core::runwith::overrides_tool(record, tool) {
+            bail!(
+                "'{tool}' is overridden by the running `varve run --with {}` this command is \
+                 inside, and its bare name already resolves to the override through PATH \
+                 (call `{}`). A plain `varve run` or a regular shim here would run the pinned \
+                 '{tool}' while that command's environment says otherwise — refused.",
+                varve_core::runwith::env_value(&record.with),
+                tool.rsplit('/').next().unwrap_or(tool)
+            );
         }
-        None => (with, recorded),
-    };
+        if let Some(layer) = override_layer {
+            bail!(
+                "--varve {layer} inside a running `varve run --with {}` would run another \
+                 layer while every bare call in that command keeps its override. Run it \
+                 outside that command.",
+                varve_core::runwith::env_value(&record.with)
+            );
+        }
+    }
+    let inherit_identity = with.is_empty() && outer.is_some();
     let pinned_realm = ctx.pin.realm.clone();
     let pinned_channel = ctx.pin.channel;
     let mut pin = ctx.pin.clone();
@@ -2671,19 +2771,16 @@ fn dispatch(
     // `varve run --with` (not a private shim) spawns its command with a
     // private shim directory first on PATH; everything else execs.
     let spawn = !with.is_empty() && recorded.is_none();
-    // A --with inside another one would report only its own overrides while
-    // bare calls still reached the outer's (clause 3). Refused. Finding an
-    // outer directory on PATH can only refuse, never grant.
-    if spawn
-        && let Some(outer) =
-            varve_core::runwith::outer_shim_dir(std::env::var_os("PATH").as_deref())
-    {
+    // A --with inside a live one of the SAME project would report only its
+    // own overrides while bare calls still reached the outer's (clause 3).
+    // Refused; a live --with of another project is no business of this one.
+    if let (true, Some(record)) = (spawn, &outer) {
         bail!(
-            "--with {} is nested inside another `varve run --with`, whose private shims ({}) \
-             are on PATH — its environment would not say what bare calls run. Put every \
-             --with on the outer command instead.",
+            "--with {} is nested inside a running `varve run --with {}` of this project, whose \
+             private shims are first on PATH — its environment would not say what bare calls \
+             run. Put every --with on the outer command instead.",
             varve_core::runwith::env_value(with),
-            outer.display()
+            varve_core::runwith::env_value(&record.with)
         );
     }
     let chosen = apply_with(&ctx, &mut pin, &pin_file, with)?;
@@ -2930,7 +3027,12 @@ fn dispatch(
     // layer, and a MIXED toolchain says so beside it. A pure one REMOVES any
     // inherited value: a tool run by a mixed project's script must not hand
     // the mix on to a pure project's tool as though it were its own.
-    if resolved.is_mixed() {
+    // Inside a live --with tree of this project both are passed through
+    // UNCHANGED (inherited, not re-derived, not stripped): they describe what
+    // bare calls in that tree get, which is what this tool's subtree gets.
+    if inherit_identity {
+        // left as inherited
+    } else if resolved.is_mixed() {
         cmd.env(
             "VARVE_OVERRIDES",
             varve_core::overrides::env_value(&resolved.recorded_overrides()),
@@ -2941,7 +3043,9 @@ fn dispatch(
     // REQ-RUNWITH-001 clause 3: what was ASKED for (tool@version) beside what
     // it resolved to (VARVE_OVERRIDES). Removed when nothing was asked, so an
     // inherited value never describes a run that had no --with.
-    if with.is_empty() {
+    if inherit_identity {
+        // left as inherited
+    } else if with.is_empty() {
         cmd.env_remove("VARVE_WITH");
     } else {
         cmd.env("VARVE_WITH", varve_core::runwith::env_value(with));
@@ -2954,16 +3058,15 @@ fn dispatch(
 
 /// Run the command as a child of this process (REQ-RUNWITH-001) with a
 /// private shim directory first on its PATH, wait for it, remove the
-/// directory, and end as it ended: with its exit code, or — when it was killed
-/// by signal N — by dying of N.
+/// directory, and end as it ended (`runwith::ending`).
 ///
-/// Order matters. The command is started through a gate (`runwith::GATE`)
-/// BEFORE any signal handler is installed, so it inherits this process's
-/// signal dispositions exactly (an ignored SIGHUP or SIGINT stays ignored).
-/// Then the handlers go in, then the directory is made, checked and filled,
-/// and only then does the gate learn the directory and exec the command. A
-/// caught signal during that setup abandons the run: the gate is told
-/// nothing, so nothing runs.
+/// Order matters. The command is started through a gate — this binary,
+/// `runwith::GATE_MARKER` — BEFORE any signal handler is installed, so it
+/// holds this process's inherited signal dispositions. Then SIGCHLD and the
+/// handlers go in, the directory is made, checked and filled, and only then
+/// does the gate see the release marker and exec the command. The gate is
+/// also the oracle for signals during setup: one it did not ignore kills it,
+/// and the run ends as the gate did; one it ignored changes nothing.
 fn spawn_with_private_shims(
     cmd: std::process::Command,
     ctx: &ProjectCtx,
@@ -2985,6 +3088,7 @@ fn spawn_with_private_shims(
     // Everything that can refuse without side effects, first.
     let parent = private_shim_parent(ctx)?;
     let varve = std::env::current_exe().context("cannot locate the varve binary")?;
+    varve_core::runwith::wrapper_text(&varve).map_err(|why| anyhow::anyhow!(why))?;
     run_gated(cmd, &parent, &record, &varve, tool)
 }
 
@@ -3001,31 +3105,57 @@ fn is_program(path: &std::path::Path) -> bool {
     }
 }
 
-/// The record of a LIVE outer `varve run --with` whose private directory is
-/// on PATH, read and checked (`read_shim_dir`). A live directory whose record
-/// cannot be read is an error: the tree claims an override that cannot be
-/// verified.
-fn outer_tree() -> anyhow::Result<Option<varve_core::runwith::ShimRecord>> {
-    let Some(dir) = varve_core::runwith::outer_shim_dir(std::env::var_os("PATH").as_deref()) else {
-        return Ok(None);
-    };
+/// The record of a LIVE `varve run --with` tree of THIS project whose private
+/// directory is on PATH, if any. Unreadable or foreign entries are skipped:
+/// what is found here can only make varve refuse.
+fn same_project_tree(pin_file: &std::path::Path) -> Option<varve_core::runwith::ShimRecord> {
     #[cfg(unix)]
-    let uid = rustix::process::getuid().as_raw();
+    {
+        let here = std::fs::canonicalize(pin_file).ok()?;
+        let uid = rustix::process::getuid().as_raw();
+        varve_core::runwith::outer_shim_dirs(std::env::var_os("PATH").as_deref())
+            .into_iter()
+            .filter_map(|dir| varve_core::runwith::read_shim_dir(&dir, uid).ok())
+            .find(|record| record.pin == here)
+    }
     #[cfg(not(unix))]
-    let uid = 0;
-    varve_core::runwith::read_shim_dir(&dir, uid)
-        .map(Some)
-        .map_err(|why| anyhow::anyhow!(why))
+    {
+        let _ = pin_file;
+        None
+    }
+}
+
+/// One line on stderr when a live `varve run --with` tree is on PATH: what
+/// `which`, `status` and `verify` report is the pin, not what a bare call in
+/// that tree reaches.
+fn note_live_tree() {
+    #[cfg(unix)]
+    {
+        let uid = rustix::process::getuid().as_raw();
+        if let Some(record) =
+            varve_core::runwith::outer_shim_dirs(std::env::var_os("PATH").as_deref())
+                .into_iter()
+                .find_map(|dir| varve_core::runwith::read_shim_dir(&dir, uid).ok())
+        {
+            eprintln!(
+                "varve: note: inside a running `varve run --with {}` — a bare call there reaches \
+                 its override through PATH; this reports the pin",
+                varve_core::runwith::env_value(&record.with)
+            );
+        }
+    }
 }
 
 /// Where the private shim directory is made: TMPDIR, canonical, checked. It is
-/// never under the varve root or the project (refused there, not moved), and
-/// neither TMPDIR nor any directory above it may let anyone else replace what
-/// is in it (`runwith::check_temp_tree`).
+/// never under the varve root or the project (refused there, not moved), it
+/// holds no ':' or newline (either would split PATH), and neither TMPDIR nor
+/// any directory above it may let anyone else replace what is in it
+/// (`runwith::check_temp_tree`).
 fn private_shim_parent(ctx: &ProjectCtx) -> anyhow::Result<PathBuf> {
     let tmp = std::env::temp_dir();
     let parent = std::fs::canonicalize(&tmp)
         .with_context(|| format!("TMPDIR {} cannot be resolved", tmp.display()))?;
+    varve_core::runwith::check_path_chars(&parent).map_err(|why| anyhow::anyhow!(why))?;
     let canonical =
         |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let (root, project) = (canonical(&ctx.base_root), canonical(&ctx.root));
@@ -3044,6 +3174,21 @@ fn private_shim_parent(ctx: &ProjectCtx) -> anyhow::Result<PathBuf> {
     Ok(parent)
 }
 
+/// A fresh, unpredictable name for the private directory.
+fn private_dir_name() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let word = |salt: u64| {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(salt);
+        h.write_u32(std::process::id());
+        if let Ok(t) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            h.write_u128(t.as_nanos());
+        }
+        h.finish()
+    };
+    varve_core::runwith::shim_dir_name(word(1), word(2))
+}
+
 #[cfg(unix)]
 fn run_gated(
     cmd: std::process::Command,
@@ -3053,27 +3198,25 @@ fn run_gated(
     tool: &str,
 ) -> anyhow::Result<()> {
     use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process, waitid};
-    use std::io::Write;
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::os::unix::process::ExitStatusExt;
     use varve_core::runwith::{self, Ending};
 
-    // 1. The gate, BEFORE any handler: it inherits our dispositions exactly.
-    //    Its read end of the pipe survives exec (CLOEXEC cleared); our write
-    //    end does not, so if we die the gate reads EOF and runs nothing.
-    let (reader, mut writer) = std::io::pipe().context("cannot create the --with gate pipe")?;
-    rustix::io::fcntl_setfd(&reader, rustix::io::FdFlags::empty())
-        .context("cannot pass the --with gate pipe to the command")?;
+    // 1. The gate — this binary — BEFORE any handler: it inherits our
+    //    dispositions. It is told the directory's (not yet made) path and our
+    //    pid, and waits.
+    let dir = parent.join(private_dir_name());
+    runwith::check_path_chars(&dir).map_err(|why| anyhow::anyhow!(why))?;
     let args: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_os_string()).collect();
-    let mut gate = std::process::Command::new("/bin/sh");
+    let mut gate = std::process::Command::new(varve);
     gate.args(runwith::gate_args(
-        reader.as_raw_fd(),
+        std::process::id(),
+        &dir,
         cmd.get_program(),
         &args,
     ));
-    if let Some(dir) = cmd.get_current_dir() {
-        gate.current_dir(dir);
+    if let Some(cwd) = cmd.get_current_dir() {
+        gate.current_dir(cwd);
     }
     for (key, value) in cmd.get_envs() {
         match value {
@@ -3084,102 +3227,174 @@ fn run_gated(
     let mut child = gate
         .spawn()
         .with_context(|| format!("failed to run {tool}"))?;
-    drop(reader);
+    let stop_gate = |child: &mut std::process::Child| {
+        let _ = child.kill();
+        let _ = child.wait();
+    };
 
-    // 2. The handlers. From here a caught signal never kills this process
-    //    before it has removed what it made.
-    let mut signals = match signal_hook::iterator::Signals::new(runwith::CAUGHT) {
-        Ok(signals) => signals,
-        Err(e) => {
-            drop(writer);
-            let _ = child.wait();
+    // 2. SIGCHLD caught from here, so an inherited ignore cannot make the
+    //    kernel reap our children unasked; the gate keeps the inherited view.
+    //    Then the handlers: a caught signal never kills this process before
+    //    it has removed what it made.
+    let chld = signal_hook::flag::register(
+        signal_hook::consts::SIGCHLD,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let signals = signal_hook::iterator::Signals::new(runwith::CAUGHT);
+    let (_chld, mut signals) = match (chld, signals) {
+        (Ok(chld), Ok(signals)) => (chld, signals),
+        (Err(e), _) | (_, Err(e)) => {
+            stop_gate(&mut child);
             return Err(anyhow::Error::from(e).context("cannot install signal handling"));
         }
     };
 
-    // 3. The directory: made 0700 under the checked parent, re-checked, filled,
-    //    and still the same directory once filled.
-    let setup = (|| -> anyhow::Result<(tempfile::TempDir, std::fs::File)> {
-        let mut builder = tempfile::Builder::new();
-        builder
-            .prefix("varve-with-")
-            .permissions(std::fs::Permissions::from_mode(0o700));
-        let dir = builder
-            .tempdir_in(parent)
-            .context("cannot create the private shim directory for --with")?;
-        let meta = std::fs::symlink_metadata(dir.path())
-            .context("cannot read the private shim directory")?;
+    // 3. The directory: made 0700 (exclusively — an existing one is never
+    //    used), re-checked, filled, proven executable, and still the same
+    //    directory once filled.
+    let mut made = false;
+    let setup = (|| -> anyhow::Result<std::fs::File> {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .with_context(|| {
+                format!("cannot create the private shim directory {}", dir.display())
+            })?;
+        made = true;
+        let meta =
+            std::fs::symlink_metadata(&dir).context("cannot read the private shim directory")?;
         runwith::check_created_dir(
-            dir.path(),
+            &dir,
             meta.file_type().is_dir(),
             meta.uid(),
             meta.permissions().mode(),
             rustix::process::getuid().as_raw(),
         )
         .map_err(|why| anyhow::anyhow!(why))?;
-        let lock = runwith::fill_shim_dir(dir.path(), record, varve)
-            .map_err(|why| anyhow::anyhow!(why))?;
-        let now = std::fs::symlink_metadata(dir.path())
-            .context("cannot read the private shim directory")?;
-        runwith::check_same_dir(dir.path(), (meta.dev(), meta.ino()), (now.dev(), now.ino()))
-            .map_err(|why| anyhow::anyhow!(why))?;
-        Ok((dir, lock))
-    })();
-    let (dir, lock) = match setup {
-        Ok(made) => made,
-        Err(e) => {
-            drop(writer);
-            let _ = child.wait();
-            return Err(e);
+        let lock =
+            runwith::fill_shim_dir(&dir, record, varve).map_err(|why| anyhow::anyhow!(why))?;
+        // A TMPDIR mounted noexec would make every wrapper fail to run, and a
+        // bare call would silently reach the next program on PATH.
+        // A probe killed by a signal (a Ctrl-C during setup reaches it too)
+        // proves nothing either way: try again. Whether the run itself was
+        // interrupted is the gate's to say, below.
+        let mut probe = Err(std::io::Error::other("not run"));
+        for _ in 0..3 {
+            probe = std::process::Command::new(dir.join(runwith::PROBE))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if !probe.as_ref().is_ok_and(|s| s.signal().is_some()) {
+                break;
+            }
         }
-    };
-    let shown = dir.path().display().to_string();
-    let finish = |dir: tempfile::TempDir, lock: std::fs::File| {
+        if !probe.as_ref().is_ok_and(|s| s.success()) {
+            bail!(
+                "programs in {} cannot be run (is TMPDIR on a filesystem mounted noexec?) — a \
+                 --with shim there would be skipped and another program run in its place. \
+                 Point TMPDIR at a directory programs can run from.",
+                parent.display()
+            );
+        }
+        let now =
+            std::fs::symlink_metadata(&dir).context("cannot read the private shim directory")?;
+        runwith::check_same_dir(&dir, (meta.dev(), meta.ino()), (now.dev(), now.ino()))
+            .map_err(|why| anyhow::anyhow!(why))?;
+        Ok(lock)
+    })();
+    let shown = dir.display().to_string();
+    let finish = |lock: Option<std::fs::File>, made: bool| {
         drop(lock);
-        if let Err(e) = dir.close() {
+        if made && let Err(e) = std::fs::remove_dir_all(&dir) {
             eprintln!(
                 "varve: warning: could not remove the --with shim directory {shown}: {e} — its \
                  shims refuse now that this run has ended; remove it by hand"
             );
         }
     };
+    let lock = match setup {
+        Ok(lock) => lock,
+        Err(e) => {
+            stop_gate(&mut child);
+            finish(None, made);
+            return Err(e);
+        }
+    };
 
-    // 4. A caught signal during setup abandons the run: the gate is told
-    //    nothing and runs nothing, and this process dies of that signal.
-    let pending: Vec<i32> = signals.pending().collect();
-    if let Some(sig) = runwith::interrupted_setup(&pending) {
-        drop(writer);
-        let _ = child.wait();
-        finish(dir, lock);
-        die_of(sig);
+    // Test hook (debug builds only): hold setup here until a file is gone, so
+    // a system test can signal varve with the handlers installed and the
+    // directory made, but the command not yet started.
+    #[cfg(debug_assertions)]
+    if let Some(hold) = std::env::var_os("VARVE_TEST_PAUSE_SETUP") {
+        let mut paused = hold.clone();
+        paused.push(".paused");
+        let _ = std::fs::write(&paused, "");
+        while std::path::Path::new(&hold).exists() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
-    // 5. Release the gate with the directory.
-    let mut line = dir.path().as_os_str().as_encoded_bytes().to_vec();
-    line.push(b'\n');
-    let released = writer.write_all(&line);
-    drop(writer);
+    // 4. Signals that came during setup: what `forwards` passes on goes to
+    //    the gate. The gate holds the inherited dispositions, so it is the
+    //    oracle: a signal it did not ignore has ended it, and the run ends as
+    //    the gate did; one it ignored changed nothing.
+    let gate_pid = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
+    for sig in signals.pending() {
+        if runwith::forwards(sig)
+            && let (Some(pid), Some(sig)) = (gate_pid, Signal::from_named_raw(sig))
+        {
+            let _ = kill_process(pid, sig);
+        }
+    }
+    let end = |status: std::process::ExitStatus| -> ! {
+        match runwith::ending(status.code(), status.signal()) {
+            Ending::Exit(code) => std::process::exit(code),
+            Ending::Die(sig) => die_of(sig),
+        }
+    };
+    // A forwarded SIGTERM has been sent; give it the moment it takes.
+    if let Some(pid) = gate_pid {
+        let exited = waitid(
+            WaitId::Pid(pid),
+            WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG,
+        );
+        if matches!(exited, Ok(Some(_))) {
+            let status = child.wait();
+            finish(Some(lock), true);
+            return match status {
+                Ok(status) => end(status),
+                Err(e) => Err(anyhow::Error::from(e).context(format!("failed to wait for {tool}"))),
+            };
+        }
+    }
+
+    // 5. Release the gate.
+    let released = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dir.join(runwith::GO_FILE));
     if let Err(e) = released {
-        let _ = child.wait();
-        finish(dir, lock);
+        stop_gate(&mut child);
+        finish(Some(lock), true);
         return Err(anyhow::Error::from(e).context(format!("failed to start {tool}")));
     }
 
     // 6. Forward what `runwith::forwards` says (SIGTERM), never after the
     //    child has exited: it is left unreaped (WNOWAIT) until forwarding
     //    stops, so its pid cannot be reused by another process.
-    let pid = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
     let handle = signals.handle();
     let forward = std::thread::spawn(move || {
         for sig in signals.forever() {
             if runwith::forwards(sig)
-                && let (Some(pid), Some(sig)) = (pid, Signal::from_named_raw(sig))
+                && let (Some(pid), Some(sig)) = (gate_pid, Signal::from_named_raw(sig))
             {
                 let _ = kill_process(pid, sig);
             }
         }
     });
-    if let Some(pid) = pid {
+    if let Some(pid) = gate_pid {
         while let Err(rustix::io::Errno::INTR) = waitid(
             WaitId::Pid(pid),
             WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
@@ -3188,17 +3403,15 @@ fn run_gated(
     handle.close();
     let _ = forward.join();
     let status = child.wait();
-    finish(dir, lock);
+    finish(Some(lock), true);
     let status = status.with_context(|| format!("failed to wait for {tool}"))?;
-    match runwith::ending(status.code(), status.signal()) {
-        Ending::Exit(code) => std::process::exit(code),
-        Ending::Die(sig) => die_of(sig),
-    }
+    end(status)
 }
 
 /// Die of `sig` with its default action — reset, unblocked, raised — so the
 /// caller sees WIFSIGNALED(sig), as it would had it run the command itself.
-/// A signal whose default does not terminate falls back to exit 128 + N.
+/// Only `runwith::REDELIVERED` signals reach here; should one not terminate,
+/// exit 128 + N.
 #[cfg(unix)]
 fn die_of(sig: i32) -> ! {
     let _ = signal_hook::low_level::emulate_default_handler(sig);
@@ -6323,6 +6536,7 @@ fn verify(
     lockfile: Option<&std::path::Path>,
     timing: bool,
 ) -> anyhow::Result<()> {
+    note_live_tree();
     let ctx = project_ctx(store)?;
     let verifier = ctx_verifier(&ctx)?;
     let store = &ctx.store;
@@ -7302,6 +7516,7 @@ fn load_pin() -> anyhow::Result<(Pin, PathBuf)> {
 }
 
 fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
+    note_live_tree();
     let ctx = dispatch_ctx(store)?;
     let resolved = resolve(&ctx.pin, &ctx.store)?;
     vouch_for_resolved(&ctx, &resolved)?;
@@ -7753,6 +7968,22 @@ mod run_with_signal_tests {
         assert_eq!(
             (rw::SIGHUP, rw::SIGINT, rw::SIGQUIT, rw::SIGTERM),
             (SIGHUP, SIGINT, SIGQUIT, SIGTERM)
+        );
+        // REDELIVERED: SIGHUP, SIGINT, SIGKILL, SIGPIPE, SIGALRM, SIGTERM.
+        use signal_hook::consts::{SIGALRM, SIGKILL, SIGPIPE};
+        assert_eq!(
+            rw::REDELIVERED,
+            [SIGHUP, SIGINT, SIGKILL, SIGPIPE, SIGALRM, SIGTERM]
+        );
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn the_lock_is_opened_without_blocking_and_without_following_a_link() {
+        use rustix::fs::OFlags;
+        assert_eq!(
+            varve_core::runwith::LOCK_OPEN_FLAGS,
+            (OFlags::NONBLOCK | OFlags::NOFOLLOW).bits() as i32
         );
     }
 }
