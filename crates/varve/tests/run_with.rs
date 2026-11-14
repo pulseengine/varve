@@ -2175,3 +2175,47 @@ fn wait_for_file(file: &Path) {
     }
     panic!("{} never appeared", file.display());
 }
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_hard_linked_varve_keeps_the_installed_binarys_mode() {
+    // A hard link shares the inode: changing the link's mode changes the
+    // installed varve's, and other users could no longer run it.
+    use std::os::unix::fs::PermissionsExt;
+    let w = world();
+    // The installed varve on the same filesystem as TMPDIR, so the link is made.
+    let installed = w.tmp().join("installed");
+    std::fs::create_dir(&installed).unwrap();
+    let varve_bin = installed.join("varve");
+    std::fs::copy(assert_cmd::cargo::cargo_bin("varve"), &varve_bin).unwrap();
+    std::fs::set_permissions(&varve_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let a = varve_at(&w, &varve_bin)
+        .env("VINSTALLED", &varve_bin)
+        .args([
+            "run",
+            "--with",
+            "synth@0.57.0",
+            "--",
+            "sh",
+            "-c",
+            "ls -i \"${PATH%%:*}/varve\" \"$VINSTALLED\"",
+        ])
+        .assert()
+        .success();
+    let inodes: Vec<String> = stdout(&a)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .collect();
+    assert_eq!(inodes.len(), 2, "{}", stdout(&a));
+    assert_eq!(
+        inodes[0],
+        inodes[1],
+        "the link was not made: {}",
+        stdout(&a)
+    );
+    let mode = std::fs::metadata(&varve_bin).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(
+        mode, 0o755,
+        "the installed varve's mode was changed to {mode:o}"
+    );
+}

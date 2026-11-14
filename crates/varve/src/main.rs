@@ -3428,16 +3428,22 @@ fn run_gated(
 /// Put varve itself at `to` (inside the private directory): a hard link to
 /// its canonical binary, or — across filesystems, or where links to another
 /// user's file are refused — a copy, closed before anything runs it (a file
-/// open for writing cannot be executed: ETXTBSY). Mode 0700.
+/// open for writing cannot be executed: ETXTBSY).
+///
+/// A hard link IS the installed binary (one inode): its mode is never
+/// touched — changing it would change the installed varve's, and other users
+/// could no longer run it. That it runs for us is proven when the gate is
+/// spawned from it. Only a copy, a file of our own, is set to 0700.
 #[cfg(unix)]
 fn place_interpreter(varve: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let source = std::fs::canonicalize(varve)
         .with_context(|| format!("cannot locate the varve binary {}", varve.display()))?;
-    if std::fs::hard_link(&source, to).is_err() {
-        std::fs::copy(&source, to)
-            .with_context(|| format!("cannot place varve in {}", to.display()))?;
+    if std::fs::hard_link(&source, to).is_ok() {
+        return Ok(());
     }
+    std::fs::copy(&source, to)
+        .with_context(|| format!("cannot place varve in {}", to.display()))?;
     std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o700))
         .with_context(|| format!("cannot make {} executable", to.display()))?;
     Ok(())
