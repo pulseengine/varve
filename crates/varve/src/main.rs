@@ -890,6 +890,25 @@ fn dispatch_tool_name(argv0: Option<&std::ffi::OsStr>) -> Option<String> {
 }
 
 fn run() -> anyhow::Result<Outcome> {
+    // A private shim (`#!<varve> --varve-with-shim`) and the gate of a
+    // (checked FIRST: whatever name the binary runs under — `varve-0.48.0`
+    // behind a `varve` symlink — a marker means what it says)
+    // `varve run --with` are this binary run again with a marker first
+    // (REQ-RUNWITH-001). Neither goes through the CLI parser, and neither
+    // takes the environment's word for what to run.
+    let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if rest
+        .first()
+        .is_some_and(|a| a == varve_core::runwith::SHIM_MARKER)
+    {
+        return run_marked_shim(&rest[1..]).map(|()| Outcome::Ok);
+    }
+    if rest
+        .first()
+        .is_some_and(|a| a == varve_core::runwith::GATE_MARKER)
+    {
+        run_gate(&rest[1..]);
+    }
     // Invoked under another name? Then this binary IS the shim: dispatch.
     let mut args = std::env::args_os();
     let argv0 = args.next();
@@ -915,23 +934,6 @@ fn run() -> anyhow::Result<Outcome> {
             )
         })?;
         return Ok(Outcome::Ok);
-    }
-    // A private shim (`#!<varve> --varve-with-shim`) and the gate of a
-    // `varve run --with` are this binary run again with a marker first
-    // (REQ-RUNWITH-001). Neither goes through the CLI parser, and neither
-    // takes the environment's word for what to run.
-    let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    if rest
-        .first()
-        .is_some_and(|a| a == varve_core::runwith::SHIM_MARKER)
-    {
-        return run_marked_shim(&rest[1..]).map(|()| Outcome::Ok);
-    }
-    if rest
-        .first()
-        .is_some_and(|a| a == varve_core::runwith::GATE_MARKER)
-    {
-        run_gate(&rest[1..]);
     }
     let cli = Cli::parse();
     let store = Store::at(store_root()?);
@@ -2834,6 +2836,14 @@ fn dispatch(
         })
     })
     .flatten();
+    if spawn
+        && ambient.is_none()
+        && tool.contains('/')
+        && varve_core::runwith::may_run_unlisted(tool)
+        && !is_program(std::path::Path::new(tool))
+    {
+        bail!("'{tool}' is not an executable file — nothing was started");
+    }
     let target = match &ambient {
         Some(program) => Some((tool, program.as_path())),
         None => dispatch_target(&resolved, tool),
@@ -3060,11 +3070,13 @@ fn dispatch(
 /// private shim directory first on its PATH, wait for it, remove the
 /// directory, and end as it ended (`runwith::ending`).
 ///
-/// Order matters. The command is started through a gate — this binary,
+/// Order matters. The directory is made first (so its name is ours before it
+/// appears in any process's arguments) and varve is linked into it; then the
+/// command is started through a gate — that `<dir>/varve`,
 /// `runwith::GATE_MARKER` — BEFORE any signal handler is installed, so it
 /// holds this process's inherited signal dispositions. Then SIGCHLD and the
-/// handlers go in, the directory is made, checked and filled, and only then
-/// does the gate see the release marker and exec the command. The gate is
+/// handlers go in, the directory is filled and checked, and only then does
+/// the gate see the release marker and exec the command. The gate is
 /// also the oracle for signals during setup: one it did not ignore kills it,
 /// and the run ends as the gate did; one it ignored changes nothing.
 fn spawn_with_private_shims(
@@ -3088,7 +3100,6 @@ fn spawn_with_private_shims(
     // Everything that can refuse without side effects, first.
     let parent = private_shim_parent(ctx)?;
     let varve = std::env::current_exe().context("cannot locate the varve binary")?;
-    varve_core::runwith::wrapper_text(&varve).map_err(|why| anyhow::anyhow!(why))?;
     run_gated(cmd, &parent, &record, &varve, tool)
 }
 
@@ -3202,13 +3213,60 @@ fn run_gated(
     use std::os::unix::process::ExitStatusExt;
     use varve_core::runwith::{self, Ending};
 
-    // 1. The gate — this binary — BEFORE any handler: it inherits our
-    //    dispositions. It is told the directory's (not yet made) path and our
-    //    pid, and waits.
+    // 1. The directory first: made 0700, exclusively (an existing one is never
+    //    used), BEFORE its name appears in any process's arguments, so nobody
+    //    can make it in our place. Its wrappers will name `<dir>/varve` in
+    //    their first line, so that path must be nameable before anything is
+    //    made. No handler is installed yet; creating a directory installs none.
     let dir = parent.join(private_dir_name());
     runwith::check_path_chars(&dir).map_err(|why| anyhow::anyhow!(why))?;
+    let interpreter = dir.join(runwith::INTERPRETER);
+    runwith::wrapper_text(&interpreter).map_err(|why| anyhow::anyhow!(why))?;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .with_context(|| format!("cannot create the private shim directory {}", dir.display()))?;
+    let shown = dir.display().to_string();
+    let finish = |lock: Option<std::fs::File>| {
+        drop(lock);
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            eprintln!(
+                "varve: warning: could not remove the --with shim directory {shown}: {e} — its \
+                 shims refuse now that this run has ended; remove it by hand"
+            );
+        }
+    };
+    let made = (|| -> anyhow::Result<(u64, u64)> {
+        let meta =
+            std::fs::symlink_metadata(&dir).context("cannot read the private shim directory")?;
+        runwith::check_created_dir(
+            &dir,
+            meta.file_type().is_dir(),
+            meta.uid(),
+            meta.permissions().mode(),
+            rustix::process::getuid().as_raw(),
+        )
+        .map_err(|why| anyhow::anyhow!(why))?;
+        // 2. varve itself, inside the directory: the wrappers' interpreter and
+        //    the gate. It lives exactly as long as the directory, whatever
+        //    happens meanwhile to the installed binary (an upgrade, a cleanup,
+        //    a rebuild) — a vanished interpreter would make a bare call fall
+        //    through to the next program on PATH.
+        place_interpreter(varve, &interpreter)?;
+        Ok((meta.dev(), meta.ino()))
+    })();
+    let made = match made {
+        Ok(made) => made,
+        Err(e) => {
+            finish(None);
+            return Err(e);
+        }
+    };
+
+    // 3. The gate — `<dir>/varve` — BEFORE any handler: it inherits our
+    //    dispositions. It is told the directory and our pid, and waits.
     let args: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_os_string()).collect();
-    let mut gate = std::process::Command::new(varve);
+    let mut gate = std::process::Command::new(&interpreter);
     gate.args(runwith::gate_args(
         std::process::id(),
         &dir,
@@ -3224,15 +3282,24 @@ fn run_gated(
             None => gate.env_remove(key),
         };
     }
-    let mut child = gate
-        .spawn()
-        .with_context(|| format!("failed to run {tool}"))?;
+    // Spawning it is also the first proof that programs in the directory can
+    // run: on a TMPDIR mounted noexec it fails with "permission denied".
+    let mut child = match gate.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            finish(None);
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                return Err(noexec(parent));
+            }
+            return Err(anyhow::Error::from(e).context(format!("failed to run {tool}")));
+        }
+    };
     let stop_gate = |child: &mut std::process::Child| {
         let _ = child.kill();
         let _ = child.wait();
     };
 
-    // 2. SIGCHLD caught from here, so an inherited ignore cannot make the
+    // 4. SIGCHLD caught from here, so an inherited ignore cannot make the
     //    kernel reap our children unasked; the gate keeps the inherited view.
     //    Then the handlers: a caught signal never kills this process before
     //    it has removed what it made.
@@ -3245,79 +3312,29 @@ fn run_gated(
         (Ok(chld), Ok(signals)) => (chld, signals),
         (Err(e), _) | (_, Err(e)) => {
             stop_gate(&mut child);
+            finish(None);
             return Err(anyhow::Error::from(e).context("cannot install signal handling"));
         }
     };
 
-    // 3. The directory: made 0700 (exclusively — an existing one is never
-    //    used), re-checked, filled, proven executable, and still the same
-    //    directory once filled.
-    let mut made = false;
+    // 5. Fill it: the lock first, the record, the wrappers (interpreter
+    //    `<dir>/varve`); prove a wrapper runs; and check it is still the
+    //    directory made in step 1.
     let setup = (|| -> anyhow::Result<std::fs::File> {
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&dir)
-            .with_context(|| {
-                format!("cannot create the private shim directory {}", dir.display())
-            })?;
-        made = true;
-        let meta =
-            std::fs::symlink_metadata(&dir).context("cannot read the private shim directory")?;
-        runwith::check_created_dir(
-            &dir,
-            meta.file_type().is_dir(),
-            meta.uid(),
-            meta.permissions().mode(),
-            rustix::process::getuid().as_raw(),
-        )
-        .map_err(|why| anyhow::anyhow!(why))?;
-        let lock =
-            runwith::fill_shim_dir(&dir, record, varve).map_err(|why| anyhow::anyhow!(why))?;
-        // A TMPDIR mounted noexec would make every wrapper fail to run, and a
-        // bare call would silently reach the next program on PATH.
-        // A probe killed by a signal (a Ctrl-C during setup reaches it too)
-        // proves nothing either way: try again. Whether the run itself was
-        // interrupted is the gate's to say, below.
-        let mut probe = Err(std::io::Error::other("not run"));
-        for _ in 0..3 {
-            probe = std::process::Command::new(dir.join(runwith::PROBE))
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            if !probe.as_ref().is_ok_and(|s| s.signal().is_some()) {
-                break;
-            }
-        }
-        if !probe.as_ref().is_ok_and(|s| s.success()) {
-            bail!(
-                "programs in {} cannot be run (is TMPDIR on a filesystem mounted noexec?) — a \
-                 --with shim there would be skipped and another program run in its place. \
-                 Point TMPDIR at a directory programs can run from.",
-                parent.display()
-            );
-        }
+        let lock = runwith::fill_shim_dir(&dir, record, &interpreter)
+            .map_err(|why| anyhow::anyhow!(why))?;
+        probe(&dir.join(runwith::PROBE), &[], parent)?;
         let now =
             std::fs::symlink_metadata(&dir).context("cannot read the private shim directory")?;
-        runwith::check_same_dir(&dir, (meta.dev(), meta.ino()), (now.dev(), now.ino()))
+        runwith::check_same_dir(&dir, made, (now.dev(), now.ino()))
             .map_err(|why| anyhow::anyhow!(why))?;
         Ok(lock)
     })();
-    let shown = dir.display().to_string();
-    let finish = |lock: Option<std::fs::File>, made: bool| {
-        drop(lock);
-        if made && let Err(e) = std::fs::remove_dir_all(&dir) {
-            eprintln!(
-                "varve: warning: could not remove the --with shim directory {shown}: {e} — its \
-                 shims refuse now that this run has ended; remove it by hand"
-            );
-        }
-    };
     let lock = match setup {
         Ok(lock) => lock,
         Err(e) => {
             stop_gate(&mut child);
-            finish(None, made);
+            finish(None);
             return Err(e);
         }
     };
@@ -3361,7 +3378,7 @@ fn run_gated(
         );
         if matches!(exited, Ok(Some(_))) {
             let status = child.wait();
-            finish(Some(lock), true);
+            finish(Some(lock));
             return match status {
                 Ok(status) => end(status),
                 Err(e) => Err(anyhow::Error::from(e).context(format!("failed to wait for {tool}"))),
@@ -3377,7 +3394,7 @@ fn run_gated(
         .open(dir.join(runwith::GO_FILE));
     if let Err(e) = released {
         stop_gate(&mut child);
-        finish(Some(lock), true);
+        finish(Some(lock));
         return Err(anyhow::Error::from(e).context(format!("failed to start {tool}")));
     }
 
@@ -3403,9 +3420,66 @@ fn run_gated(
     handle.close();
     let _ = forward.join();
     let status = child.wait();
-    finish(Some(lock), true);
+    finish(Some(lock));
     let status = status.with_context(|| format!("failed to wait for {tool}"))?;
     end(status)
+}
+
+/// Put varve itself at `to` (inside the private directory): a hard link to
+/// its canonical binary, or — across filesystems, or where links to another
+/// user's file are refused — a copy, closed before anything runs it (a file
+/// open for writing cannot be executed: ETXTBSY). Mode 0700.
+#[cfg(unix)]
+fn place_interpreter(varve: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let source = std::fs::canonicalize(varve)
+        .with_context(|| format!("cannot locate the varve binary {}", varve.display()))?;
+    if std::fs::hard_link(&source, to).is_err() {
+        std::fs::copy(&source, to)
+            .with_context(|| format!("cannot place varve in {}", to.display()))?;
+    }
+    std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("cannot make {} executable", to.display()))?;
+    Ok(())
+}
+
+/// Run `program` (a probe that exits 0 at once) and require success: a
+/// TMPDIR mounted noexec makes it fail to start. A probe killed by a signal
+/// (a Ctrl-C during setup reaches it too) proves nothing either way and is
+/// tried again; whether the run itself was interrupted is the gate's to say.
+#[cfg(unix)]
+fn probe(
+    program: &std::path::Path,
+    args: &[std::ffi::OsString],
+    parent: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::os::unix::process::ExitStatusExt;
+    let mut status = Err(std::io::Error::other("not run"));
+    for _ in 0..3 {
+        status = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !status.as_ref().is_ok_and(|s| s.signal().is_some()) {
+            break;
+        }
+    }
+    if status.as_ref().is_ok_and(|s| s.success()) {
+        return Ok(());
+    }
+    Err(noexec(parent))
+}
+
+/// Why `--with` refuses a TMPDIR where programs cannot be run.
+fn noexec(parent: &std::path::Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "programs in {} cannot be run (is TMPDIR on a filesystem mounted noexec?) — a --with \
+         shim there would be skipped and another program run in its place. Point TMPDIR at a \
+         directory programs can run from.",
+        parent.display()
+    )
 }
 
 /// Die of `sig` with its default action — reset, unblocked, raised — so the
@@ -3420,17 +3494,18 @@ fn die_of(sig: i32) -> ! {
 
 #[cfg(not(unix))]
 fn run_gated(
-    mut cmd: std::process::Command,
+    cmd: std::process::Command,
     parent: &std::path::Path,
     record: &varve_core::runwith::ShimRecord,
     varve: &std::path::Path,
     tool: &str,
 ) -> anyhow::Result<()> {
-    let _ = (parent, record, varve);
-    let status = cmd
-        .status()
-        .with_context(|| format!("failed to run {tool}"))?;
-    std::process::exit(status.code().unwrap_or(1))
+    let _ = (cmd, parent, record, varve);
+    bail!(
+        "--with needs a unix system: its private shims are scripts the kernel runs, and \
+         without them `{tool}` would run without the override while its environment said \
+         otherwise"
+    )
 }
 
 /// Resolve which installed layer an export targets, and verify it (trust
@@ -7974,16 +8049,6 @@ mod run_with_signal_tests {
         assert_eq!(
             rw::REDELIVERED,
             [SIGHUP, SIGINT, SIGKILL, SIGPIPE, SIGALRM, SIGTERM]
-        );
-    }
-
-    // rivet: verifies REQ-RUNWITH-001
-    #[test]
-    fn the_lock_is_opened_without_blocking_and_without_following_a_link() {
-        use rustix::fs::OFlags;
-        assert_eq!(
-            varve_core::runwith::LOCK_OPEN_FLAGS,
-            (OFlags::NONBLOCK | OFlags::NOFOLLOW).bits() as i32
         );
     }
 }

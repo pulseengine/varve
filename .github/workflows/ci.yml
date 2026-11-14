@@ -102,6 +102,18 @@ jobs:
           cargo test -p varve --test cli -- --exact \
             env_quotes_a_hostile_root_for_fish_so_eval_cannot_run_embedded_commands 2>&1 | tee fish.log
           grep -q 'test result: ok. 1 passed' fish.log
+      - name: run --with refuses a TMPDIR where programs cannot run (REQ-RUNWITH-001)
+        # A noexec mount needs root, which this hosted runner (ubuntu-latest,
+        # passwordless sudo) has. The test runs only where VARVE_TEST_NOEXEC_DIR
+        # is set, so the step also insists it ran, and did not skip.
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /mnt/varve-noexec
+          sudo mount -t tmpfs -o noexec,nosuid,nodev,mode=1777,size=512m tmpfs /mnt/varve-noexec
+          VARVE_TEST_NOEXEC_DIR=/mnt/varve-noexec cargo test -p varve --test run_with -- --exact \
+            a_tmpdir_where_programs_cannot_run_is_refused --nocapture 2>&1 | tee noexec.log
+          grep -q 'test result: ok. 1 passed' noexec.log
+          if grep -q 'not run: VARVE_TEST_NOEXEC_DIR' noexec.log; then exit 1; fi
 
   rivet:
     name: rivet validate · release plan

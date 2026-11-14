@@ -1441,7 +1441,10 @@ fn a_relative_path_entry_is_never_searched_for_the_command() {
 fn no_shell_stands_between_varve_and_the_command_or_its_shims() {
     // Under bash-as-sh, BASH_FUNC_read%% replaced `read` and SHELLOPTS=noexec
     // made a shell read without running. Neither may reach the gate or a
-    // private shim: the right tool runs, through the wrapper.
+    // private shim: the right tool runs, through the wrapper. (These variables
+    // bite where /bin/sh is bash — macOS, Fedora. Where it is dash, as on
+    // Ubuntu, they could not have, so there this shows only that the run is
+    // unaffected; the macOS run is the one that would go red.)
     let w = world();
     let evil = w.tmp().join("evil");
     executable(&evil.join("synth"), "#!/bin/sh\necho EVIL-SYNTH\n");
@@ -1561,7 +1564,7 @@ fn forge_live_tree(w: &World) -> (tempfile::TempDir, std::fs::File) {
         .assert()
         .success();
     let forged = tempfile::Builder::new()
-        .prefix("not-varve-")
+        .prefix("varve-with-forged-")
         .tempdir_in(w.tmp())
         .unwrap();
     {
@@ -1730,7 +1733,7 @@ fn a_live_with_of_another_project_does_not_refuse_a_with_here() {
 #[test]
 fn a_fifo_planted_as_the_lock_neither_hangs_nor_fails_a_plain_run() {
     let w = world();
-    let trap = w.tmp().join("trap");
+    let trap = w.tmp().join("varve-with-trap");
     std::fs::create_dir(&trap).unwrap();
     std::fs::write(trap.join("with.json"), "{}").unwrap();
     assert!(
@@ -1980,4 +1983,195 @@ fn a_tmpdir_where_programs_cannot_run_is_refused() {
     assert!(!stdout(&a).contains("AMBIENT"), "{}", stdout(&a));
     assert!(stderr(&a).contains("cannot be run"), "{}", stderr(&a));
     assert!(std::fs::read_dir(t.path()).unwrap().next().is_none());
+}
+
+// ---- fourth review (2026-11-14) ----
+
+/// A copy of varve at a path this test controls.
+fn varve_copy(w: &World, name: &str) -> PathBuf {
+    let bin = w.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let p = bin.join(name);
+    std::fs::copy(assert_cmd::cargo::cargo_bin("varve"), &p).unwrap();
+    p
+}
+
+/// `varve(w)`, but running the binary at `exe`.
+fn varve_at(w: &World, exe: &Path) -> Command {
+    let mut cmd = Command::new(exe);
+    let none = w.dir.join("no-user-config");
+    cmd.env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &w.root)
+        .env("XDG_CONFIG_HOME", &none)
+        .env("HOME", &none)
+        .env("RUNWITH_TEST_MARKS", w.marks())
+        .env("TMPDIR", w.tmp())
+        .env_remove("VARVE_TRUST_ROOT")
+        .env_remove("VARVE_LAYER")
+        .env_remove("VARVE_OVERRIDES")
+        .env_remove("VARVE_WITH")
+        .current_dir(&w.project);
+    cmd
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_varve_binary_removed_mid_run_does_not_let_a_bare_call_fall_through() {
+    // An upgrade or cleanup removes the installed varve while the command
+    // runs. Wrappers naming it would fail with ENOENT, and execvp would try
+    // the next PATH entry: an ambient synth, under VARVE_WITH=synth@0.57.0.
+    let w = world();
+    let copy = varve_copy(&w, "varve");
+    let amb = w.dir.join("amb");
+    executable(&amb.join("synth"), "#!/bin/sh\necho \"AMBIENT-SYNTH\"\n");
+    w.clear_marks();
+    let a = varve_at(&w, &copy)
+        .env("PATH", format!("/usr/bin:/bin:{}", amb.display()))
+        .env("VCOPY", &copy)
+        .args([
+            "run",
+            "--with",
+            "synth@0.57.0",
+            "--",
+            "sh",
+            "-c",
+            "/usr/bin/env synth; rm \"$VCOPY\"; /usr/bin/env synth",
+        ])
+        .assert()
+        .success();
+    let out = stdout(&a);
+    assert!(!out.contains("AMBIENT"), "{out}");
+    assert_eq!(
+        out.matches("synth-0.57 ").count(),
+        2,
+        "{out} {}",
+        stderr(&a)
+    );
+    assert!(w.tmp_is_empty());
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_missing_explicit_program_is_refused_and_nothing_is_made() {
+    let w = world();
+    let a = varve(&w)
+        .args(["run", "--with", "synth@0.57.0", "--", "./no-such-program"])
+        .assert()
+        .code(1);
+    assert!(stderr(&a).contains("no-such-program"), "{}", stderr(&a));
+    assert!(
+        w.tmp_is_empty(),
+        "a directory was made for a command that does not exist"
+    );
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn the_gate_takes_pid_1_as_a_parent() {
+    // varve as a container's entrypoint is pid 1, and tells its gate so. Run
+    // here, our parent is not pid 1, so the gate gives up as orphaned — but it
+    // must not refuse the request itself.
+    let w = world();
+    let a = varve(&w)
+        .args(["--varve-with-gate", "1"])
+        .arg(w.tmp().join("varve-with-x"))
+        .args(["--", "/usr/bin/true"])
+        .assert()
+        .code(125);
+    assert!(!stderr(&a).contains("pid"), "{}", stderr(&a));
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_varve_binary_under_another_name_still_runs_its_gate() {
+    // On Linux current_exe() resolves `varve -> varve-0.48.0`; the gate and
+    // wrappers then ran under the real name, which argv[0] took for a shim.
+    let w = world();
+    let real = varve_copy(&w, "varve-0.48.0");
+    let a = varve_at(&w, &real)
+        .args(["--varve-with-gate", "4242"])
+        .arg(w.tmp().join("varve-with-x"))
+        .args(["--", "/usr/bin/true"])
+        .assert()
+        .code(125);
+    assert!(!stderr(&a).contains("invoked as"), "{}", stderr(&a));
+    // …and a run through a symlink named varve works end to end.
+    let link = w.dir.join("bin").join("varve");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let a = varve_at(&w, &link)
+        .args([
+            "run",
+            "--with",
+            "synth@0.57.0",
+            "--",
+            "/usr/bin/env",
+            "synth",
+        ])
+        .assert()
+        .success();
+    assert!(stdout(&a).starts_with("synth-0.57 "), "{}", stderr(&a));
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn the_gate_gives_up_when_varve_is_killed_during_setup() {
+    // SIGKILL cannot be caught: varve dies mid-setup. Its gate must notice,
+    // run nothing, and exit — no process of the run may outlive it.
+    use std::os::unix::process::CommandExt;
+    let w = world();
+    let release = w.dir.join("release");
+    std::fs::write(&release, "").unwrap();
+    let ran = w.dir.join("ran");
+    let none = w.dir.join("no-user-config");
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("varve"))
+        .args(["run", "--with", "synth@0.57.0", "--", "/usr/bin/touch"])
+        .arg(&ran)
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &w.root)
+        .env("XDG_CONFIG_HOME", &none)
+        .env("HOME", &none)
+        .env("TMPDIR", w.tmp())
+        .env("VARVE_TEST_PAUSE_SETUP", &release)
+        .env_remove("VARVE_TRUST_ROOT")
+        .current_dir(&w.project)
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pg = child.id();
+    wait_for_file(&w.dir.join("release.paused"));
+    let members = || {
+        let o = std::process::Command::new("ps")
+            .args(["-A", "-o", "pid=,pgid="])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| l.split_whitespace().nth(1) == Some(pg.to_string().as_str()))
+            .count()
+    };
+    assert!(members() >= 2, "varve and its gate");
+    send("-KILL", pg);
+    child.wait().unwrap();
+    let mut left = members();
+    for _ in 0..600 {
+        if left == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        left = members();
+    }
+    std::fs::remove_file(&release).ok();
+    assert_eq!(left, 0, "the gate outlived varve");
+    assert!(!ran.exists(), "the command ran after varve was killed");
+}
+
+/// Wait (bounded, 60 s) for a file to exist.
+fn wait_for_file(file: &Path) {
+    for _ in 0..1200 {
+        if file.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("{} never appeared", file.display());
 }

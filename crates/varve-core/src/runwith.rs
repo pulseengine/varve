@@ -416,6 +416,16 @@ pub const GATE_MARKER: &str = "--varve-with-gate";
 pub const PROBE: &str = ".varve-probe";
 /// Written last; the gate execs the command only once it exists.
 pub const GO_FILE: &str = ".go";
+/// varve itself, inside the private directory: the wrappers' interpreter and
+/// the gate. A hard link (or copy) that lives exactly as long as the
+/// directory, so an upgrade or cleanup of the installed binary meanwhile
+/// cannot leave the wrappers naming a file that is gone.
+pub const INTERPRETER: &str = "varve";
+/// Every private shim directory's name starts with this. Only PATH entries so
+/// named are ever looked at (`outer_shim_dirs`): any other entry is skipped
+/// without a single system call, so a hung network mount on PATH cannot hang
+/// a plain run or a shim.
+pub const SHIM_DIR_PREFIX: &str = "varve-with-";
 
 /// The text of every wrapper in a private shim directory. The shebang line
 /// holds varve's absolute path and the marker and nothing else: a kernel
@@ -446,7 +456,7 @@ pub fn wrapper_text(varve: &std::path::Path) -> Result<String, String> {
 
 /// The name of a private shim directory, from two random words.
 pub fn shim_dir_name(a: u64, b: u64) -> String {
-    format!("varve-with-{a:016x}{b:016x}")
+    format!("{SHIM_DIR_PREFIX}{a:016x}{b:016x}")
 }
 
 /// A directory that is put on PATH must not contain `:` (PATH's separator)
@@ -496,7 +506,9 @@ pub fn parse_gate_args(rest: &[std::ffi::OsString]) -> Result<GateRequest, Strin
             let parent = parent
                 .to_str()
                 .and_then(|p| p.parse::<u32>().ok())
-                .filter(|p| *p > 1)
+                // varve may be pid 1 (a container's entrypoint, `unshare -pf`):
+                // an orphaned gate sees parent 1 only if varve was not pid 1.
+                .filter(|p| *p > 0)
                 .ok_or("the gate needs varve's pid")?;
             Ok((parent, dir.into(), program.clone(), args.to_vec()))
         }
@@ -600,14 +612,14 @@ pub fn fill_shim_dir(
 
 /// `O_NONBLOCK | O_NOFOLLOW` for opening a lock file: a FIFO planted under
 /// that name must not hang the probe, and a symlink must not redirect it.
-/// Written as one literal per platform (Linux 0o4000 | 0o400000, macOS
-/// 0x0004 | 0x0100) and checked against the platform's values by the tests.
-#[cfg(target_os = "linux")]
-pub const LOCK_OPEN_FLAGS: i32 = 0o404000;
-#[cfg(target_os = "macos")]
-pub const LOCK_OPEN_FLAGS: i32 = 0x0104;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub const LOCK_OPEN_FLAGS: i32 = 0;
+/// From the platform's own definitions (they differ between architectures:
+/// O_NOFOLLOW is 0o400000 on x86_64 Linux but 0o100000 on aarch64).
+#[cfg(unix)]
+pub fn lock_open_flags() -> i32 {
+    rustix::fs::OFlags::NONBLOCK
+        .union(rustix::fs::OFlags::NOFOLLOW)
+        .bits() as i32
+}
 
 /// What a directory's lock says about its run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -629,7 +641,7 @@ pub fn lock_state(dir: &std::path::Path) -> LockState {
     use std::os::unix::fs::OpenOptionsExt;
     let Ok(lock) = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(LOCK_OPEN_FLAGS)
+        .custom_flags(lock_open_flags())
         .open(dir.join(LOCK_FILE))
     else {
         return LockState::Unusable;
@@ -822,7 +834,8 @@ pub fn find_program(
     is_program: impl Fn(&std::path::Path) -> bool,
 ) -> Option<std::path::PathBuf> {
     if name.contains('/') {
-        return Some(std::path::PathBuf::from(name));
+        let explicit = std::path::PathBuf::from(name);
+        return is_program(&explicit).then_some(explicit);
     }
     std::env::split_paths(path?)
         .filter(|dir| dir.is_absolute())
@@ -883,6 +896,10 @@ pub fn outer_shim_dirs(path: Option<&std::ffi::OsStr>) -> Vec<std::path::PathBuf
     std::env::split_paths(path)
         .filter(|dir| {
             dir.is_absolute()
+                && dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(SHIM_DIR_PREFIX))
                 && std::fs::symlink_metadata(dir.join(RECORD_FILE)).is_ok_and(|m| m.is_file())
                 && lock_state(dir) == LockState::Held
         })
@@ -1650,12 +1667,14 @@ mod tests {
         assert_eq!(find_program("make", Some(&only_relative), exists), None);
         assert_eq!(find_program("make", None, exists), None);
         assert_eq!(find_program("nothing", Some(&path), exists), None);
-        // An explicit path is taken as written.
-        assert_eq!(find_program("./x.sh", None, exists), Some("./x.sh".into()));
+        // An explicit path is taken as written — if it is a program at all.
+        let explicit = |p: &std::path::Path| p == std::path::Path::new("./x.sh");
         assert_eq!(
-            find_program("/bin/sh", None, exists),
-            Some("/bin/sh".into())
+            find_program("./x.sh", None, explicit),
+            Some("./x.sh".into())
         );
+        assert_eq!(find_program("./missing", None, explicit), None);
+        assert_eq!(find_program("/bin/nothing", None, explicit), None);
     }
 
     // rivet: verifies REQ-RUNWITH-001
@@ -1750,9 +1769,10 @@ mod tests {
             parse_gate_args(&s(&["x", "/d", "--", "/bin/p"])).is_err(),
             "pid"
         );
-        assert!(
-            parse_gate_args(&s(&["1", "/d", "--", "/bin/p"])).is_err(),
-            "init"
+        assert_eq!(
+            parse_gate_args(&s(&["1", "/d", "--", "/bin/p"])),
+            Ok((1, "/d".into(), "/bin/p".into(), vec![])),
+            "varve as pid 1 (a container's entrypoint)"
         );
         assert!(parse_gate_args(&s(&["0", "/d", "--", "/bin/p"])).is_err());
         assert!(
@@ -1765,6 +1785,7 @@ mod tests {
     #[test]
     fn the_gate_goes_only_when_released_and_gives_up_when_varve_is_gone() {
         assert_eq!(gate_step(100, 100, false), GateStep::Wait);
+        assert_eq!(gate_step(1, 1, true), GateStep::Go, "varve is pid 1");
         assert_eq!(gate_step(100, 100, true), GateStep::Go);
         assert_eq!(gate_step(100, 1, false), GateStep::Abandon);
         assert_eq!(
@@ -1843,6 +1864,14 @@ mod tests {
         let dead = private_dir();
         let fifo = private_dir();
         let link = private_dir();
+        // A live-looking directory NOT named varve-with-*: never looked at.
+        let other = tempfile::Builder::new()
+            .prefix("not-varve-")
+            .tempdir()
+            .unwrap();
+        std::fs::write(other.path().join(RECORD_FILE), "{}").unwrap();
+        let other_lock = std::fs::File::create(other.path().join(LOCK_FILE)).unwrap();
+        other_lock.lock().unwrap();
         for d in [&live, &dead, &fifo, &link] {
             std::fs::write(d.path().join(RECORD_FILE), "{}").unwrap();
         }
@@ -1863,6 +1892,7 @@ mod tests {
             dead.path(),
             link.path(),
             std::path::Path::new("relative-dir"),
+            other.path(),
             live.path(),
         ])
         .unwrap();
@@ -1891,11 +1921,13 @@ mod tests {
 
     // rivet: verifies REQ-RUNWITH-001
     #[test]
-    fn the_lock_open_flags_are_this_platforms_nonblock_and_nofollow() {
-        use rustix::fs::OFlags;
+    fn the_lock_is_opened_nonblocking_and_without_following_a_link() {
+        let flags = rustix::fs::OFlags::from_bits_retain(lock_open_flags() as _);
+        assert!(flags.contains(rustix::fs::OFlags::NONBLOCK));
+        assert!(flags.contains(rustix::fs::OFlags::NOFOLLOW));
         assert_eq!(
-            LOCK_OPEN_FLAGS,
-            (OFlags::NONBLOCK | OFlags::NOFOLLOW).bits() as i32
+            flags,
+            rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOFOLLOW
         );
     }
 }
