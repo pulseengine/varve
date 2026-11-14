@@ -470,8 +470,12 @@ pub fn read_shim_dir(dir: &std::path::Path, uid: u32) -> Result<ShimRecord, Stri
     }
     let lock = std::fs::File::open(dir.join(LOCK_FILE))
         .map_err(|e| format!("{}: no lock: {e}", dir.display()))?;
-    match lock.try_lock() {
-        // Taken by us: nobody holds it, so the run that made this is gone.
+    // A SHARED probe: probers never block each other, so only the live run's
+    // exclusive lock can fail it. An exclusive probe made a dead directory
+    // look alive to every other prober holding it at that instant (review,
+    // 2026-11-14: 149 of 1200 concurrent calls into a leaked directory ran).
+    match lock.try_lock_shared() {
+        // Taken: nobody holds it exclusively, so the run that made this is gone.
         Ok(()) => {
             return Err(format!(
                 "{} outlived the `varve run --with` that made it — its shims grant nothing \
@@ -496,6 +500,106 @@ pub fn exit_code(code: Option<i32>, signal: Option<i32>) -> i32 {
         (Some(code), _) => code,
         (None, Some(signal)) => 128 + signal,
         (None, None) => 1,
+    }
+}
+
+/// May `varve run --with` run `name` as a program the layer does not carry?
+/// Only an ASCII name (a filesystem may fold a non-ASCII spelling onto a
+/// carried tool, as REQ-PASSTHROUGH-001 clause 2 guards), and only a bare
+/// name (looked up on PATH) or an explicit path (`/…`, `./…`, `../…`). A
+/// selector-shaped `realm/tool` that does not resolve is refused, never taken
+/// as a path relative to the working directory.
+pub fn may_run_unlisted(name: &str) -> bool {
+    name.is_ascii()
+        && !name.is_empty()
+        && (!name.contains('/')
+            || name.starts_with('/')
+            || name.starts_with("./")
+            || name.starts_with("../"))
+}
+
+/// The directory a private shim directory is made in (TMPDIR) must not let
+/// anyone else replace what is in it: owned by the user or by root, and not
+/// writable by group or others unless sticky (as /tmp is). Otherwise the
+/// directory could be swapped between creation and use, and PATH would run a
+/// foreign binary without ever reaching a wrapper.
+pub fn check_temp_parent(
+    parent: &std::path::Path,
+    owner: u32,
+    mode: u32,
+    uid: u32,
+) -> Result<(), String> {
+    if owner != uid && owner != 0 {
+        return Err(format!(
+            "{} (TMPDIR) belongs to another user — a --with shim directory is not made there",
+            parent.display()
+        ));
+    }
+    if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+        return Err(format!(
+            "{} (TMPDIR) is a directory others can write without the sticky bit — a --with \
+             shim directory in it could be replaced. Point TMPDIR at a private directory.",
+            parent.display()
+        ));
+    }
+    Ok(())
+}
+
+/// The private shim directory never lives under the varve root or the
+/// project: "nothing persists" there, even while the run lasts. `parent` and
+/// `roots` are canonical. Refused rather than moved: TMPDIR is the user's
+/// choice, and a guessed fallback would be a second place to get right.
+pub fn check_not_inside(
+    parent: &std::path::Path,
+    roots: &[&std::path::Path],
+) -> Result<(), String> {
+    match roots.iter().find(|root| parent.starts_with(root)) {
+        Some(root) => Err(format!(
+            "{} (TMPDIR) is inside {} — a --with shim directory is never made under the varve \
+             root or the project. Point TMPDIR elsewhere.",
+            parent.display(),
+            root.display()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// A private shim directory of an outer `varve run --with` on `path`, if any:
+/// a PATH entry holding both a record and a lock. Used only to REFUSE a nested
+/// `--with` (whose environment would report its own overrides while bare calls
+/// still reached the outer's): finding one can never grant anything.
+pub fn outer_shim_dir(path: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    std::env::split_paths(path?).find(|dir| {
+        dir.is_absolute() && dir.join(RECORD_FILE).is_file() && dir.join(LOCK_FILE).is_file()
+    })
+}
+
+/// Does a live record say exactly what its `with` resolves to now? `chosen`
+/// is what `choose` picks for each request against the store today. An
+/// edited record — another layer, another digest, a tool nobody asked for —
+/// would make `VARVE_WITH` describe something other than what runs.
+pub fn record_matches(record: &ShimRecord, chosen: &[ToolOverride]) -> Result<(), String> {
+    let mut expected: Vec<crate::overrides::RecordedOverride> = chosen
+        .iter()
+        .map(|o| crate::overrides::RecordedOverride {
+            tool: o.tool.clone(),
+            layer: o.layer.to_string(),
+            digest: o.digest.clone(),
+        })
+        .collect();
+    expected.sort();
+    let mut recorded = record.overrides.clone();
+    recorded.sort();
+    if expected == recorded {
+        Ok(())
+    } else {
+        Err(format!(
+            "the --with shim record ({}) does not match what --with {} resolves to ({}) — \
+             refusing",
+            crate::overrides::env_value(&recorded),
+            env_value(&record.with),
+            crate::overrides::env_value(&expected)
+        ))
     }
 }
 
@@ -995,5 +1099,127 @@ mod tests {
         assert_eq!(exit_code(None, Some(15)), 143);
         assert_eq!(exit_code(None, Some(2)), 130);
         assert_eq!(exit_code(None, None), 1);
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_concurrent_prober_does_not_make_a_leaked_directory_look_alive() {
+        // Review finding 1: probing with the EXCLUSIVE lock made the directory
+        // look alive to any other prober holding it at that instant.
+        let dir = private_dir();
+        let uid = uid_of(dir.path());
+        drop(fill_shim_dir(dir.path(), &record(), std::path::Path::new("/v")).unwrap());
+        let other_prober = std::fs::File::open(dir.path().join(LOCK_FILE)).unwrap();
+        other_prober.lock_shared().unwrap();
+        let why = read_shim_dir(dir.path(), uid).unwrap_err();
+        assert!(why.contains("outlived"), "{why}");
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn only_an_ascii_bare_name_or_an_explicit_path_may_run_unlisted() {
+        for ok in ["make", "sh", "/bin/sh", "./bench.sh", "../x/run", "a-b_c.1"] {
+            assert!(may_run_unlisted(ok), "{ok}");
+        }
+        for no in [
+            "zzz/loom",
+            "acme/synth",
+            "\u{17f}ynth",
+            "b/./x",
+            "",
+            "x/../y",
+        ] {
+            assert!(!may_run_unlisted(no), "{no:?}");
+        }
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_temp_parent_must_be_ours_or_roots_and_not_open_without_the_sticky_bit() {
+        let p = std::path::Path::new("/t");
+        assert_eq!(check_temp_parent(p, 501, 0o40700, 501), Ok(()));
+        assert_eq!(check_temp_parent(p, 0, 0o41777, 501), Ok(()), "/tmp");
+        assert_eq!(check_temp_parent(p, 501, 0o40755, 501), Ok(()));
+        let why = check_temp_parent(p, 502, 0o40700, 501).unwrap_err();
+        assert!(why.contains("another user"), "{why}");
+        for open in [0o40777, 0o40770, 0o40702, 0o40720] {
+            let why = check_temp_parent(p, 501, open, 501).unwrap_err();
+            assert!(why.contains("others can write"), "{open:o}: {why}");
+        }
+        assert_eq!(check_temp_parent(p, 501, 0o41770, 501), Ok(()));
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_temp_parent_inside_the_varve_root_or_the_project_is_refused() {
+        let root = std::path::Path::new("/home/u/.varve");
+        let project = std::path::Path::new("/src/proj");
+        let roots = [root, project];
+        assert_eq!(
+            check_not_inside(std::path::Path::new("/tmp"), &roots),
+            Ok(())
+        );
+        assert_eq!(
+            check_not_inside(std::path::Path::new("/src/project-tmp"), &roots),
+            Ok(()),
+            "a path component, not a string prefix"
+        );
+        for inside in ["/src/proj", "/src/proj/tmp", "/home/u/.varve/tmp"] {
+            let why = check_not_inside(std::path::Path::new(inside), &roots).unwrap_err();
+            assert!(why.contains("inside"), "{inside}: {why}");
+        }
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn an_outer_shim_directory_on_path_is_found() {
+        let outer = private_dir();
+        let plain = private_dir();
+        std::fs::write(outer.path().join(RECORD_FILE), "{}").unwrap();
+        std::fs::write(outer.path().join(LOCK_FILE), "").unwrap();
+        std::fs::write(plain.path().join(RECORD_FILE), "{}").unwrap();
+        let path = std::env::join_paths([plain.path(), outer.path()]).unwrap();
+        assert_eq!(
+            outer_shim_dir(Some(&path)),
+            Some(outer.path().to_path_buf())
+        );
+        let path = std::env::join_paths([plain.path()]).unwrap();
+        assert_eq!(
+            outer_shim_dir(Some(&path)),
+            None,
+            "a record alone is not one"
+        );
+        assert_eq!(outer_shim_dir(None), None);
+        // A relative entry is never taken for one.
+        let rel = std::env::join_paths(["relative-dir"]).unwrap();
+        assert_eq!(outer_shim_dir(Some(&rel)), None);
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_record_must_say_exactly_what_its_with_resolves_to() {
+        let chosen = |layer: &str, digest: &str| ToolOverride {
+            tool: "synth".into(),
+            layer: layer.parse().unwrap(),
+            digest: digest.into(),
+        };
+        assert_eq!(
+            record_matches(&record(), &[chosen("2026.08.0", "sha256:a")]),
+            Ok(())
+        );
+        let why = record_matches(&record(), &[chosen("2026.09.0", "sha256:a")]).unwrap_err();
+        assert!(
+            why.contains("does not match") && why.contains("2026.09.0"),
+            "{why}"
+        );
+        assert!(record_matches(&record(), &[chosen("2026.08.0", "sha256:b")]).is_err());
+        assert!(record_matches(&record(), &[]).is_err());
+        let mut two = record();
+        two.overrides.push(crate::overrides::RecordedOverride {
+            tool: "loom".into(),
+            layer: "2026.08.0".into(),
+            digest: "sha256:a".into(),
+        });
+        assert!(record_matches(&two, &[chosen("2026.08.0", "sha256:a")]).is_err());
     }
 }

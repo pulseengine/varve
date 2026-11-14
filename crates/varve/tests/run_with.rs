@@ -448,6 +448,25 @@ fn layers_carrying_the_version_pick_one_only_when_they_run_the_same_bytes() {
         "{}",
         stdout(&a)
     );
+    // 2026.07.0, the least layer id, is installed LAST and still chosen: the
+    // choice does not follow install order.
+    let least = put_layer(
+        &w.registry,
+        &w.sk,
+        "2026.07.0",
+        "qualified",
+        &[("synth", "0.57.0", script("synth-0.57"))],
+    );
+    w.install_also("2026.07.0", &least);
+    let a = varve(&w)
+        .args(["run", "--with", "synth@0.57.0", "--", "synth"])
+        .assert()
+        .success();
+    assert!(
+        stdout(&a).contains(&format!("overrides=synth=2026.07.0@{least}")),
+        "{}",
+        stdout(&a)
+    );
     // 2026.10.0 ships DIFFERENT bytes under the same version: refused, listing
     // every candidate.
     let other = put_layer(
@@ -463,7 +482,7 @@ fn layers_carrying_the_version_pick_one_only_when_they_run_the_same_bytes() {
         &["run", "--with", "synth@0.57.0", "--", "synth"],
         "do not run the same bytes",
     );
-    for part in [&w.older_digest, &same, &other] {
+    for part in [&w.older_digest, &same, &other, &least] {
         assert!(err.contains(part.as_str()), "missing {part}: {err}");
     }
 }
@@ -700,6 +719,7 @@ fn the_exit_status_passes_through_and_the_directory_goes_either_way() {
 
 /// Start `varve run --with synth@0.57.0 -- sh -c <script>` in the background.
 fn spawn_varve(w: &World, script: &str) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
     let none = w.dir.join("no-user-config");
     std::process::Command::new(assert_cmd::cargo::cargo_bin("varve"))
         .args(["run", "--with", "synth@0.57.0", "--", "sh", "-c", script])
@@ -715,6 +735,7 @@ fn spawn_varve(w: &World, script: &str) -> std::process::Child {
         .current_dir(&w.project)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .process_group(0)
         .spawn()
         .unwrap()
 }
@@ -732,6 +753,16 @@ fn wait_for(file: &Path) -> String {
     panic!("{} never appeared", file.display());
 }
 
+/// Signal a whole process group, as a terminal does.
+fn send_group(sig: &str, pgid: u32) {
+    let ok = std::process::Command::new("kill")
+        .args([sig, "--", &format!("-{pgid}")])
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "kill {sig} -{pgid}");
+}
+
 fn send(sig: &str, pid: u32) {
     let ok = std::process::Command::new("kill")
         .args([sig, &pid.to_string()])
@@ -744,7 +775,10 @@ fn send(sig: &str, pid: u32) {
 // rivet: verifies REQ-RUNWITH-001
 #[test]
 fn a_signal_to_varve_is_forwarded_and_the_directory_is_removed() {
-    for (sig, n) in [("-TERM", 15), ("-INT", 2), ("-HUP", 1)] {
+    // TERM sent to varve alone is forwarded. INT and HUP come from a terminal
+    // to the whole process group, so the child has them already: varve does
+    // not forward them, and survives them to clean up.
+    for (sig, n, group) in [("-TERM", 15, false), ("-INT", 2, true), ("-HUP", 1, true)] {
         let w = world();
         let ready = w.dir.join("ready");
         // `exec sleep`: the child IS the sleep, so a forwarded signal ends it.
@@ -759,7 +793,11 @@ fn a_signal_to_varve_is_forwarded_and_the_directory_is_removed() {
             "{}",
             dir.display()
         );
-        send(sig, child.id());
+        if group {
+            send_group(sig, child.id());
+        } else {
+            send(sig, child.id());
+        }
         let status = child.wait().unwrap();
         assert_eq!(status.code(), Some(128 + n), "{sig}: {status:?}");
         assert!(!dir.exists(), "{sig}: the shim directory is removed");
@@ -821,22 +859,332 @@ fn a_shim_directory_leaked_by_sigkill_grants_nothing_even_when_edited() {
 // rivet: verifies REQ-RUNWITH-001
 #[test]
 fn an_edited_record_in_a_live_directory_is_reverified_not_trusted() {
-    // While the run lives, its own script rewrites the record to a digest no
-    // installed layer has: the private shim re-verifies it against the store
-    // as an override and refuses, and runs nothing.
+    // While the run lives, its own script rewrites the record: to a digest no
+    // installed layer has, and to ANOTHER installed layer that carries synth
+    // at another version. Either would make VARVE_WITH lie, so the private
+    // shim refuses both and runs nothing.
     let w = world();
+    let other = put_layer(
+        &w.registry,
+        &w.sk,
+        "2026.09.0",
+        "qualified",
+        &[("synth", "0.60.0", script("synth-0.60"))],
+    );
+    w.install_also("2026.09.0", &other);
     let forged = format!("sha256:{}", "0".repeat(64));
+    for (layer, digest) in [(OLDER, forged.as_str()), ("2026.09.0", other.as_str())] {
+        let script = format!(
+            "rec=$(ls \"${{PATH%%:*}}\"/*.json); \
+             sed -e 's/{}/{digest}/' -e 's/\"{OLDER}\"/\"{layer}\"/' \"$rec\" > \"$rec.new\" \
+             && mv \"$rec.new\" \"$rec\"; synth",
+            w.older_digest
+        );
+        w.clear_marks();
+        let a = varve(&w)
+            .args(["run", "--with", "synth@0.57.0", "--", "sh", "-c", &script])
+            .assert()
+            .code(1);
+        assert!(
+            stderr(&a).contains("does not match"),
+            "{layer}: {}",
+            stderr(&a)
+        );
+        for id in ["synth-0.57", "synth-0.60", "synth-0.65"] {
+            assert!(!w.ran(id), "{layer}: {id} ran");
+        }
+        assert!(w.tmp_is_empty());
+    }
+}
+
+// ---- review findings (feat/run-with review, 2026-11-14) ----
+
+/// Spawn varve and SIGKILL it with its child, leaking its shim directory.
+fn leak_a_shim_dir(w: &World) -> PathBuf {
+    let ready = w.dir.join("ready");
     let script = format!(
-        "rec=$(ls \"${{PATH%%:*}}\"/*.json); \
-         sed 's/{}/{forged}/' \"$rec\" > \"$rec.new\" && mv \"$rec.new\" \"$rec\"; synth",
-        w.older_digest
+        "echo \"${{PATH%%:*}} $$\" > '{}'; exec sleep 60",
+        ready.display()
+    );
+    let mut child = spawn_varve(w, &script);
+    let text = wait_for(&ready);
+    let (dir, sleeper) = text.trim().split_once(' ').unwrap();
+    send("-KILL", child.id());
+    child.wait().unwrap();
+    send("-KILL", sleeper.parse().unwrap());
+    std::fs::remove_file(&ready).unwrap();
+    PathBuf::from(dir)
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn concurrent_shims_into_a_leaked_directory_are_all_refused() {
+    // Finding 1: a liveness probe that takes the lock itself makes a leaked
+    // directory look alive to every other prober at that instant.
+    let w = world();
+    let dir = leak_a_shim_dir(&w);
+    w.clear_marks();
+    let shim = dir.join("synth");
+    let none = w.dir.join("no-user-config");
+    let mut honoured = 0;
+    for _ in 0..40 {
+        let kids: Vec<_> = (0..8)
+            .map(|_| {
+                std::process::Command::new(&shim)
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("VARVE_ROOT", &w.root)
+                    .env("XDG_CONFIG_HOME", &none)
+                    .env("HOME", &none)
+                    .env("RUNWITH_TEST_MARKS", w.marks())
+                    .env_remove("VARVE_TRUST_ROOT")
+                    .current_dir(&w.project)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for k in kids {
+            if k.wait_with_output().unwrap().status.success() {
+                honoured += 1;
+            }
+        }
+    }
+    assert_eq!(honoured, 0, "a leaked directory granted the override");
+    assert!(!w.ran("synth-0.57"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn executable(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_qualified_name_that_does_not_resolve_never_runs_a_project_file() {
+    // Finding 2: `zzz/loom` is a selector, not a path. Plain `run` refuses it;
+    // so must --with, instead of running ./zzz/loom from the project tree.
+    let w = world();
+    executable(
+        &w.project.join("zzz").join("loom"),
+        "#!/bin/sh\necho PROJECT-FILE-RAN\n",
+    );
+    let err = assert_refused(
+        &w,
+        &["run", "--with", "synth@0.57.0", "--", "zzz/loom"],
+        "not part of layer",
+    );
+    assert!(!err.contains("PROJECT-FILE-RAN"));
+    // An explicit path is a path: it runs, as the user wrote it.
+    let a = varve(&w)
+        .args(["run", "--with", "synth@0.57.0", "--", "./zzz/loom"])
+        .assert()
+        .success();
+    assert_eq!(stdout(&a).trim(), "PROJECT-FILE-RAN");
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_non_ascii_name_never_runs_an_ambient_binary() {
+    // Finding 3: U+017F folds onto `synth` on a case-insensitive filesystem;
+    // without an ASCII rule an ambient synth runs where the layer carries one.
+    let w = world();
+    let amb = w.dir.join("amb");
+    executable(&amb.join("synth"), "#!/bin/sh\necho AMBIENT-SYNTH-RAN\n");
+    let path = format!("/usr/bin:/bin:{}", amb.display());
+    let a = varve(&w)
+        .env("PATH", &path)
+        .args(["run", "--with", "loom@0.9.0", "--", "\u{17f}ynth"])
+        .assert()
+        .code(1);
+    assert!(!stdout(&a).contains("AMBIENT"), "{}", stdout(&a));
+    assert!(stderr(&a).contains("not part of layer"), "{}", stderr(&a));
+    assert!(w.tmp_is_empty());
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_temp_parent_others_can_write_without_the_sticky_bit_is_refused() {
+    // Finding 4: in such a parent the directory can be swapped, and PATH then
+    // runs a foreign binary without ever reaching the wrapper.
+    use std::os::unix::fs::PermissionsExt;
+    let w = world();
+    let open = w.dir.join("open-tmp");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    w.clear_marks();
+    let a = varve(&w)
+        .env("TMPDIR", &open)
+        .args(["run", "--with", "synth@0.57.0", "--", "synth"])
+        .assert()
+        .code(1);
+    assert!(stderr(&a).contains("others can write"), "{}", stderr(&a));
+    assert!(!w.ran("synth-0.57"));
+    assert!(std::fs::read_dir(&open).unwrap().next().is_none());
+    // The sticky bit (as /tmp has) is what makes such a parent safe.
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    varve(&w)
+        .env("TMPDIR", &open)
+        .args(["run", "--with", "synth@0.57.0", "--", "synth"])
+        .assert()
+        .success();
+    assert!(std::fs::read_dir(&open).unwrap().next().is_none());
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_temp_dir_inside_the_project_or_the_varve_root_is_refused() {
+    // Finding 5: "never under VARVE_ROOT or the project" is enforced, not
+    // claimed. Refused, not moved elsewhere: TMPDIR is the user's choice, and
+    // a guessed fallback would be a second place with its own checks.
+    let w = world();
+    for inside in [w.project.join("tmp"), w.root.join("tmp")] {
+        std::fs::create_dir_all(&inside).unwrap();
+        let before = w.snapshot();
+        w.clear_marks();
+        let a = varve(&w)
+            .env("TMPDIR", &inside)
+            .args(["run", "--with", "synth@0.57.0", "--", "synth"])
+            .assert()
+            .code(1);
+        assert!(stderr(&a).contains("inside"), "{}", stderr(&a));
+        assert!(!w.ran("synth-0.57"));
+        assert!(before == w.snapshot(), "{}", inside.display());
+    }
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn one_terminal_sigint_reaches_the_child_once() {
+    // Finding 6: a terminal signals the whole process group; varve must not
+    // forward a second copy.
+    let w = world();
+    let ready = w.dir.join("ready");
+    let count = w.dir.join("count");
+    let script = format!(
+        "n=0; trap 'n=$((n+1))' INT; echo ready > '{}'; i=0; \
+         while [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; echo $n > '{}'",
+        ready.display(),
+        count.display()
+    );
+    let mut child = spawn_varve(&w, &script);
+    wait_for(&ready);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    send_group("-INT", child.id());
+    let status = child.wait().unwrap();
+    assert_eq!(wait_for(&count).trim(), "1", "the child counted SIGINTs");
+    assert_eq!(status.code(), Some(0));
+    assert!(w.tmp_is_empty());
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_nested_with_is_refused() {
+    // Finding 7: an inner --with inside an outer one would report only its
+    // own override while bare calls still get the outer's (clause 3).
+    let w = world();
+    let inner = format!(
+        "{} run --with loom@0.9.0 -- sh -c 'echo inner-ran; synth'",
+        assert_cmd::cargo::cargo_bin("varve").display()
     );
     w.clear_marks();
     let a = varve(&w)
-        .args(["run", "--with", "synth@0.57.0", "--", "sh", "-c", &script])
+        .args(["run", "--with", "synth@0.57.0", "--", "sh", "-c", &inner])
         .assert()
         .code(1);
-    assert!(stderr(&a).contains("is not installed"), "{}", stderr(&a));
-    assert!(!w.ran("synth-0.57") && !w.ran("synth-0.65"));
+    assert!(stderr(&a).contains("nested"), "{}", stderr(&a));
+    assert!(!stdout(&a).contains("inner-ran"), "{}", stdout(&a));
+    assert!(!w.ran("synth-0.57") && !w.ran("loom-0.9"));
+    assert!(w.tmp_is_empty());
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_directory_that_cannot_be_removed_warns_and_keeps_the_childs_status() {
+    let w = world();
+    let a = varve(&w)
+        .args([
+            "run",
+            "--with",
+            "synth@0.57.0",
+            "--",
+            "sh",
+            "-c",
+            "chmod 500 \"${PATH%%:*}\"; exit 3",
+        ])
+        .assert()
+        .code(3);
+    assert!(
+        stderr(&a).contains("warning") && stderr(&a).contains("could not remove"),
+        "{}",
+        stderr(&a)
+    );
+    use std::os::unix::fs::PermissionsExt;
+    for e in std::fs::read_dir(w.tmp()).unwrap() {
+        let p = e.unwrap().path();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(&p).unwrap();
+    }
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn in_another_project_the_wrapper_falls_through_like_a_regular_shim() {
+    // A command that cds into another project gets what a regular shim gives
+    // there — passthrough included — never the outer override, and the PATH
+    // search skips the private directory, so it cannot loop into it.
+    let w = world();
+    let bare = put_layer(
+        &w.registry,
+        &w.sk,
+        "2026.06.0",
+        "qualified",
+        &[("loom", "0.8.0", script("loom-0.8"))],
+    );
+    let other = w.dir.join("other-project");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("varve-realms.toml"), &w.realms).unwrap();
+    std::fs::write(
+        other.join("varve.toml"),
+        format!(
+            "manifest-version = 1\n[toolchain]\nrealm = \"acme\"\nchannel = \"qualified\"\n\
+             layer = \"2026.06.0\"\ndigest = \"{bare}\"\n"
+        ),
+    )
+    .unwrap();
+    varve(&w)
+        .current_dir(&other)
+        .arg("install")
+        .assert()
+        .success();
+    let cfg = w.dir.join("cfg");
+    std::fs::create_dir_all(cfg.join("varve")).unwrap();
+    std::fs::write(
+        cfg.join("varve").join("config.toml"),
+        "[shim]\npassthrough = [\"synth\"]\n",
+    )
+    .unwrap();
+    let amb = w.dir.join("amb");
+    executable(&amb.join("synth"), "#!/bin/sh\necho AMBIENT-SYNTH-RAN\n");
+    let a = varve(&w)
+        .env("XDG_CONFIG_HOME", &cfg)
+        .env("PATH", format!("/usr/bin:/bin:{}", amb.display()))
+        .args([
+            "run",
+            "--with",
+            "synth@0.57.0",
+            "--",
+            "sh",
+            "-c",
+            &format!("cd '{}' && synth", other.display()),
+        ])
+        .assert()
+        .success();
+    assert_eq!(stdout(&a).trim(), "AMBIENT-SYNTH-RAN", "{}", stderr(&a));
+    assert!(stderr(&a).contains("passthrough"), "{}", stderr(&a));
+    assert!(!w.ran("synth-0.57"));
     assert!(w.tmp_is_empty());
 }
