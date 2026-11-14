@@ -1602,14 +1602,24 @@ fn ambient_state_never_selects_a_tool_for_a_plain_run() {
         stdout(&a).trim(),
         format!("loom-1.0 layer={PINNED} overrides=inherited-overrides with=inherited-with")
     );
-    // Once the lock is released, nothing about it remains.
+    // Once the lock is released, nothing about it remains. (Bounded retry: a
+    // child another test thread forked holds a duplicate of the lock's fd
+    // until it execs, so the release can take a moment to be seen.)
     drop(lock);
-    let a = varve(&w)
-        .env("PATH", &path)
-        .args(["run", "--", "synth"])
-        .assert()
-        .success();
-    assert!(stdout(&a).starts_with("synth-0.65 "), "{}", stdout(&a));
+    let mut last = String::new();
+    for _ in 0..50 {
+        let out = varve(&w)
+            .env("PATH", &path)
+            .args(["run", "--", "synth"])
+            .output()
+            .unwrap();
+        last = String::from_utf8_lossy(&out.stdout).into_owned();
+        if out.status.success() && last.starts_with("synth-0.65 ") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+    assert!(last.starts_with("synth-0.65 "), "{last}");
 }
 
 // rivet: verifies REQ-RUNWITH-001

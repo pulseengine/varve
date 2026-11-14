@@ -600,11 +600,12 @@ pub fn fill_shim_dir(
 
 /// `O_NONBLOCK | O_NOFOLLOW` for opening a lock file: a FIFO planted under
 /// that name must not hang the probe, and a symlink must not redirect it.
-/// (Checked against the platform's values by varve's own tests.)
+/// Written as one literal per platform (Linux 0o4000 | 0o400000, macOS
+/// 0x0004 | 0x0100) and checked against the platform's values by the tests.
 #[cfg(target_os = "linux")]
-pub const LOCK_OPEN_FLAGS: i32 = 0o4000 | 0o400000;
+pub const LOCK_OPEN_FLAGS: i32 = 0o404000;
 #[cfg(target_os = "macos")]
-pub const LOCK_OPEN_FLAGS: i32 = 0x0004 | 0x0100;
+pub const LOCK_OPEN_FLAGS: i32 = 0x0104;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub const LOCK_OPEN_FLAGS: i32 = 0;
 
@@ -930,6 +931,19 @@ mod tests {
 
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         FORK_OR_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether `released` becomes true within two seconds. A lock just
+    /// released can look held for a moment while a child that another test
+    /// (in any module) forked has not yet exec'd: it holds a duplicate of
+    /// every open fd until then. A probe that never sees it free still fails.
+    fn eventually(released: impl Fn() -> bool) -> bool {
+        (0..200).any(|_| {
+            released() || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }
+        })
     }
 
     const HOST: &str = "x86_64-unknown-linux-gnu";
@@ -1369,8 +1383,11 @@ mod tests {
         assert!(why.contains("unreadable record"), "{why}");
         // The run is gone (its lock released): refused, record never read.
         drop(lock);
-        let why = read_shim_dir(dir.path(), uid).unwrap_err();
-        assert!(why.contains("outlived"), "{why}");
+        assert!(
+            eventually(|| read_shim_dir(dir.path(), uid).is_err_and(|why| why.contains("outlived"))),
+            "{:?}",
+            read_shim_dir(dir.path(), uid)
+        );
         // No lock file, or not a directory at all.
         std::fs::remove_file(dir.path().join(LOCK_FILE)).unwrap();
         assert!(
@@ -1407,8 +1424,11 @@ mod tests {
         drop(fill_shim_dir(dir.path(), &record(), std::path::Path::new("/v")).unwrap());
         let other_prober = std::fs::File::open(dir.path().join(LOCK_FILE)).unwrap();
         other_prober.lock_shared().unwrap();
-        let why = read_shim_dir(dir.path(), uid).unwrap_err();
-        assert!(why.contains("outlived"), "{why}");
+        assert!(
+            eventually(|| read_shim_dir(dir.path(), uid).is_err_and(|why| why.contains("outlived"))),
+            "{:?}",
+            read_shim_dir(dir.path(), uid)
+        );
     }
 
     // rivet: verifies REQ-RUNWITH-001
@@ -1723,6 +1743,10 @@ mod tests {
             "no --"
         );
         assert!(
+            parse_gate_args(&s(&["4242", "/d", "x", "/bin/p"])).is_err(),
+            "not -- where it belongs"
+        );
+        assert!(
             parse_gate_args(&s(&["x", "/d", "--", "/bin/p"])).is_err(),
             "pid"
         );
@@ -1851,7 +1875,10 @@ mod tests {
         assert_eq!(lock_state(dead.path()), LockState::Free);
         assert_eq!(lock_state(live.path()), LockState::Held);
         drop(lock);
-        assert!(outer_shim_dirs(Some(&path)).is_empty(), "its run ended");
+        assert!(
+            eventually(|| outer_shim_dirs(Some(&path)).is_empty()),
+            "its run ended"
+        );
         assert!(outer_shim_dirs(None).is_empty());
         // read_shim_dir does not hang on a FIFO either.
         let uid = uid_of(fifo.path());
@@ -1859,6 +1886,16 @@ mod tests {
             read_shim_dir(fifo.path(), uid)
                 .unwrap_err()
                 .contains("no usable lock")
+        );
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn the_lock_open_flags_are_this_platforms_nonblock_and_nofollow() {
+        use rustix::fs::OFlags;
+        assert_eq!(
+            LOCK_OPEN_FLAGS,
+            (OFlags::NONBLOCK | OFlags::NOFOLLOW).bits() as i32
         );
     }
 }
