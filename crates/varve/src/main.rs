@@ -2964,9 +2964,38 @@ fn spawn_with_private_shims(
         .tempdir_in(&parent)
         .context("cannot create the private shim directory for --with")?;
     let varve = std::env::current_exe().context("cannot locate the varve binary")?;
+    // The directory is the one this run made — a directory of ours, 0700 —
+    // and is still that same directory (device and inode) once filled.
+    #[cfg(unix)]
+    let made = {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = std::fs::symlink_metadata(dir.path())
+            .context("cannot read the private shim directory")?;
+        varve_core::runwith::check_created_dir(
+            dir.path(),
+            meta.file_type().is_dir(),
+            meta.uid(),
+            meta.permissions().mode(),
+            rustix::process::getuid().as_raw(),
+        )
+        .map_err(|why| anyhow::anyhow!(why))?;
+        (meta.dev(), meta.ino())
+    };
     #[cfg(unix)]
     let lock = varve_core::runwith::fill_shim_dir(dir.path(), &record, &varve)
         .map_err(|why| anyhow::anyhow!(why))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let now = std::fs::symlink_metadata(dir.path())
+            .context("cannot read the private shim directory")?;
+        if (now.dev(), now.ino()) != made {
+            bail!(
+                "{} was replaced while its shims were written — refusing to run",
+                dir.path().display()
+            );
+        }
+    }
     #[cfg(not(unix))]
     let lock = ();
     let mut path = vec![dir.path().to_path_buf()];
@@ -3002,24 +3031,26 @@ fn private_shim_parent(ctx: &ProjectCtx) -> anyhow::Result<PathBuf> {
     let tmp = std::env::temp_dir();
     let parent = std::fs::canonicalize(&tmp)
         .with_context(|| format!("TMPDIR {} cannot be resolved", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let meta = std::fs::metadata(&parent)
-            .with_context(|| format!("TMPDIR {} cannot be read", parent.display()))?;
-        varve_core::runwith::check_temp_parent(
-            &parent,
-            meta.uid(),
-            meta.permissions().mode(),
-            rustix::process::getuid().as_raw(),
-        )
-        .map_err(|why| anyhow::anyhow!(why))?;
-    }
     let canonical =
         |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let (root, project) = (canonical(&ctx.base_root), canonical(&ctx.root));
     varve_core::runwith::check_not_inside(&parent, &[&root, &project])
         .map_err(|why| anyhow::anyhow!(why))?;
+    // TMPDIR and every directory above it, up to `/` (as ssh and sudo check a
+    // path): a foreign-writable, non-sticky ancestor lets someone replace a
+    // whole path component above the directory checked.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mut chain = Vec::new();
+        for dir in parent.ancestors() {
+            let meta = std::fs::symlink_metadata(dir)
+                .with_context(|| format!("{} (above TMPDIR) cannot be read", dir.display()))?;
+            chain.push((dir.to_path_buf(), meta.uid(), meta.permissions().mode()));
+        }
+        varve_core::runwith::check_temp_ancestors(&chain, rustix::process::getuid().as_raw())
+            .map_err(|why| anyhow::anyhow!(why))?;
+    }
     Ok(parent)
 }
 

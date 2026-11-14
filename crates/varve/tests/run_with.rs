@@ -18,6 +18,10 @@ const OLDER: &str = "2026.08.0";
 
 struct World {
     _tmp: tempfile::TempDir,
+    /// varve's TMPDIR, under /tmp: a --with run refuses a TMPDIR with any
+    /// parent others can write without the sticky bit, and the test world
+    /// itself may live under one (a shared volume, a CI work disk).
+    vtmp: tempfile::TempDir,
     dir: PathBuf,
     root: PathBuf,
     project: PathBuf,
@@ -83,7 +87,6 @@ fn world() -> World {
     let registry = dir.join("acme-registry");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir_all(dir.join("marks")).unwrap();
-    std::fs::create_dir_all(dir.join("tmp")).unwrap();
     let (sk, pk) = varve_core::generate_root_keypair();
     put_layer(
         &registry,
@@ -112,8 +115,13 @@ fn world() -> World {
         hex::encode(&pk)
     );
     std::fs::write(project.join("varve-realms.toml"), &realms).unwrap();
+    let vtmp = tempfile::Builder::new()
+        .prefix("varve-test-tmp-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let w = World {
         _tmp: tmp,
+        vtmp,
         dir,
         root,
         project,
@@ -151,7 +159,9 @@ impl World {
     /// varve's TMPDIR: outside the varve root and the project, so a --with
     /// shim directory is visible to the tests and never in the snapshot.
     fn tmp(&self) -> PathBuf {
-        self.dir.join("tmp")
+        // Canonical: varve makes its directory in the canonical TMPDIR
+        // (/tmp is /private/tmp on macOS).
+        std::fs::canonicalize(self.vtmp.path()).unwrap()
     }
 
     /// Nothing left in varve's TMPDIR.
@@ -1012,7 +1022,7 @@ fn a_temp_parent_others_can_write_without_the_sticky_bit_is_refused() {
     // runs a foreign binary without ever reaching the wrapper.
     use std::os::unix::fs::PermissionsExt;
     let w = world();
-    let open = w.dir.join("open-tmp");
+    let open = w.tmp().join("open-tmp");
     std::fs::create_dir_all(&open).unwrap();
     std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
     w.clear_marks();
@@ -1187,4 +1197,39 @@ fn in_another_project_the_wrapper_falls_through_like_a_regular_shim() {
     assert!(stderr(&a).contains("passthrough"), "{}", stderr(&a));
     assert!(!w.ran("synth-0.57"));
     assert!(w.tmp_is_empty());
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_tmpdir_below_a_directory_others_can_write_is_refused() {
+    // A foreign-writable, non-sticky ANCESTOR lets someone replace a whole
+    // path component above TMPDIR, however private TMPDIR itself is.
+    use std::os::unix::fs::PermissionsExt;
+    let w = world();
+    let above = w.tmp().join("open-above");
+    let inner = above.join("inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&above, std::fs::Permissions::from_mode(0o777)).unwrap();
+    w.clear_marks();
+    let a = varve(&w)
+        .env("TMPDIR", &inner)
+        .args(["run", "--with", "synth@0.57.0", "--", "synth"])
+        .assert()
+        .code(1);
+    let err = stderr(&a);
+    assert!(
+        err.contains("others can write") && err.contains("open-above"),
+        "{err}"
+    );
+    assert!(!w.ran("synth-0.57"));
+    assert!(std::fs::read_dir(&inner).unwrap().next().is_none());
+    // Sticky, as /tmp is: accepted.
+    std::fs::set_permissions(&above, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    varve(&w)
+        .env("TMPDIR", &inner)
+        .args(["run", "--with", "synth@0.57.0", "--", "synth"])
+        .assert()
+        .success();
+    assert!(std::fs::read_dir(&inner).unwrap().next().is_none());
 }

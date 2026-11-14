@@ -531,15 +531,50 @@ pub fn check_temp_parent(
 ) -> Result<(), String> {
     if owner != uid && owner != 0 {
         return Err(format!(
-            "{} (TMPDIR) belongs to another user — a --with shim directory is not made there",
+            "{} (TMPDIR or a directory above it) belongs to another user — a --with shim \
+             directory is not made under it",
             parent.display()
         ));
     }
     if mode & 0o022 != 0 && mode & 0o1000 == 0 {
         return Err(format!(
-            "{} (TMPDIR) is a directory others can write without the sticky bit — a --with \
-             shim directory in it could be replaced. Point TMPDIR at a private directory.",
+            "{} (TMPDIR or a directory above it) is a directory others can write without the \
+             sticky bit — a --with shim directory under it could be replaced. Point TMPDIR at a \
+             directory whose every parent only you or root can write.",
             parent.display()
+        ));
+    }
+    Ok(())
+}
+
+/// `check_temp_parent` for TMPDIR (canonical) and EVERY directory above it,
+/// up to `/`, as ssh and sudo check a path: one foreign-writable, non-sticky
+/// ancestor lets someone replace a whole path component above the checked
+/// directory. `chain` is (path, owner uid, mode) for each.
+pub fn check_temp_ancestors(
+    chain: &[(std::path::PathBuf, u32, u32)],
+    uid: u32,
+) -> Result<(), String> {
+    for (path, owner, mode) in chain {
+        check_temp_parent(path, *owner, *mode, uid)?;
+    }
+    Ok(())
+}
+
+/// The directory just created for the private shims is the one this run
+/// made: a real directory (not a link), owned by `uid`, mode exactly 0700.
+pub fn check_created_dir(
+    path: &std::path::Path,
+    is_dir: bool,
+    owner: u32,
+    mode: u32,
+    uid: u32,
+) -> Result<(), String> {
+    if !is_dir || owner != uid || mode & 0o7777 != 0o700 {
+        return Err(format!(
+            "{} is not the private directory this run created (a directory of yours, 0700) — \
+             refusing to put shims in it",
+            path.display()
         ));
     }
     Ok(())
@@ -1221,5 +1256,67 @@ mod tests {
             digest: "sha256:a".into(),
         });
         assert!(record_matches(&two, &[chosen("2026.08.0", "sha256:a")]).is_err());
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn every_directory_above_tmpdir_is_checked() {
+        let chain = |modes: &[(&str, u32, u32)]| -> Vec<(std::path::PathBuf, u32, u32)> {
+            modes.iter().map(|(p, o, m)| (p.into(), *o, *m)).collect()
+        };
+        let safe = chain(&[
+            ("/home/u/tmp", 501, 0o40700),
+            ("/home/u", 501, 0o40755),
+            ("/home", 0, 0o40755),
+            ("/", 0, 0o40755),
+        ]);
+        assert_eq!(check_temp_ancestors(&safe, 501), Ok(()));
+        // A foreign-writable, non-sticky ANCESTOR, the checked dir itself fine.
+        let open_above = chain(&[
+            ("/v/h/tmp", 501, 0o40700),
+            ("/v/h", 501, 0o40775),
+            ("/", 0, 0o40755),
+        ]);
+        let why = check_temp_ancestors(&open_above, 501).unwrap_err();
+        assert!(
+            why.contains("/v/h ") && why.contains("others can write"),
+            "{why}"
+        );
+        // Another user's ancestor.
+        let foreign = chain(&[("/s/tmp", 501, 0o40700), ("/s", 502, 0o40755)]);
+        assert!(
+            check_temp_ancestors(&foreign, 501)
+                .unwrap_err()
+                .contains("another user")
+        );
+        // A sticky world-writable ancestor (as /tmp) is fine.
+        let sticky = chain(&[
+            ("/tmp/x", 501, 0o40700),
+            ("/tmp", 0, 0o41777),
+            ("/", 0, 0o40755),
+        ]);
+        assert_eq!(check_temp_ancestors(&sticky, 501), Ok(()));
+        assert_eq!(check_temp_ancestors(&[], 501), Ok(()));
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn the_created_directory_must_be_ours_a_directory_and_0700() {
+        let p = std::path::Path::new("/t/varve-with-x");
+        assert_eq!(check_created_dir(p, true, 501, 0o40700, 501), Ok(()));
+        assert!(
+            check_created_dir(p, false, 501, 0o40700, 501).is_err(),
+            "a link or file"
+        );
+        assert!(
+            check_created_dir(p, true, 502, 0o40700, 501).is_err(),
+            "another owner"
+        );
+        for mode in [0o40755, 0o40701, 0o40710, 0o41700, 0o40600] {
+            assert!(
+                check_created_dir(p, true, 501, mode, 501).is_err(),
+                "{mode:o}"
+            );
+        }
     }
 }
