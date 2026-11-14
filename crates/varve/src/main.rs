@@ -2484,18 +2484,37 @@ fn run_gate(rest: &[std::ffi::OsString]) -> ! {
         eprintln!("varve: {why}");
         std::process::exit(code)
     };
-    let (parent, dir, program, args) =
+    let (parent, identity, dir, program, args) =
         runwith::parse_gate_args(rest).unwrap_or_else(|why| fail(why, 125));
+    // A varve replaced by an upgrade between starting and spawning its gate
+    // could pair two builds whose release protocols differ: refused.
+    runwith::check_identity(&identity, &runwith::build_identity())
+        .unwrap_or_else(|why| fail(why, 125));
     let go = dir.join(runwith::GO_FILE);
+    let started = std::time::Instant::now();
     let mut delay = std::time::Duration::from_millis(1);
     loop {
         let now = rustix::process::Pid::as_raw(rustix::process::getppid()) as u32;
-        match runwith::gate_step(parent, now, std::fs::symlink_metadata(&go).is_ok()) {
+        match runwith::gate_step(
+            parent,
+            now,
+            std::fs::symlink_metadata(&go).is_ok(),
+            started.elapsed(),
+        ) {
             GateStep::Wait => {
                 std::thread::sleep(delay);
                 delay = (delay * 2).min(std::time::Duration::from_millis(20));
             }
             GateStep::Abandon => std::process::exit(125),
+            GateStep::TimedOut => fail(
+                format!(
+                    "varve did not release {} within {} s — giving up without running the \
+                     command",
+                    dir.display(),
+                    runwith::GATE_DEADLINE.as_secs()
+                ),
+                125,
+            ),
             GateStep::Go => break,
         }
     }
@@ -3294,6 +3313,7 @@ fn run_gated(
     let mut gate = std::process::Command::new(&gate_binary);
     gate.args(runwith::gate_args(
         std::process::id(),
+        &runwith::build_identity(),
         &dir,
         cmd.get_program(),
         &args,

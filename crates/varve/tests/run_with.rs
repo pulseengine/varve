@@ -2073,6 +2073,7 @@ fn the_gate_takes_pid_1_as_a_parent() {
     let w = world();
     let a = varve(&w)
         .args(["--varve-with-gate", "1"])
+        .arg(varve_core::runwith::build_identity())
         .arg(w.tmp().join("varve-with-x"))
         .args(["--", "/usr/bin/true"])
         .assert()
@@ -2089,6 +2090,7 @@ fn a_varve_binary_under_another_name_still_runs_its_gate() {
     let real = varve_copy(&w, "varve-0.48.0");
     let a = varve_at(&w, &real)
         .args(["--varve-with-gate", "4242"])
+        .arg(varve_core::runwith::build_identity())
         .arg(w.tmp().join("varve-with-x"))
         .args(["--", "/usr/bin/true"])
         .assert()
@@ -2457,4 +2459,25 @@ fn a_regular_shim_whose_first_argument_is_a_marker_runs_its_tool() {
             stderr(&a)
         );
     }
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_gate_refuses_a_varve_of_another_build() {
+    // varve replaced by an upgrade between starting and spawning its gate:
+    // the gate (the new build) is told the old build's identity and refuses,
+    // with a reason, instead of waiting forever for a release it cannot read.
+    let w = world();
+    let a = varve(&w)
+        .args(["--varve-with-gate", &std::process::id().to_string()])
+        .arg("0.0.0+gate0")
+        .arg(w.tmp().join("varve-with-x"))
+        .args(["--", "/usr/bin/true"])
+        .assert()
+        .code(125);
+    assert!(
+        stderr(&a).contains("replaced") && stderr(&a).contains("0.0.0+gate0"),
+        "{}",
+        stderr(&a)
+    );
 }

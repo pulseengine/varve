@@ -104,20 +104,41 @@ jobs:
           grep -q 'test result: ok. 1 passed' fish.log
       - name: run --with refuses a TMPDIR where programs cannot run (REQ-RUNWITH-001)
         # A noexec mount needs root, which this hosted runner (ubuntu-latest,
-        # passwordless sudo) has. The test runs only where VARVE_TEST_NOEXEC_DIR
-        # is set, so the step also insists it ran, and did not skip.
+        # passwordless sudo) has. `run --with` checks TMPDIR and EVERY directory
+        # above it (owned by the user or root, not group/other-writable unless
+        # sticky), so the mount goes under a directory made here, not /mnt,
+        # whose mode is the image's to choose. Each ancestor is printed first,
+        # and a refusal of the setup itself is reported as such. The test runs
+        # only where VARVE_TEST_NOEXEC_DIR is set, so the step insists it ran.
         run: |
           set -euo pipefail
           cargo test -p varve --test run_with --no-run
           # The run copies the (debug) varve binary into the mount: size it
           # from the binary, with room to spare.
           size=$(( $(stat -c %s target/debug/varve) * 2 / 1048576 + 64 ))
-          sudo mkdir -p /mnt/varve-noexec
-          sudo mount -t tmpfs -o "noexec,nosuid,nodev,mode=1777,size=${size}m" tmpfs /mnt/varve-noexec
-          VARVE_TEST_NOEXEC_DIR=/mnt/varve-noexec cargo test -p varve --test run_with -- --exact \
-            a_tmpdir_where_programs_cannot_run_is_refused --nocapture 2>&1 | tee noexec.log
+          sudo mkdir -m 0755 /srv/varve-noexec
+          sudo mount -t tmpfs -o "noexec,nosuid,nodev,mode=0700,size=${size}m" tmpfs /srv/varve-noexec
+          sudo chown "$(id -u):$(id -g)" /srv/varve-noexec
+          chmod 0700 /srv/varve-noexec
+          findmnt -no OPTIONS /srv/varve-noexec | tr ',' '\n' | grep -qx noexec \
+            || { echo "::error::/srv/varve-noexec is not mounted noexec"; exit 1; }
+          for d in /srv/varve-noexec /srv /; do stat -c '%A %U:%G %n' "$d"; done
+          if VARVE_TEST_NOEXEC_DIR=/srv/varve-noexec cargo test -p varve --test run_with -- --exact \
+            a_tmpdir_where_programs_cannot_run_is_refused --nocapture > noexec.log 2>&1; then
+            status=0
+          else
+            status=$?
+          fi
+          cat noexec.log
+          if grep -q 'not run: VARVE_TEST_NOEXEC_DIR' noexec.log; then
+            echo "::error::the noexec test did not run"; exit 1
+          fi
+          if grep -qE 'others can write|another user|cannot be read' noexec.log; then
+            echo "::error::the noexec mount or a directory above it fails the TMPDIR ancestor rule (see the stat lines above) — the test environment, not varve"
+            exit 1
+          fi
+          [ "$status" -eq 0 ] || { echo "::error::the noexec test failed (see the log above)"; exit 1; }
           grep -q 'test result: ok. 1 passed' noexec.log
-          if grep -q 'not run: VARVE_TEST_NOEXEC_DIR' noexec.log; then exit 1; fi
 
   rivet:
     name: rivet validate · release plan

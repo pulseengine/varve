@@ -503,9 +503,43 @@ pub fn check_path_chars(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// The gate's arguments: `--varve-with-gate <varve's pid> <dir> -- <program> <args…>`.
+/// The version of the protocol between varve and its gate (the arguments,
+/// the release marker, what the gate checks). Bumped with any change to it.
+pub const GATE_PROTOCOL: u32 = 1;
+
+/// This build's identity as a gate partner: varve's version and the gate
+/// protocol. varve passes its own to the gate, which refuses a different one:
+/// varve replaced by an upgrade between starting and spawning its gate could
+/// otherwise pair two builds whose release protocols differ, and the gate
+/// would wait forever.
+pub fn build_identity() -> String {
+    format!("{}+gate{GATE_PROTOCOL}", env!("CARGO_PKG_VERSION"))
+}
+
+/// The gate's check of the identity it was given against its own.
+pub fn check_identity(asked: &str, ours: &str) -> Result<(), String> {
+    if asked == ours {
+        Ok(())
+    } else {
+        Err(format!(
+            "this gate is varve {ours}, but the varve that started it is {asked} — varve was \
+             replaced while it started (an upgrade?); run the command again"
+        ))
+    }
+}
+
+/// How long a gate waits to be released before giving up. Setup is purely
+/// local — make a directory, link or copy one binary, write a few small
+/// files, run one probe — so even a large copy on a heavily loaded runner is
+/// seconds, not minutes; ten minutes cannot fire on a working setup, and it
+/// still bounds a gate whose varve is wedged rather than gone.
+pub const GATE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The gate's arguments:
+/// `--varve-with-gate <varve's pid> <identity> <dir> -- <program> <args…>`.
 pub fn gate_args(
     parent: u32,
+    identity: &str,
     dir: &std::path::Path,
     program: &std::ffi::OsStr,
     args: &[std::ffi::OsString],
@@ -513,6 +547,7 @@ pub fn gate_args(
     let mut out: Vec<std::ffi::OsString> = vec![
         GATE_MARKER.into(),
         parent.to_string().into(),
+        identity.into(),
         dir.as_os_str().to_os_string(),
         "--".into(),
         program.to_os_string(),
@@ -524,6 +559,7 @@ pub fn gate_args(
 /// The gate's request, parsed back: (varve's pid, dir, program, args).
 pub type GateRequest = (
     u32,
+    String,
     std::path::PathBuf,
     std::ffi::OsString,
     Vec<std::ffi::OsString>,
@@ -532,7 +568,7 @@ pub type GateRequest = (
 /// Parse what follows `--varve-with-gate`.
 pub fn parse_gate_args(rest: &[std::ffi::OsString]) -> Result<GateRequest, String> {
     match rest {
-        [parent, dir, sep, program, args @ ..] if sep == "--" => {
+        [parent, identity, dir, sep, program, args @ ..] if sep == "--" => {
             let parent = parent
                 .to_str()
                 .and_then(|p| p.parse::<u32>().ok())
@@ -540,9 +576,15 @@ pub fn parse_gate_args(rest: &[std::ffi::OsString]) -> Result<GateRequest, Strin
                 // an orphaned gate sees parent 1 only if varve was not pid 1.
                 .filter(|p| *p > 0)
                 .ok_or("the gate needs varve's pid")?;
-            Ok((parent, dir.into(), program.clone(), args.to_vec()))
+            let identity = identity
+                .to_str()
+                .ok_or("the gate needs varve's identity")?
+                .to_string();
+            Ok((parent, identity, dir.into(), program.clone(), args.to_vec()))
         }
-        _ => Err("usage: varve --varve-with-gate <pid> <dir> -- <program> [args…]".into()),
+        _ => {
+            Err("usage: varve --varve-with-gate <pid> <identity> <dir> -- <program> [args…]".into())
+        }
     }
 }
 
@@ -552,14 +594,23 @@ pub fn parse_gate_args(rest: &[std::ffi::OsString]) -> Result<GateRequest, Strin
 pub enum GateStep {
     Wait,
     Abandon,
+    /// Not released within `GATE_DEADLINE`.
+    TimedOut,
     Go,
 }
 
-pub fn gate_step(parent: u32, parent_now: u32, released: bool) -> GateStep {
+pub fn gate_step(
+    parent: u32,
+    parent_now: u32,
+    released: bool,
+    waited: std::time::Duration,
+) -> GateStep {
     if parent_now != parent {
         GateStep::Abandon
     } else if released {
         GateStep::Go
+    } else if waited >= GATE_DEADLINE {
+        GateStep::TimedOut
     } else {
         GateStep::Wait
     }
@@ -1774,6 +1825,7 @@ mod tests {
     fn the_gate_is_told_its_parent_directory_and_program() {
         let args = gate_args(
             4242,
+            "0.48.0+gate1",
             std::path::Path::new("/t/varve-with-x"),
             std::ffi::OsStr::new("/bin/prog"),
             &["a b".into(), "--".into()],
@@ -1787,6 +1839,7 @@ mod tests {
             [
                 GATE_MARKER,
                 "4242",
+                "0.48.0+gate1",
                 "/t/varve-with-x",
                 "--",
                 "/bin/prog",
@@ -1798,6 +1851,7 @@ mod tests {
             parse_gate_args(&args[1..]),
             Ok((
                 4242,
+                "0.48.0+gate1".into(),
                 "/t/varve-with-x".into(),
                 "/bin/prog".into(),
                 vec!["a b".into(), "--".into()]
@@ -1805,25 +1859,25 @@ mod tests {
         );
         let s = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
         assert!(
-            parse_gate_args(&s(&["4242", "/d", "/bin/p"])).is_err(),
+            parse_gate_args(&s(&["4242", "v", "/d", "/bin/p"])).is_err(),
             "no --"
         );
         assert!(
-            parse_gate_args(&s(&["4242", "/d", "x", "/bin/p"])).is_err(),
+            parse_gate_args(&s(&["4242", "v", "/d", "x", "/bin/p"])).is_err(),
             "not -- where it belongs"
         );
         assert!(
-            parse_gate_args(&s(&["x", "/d", "--", "/bin/p"])).is_err(),
+            parse_gate_args(&s(&["x", "v", "/d", "--", "/bin/p"])).is_err(),
             "pid"
         );
         assert_eq!(
-            parse_gate_args(&s(&["1", "/d", "--", "/bin/p"])),
-            Ok((1, "/d".into(), "/bin/p".into(), vec![])),
+            parse_gate_args(&s(&["1", "v", "/d", "--", "/bin/p"])),
+            Ok((1, "v".into(), "/d".into(), "/bin/p".into(), vec![])),
             "varve as pid 1 (a container's entrypoint)"
         );
-        assert!(parse_gate_args(&s(&["0", "/d", "--", "/bin/p"])).is_err());
+        assert!(parse_gate_args(&s(&["0", "v", "/d", "--", "/bin/p"])).is_err());
         assert!(
-            parse_gate_args(&s(&["4242", "/d", "--"])).is_err(),
+            parse_gate_args(&s(&["4242", "v", "/d", "--"])).is_err(),
             "no program"
         );
     }
@@ -1831,12 +1885,26 @@ mod tests {
     // rivet: verifies REQ-RUNWITH-001
     #[test]
     fn the_gate_goes_only_when_released_and_gives_up_when_varve_is_gone() {
-        assert_eq!(gate_step(100, 100, false), GateStep::Wait);
-        assert_eq!(gate_step(1, 1, true), GateStep::Go, "varve is pid 1");
-        assert_eq!(gate_step(100, 100, true), GateStep::Go);
-        assert_eq!(gate_step(100, 1, false), GateStep::Abandon);
+        const ZERO: std::time::Duration = std::time::Duration::ZERO;
+        // Waiting is bounded: past the deadline an unreleased gate gives up;
+        // a release, or varve gone, still decides first.
+        let late = GATE_DEADLINE;
+        let almost = GATE_DEADLINE - std::time::Duration::from_millis(1);
+        assert_eq!(gate_step(100, 100, false, almost), GateStep::Wait);
+        assert_eq!(gate_step(100, 100, false, late), GateStep::TimedOut);
         assert_eq!(
-            gate_step(100, 1, true),
+            gate_step(100, 100, false, late + std::time::Duration::from_secs(1)),
+            GateStep::TimedOut
+        );
+        assert_eq!(gate_step(100, 100, true, late), GateStep::Go);
+        assert_eq!(gate_step(100, 1, false, late), GateStep::Abandon);
+        assert!(GATE_DEADLINE >= std::time::Duration::from_secs(600));
+        assert_eq!(gate_step(100, 100, false, ZERO), GateStep::Wait);
+        assert_eq!(gate_step(1, 1, true, ZERO), GateStep::Go, "varve is pid 1");
+        assert_eq!(gate_step(100, 100, true, ZERO), GateStep::Go);
+        assert_eq!(gate_step(100, 1, false, ZERO), GateStep::Abandon);
+        assert_eq!(
+            gate_step(100, 1, true, ZERO),
             GateStep::Abandon,
             "orphaned: never go"
         );
@@ -2060,5 +2128,18 @@ mod tests {
         );
         assert!(!is_interpreter_path(p("/usr/local/bin/varve")));
         assert!(!is_interpreter_path(p("varve")));
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_gate_refuses_a_varve_of_another_build() {
+        let ours = build_identity();
+        assert!(ours.starts_with(env!("CARGO_PKG_VERSION")), "{ours}");
+        assert!(ours.ends_with(&format!("+gate{GATE_PROTOCOL}")), "{ours}");
+        assert_eq!(check_identity(&ours, &ours), Ok(()));
+        let why = check_identity("0.0.1+gate1", &ours).unwrap_err();
+        assert!(why.contains("0.0.1+gate1") && why.contains(&ours), "{why}");
+        assert!(check_identity(&format!("{}+gate0", env!("CARGO_PKG_VERSION")), &ours).is_err());
+        assert!(check_identity("", &ours).is_err());
     }
 }
