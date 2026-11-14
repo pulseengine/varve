@@ -63,7 +63,7 @@ jobs:
     # Routes fork PRs to GitHub-hosted runners by default. This is NOT a security
     # boundary: a fork PR can edit this file. Isolation is enforced by the org's
     # smithy runner-group policy and fork-PR approval (pulseengine/warte#35).
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","rust-cpu"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,7 +95,7 @@ jobs:
     # pr_gates_cannot_be_switched_off.rs holds every PR workflow to that.
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","rust-cpu"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -110,7 +110,7 @@ jobs:
     name: OCI registry round trip (clause 2, varve#62)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","rust-cpu"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -153,7 +153,7 @@ jobs:
     name: layer assembly, end to end without publishing (REQ-SYSTEST-002)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","rust-cpu"]') || 'ubuntu-latest' }}
     # Minutes, not tens of minutes: no network, no registry, ~50 fixture files
     # and 24 tiny payloads. A producer gate that took as long as the self-host
     # jobs would be one people learn to ignore.
@@ -185,7 +185,7 @@ jobs:
     name: two realms composed, end to end (REQ-REALM2-001 clause 3)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","rust-cpu"]') || 'ubuntu-latest' }}
     # Longer than deposit-layer: the negative control rebuilds varve from a
     # mutated copy of the source, which is a second release build.
     timeout-minutes: 30
@@ -220,7 +220,7 @@ jobs:
     name: a flat WIT layer composed for wkg (REQ-WIT-001 clause 3)
     needs: changes
     if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.changes.outputs.code != 'false' }}
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","rust-cpu"]') || 'ubuntu-latest' }}
     # Two packages of a few hundred bytes each: no network, no registry, no
     # cargo fetch. A gate this cheap has no excuse to be skipped.
     timeout-minutes: 15
@@ -247,7 +247,7 @@ jobs:
     name: Zephyr modules verified, laid out and added to ZEPHYR_EXTRA_MODULES (REQ-ZMODEXPORT-001)
     needs: changes
     if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.changes.outputs.code != 'false' }}
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","rust-cpu"]') || 'ubuntu-latest' }}
     # Two modules of a few hundred bytes each: no network, no cargo fetch.
     timeout-minutes: 15
     steps:
@@ -307,7 +307,7 @@ jobs:
     name: a published signed line index, read and acted on (REQ-LAYERDIFF-001 clause 1)
     needs: changes
     if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.changes.outputs.code != 'false' }}
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","rust-cpu"]') || 'ubuntu-latest' }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -337,7 +337,7 @@ jobs:
     name: the installer names which varve will run (REQ-INSTALLSHADOW-001)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64","rust-cpu"]') }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","rust-cpu"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # A maintainer followed the documented install and ended up running a
