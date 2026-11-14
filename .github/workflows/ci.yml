@@ -498,6 +498,15 @@ jobs:
           - shard: varve-core (seed)
             files: >-
               -f crates/varve-core/src/seed.rs
+          # NEW at v0.48.0 (REQ-RUNWITH-001), as its own shard for the same
+          # reason: `runwith.rs` decides which installed layer `varve run --with
+          # tool@version` takes a tool from. A mutant that lets a layer on
+          # another channel through, or picks one of two layers that run
+          # different bytes, runs a binary nobody asked for under a version
+          # string that looks right.
+          - shard: varve-core (run-with)
+            files: >-
+              -f crates/varve-core/src/runwith.rs
           # NEW at v0.44.0 (REQ-AGENTDOCS-001/-002), as its own shard: the
           # orientation an agent is handed unasked, and the ranking that points
           # it at documentation. A wrong caveat dropped here is a tool an agent
