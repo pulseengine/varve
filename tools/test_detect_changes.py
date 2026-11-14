@@ -35,7 +35,7 @@ DEFAULT_CONTROLS = [
 NOT_CODE = "gate-probe-" + "not-code.md"
 
 
-def classify(paths, env_extra=None):
+def classify(paths, env_extra=None, cwd=ROOT):
     """Run the detector the way the probe does; return its `code` output."""
     with tempfile.TemporaryDirectory() as tmp:
         listing = os.path.join(tmp, "files")
@@ -47,7 +47,7 @@ def classify(paths, env_extra=None):
                "GATE_PROBE_FILES": listing, "GITHUB_OUTPUT": out}
         if env_extra:
             env.update(env_extra)
-        subprocess.run([DETECTOR], cwd=ROOT, env=env, check=True,
+        subprocess.run([DETECTOR], cwd=cwd, env=env, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         values = {}
         with open(out) as f:
@@ -117,6 +117,12 @@ class GateProbe(unittest.TestCase):
     def test_a_referenced_markdown_file_is_code(self):
         # README.md is include_str!'d by crates/varve/src/docs.rs.
         self.assertEqual(classify(["README.md"]), "true")
+
+    def test_a_failing_git_grep_runs_everything(self):
+        # #352 item 2: outside a git repository `git grep` exits 128, which the
+        # detector read as "not referenced" and classified docs as not code.
+        with tempfile.TemporaryDirectory() as notrepo:
+            self.assertEqual(classify([NOT_CODE], cwd=notrepo), "true")
 
 
 if __name__ == "__main__":
