@@ -60,6 +60,24 @@ class Passes(unittest.TestCase):
 
 
 class Fails(unittest.TestCase):
+    def test_a_missed_line_fails_even_beside_a_clean_summary(self):
+        # #352: the summary alone was trusted; a log naming a survivor passed.
+        log = (
+            "MISSED   crates/a/src/x.rs:12:5: replace f -> bool with true in 1s build + 2s test\n"
+            "46 mutants tested in 6m: 35 caught, 11 unviable\n"
+        )
+        code, msgs = verdict(log)
+        self.assertEqual(code, 1)
+        self.assertIn("crates/a/src/x.rs:12:5", "\n".join(msgs))
+
+    def test_the_word_missed_inside_a_mutant_name_is_not_a_survivor(self):
+        log = (
+            "caught   crates/a/src/x.rs:3:1: replace MISSED_COUNT with 0 in 1s\n"
+            "46 mutants tested in 6m: 35 caught, 11 unviable\n"
+        )
+        code, _ = verdict(log)
+        self.assertEqual(code, 0)
+
     def test_no_summary_fails(self):
         code, msgs = verdict("Found 12 mutants to test\nKilled\n")
         self.assertEqual(code, 1)

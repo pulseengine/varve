@@ -49,21 +49,48 @@ mod tests {
     fn gated(root: &Path) -> BTreeSet<String> {
         let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
             .expect("the workflow that defines the gate must be readable");
-        let mut out = BTreeSet::new();
-        for (i, _) in ci.match_indices("-f ") {
-            let rest = &ci[i + 3..];
-            let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-            let path = rest[..end].trim();
-            if path.ends_with(".rs") {
-                out.insert(path.to_string());
-            }
-        }
+        let out = shard_files(&ci);
         assert!(
             !out.is_empty(),
             "no `-f <file>.rs` found in ci.yml — the gate cannot be empty, and a \
              check that reads an empty list would pass by finding nothing"
         );
         out
+    }
+
+    /// The `-f <file>.rs` flags in workflow text. Comments are not the gate:
+    /// a `-f` that only a YAML or shell comment mentions is not in a shard
+    /// (#352: ci.yml carries `-f crates/varve-producer/src/asset.rs` in a
+    /// comment, and a file removed from its shard stayed "gated" through it).
+    fn shard_files(text: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for line in text.lines() {
+            // A `#` at the start or after whitespace opens a comment in YAML
+            // and in shell alike; no gated path contains one.
+            let code = match line
+                .char_indices()
+                .find(|&(i, c)| c == '#' && (i == 0 || line[..i].ends_with(char::is_whitespace)))
+            {
+                Some((i, _)) => &line[..i],
+                None => line,
+            };
+            for (i, _) in code.match_indices("-f ") {
+                let rest = &code[i + 3..];
+                let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+                let path = rest[..end].trim();
+                if path.ends_with(".rs") {
+                    out.insert(path.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_flag_only_a_comment_mentions_is_not_gated() {
+        let text = "        # was: -f crates/a/src/gone.rs \\\n          -f crates/a/src/kept.rs \\  # -f crates/a/src/also_gone.rs\n";
+        let got: Vec<String> = shard_files(text).into_iter().collect();
+        assert_eq!(got, vec!["crates/a/src/kept.rs".to_string()]);
     }
 
     /// Every `.rs` file under `crates/*/src`, recursively.

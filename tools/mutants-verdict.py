@@ -9,7 +9,9 @@ REQ-MUTATE-001. A shard passes only on evidence that it TESTED something:
     and only the LAST one counts;
   * every count in it is one this tool understands. An unknown word or a
     changed format fails closed rather than reading as "0 missed";
-  * nothing was missed;
+  * nothing was missed: neither in the summary nor as a `MISSED` line, which
+    cargo-mutants writes per survivor (#352: a log naming a survivor beside a
+    clean summary used to pass);
   * at least one mutant was tested; and
   * at least one was caught or timed out. A timeout is a mutant the suite never
     finished under, which is detection, not silence.
@@ -27,6 +29,7 @@ import sys
 
 SUMMARY = re.compile(r"([0-9]+) mutants? tested in [^:\n]*(?::(.*))?$")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+MISSED_LINE = re.compile(r"^MISSED\s+(\S.*)$")
 COUNT = re.compile(r"^([0-9]+) (missed|caught|unviable|timeouts?|failed|success)$")
 
 
@@ -38,7 +41,9 @@ def verdict(path):
     except OSError as e:
         return 1, ["::error::cannot read %s: %s — the gate did not run" % (path, e)]
 
-    found = [m for m in (SUMMARY.search(l.strip()) for l in ANSI.sub("", text).splitlines()) if m]
+    lines = [l.strip() for l in ANSI.sub("", text).splitlines()]
+    survivors = [m.group(1) for m in (MISSED_LINE.match(l) for l in lines) if m]
+    found = [m for m in (SUMMARY.search(l) for l in lines) if m]
     if not found:
         return 1, ["::error::cargo-mutants produced no summary — the gate did not run"]
     last = found[-1]
@@ -58,6 +63,8 @@ def verdict(path):
         word = "timeouts" if m.group(2).startswith("timeout") else m.group(2)
         counts[word] = counts.get(word, 0) + int(m.group(1))
 
+    if survivors:
+        return 1, msgs + ["::error::SURVIVED: %s" % s for s in survivors]
     missed = counts.get("missed", 0)
     if missed:
         return 1, msgs + ["::error::%d mutant(s) SURVIVED — a change nothing noticed" % missed]

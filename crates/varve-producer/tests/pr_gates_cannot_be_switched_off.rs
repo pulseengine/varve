@@ -248,3 +248,86 @@ fn the_scanner_flags_valid_yaml_spellings_a_line_scanner_misses() {
         "allowed flow form flagged"
     );
 }
+
+/// Every parsed value in the workflow that reads the `vars` or `secrets`
+/// context, wherever it sits (`env:`, `with:`, `run:`), as (path, value).
+/// Comments are not values, so a comment naming `vars.X` is not a reader.
+///
+/// The `if:` allowlist above cannot see a step that switches itself off from
+/// inside: `env: { SKIP: ${{ vars.SKIP_MUTANTS }} }` with
+/// `[ "${SKIP:-}" = 1 ] && exit 0` stays green (#352, item 1). A deleted
+/// secret is the same switch, read as an empty string. No PR workflow reads
+/// either context today, so the rule is absolute.
+fn setting_readers(workflow: &str, text: &str) -> Vec<(String, String)> {
+    fn walk(node: &Yaml, path: String, out: &mut Vec<(String, String)>) {
+        match node {
+            Yaml::String(s) => {
+                let reads = |ctx: &str| {
+                    s.match_indices(ctx).any(|(i, _)| {
+                        !s[..i]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                    })
+                };
+                if reads("vars.") || reads("secrets.") {
+                    out.push((path, s.clone()));
+                }
+            }
+            Yaml::Array(a) => {
+                for (i, v) in a.iter().enumerate() {
+                    walk(v, format!("{path}[{i}]"), out);
+                }
+            }
+            Yaml::Hash(h) => {
+                for (k, v) in h {
+                    walk(k, format!("{path}.<key>"), out);
+                    walk(v, format!("{path}.{}", k.as_str().unwrap_or("?")), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(&parse(workflow, text), String::new(), &mut out);
+    out
+}
+
+// rivet: verifies REQ-SYSTEST-001
+#[test]
+fn no_pr_workflow_reads_a_repository_variable_or_secret() {
+    for name in PR_WORKFLOWS {
+        let found = setting_readers(name, &workflow(name));
+        assert!(
+            found.is_empty(),
+            "{name} reads a repository setting: {found:?}. A step can switch \
+             itself off from inside on a variable, or on a secret deleted to an \
+             empty string, and stay green (#352). Park a gate by editing the \
+             workflow."
+        );
+    }
+}
+
+/// Negative and positive controls for `setting_readers`.
+#[test]
+fn the_reader_scan_flags_env_run_and_with_but_not_comments() {
+    let env = "jobs:\n  x:\n    steps:\n      - env:\n          SKIP: ${{ vars.SKIP_MUTANTS }}\n        run: '[ \"${SKIP:-}\" = 1 ] && exit 0'\n";
+    let run =
+        "jobs:\n  x:\n    steps:\n      - run: echo \"${{ secrets.VARVE_ROOT_KEY }}\" > k.pem\n";
+    let with = "jobs:\n  x:\n    steps:\n      - uses: a/b@c\n        with:\n          skip: ${{ vars.X }}\n";
+    let job_env = "env:\n  S: ${{ vars.S }}\njobs: {}\n";
+    for (name, text) in [
+        ("env", env),
+        ("run", run),
+        ("with", with),
+        ("workflow env", job_env),
+    ] {
+        assert_eq!(
+            setting_readers("t.yml", text).len(),
+            1,
+            "{name} reader not flagged"
+        );
+    }
+    let comment = "# vars.X is not read here\njobs:\n  x:\n    steps:\n      - run: echo myvars.x  # secrets.Y\n";
+    assert!(setting_readers("t.yml", comment).is_empty());
+}

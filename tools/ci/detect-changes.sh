@@ -10,11 +10,12 @@
 # merge_group passes merge_group.base_sha (the checkout is the queue commit, so
 # base...HEAD is what that entry adds).
 #
-# FAILS CLOSED: any other event, an empty base, a failed or empty diff, or any
-# file that is not docs runs everything. "Docs" is narrow on purpose: a `.md`
-# or LICENSE file OUTSIDE crates/ (crates/*/docs/*.md are include_str!'d into
-# the binaries), whose basename no .rs, workflow or tools/ file mentions
-# (README.md is include_str!'d by crates/varve/src/docs.rs).
+# FAILS CLOSED: any other event, an empty base, a failed or empty diff, a
+# failed `git grep`, or any file that is not docs runs everything. "Docs" is
+# narrow on purpose: a `.md` or LICENSE file OUTSIDE crates/
+# (crates/*/docs/*.md are include_str!'d into the binaries), whose basename
+# no .rs, workflow or tools/ file mentions (README.md is include_str!'d by
+# crates/varve/src/docs.rs).
 set -uo pipefail
 out="${GITHUB_OUTPUT:-/dev/stdout}"
 run_all() { echo "code=true" >> "$out"; echo "-> $1; running everything"; exit 0; }
@@ -43,9 +44,15 @@ while IFS= read -r f; do
     *.md|LICENSE|LICENSE-*) ;;
     *) run_all "non-docs file $f" ;;
   esac
-  if git grep -qF -- "$(basename "$f")" -- '*.rs' '.github/workflows/*' 'tools/*'; then
-    run_all "$f is referenced from source, a workflow or tools/"
-  fi
+  # 0 = referenced, 1 = not referenced; anything else is an error and fails
+  # closed (#352: exit 128 outside a repository read as "not referenced").
+  git grep -qF -- "$(basename "$f")" -- '*.rs' '.github/workflows/*' 'tools/*'
+  rc=$?
+  case "$rc" in
+    0) run_all "$f is referenced from source, a workflow or tools/" ;;
+    1) ;;
+    *) run_all "git grep failed (exit $rc) while checking $f" ;;
+  esac
 done <<< "$changed"
 echo "code=false" >> "$out"
 echo "-> docs-only change; skipping the heavy jobs"

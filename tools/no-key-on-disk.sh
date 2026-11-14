@@ -53,10 +53,19 @@ if [ "${1:-}" = "--self-test" ]; then
   must_reject "the adopter mistake docs name" 'echo "$SIGNING_SECRET" > key.tmp'
   must_reject "append"                     'printf %s "$VARVE_ROOT_KEY" >> /tmp/k'
   must_reject "tee"                        'printf %s "$MY_TOKEN" | tee /tmp/t'
+  # #352 item 4: the expression form, and a secret bound to a name without
+  # KEY/SECRET/TOKEN in it.
+  must_reject "a secrets expression"       'echo "${{ secrets.VARVE_ROOT_KEY }}" > "$RUNNER_TEMP/root.pem"'
+  printf 'jobs:\n  x:\n    steps:\n      - env:\n          SIGNER: ${{ secrets.X }}\n        run: printf %%s "$SIGNER" > /tmp/s\n' > "$work/wf/a.yml"
+  if "$0" "$work/wf" >/dev/null 2>&1; then
+    echo "::error::self-test: gate ACCEPTED a secret bound to an innocent name"; fail=1
+  else
+    echo "  rejects: a secret bound to an innocent name"
+  fi
   must_accept "the documented fd form"     "varve deposit --key <(printf '%s' \"\$VARVE_ROLLING_KEY\") --out o"
   must_accept "a pipe to /dev/stdin"       "printf '%s' \"\$K\" | varve sign-status --key /dev/stdin"
   [ "$fail" -eq 0 ] || { echo "::error::no-key-on-disk self-test FAILED"; exit 1; }
-  echo "no-key-on-disk: self-test OK — the gate rejects 4 shapes and accepts 2"
+  echo "no-key-on-disk: self-test OK — the gate rejects 6 shapes and accepts 2"
   exit 0
 fi
 
@@ -65,6 +74,17 @@ DIR="${1:-.github/workflows}"
 # A secret-looking variable redirected into a file. Covers `> f`, `>> f`, and
 # `tee f`, with or without quotes around the variable.
 PATTERN='(\$\{?[A-Za-z_]*(KEY|SECRET|TOKEN)[A-Za-z_]*\}?"?[[:space:]]*(>>?|\|[[:space:]]*tee)[[:space:]])|((>>?|\|[[:space:]]*tee)[[:space:]]*[^[:space:]|]*(key|secret)[^[:space:]|]*$)'
+
+# A `${{ secrets.X }}` expression redirected straight into a file (#352).
+SECRET_EXPR='\$\{\{[[:space:]]*secrets\.[A-Za-z0-9_]+[[:space:]]*\}\}"?[[:space:]]*(>>?|\|[[:space:]]*tee)[[:space:]]'
+PATTERN="$PATTERN|($SECRET_EXPR)"
+# Names an `env:` entry binds to a secret, whatever they are called (#352: a
+# secret bound to SIGNER passed the KEY/SECRET/TOKEN name rule).
+bound="$(grep -rhoE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*\$\{\{[[:space:]]*secrets\.' "$DIR" 2>/dev/null \
+         | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*):.*/\1/' | sort -u | paste -sd'|' - || true)"
+if [ -n "$bound" ]; then
+  PATTERN="$PATTERN|(\\\$\{?($bound)\}?\"?[[:space:]]*(>>?|\|[[:space:]]*tee)[[:space:]])"
+fi
 
 found=0
 while IFS= read -r hit; do
