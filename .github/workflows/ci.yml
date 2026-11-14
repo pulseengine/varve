@@ -108,8 +108,12 @@ jobs:
         # is set, so the step also insists it ran, and did not skip.
         run: |
           set -euo pipefail
+          cargo test -p varve --test run_with --no-run
+          # The run copies the (debug) varve binary into the mount: size it
+          # from the binary, with room to spare.
+          size=$(( $(stat -c %s target/debug/varve) * 2 / 1048576 + 64 ))
           sudo mkdir -p /mnt/varve-noexec
-          sudo mount -t tmpfs -o noexec,nosuid,nodev,mode=1777,size=512m tmpfs /mnt/varve-noexec
+          sudo mount -t tmpfs -o "noexec,nosuid,nodev,mode=1777,size=${size}m" tmpfs /mnt/varve-noexec
           VARVE_TEST_NOEXEC_DIR=/mnt/varve-noexec cargo test -p varve --test run_with -- --exact \
             a_tmpdir_where_programs_cannot_run_is_refused --nocapture 2>&1 | tee noexec.log
           grep -q 'test result: ok. 1 passed' noexec.log

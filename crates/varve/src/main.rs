@@ -897,15 +897,20 @@ fn run() -> anyhow::Result<Outcome> {
     // (REQ-RUNWITH-001). Neither goes through the CLI parser, and neither
     // takes the environment's word for what to run.
     let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let argv0 = std::env::args_os().next().map(std::path::PathBuf::from);
     if rest
         .first()
         .is_some_and(|a| a == varve_core::runwith::SHIM_MARKER)
+        && argv0
+            .as_deref()
+            .is_some_and(varve_core::runwith::is_interpreter_path)
     {
         return run_marked_shim(&rest[1..]).map(|()| Outcome::Ok);
     }
     if rest
         .first()
         .is_some_and(|a| a == varve_core::runwith::GATE_MARKER)
+        && argv0.as_deref().is_some_and(is_this_binary)
     {
         run_gate(&rest[1..]);
     }
@@ -2430,6 +2435,19 @@ fn run_tool_with(
 /// call cannot nest. Anywhere else (another project, or none) it does what a
 /// regular shim does there, passthrough included, with its own directory left
 /// out of the PATH that is searched.
+/// Is `argv0` this very binary, named by its own path — as varve spawns its
+/// gate (from its canonical path) — and not a symlink to it? A regular shim
+/// is such a symlink, so a shim whose first argument happens to be the gate
+/// marker is not taken for a gate.
+fn is_this_binary(argv0: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(argv0).is_ok_and(|m| !m.file_type().is_symlink())
+        && std::fs::canonicalize(argv0).ok().is_some()
+        && std::fs::canonicalize(argv0).ok()
+            == std::env::current_exe()
+                .ok()
+                .and_then(|e| std::fs::canonicalize(e).ok())
+}
+
 /// A wrapper in a private shim directory was run: the kernel handed us its
 /// path, which names the directory and the tool. The probe wrapper only
 /// proves programs in the directory can run, and exits 0.
@@ -2442,7 +2460,7 @@ fn run_marked_shim(rest: &[std::ffi::OsString]) -> anyhow::Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .context("a private shim's name is a tool name")?;
-    if tool == varve_core::runwith::PROBE {
+    if varve_core::runwith::is_probe(script) {
         return Ok(());
     }
     let dir = std::fs::canonicalize(script.parent().unwrap_or(std::path::Path::new(".")))
@@ -3071,12 +3089,12 @@ fn dispatch(
 /// directory, and end as it ended (`runwith::ending`).
 ///
 /// Order matters. The directory is made first (so its name is ours before it
-/// appears in any process's arguments) and varve is linked into it; then the
-/// command is started through a gate — that `<dir>/varve`,
-/// `runwith::GATE_MARKER` — BEFORE any signal handler is installed, so it
-/// holds this process's inherited signal dispositions. Then SIGCHLD and the
-/// handlers go in, the directory is filled and checked, and only then does
-/// the gate see the release marker and exec the command. The gate is
+/// appears in any process's arguments); then the command is started through a
+/// gate — this binary, `runwith::GATE_MARKER` — BEFORE any signal handler is
+/// installed, so it holds this process's inherited signal dispositions. Then
+/// SIGCHLD and the handlers go in, and only then is the directory filled
+/// (varve's own copy, the wrappers), checked and released. Until the handlers
+/// are in, only the empty directory exists. The gate is
 /// also the oracle for signals during setup: one it did not ignore kills it,
 /// and the run ends as the gate did; one it ignored changes nothing.
 fn spawn_with_private_shims(
@@ -3215,9 +3233,11 @@ fn run_gated(
 
     // 1. The directory first: made 0700, exclusively (an existing one is never
     //    used), BEFORE its name appears in any process's arguments, so nobody
-    //    can make it in our place. Its wrappers will name `<dir>/varve` in
+    //    can make it in our place. Its wrappers will name `<dir>/.v/varve` in
     //    their first line, so that path must be nameable before anything is
     //    made. No handler is installed yet; creating a directory installs none.
+    //    Until the handlers are in (step 3) only this EMPTY directory exists,
+    //    so that is all a signal in that window can leave behind.
     let dir = parent.join(private_dir_name());
     runwith::check_path_chars(&dir).map_err(|why| anyhow::anyhow!(why))?;
     let interpreter = dir.join(runwith::INTERPRETER);
@@ -3247,12 +3267,6 @@ fn run_gated(
             rustix::process::getuid().as_raw(),
         )
         .map_err(|why| anyhow::anyhow!(why))?;
-        // 2. varve itself, inside the directory: the wrappers' interpreter and
-        //    the gate. It lives exactly as long as the directory, whatever
-        //    happens meanwhile to the installed binary (an upgrade, a cleanup,
-        //    a rebuild) — a vanished interpreter would make a bare call fall
-        //    through to the next program on PATH.
-        place_interpreter(varve, &interpreter)?;
         Ok((meta.dev(), meta.ino()))
     })();
     let made = match made {
@@ -3263,10 +3277,21 @@ fn run_gated(
         }
     };
 
-    // 3. The gate — `<dir>/varve` — BEFORE any handler: it inherits our
-    //    dispositions. It is told the directory and our pid, and waits.
+    // 2. The gate — this binary, run again — BEFORE any handler: it inherits
+    //    our dispositions. It is told the directory and our pid, and waits.
+    //    It execs once, almost at once after release; the private copy of
+    //    varve (step 4) is for the long-lived wrappers.
     let args: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_os_string()).collect();
-    let mut gate = std::process::Command::new(&interpreter);
+    // From the canonical path: the gate marker is honoured only from varve's
+    // own file, never from a symlink to it (a regular shim).
+    let gate_binary = match std::fs::canonicalize(varve) {
+        Ok(path) => path,
+        Err(e) => {
+            finish(None);
+            return Err(anyhow::Error::from(e).context("cannot locate the varve binary"));
+        }
+    };
+    let mut gate = std::process::Command::new(&gate_binary);
     gate.args(runwith::gate_args(
         std::process::id(),
         &dir,
@@ -3282,15 +3307,10 @@ fn run_gated(
             None => gate.env_remove(key),
         };
     }
-    // Spawning it is also the first proof that programs in the directory can
-    // run: on a TMPDIR mounted noexec it fails with "permission denied".
     let mut child = match gate.spawn() {
         Ok(child) => child,
         Err(e) => {
             finish(None);
-            if e.kind() == std::io::ErrorKind::PermissionDenied {
-                return Err(noexec(parent));
-            }
             return Err(anyhow::Error::from(e).context(format!("failed to run {tool}")));
         }
     };
@@ -3299,7 +3319,7 @@ fn run_gated(
         let _ = child.wait();
     };
 
-    // 4. SIGCHLD caught from here, so an inherited ignore cannot make the
+    // 3. SIGCHLD caught from here, so an inherited ignore cannot make the
     //    kernel reap our children unasked; the gate keeps the inherited view.
     //    Then the handlers: a caught signal never kills this process before
     //    it has removed what it made.
@@ -3317,10 +3337,18 @@ fn run_gated(
         }
     };
 
-    // 5. Fill it: the lock first, the record, the wrappers (interpreter
-    //    `<dir>/varve`); prove a wrapper runs; and check it is still the
-    //    directory made in step 1.
+    // 4. Fill it, now that a signal cannot interrupt us: the control
+    //    directory, varve itself as `<dir>/.v/varve` (the wrappers'
+    //    interpreter, living exactly as long as the directory whatever happens
+    //    meanwhile to the installed binary), the lock, the record, the
+    //    wrappers. Then prove a wrapper runs (a TMPDIR mounted noexec cannot),
+    //    and check it is still the directory made in step 1.
     let setup = (|| -> anyhow::Result<std::fs::File> {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir.join(runwith::CONTROL))
+            .context("cannot create the private shim directory's control directory")?;
+        place_interpreter(varve, &interpreter)?;
         let lock = runwith::fill_shim_dir(&dir, record, &interpreter)
             .map_err(|why| anyhow::anyhow!(why))?;
         probe(&dir.join(runwith::PROBE), &[], parent)?;
@@ -3432,20 +3460,30 @@ fn run_gated(
 ///
 /// A hard link IS the installed binary (one inode): its mode is never
 /// touched — changing it would change the installed varve's, and other users
-/// could no longer run it. That it runs for us is proven when the gate is
-/// spawned from it. Only a copy, a file of our own, is set to 0700.
+/// could no longer run it. That it runs for us is proven by the wrapper
+/// probe. Only a copy, a file of our own, is created 0700.
 #[cfg(unix)]
 fn place_interpreter(varve: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::OpenOptionsExt;
     let source = std::fs::canonicalize(varve)
         .with_context(|| format!("cannot locate the varve binary {}", varve.display()))?;
+    // A link never replaces an existing name.
     if std::fs::hard_link(&source, to).is_ok() {
         return Ok(());
     }
-    std::fs::copy(&source, to)
+    // A copy is created exclusively (O_EXCL, mode 0700 from the start) and
+    // closed before anything runs it.
+    let mut from = std::fs::File::open(&source)
+        .with_context(|| format!("cannot read the varve binary {}", source.display()))?;
+    let mut copy = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .open(to)
         .with_context(|| format!("cannot place varve in {}", to.display()))?;
-    std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("cannot make {} executable", to.display()))?;
+    std::io::copy(&mut from, &mut copy)
+        .with_context(|| format!("cannot place varve in {}", to.display()))?;
+    drop(copy);
     Ok(())
 }
 

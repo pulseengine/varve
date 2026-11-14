@@ -52,6 +52,12 @@ pub fn parse_request(spec: &str) -> Result<WithRequest, String> {
              pin's own realm, so a realm qualifier or a path names something it cannot do"
         ));
     }
+    if tool.eq_ignore_ascii_case(CONTROL) {
+        return Err(format!(
+            "--with {spec:?}: {tool:?} is reserved — it names the control directory of a \
+             --with run's private shims"
+        ));
+    }
     if version.is_empty() || version.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(format!(
             "--with {spec:?}: the version must be non-empty, with no whitespace"
@@ -387,10 +393,15 @@ pub fn choose(
 // store exactly as a varve.toml override is (`resolve`), so an edited record
 // can name only what the pin could have overridden anyway.
 
-/// The record of what a `--with` run resolved, beside its private shims.
-pub const RECORD_FILE: &str = "with.json";
+/// The control subdirectory of a private shim directory. The directory on
+/// PATH holds nothing but wrappers, one per `--with` tool, and this; the
+/// interpreter and every control file live in here, so no tool's wrapper can
+/// ever share a name with them (and `.v` itself is a reserved tool name).
+pub const CONTROL: &str = ".v";
+/// The record of what a `--with` run resolved.
+pub const RECORD_FILE: &str = ".v/with.json";
 /// Held, exclusively, by the run for its whole life.
-pub const LOCK_FILE: &str = "owner.lock";
+pub const LOCK_FILE: &str = ".v/owner.lock";
 
 /// What a private shim directory records: the pin the run resolved (its
 /// varve.toml, canonical), the overrides `--with` resolved to, and what was
@@ -413,14 +424,14 @@ pub const SHIM_MARKER: &str = "--varve-with-shim";
 /// The first argument of the gate (`varve run --with`'s own binary, re-run).
 pub const GATE_MARKER: &str = "--varve-with-gate";
 /// A wrapper that only proves programs in the directory can be executed.
-pub const PROBE: &str = ".varve-probe";
+pub const PROBE: &str = ".v/probe";
 /// Written last; the gate execs the command only once it exists.
-pub const GO_FILE: &str = ".go";
+pub const GO_FILE: &str = ".v/go";
 /// varve itself, inside the private directory: the wrappers' interpreter and
 /// the gate. A hard link (or copy) that lives exactly as long as the
 /// directory, so an upgrade or cleanup of the installed binary meanwhile
 /// cannot leave the wrappers naming a file that is gone.
-pub const INTERPRETER: &str = "varve";
+pub const INTERPRETER: &str = ".v/varve";
 /// Every private shim directory's name starts with this. Only PATH entries so
 /// named are ever looked at (`outer_shim_dirs`): any other entry is skipped
 /// without a single system call, so a hung network mount on PATH cannot hang
@@ -452,6 +463,25 @@ pub fn wrapper_text(varve: &std::path::Path) -> Result<String, String> {
         ));
     }
     Ok(line)
+}
+
+/// Is `script` the probe wrapper (`<dir>/.v/probe`)?
+pub fn is_probe(script: &std::path::Path) -> bool {
+    script.ends_with(PROBE)
+}
+
+/// Is `argv0` a private interpreter (`…/varve-with-…/.v/varve`)? The kernel
+/// runs a wrapper's interpreter under the path its first line names, so the
+/// shim marker is honoured only from there — a regular shim whose first
+/// argument happens to be the marker is not taken over.
+pub fn is_interpreter_path(argv0: &std::path::Path) -> bool {
+    argv0.ends_with(INTERPRETER)
+        && argv0
+            .parent()
+            .and_then(|control| control.parent())
+            .and_then(|dir| dir.file_name())
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(SHIM_DIR_PREFIX))
 }
 
 /// The name of a private shim directory, from two random words.
@@ -589,23 +619,34 @@ pub fn fill_shim_dir(
     record: &ShimRecord,
     varve: &std::path::Path,
 ) -> Result<std::fs::File, String> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let io = |what: &str, e: std::io::Error| format!("{what} in {}: {e}", dir.display());
     let text = wrapper_text(varve)?;
-    let lock = std::fs::File::create(dir.join(LOCK_FILE)).map_err(|e| io("lock", e))?;
+    // Every file is created EXCLUSIVELY (O_EXCL): nothing is ever written
+    // through a path that already exists, so a name collision refuses.
+    let create = |rel: &str, mode: u32| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(dir.join(rel))
+    };
+    let lock = create(LOCK_FILE, 0o600).map_err(|e| io("lock", e))?;
     lock.lock().map_err(|e| io("lock", e))?;
     let json = serde_json::to_vec_pretty(record).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join(RECORD_FILE), json).map_err(|e| io("record", e))?;
+    create(RECORD_FILE, 0o600)
+        .and_then(|mut f| f.write_all(&json))
+        .map_err(|e| io("record", e))?;
     let names = record
         .overrides
         .iter()
         .map(|o| o.tool.as_str())
         .chain(std::iter::once(PROBE));
     for name in names {
-        let path = dir.join(name);
-        std::fs::write(&path, &text).map_err(|e| io("shim", e))?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| io("shim", e))?;
+        create(name, 0o700)
+            .and_then(|mut f| f.write_all(text.as_bytes()))
+            .map_err(|e| io(&format!("shim {name:?}"), e))?;
     }
     Ok(lock)
 }
@@ -1356,6 +1397,12 @@ mod tests {
     }
 
     fn private_dir() -> tempfile::TempDir {
+        let dir = private_dir_bare();
+        std::fs::create_dir(dir.path().join(CONTROL)).unwrap();
+        dir
+    }
+
+    fn private_dir_bare() -> tempfile::TempDir {
         // 0700 asked for explicitly, as varve's own is: tempfile's default
         // follows the umask, which leaves a directory others can read.
         use std::os::unix::fs::PermissionsExt;
@@ -1869,6 +1916,7 @@ mod tests {
             .prefix("not-varve-")
             .tempdir()
             .unwrap();
+        std::fs::create_dir(other.path().join(CONTROL)).unwrap();
         std::fs::write(other.path().join(RECORD_FILE), "{}").unwrap();
         let other_lock = std::fs::File::create(other.path().join(LOCK_FILE)).unwrap();
         other_lock.lock().unwrap();
@@ -1929,5 +1977,88 @@ mod tests {
             flags,
             rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOFOLLOW
         );
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_tool_named_like_the_control_directory_is_refused_at_parse_time() {
+        for name in [".v", ".V"] {
+            let why = parse_request(&format!("{name}@1")).unwrap_err();
+            assert!(why.contains("reserved"), "{name}: {why}");
+        }
+        assert!(
+            parse_request(".go@1").is_ok(),
+            "only the control directory is reserved"
+        );
+        assert!(parse_request("varve@1").is_ok());
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn the_path_directory_holds_only_wrappers_and_nothing_is_written_through_an_existing_path() {
+        let _serial = serial();
+        let dir = private_dir();
+        let mut rec = record();
+        rec.overrides.push(crate::overrides::RecordedOverride {
+            tool: "varve".into(),
+            layer: "2026.08.0".into(),
+            digest: "sha256:a".into(),
+        });
+        let interpreter = dir.path().join(INTERPRETER);
+        std::fs::write(&interpreter, b"THE-INSTALLED-BINARY").unwrap();
+        let lock = fill_shim_dir(dir.path(), &rec, &interpreter).unwrap();
+        let mut top: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        top.sort();
+        assert_eq!(
+            top,
+            [".v", "synth", "varve"],
+            "only wrappers and the control dir"
+        );
+        assert_eq!(
+            std::fs::read(&interpreter).unwrap(),
+            b"THE-INSTALLED-BINARY",
+            "a wrapper named varve never touches the interpreter"
+        );
+        for control in [LOCK_FILE, RECORD_FILE, PROBE] {
+            assert!(dir.path().join(control).is_file(), "{control}");
+        }
+        drop(lock);
+        // A path that already exists is never written through: refused.
+        let taken = private_dir();
+        std::fs::write(taken.path().join("synth"), b"already here").unwrap();
+        assert!(fill_shim_dir(taken.path(), &record(), &interpreter).is_err());
+        assert_eq!(
+            std::fs::read(taken.path().join("synth")).unwrap(),
+            b"already here"
+        );
+        let locked = private_dir();
+        std::fs::write(locked.path().join(LOCK_FILE), b"").unwrap();
+        assert!(fill_shim_dir(locked.path(), &record(), &interpreter).is_err());
+        let recorded = private_dir();
+        std::fs::write(recorded.path().join(RECORD_FILE), b"{}").unwrap();
+        assert!(fill_shim_dir(recorded.path(), &record(), &interpreter).is_err());
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn the_probe_and_the_interpreter_are_known_by_where_they_are() {
+        let p = std::path::Path::new;
+        assert!(is_probe(p("/t/varve-with-x/.v/probe")));
+        assert!(!is_probe(p("/t/varve-with-x/probe")), "a tool named probe");
+        assert!(!is_probe(p("/t/varve-with-x/synth")));
+        assert!(is_interpreter_path(p("/t/varve-with-x/.v/varve")));
+        assert!(
+            !is_interpreter_path(p("/t/varve-with-x/varve")),
+            "a wrapper named varve"
+        );
+        assert!(
+            !is_interpreter_path(p("/t/other/.v/varve")),
+            "not a private dir"
+        );
+        assert!(!is_interpreter_path(p("/usr/local/bin/varve")));
+        assert!(!is_interpreter_path(p("varve")));
     }
 }

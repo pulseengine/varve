@@ -878,11 +878,8 @@ fn a_shim_directory_leaked_by_sigkill_grants_nothing_even_when_edited() {
     let a = run_shim();
     assert!(stderr(&a).contains("outlived"), "{}", stderr(&a));
     // An edited record changes nothing: it is never read.
-    let record = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| p.extension().is_some_and(|x| x == "json"))
-        .unwrap();
+    let record = dir.join(".v").join("with.json");
+    assert!(record.is_file());
     std::fs::write(&record, "{\"forged\": true}").unwrap();
     let a = run_shim();
     assert!(stderr(&a).contains("outlived"), "{}", stderr(&a));
@@ -911,7 +908,7 @@ fn an_edited_record_in_a_live_directory_is_reverified_not_trusted() {
     let forged = format!("sha256:{}", "0".repeat(64));
     for (layer, digest) in [(OLDER, forged.as_str()), ("2026.09.0", other.as_str())] {
         let script = format!(
-            "rec=$(ls \"${{PATH%%:*}}\"/*.json); \
+            "rec=\"${{PATH%%:*}}/.v/with.json\"; \
              sed -e 's/{}/{digest}/' -e 's/\"{OLDER}\"/\"{layer}\"/' \"$rec\" > \"$rec.new\" \
              && mv \"$rec.new\" \"$rec\"; synth",
             w.older_digest
@@ -1559,7 +1556,7 @@ fn forge_live_tree(w: &World) -> (tempfile::TempDir, std::fs::File) {
             "--",
             "sh",
             "-c",
-            "cat \"${PATH%%:*}/with.json\"",
+            "cat \"${PATH%%:*}/.v/with.json\"",
         ])
         .assert()
         .success();
@@ -1571,8 +1568,9 @@ fn forge_live_tree(w: &World) -> (tempfile::TempDir, std::fs::File) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(forged.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    std::fs::write(forged.path().join("with.json"), stdout(&a)).unwrap();
-    let lock = std::fs::File::create(forged.path().join("owner.lock")).unwrap();
+    std::fs::create_dir(forged.path().join(".v")).unwrap();
+    std::fs::write(forged.path().join(".v").join("with.json"), stdout(&a)).unwrap();
+    let lock = std::fs::File::create(forged.path().join(".v").join("owner.lock")).unwrap();
     lock.lock().unwrap();
     (forged, lock)
 }
@@ -1735,10 +1733,11 @@ fn a_fifo_planted_as_the_lock_neither_hangs_nor_fails_a_plain_run() {
     let w = world();
     let trap = w.tmp().join("varve-with-trap");
     std::fs::create_dir(&trap).unwrap();
-    std::fs::write(trap.join("with.json"), "{}").unwrap();
+    std::fs::create_dir(trap.join(".v")).unwrap();
+    std::fs::write(trap.join(".v").join("with.json"), "{}").unwrap();
     assert!(
         std::process::Command::new("mkfifo")
-            .arg(trap.join("owner.lock"))
+            .arg(trap.join(".v").join("owner.lock"))
             .status()
             .unwrap()
             .success()
@@ -2198,7 +2197,7 @@ fn a_hard_linked_varve_keeps_the_installed_binarys_mode() {
             "--",
             "sh",
             "-c",
-            "ls -i \"${PATH%%:*}/varve\" \"$VINSTALLED\"",
+            "ls -i \"${PATH%%:*}/.v/varve\" \"$VINSTALLED\"",
         ])
         .assert()
         .success();
@@ -2218,4 +2217,244 @@ fn a_hard_linked_varve_keeps_the_installed_binarys_mode() {
         mode, 0o755,
         "the installed varve's mode was changed to {mode:o}"
     );
+}
+
+// ---- fifth review (2026-11-14) ----
+
+/// `world()`, except both layers also carry a tool named `name` (1.0.0 in
+/// the pin, 0.9.0 in the older layer).
+fn world_with_tool(name: &str) -> World {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let root = dir.join("varve-root");
+    let project = dir.join("project");
+    let registry = dir.join("acme-registry");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(dir.join("marks")).unwrap();
+    let (sk, pk) = varve_core::generate_root_keypair();
+    put_layer(
+        &registry,
+        &sk,
+        PINNED,
+        "qualified",
+        &[
+            ("synth", "0.65.0", script("synth-0.65")),
+            (name, "1.0.0", script("named-1.0")),
+        ],
+    );
+    let older_digest = put_layer(
+        &registry,
+        &sk,
+        OLDER,
+        "qualified",
+        &[
+            ("synth", "0.57.0", script("synth-0.57")),
+            (name, "0.9.0", script("named-0.9")),
+        ],
+    );
+    let realms = format!(
+        "[realm.acme]\nregistry = \"{}\"\ntrust-root = \"{}\"\n",
+        registry.display(),
+        hex::encode(&pk)
+    );
+    std::fs::write(project.join("varve-realms.toml"), &realms).unwrap();
+    let vtmp = tempfile::Builder::new()
+        .prefix("varve-test-tmp-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let w = World {
+        _tmp: tmp,
+        vtmp,
+        dir,
+        root,
+        project,
+        registry,
+        realms,
+        sk,
+        older_digest,
+    };
+    w.install_also(OLDER, &w.older_digest.clone());
+    w
+}
+
+fn file_digest(path: &Path) -> String {
+    varve_core::manifest_digest(&std::fs::read(path).unwrap())
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_tool_named_varve_never_overwrites_the_installed_binary() {
+    // The interpreter `<dir>/varve` and a wrapper for a tool named `varve`
+    // (or `Varve`, on a case-insensitive filesystem) shared one name: the
+    // wrapper was written through the hard link onto the INSTALLED varve.
+    use std::os::unix::fs::PermissionsExt;
+    for name in ["varve", "Varve"] {
+        let w = world_with_tool(name);
+        // Installed on the same filesystem as TMPDIR, so the link is made.
+        let installed = w.tmp().join("installed");
+        std::fs::create_dir(&installed).unwrap();
+        let varve_bin = installed.join("varve");
+        std::fs::copy(assert_cmd::cargo::cargo_bin("varve"), &varve_bin).unwrap();
+        std::fs::set_permissions(&varve_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = file_digest(&varve_bin);
+        let out = varve_at(&w, &varve_bin)
+            .args([
+                "run",
+                "--with",
+                &format!("{name}@0.9.0"),
+                "--",
+                "/usr/bin/env",
+                name,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            file_digest(&varve_bin),
+            before,
+            "{name}: the installed varve changed"
+        );
+        let mode = std::fs::metadata(&varve_bin).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o755, "{name}: mode {mode:o}");
+        // …and the run did what was asked: the override of that tool ran.
+        assert!(
+            String::from_utf8_lossy(&out.stdout).starts_with("named-0.9 "),
+            "{name}: {:?} {} {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_tool_named_like_a_control_file_cannot_release_the_gate() {
+    // A wrapper named `.go` was the gate's release marker: written with the
+    // wrappers, it let the command start before setup had finished.
+    let w = world_with_tool(".go");
+    let a = varve(&w)
+        .args([
+            "run",
+            "--with",
+            ".go@0.9.0",
+            "--",
+            "sh",
+            "-c",
+            "echo ran; .go",
+        ])
+        .assert()
+        .success();
+    let out = stdout(&a);
+    assert!(out.starts_with("ran\nnamed-0.9 "), "{out} {}", stderr(&a));
+    assert!(w.tmp_is_empty());
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_tool_named_like_the_control_directory_is_refused() {
+    let w = world();
+    for name in [".v", ".V"] {
+        let err = assert_refused(
+            &w,
+            &["run", "--with", &format!("{name}@1.0.0"), "--", "synth"],
+            "reserved",
+        );
+        assert!(err.contains(name), "{err}");
+    }
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_signal_during_setup_never_leaks_a_copy_of_varve() {
+    // Before the handlers are installed only an empty directory exists; the
+    // interpreter is placed after them. Signal varve at varying points just
+    // after its directory appears: anything left behind must be empty.
+    use std::os::unix::process::CommandExt;
+    let w = world();
+    let none = w.dir.join("no-user-config");
+    for i in 0..40u64 {
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("varve"))
+            .args(["run", "--with", "synth@0.57.0", "--", "/usr/bin/true"])
+            .env("PATH", "/usr/bin:/bin")
+            .env("VARVE_ROOT", &w.root)
+            .env("XDG_CONFIG_HOME", &none)
+            .env("HOME", &none)
+            .env("TMPDIR", w.tmp())
+            .env_remove("VARVE_TRUST_ROOT")
+            .current_dir(&w.project)
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        while std::fs::read_dir(w.tmp()).unwrap().next().is_none()
+            && start.elapsed() < std::time::Duration::from_secs(10)
+        {
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+        std::thread::sleep(std::time::Duration::from_micros(500 * (i % 20)));
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status();
+        child.wait().unwrap();
+        // A gate orphaned by an early signal gives up on its own.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        for e in std::fs::read_dir(w.tmp()).unwrap() {
+            let leak = e.unwrap().path();
+            let inside: Vec<_> = walk(&leak);
+            assert!(
+                inside.is_empty(),
+                "iteration {i}: {} leaked with {inside:?}",
+                leak.display()
+            );
+            std::fs::remove_dir_all(&leak).unwrap();
+        }
+    }
+}
+
+/// Every file under `dir` (not directories).
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if std::fs::symlink_metadata(&p).unwrap().is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_regular_shim_whose_first_argument_is_a_marker_runs_its_tool() {
+    // The markers are honoured only from a private interpreter (the shim
+    // marker) or as varve's own binary run by itself (the gate marker); a
+    // regular shim hands such an argument to its tool like any other.
+    let w = world();
+    with_regular_shims(&w);
+    let shim = w.root.join("shims").join("synth");
+    for marker in ["--varve-with-shim", "--varve-with-gate"] {
+        let none = w.dir.join("no-user-config");
+        let a = Command::new(&shim)
+            .args([marker, "/x", "--", "/usr/bin/true"])
+            .env("PATH", "/usr/bin:/bin")
+            .env("VARVE_ROOT", &w.root)
+            .env("XDG_CONFIG_HOME", &none)
+            .env("HOME", &none)
+            .env("RUNWITH_TEST_MARKS", w.marks())
+            .env_remove("VARVE_TRUST_ROOT")
+            .current_dir(&w.project)
+            .assert()
+            .success();
+        assert!(
+            stdout(&a).starts_with("synth-0.65 "),
+            "{marker}: {}",
+            stderr(&a)
+        );
+    }
 }
