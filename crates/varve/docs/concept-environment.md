@@ -15,7 +15,9 @@ Every variable varve reads, and which one wins.
 `VARVE_LAYER_MANIFEST_DIGEST` into the dispatched tool — provenance handed
 downward, not configuration read upward (`varve docs run`). In a mixed
 toolchain they add `VARVE_OVERRIDES`, and `varve run --with` adds `VARVE_WITH`
-(`tool@version`); varve never reads either back.
+(`tool@version`) and puts a private shim directory first on the command's
+`PATH`; varve never reads either variable back, and a shim finds an override
+only through the directory it sits in (`varve docs run`).
 
 ## VARVE_ROOT
 

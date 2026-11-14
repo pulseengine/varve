@@ -83,6 +83,7 @@ fn world() -> World {
     let registry = dir.join("acme-registry");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir_all(dir.join("marks")).unwrap();
+    std::fs::create_dir_all(dir.join("tmp")).unwrap();
     let (sk, pk) = varve_core::generate_root_keypair();
     put_layer(
         &registry,
@@ -147,6 +148,17 @@ impl World {
         self.pin("");
     }
 
+    /// varve's TMPDIR: outside the varve root and the project, so a --with
+    /// shim directory is visible to the tests and never in the snapshot.
+    fn tmp(&self) -> PathBuf {
+        self.dir.join("tmp")
+    }
+
+    /// Nothing left in varve's TMPDIR.
+    fn tmp_is_empty(&self) -> bool {
+        std::fs::read_dir(self.tmp()).unwrap().next().is_none()
+    }
+
     fn marks(&self) -> PathBuf {
         self.dir.join("marks")
     }
@@ -198,6 +210,7 @@ fn varve(w: &World) -> Command {
         .env("XDG_CONFIG_HOME", &none)
         .env("HOME", &none)
         .env("RUNWITH_TEST_MARKS", w.marks())
+        .env("TMPDIR", w.tmp())
         .env_remove("VARVE_TRUST_ROOT")
         .env_remove("VARVE_LAYER")
         .env_remove("VARVE_OVERRIDES")
@@ -235,6 +248,7 @@ fn assert_refused(w: &World, args: &[&str], reason: &str) -> String {
         before == w.snapshot(),
         "{args:?} changed the store or project"
     );
+    assert!(w.tmp_is_empty(), "{args:?} left a shim directory");
     err
 }
 
@@ -573,4 +587,256 @@ fn the_chosen_layer_meets_every_rule_an_override_in_varve_toml_meets() {
     );
     assert!(err.contains("does not carry 'synth'"), "{err}");
     assert!(err.contains(&w.older_digest), "{err}");
+}
+
+// ---- the command is spawned with a private shim directory first on PATH ----
+
+/// The project's regular shims, so a script's call to a tool `--with` does not
+/// override reaches the pin, as on a developer's PATH.
+fn with_regular_shims(w: &World) -> String {
+    varve(w).args(["shim", "install"]).assert().success();
+    format!("{}:/usr/bin:/bin", w.root.join("shims").display())
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_script_calling_the_tool_by_name_gets_the_override_and_nothing_persists() {
+    let w = world();
+    let path = with_regular_shims(&w);
+    let before = w.snapshot();
+    // A script, not a layer tool: `synth` by bare name gets 0.57.0 through the
+    // private shim, nested shells too; `loom` reaches the pin's regular shim.
+    let a = varve(&w)
+        .env("PATH", &path)
+        .args([
+            "run",
+            "--with",
+            "synth@0.57.0",
+            "--",
+            "sh",
+            "-c",
+            "echo \"script with=$VARVE_WITH overrides=$VARVE_OVERRIDES\"; synth; \
+             sh -c 'sh -c synth'; loom",
+        ])
+        .assert()
+        .success();
+    let out = stdout(&a);
+    let d = &w.older_digest;
+    let synth = format!("synth-0.57 layer={PINNED} overrides=synth={OLDER}@{d} with=synth@0.57.0");
+    let expected = vec![
+        format!("script with=synth@0.57.0 overrides=synth={OLDER}@{d}"),
+        synth.clone(),
+        synth,
+        format!("loom-1.0 layer={PINNED} overrides= with="),
+    ];
+    let lines: Vec<String> = out.lines().map(str::to_string).collect();
+    assert_eq!(lines, expected, "{out}");
+    assert!(!w.ran("synth-0.65"));
+    assert!(w.tmp_is_empty(), "the shim directory is removed");
+    assert!(
+        before == w.snapshot(),
+        "--with changed the store or project"
+    );
+    // Without --with, a bare `synth` is the pin's.
+    let a = varve(&w)
+        .env("PATH", &path)
+        .args(["run", "--", "synth"])
+        .assert()
+        .success();
+    assert!(stdout(&a).starts_with("synth-0.65 "), "{}", stdout(&a));
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn the_exit_status_passes_through_and_the_directory_goes_either_way() {
+    let w = world();
+    // A non-zero exit.
+    varve(&w)
+        .args([
+            "run",
+            "--with",
+            "synth@0.57.0",
+            "--",
+            "sh",
+            "-c",
+            "synth; exit 7",
+        ])
+        .assert()
+        .code(7);
+    assert!(w.tmp_is_empty());
+    // A layer tool run directly, under --with.
+    varve(&w)
+        .args(["run", "--with", "synth@0.57.0", "--", "synth"])
+        .assert()
+        .code(0);
+    assert!(w.tmp_is_empty());
+    // A child that dies of a signal: 128 + N.
+    varve(&w)
+        .args([
+            "run",
+            "--with",
+            "synth@0.57.0",
+            "--",
+            "sh",
+            "-c",
+            "kill -TERM $$",
+        ])
+        .assert()
+        .code(128 + 15);
+    assert!(w.tmp_is_empty());
+    // A command that cannot be started: refused, directory gone.
+    varve(&w)
+        .args([
+            "run",
+            "--with",
+            "synth@0.57.0",
+            "--",
+            "no-such-command-anywhere",
+        ])
+        .assert()
+        .code(1);
+    assert!(w.tmp_is_empty());
+}
+
+/// Start `varve run --with synth@0.57.0 -- sh -c <script>` in the background.
+fn spawn_varve(w: &World, script: &str) -> std::process::Child {
+    let none = w.dir.join("no-user-config");
+    std::process::Command::new(assert_cmd::cargo::cargo_bin("varve"))
+        .args(["run", "--with", "synth@0.57.0", "--", "sh", "-c", script])
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &w.root)
+        .env("XDG_CONFIG_HOME", &none)
+        .env("HOME", &none)
+        .env("RUNWITH_TEST_MARKS", w.marks())
+        .env("TMPDIR", w.tmp())
+        .env_remove("VARVE_TRUST_ROOT")
+        .env_remove("VARVE_WITH")
+        .env_remove("VARVE_OVERRIDES")
+        .current_dir(&w.project)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// Wait (bounded, 30 s) for the script to write a line to `file`.
+fn wait_for(file: &Path) -> String {
+    for _ in 0..600 {
+        if let Ok(text) = std::fs::read_to_string(file)
+            && text.ends_with('\n')
+        {
+            return text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("{} never appeared", file.display());
+}
+
+fn send(sig: &str, pid: u32) {
+    let ok = std::process::Command::new("kill")
+        .args([sig, &pid.to_string()])
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "kill {sig} {pid}");
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_signal_to_varve_is_forwarded_and_the_directory_is_removed() {
+    for (sig, n) in [("-TERM", 15), ("-INT", 2), ("-HUP", 1)] {
+        let w = world();
+        let ready = w.dir.join("ready");
+        // `exec sleep`: the child IS the sleep, so a forwarded signal ends it.
+        let script = format!(
+            "echo \"${{PATH%%:*}}\" > '{}'; exec sleep 30",
+            ready.display()
+        );
+        let mut child = spawn_varve(&w, &script);
+        let dir = PathBuf::from(wait_for(&ready).trim());
+        assert!(
+            dir.is_dir() && dir.starts_with(w.tmp()),
+            "{}",
+            dir.display()
+        );
+        send(sig, child.id());
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), Some(128 + n), "{sig}: {status:?}");
+        assert!(!dir.exists(), "{sig}: the shim directory is removed");
+        assert!(w.tmp_is_empty(), "{sig}");
+    }
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn a_shim_directory_leaked_by_sigkill_grants_nothing_even_when_edited() {
+    let w = world();
+    let ready = w.dir.join("ready");
+    let script = format!(
+        "echo \"${{PATH%%:*}} $$\" > '{}'; exec sleep 30",
+        ready.display()
+    );
+    let mut child = spawn_varve(&w, &script);
+    let text = wait_for(&ready);
+    let (dir, sleeper) = text.trim().split_once(' ').unwrap();
+    let dir = PathBuf::from(dir);
+    // SIGKILL cannot be caught: the directory leaks.
+    send("-KILL", child.id());
+    child.wait().unwrap();
+    send("-KILL", sleeper.parse().unwrap());
+    assert!(dir.is_dir(), "a SIGKILL leaks the directory");
+    // Its shim is refused: the varve run that made it is gone.
+    let shim = dir.join("synth");
+    let run_shim = || {
+        let none = w.dir.join("no-user-config");
+        Command::new(&shim)
+            .env("PATH", "/usr/bin:/bin")
+            .env("VARVE_ROOT", &w.root)
+            .env("XDG_CONFIG_HOME", &none)
+            .env("HOME", &none)
+            .env("RUNWITH_TEST_MARKS", w.marks())
+            .env_remove("VARVE_TRUST_ROOT")
+            .current_dir(&w.project)
+            .assert()
+            .code(1)
+    };
+    w.clear_marks();
+    let a = run_shim();
+    assert!(stderr(&a).contains("outlived"), "{}", stderr(&a));
+    // An edited record changes nothing: it is never read.
+    let record = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "json"))
+        .unwrap();
+    std::fs::write(&record, "{\"forged\": true}").unwrap();
+    let a = run_shim();
+    assert!(stderr(&a).contains("outlived"), "{}", stderr(&a));
+    for id in ["synth-0.57", "synth-0.65"] {
+        assert!(!w.ran(id), "{id} ran from a leaked directory");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// rivet: verifies REQ-RUNWITH-001
+#[test]
+fn an_edited_record_in_a_live_directory_is_reverified_not_trusted() {
+    // While the run lives, its own script rewrites the record to a digest no
+    // installed layer has: the private shim re-verifies it against the store
+    // as an override and refuses, and runs nothing.
+    let w = world();
+    let forged = format!("sha256:{}", "0".repeat(64));
+    let script = format!(
+        "rec=$(ls \"${{PATH%%:*}}\"/*.json); \
+         sed 's/{}/{forged}/' \"$rec\" > \"$rec.new\" && mv \"$rec.new\" \"$rec\"; synth",
+        w.older_digest
+    );
+    w.clear_marks();
+    let a = varve(&w)
+        .args(["run", "--with", "synth@0.57.0", "--", "sh", "-c", &script])
+        .assert()
+        .code(1);
+    assert!(stderr(&a).contains("is not installed"), "{}", stderr(&a));
+    assert!(!w.ran("synth-0.57") && !w.ran("synth-0.65"));
+    assert!(w.tmp_is_empty());
 }

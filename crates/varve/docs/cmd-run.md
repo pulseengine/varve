@@ -1,4 +1,4 @@
-# varve run [--varve <layer> | --with <tool>@<version>…] -- <tool> <args>
+# varve run [--varve <layer> | --with <tool>@<version>…] -- <tool or command> <args>
 
 Dispatches a tool from the pinned layer with the layer identity in the environment (VARVE_LAYER, VARVE_LAYER_MANIFEST_DIGEST) so provenance tooling records which qualified set produced the output. --varve runs another installed layer without touching the pin.
 
@@ -12,10 +12,10 @@ Every address of an overridden tool runs the override: `synth` and the pin's own
 
 ```sh
 varve run --with synth@0.57.0 -- synth build.yaml
-varve run --with synth@0.57.0 --with loom@0.9.0 -- loom check
+varve run --with synth@0.57.0 --with loom@0.9.0 -- make bench
 ```
 
-`--with <tool>@<version>` (REQ-RUNWITH-001) runs this one command as though varve.toml carried a `[toolchain.override.<tool>]` naming the layer that ships that version, and every other tool from the pin. **Nothing persists**: varve.toml, the store, the anti-rollback marks and the project are byte-identical afterwards, and the next command runs the pin.
+`--with <tool>@<version>` (REQ-RUNWITH-001) runs this one command as though varve.toml carried a `[toolchain.override.<tool>]` naming the layer that ships that version, and every other tool from the pin. The command may be a tool of the layer or any program — a script, `make` — and every call to the tool by bare name anywhere in the command's process tree gets the `--with` version (see *How a script reaches the override* below). **Nothing persists**: varve.toml, the store, the anti-rollback marks and the project are byte-identical afterwards, and the next command runs the pin.
 
 The version is resolved to a layer id and digest **only among layers already installed from the pin's realm** — the store's partition for that realm's trust root — by the `eu.pulseengine.tool.version` the layer's signed manifest declares for the tool on this platform. The match is exact: no ranges, no "latest". `--with` never fetches. To make a version available, install a layer that carries it the one way anything reaches the store — pin it (for example as an override) and run `varve install`.
 
@@ -32,4 +32,16 @@ Also refused, exit 1, nothing run:
 - **A tool varve.toml already overrides**: an override of an override. `--with` does not replace the reviewed override; change varve.toml or run without `--with`. An override of ANOTHER tool in varve.toml applies beside `--with`.
 - **Beside `--varve`**: one layer swapped whole plus a tool from another is a toolchain nobody declared.
 
-**What `--with` does not reach.** It applies to the tool `varve run` dispatches. A process that tool starts and that reaches another tool through a shim gets the pin's resolution, because a shim reads only varve.toml: no environment variable changes what a shim runs.
+- **A command the layer holds or carries but does not dispatch** (a held payload, a tool the pin's `tools` list leaves out): it is never run from outside the layer.
+
+### How a script reaches the override
+
+With `--with`, `varve run` does not exec. It creates a **private shim directory** with mkdtemp under `TMPDIR` — mode 0700, an unpredictable name, never under `VARVE_ROOT` or the project — and starts the command as a child with that directory **first on PATH**. For each `--with` tool the directory holds a small wrapper that execs `varve run --with-shim-dir <that directory> -- <tool>`, so a call by bare name from the command, or from anything it starts, reaches the wrapper before any other `synth` on PATH. The run waits for the child, removes the directory, and exits with the child's status — 128 + N for a child killed by signal N. SIGINT, SIGTERM and SIGHUP sent to `varve` are forwarded to the child, and the directory is removed then too. A command that cannot be started is refused, exit 1, and the directory is removed.
+
+The wrapper names its directory **in its own text**. No environment variable is read to find an override, so an inherited variable cannot change what any shim runs, and a regular shim never consults the private directory. The directory also holds what the run resolved (`with.json`: the project's varve.toml, each tool's layer and digest, what was asked) and a lock that the run holds for its whole life. A wrapper is honoured only while that lock is held:
+
+- **The run is alive:** the wrapper's varve checks the directory is the caller's own and 0700, then re-verifies the recorded override against the store exactly as an override in varve.toml — the tool the pin dispatches, the digest installed in this realm, its channel and platform, the tool and runner in that layer — and execs the tool. It creates no directory and starts no child, so nested calls do not nest. An edited record can name only what the pin could have overridden anyway, and a record varve cannot read whole is refused.
+- **In another project** (the command `cd`s into a directory with another varve.toml), the wrapper runs the tool as `varve run` would there: that project's pin decides, and the override does not apply.
+- **After the run ends**, the directory is gone. If `varve` itself is killed with SIGKILL, it cannot remove the directory and the directory leaks in `TMPDIR`. Its lock died with the process, so its wrappers refuse — `… outlived the varve run --with that made it` — without reading the record, edited or not. Only processes that inherited the child's PATH could reach it at all. Remove a leaked `varve-with-*` directory by hand.
+
+Without `--with`, `varve run` execs the tool as before, and no directory is made.

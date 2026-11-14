@@ -221,9 +221,22 @@ enum Cmd {
         /// resolved among layers ALREADY INSTALLED from the pin's realm (never
         /// fetched) and applied as an in-memory `[toolchain.override.TOOL]`,
         /// with every refusal an override has. Nothing persists. Repeatable,
-        /// one per tool. The command sees `VARVE_WITH` and `VARVE_OVERRIDES`.
+        /// one per tool. The command — a layer tool or any program — runs as a
+        /// child with a private shim directory first on PATH, so calls to TOOL
+        /// by name from anything it starts get that version too; it sees
+        /// `VARVE_WITH` and `VARVE_OVERRIDES`.
         #[arg(long = "with", value_name = "TOOL@VERSION")]
         with: Vec<String>,
+        /// (internal) Run as a private shim of a `varve run --with` that is
+        /// still running: named in the wrapper's own text, never read from the
+        /// environment, and refused once that run has ended.
+        #[arg(
+            long = "with-shim-dir",
+            value_name = "DIR",
+            hide = true,
+            conflicts_with_all = ["varve", "with"]
+        )]
+        with_shim_dir: Option<PathBuf>,
         /// Tool and its arguments, after `--`. The tool may be realm-qualified
         /// (`bytecodealliance/wasm-tools`) to reach one specific provider where
         /// two realms of the composition ship the same name. `OsString`, so an
@@ -957,6 +970,7 @@ fn run() -> anyhow::Result<Outcome> {
         Cmd::Run {
             varve,
             with,
+            with_shim_dir,
             tool_and_args,
         } => {
             let (tool, args) = tool_and_args.split_first().context(
@@ -966,6 +980,9 @@ fn run() -> anyhow::Result<Outcome> {
             let tool = tool
                 .to_str()
                 .context("tool name must be valid UTF-8 — it names an entry in the layer")?;
+            if let Some(dir) = with_shim_dir {
+                return run_private_shim(&store, &dir, tool, args).map(|()| Outcome::Ok);
+            }
             let with = with
                 .iter()
                 .map(|spec| varve_core::runwith::parse_request(spec))
@@ -2366,7 +2383,7 @@ fn run_tool(
     args: &[std::ffi::OsString],
     via_shim: bool,
 ) -> anyhow::Result<()> {
-    dispatch(store, override_layer, &[], tool, args, via_shim)
+    dispatch(store, override_layer, &[], None, tool, args, via_shim)
 }
 
 /// `varve run`, with any `--with` (REQ-RUNWITH-001). A shim never takes one:
@@ -2378,7 +2395,92 @@ fn run_tool_with(
     tool: &str,
     args: &[std::ffi::OsString],
 ) -> anyhow::Result<()> {
-    dispatch(store, override_layer, with, tool, args, false)
+    dispatch(store, override_layer, with, None, tool, args, false)
+}
+
+/// A private shim of a running `varve run --with` (REQ-RUNWITH-001): the
+/// wrapper in its directory names the directory, so nothing in the
+/// environment decides this. Refused once that run has ended. In the project
+/// the run resolved, the recorded overrides are applied in memory and
+/// re-verified by `resolve` exactly as varve.toml's are, and the tool is
+/// exec'd — no new directory, no child, so a nested call cannot nest. In any
+/// other project, that project's own pin decides, as for `varve run`.
+fn run_private_shim(
+    store: &Store,
+    dir: &std::path::Path,
+    tool: &str,
+    args: &[std::ffi::OsString],
+) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    let uid = rustix::process::getuid().as_raw();
+    #[cfg(not(unix))]
+    let uid = 0;
+    let record =
+        varve_core::runwith::read_shim_dir(dir, uid).map_err(|why| anyhow::anyhow!(why))?;
+    if !record.overrides.iter().any(|o| o.tool == tool) {
+        bail!(
+            "{} is a --with shim directory for {}, not for '{tool}' — refusing",
+            dir.display(),
+            varve_core::runwith::env_value(&record.with)
+        );
+    }
+    let ctx = dispatch_ctx(store)?;
+    let here = std::fs::canonicalize(ctx.root.join("varve.toml"))
+        .context("cannot locate this project's varve.toml")?;
+    if here != record.pin {
+        return run_tool(store, None, tool, args, false);
+    }
+    dispatch(store, None, &record.with, Some(&record), tool, args, false)
+}
+
+/// `refuse` when varve.toml already overrides `tool`: an override of an
+/// override (DD-043 (3)). Replacing the declared one would run a mix the
+/// reviewed pin never named while every report took its override as what ran.
+fn refuse_override_of_override(
+    pin: &Pin,
+    pin_file: &std::path::Path,
+    asked: &str,
+    tool: &str,
+) -> anyhow::Result<()> {
+    if let Some(o) = pin
+        .overrides
+        .iter()
+        .find(|o| o.tool.eq_ignore_ascii_case(tool))
+    {
+        bail!(
+            "--with {asked}: {} already overrides '{}' with layer {} ({}) — an override of an \
+             override is refused. Run without --with {tool}, or change the override in \
+             varve.toml.",
+            pin_file.display(),
+            o.tool,
+            o.layer,
+            o.digest,
+        );
+    }
+    Ok(())
+}
+
+/// A private shim's recorded overrides, applied to `pin` in memory. Nothing
+/// here trusts the record: `resolve` re-verifies each one as it does an
+/// override in varve.toml (clause 4, the digest installed in this realm, its
+/// channel and platform, the tool and runner in that layer).
+fn apply_recorded(
+    pin: &mut Pin,
+    pin_file: &std::path::Path,
+    record: &varve_core::runwith::ShimRecord,
+) -> anyhow::Result<()> {
+    for o in &record.overrides {
+        refuse_override_of_override(pin, pin_file, &format!("{}@{}", o.tool, o.layer), &o.tool)?;
+        pin.overrides.push(varve_core::ToolOverride {
+            tool: o.tool.clone(),
+            layer: o.layer.parse().map_err(|e| {
+                anyhow::anyhow!("the --with shim record names layer {:?}: {e}", o.layer)
+            })?,
+            digest: o.digest.clone(),
+        });
+    }
+    pin.overrides.sort_by(|a, b| a.tool.cmp(&b.tool));
+    Ok(())
 }
 
 /// Turn each `--with tool@version` into an in-memory `[toolchain.override]`
@@ -2395,26 +2497,9 @@ fn apply_with(
         return Ok(());
     }
     // The same tool overridden in varve.toml AND by --with is refused, not
-    // replaced: an override of an override is refused in varve.toml (DD-043
-    // (3)), and replacing the declared one would run a mix the reviewed pin
-    // never named while every report took its override as what ran.
+    // replaced.
     for r in with {
-        if let Some(o) = pin
-            .overrides
-            .iter()
-            .find(|o| o.tool.eq_ignore_ascii_case(&r.tool))
-        {
-            bail!(
-                "--with {r}: {} already overrides '{}' with layer {} ({}) — an override of an \
-                 override is refused. Run without --with {}, or change the override in \
-                 varve.toml.",
-                pin_file.display(),
-                o.tool,
-                o.layer,
-                o.digest,
-                r.tool
-            );
-        }
+        refuse_override_of_override(pin, pin_file, &r.to_string(), &r.tool)?;
     }
     // Clause 4 first, from the pin as it stands: --with replaces a tool the
     // pinned composition dispatches here, it never adds one. Asked before any
@@ -2463,6 +2548,7 @@ fn dispatch(
     store: &Store,
     override_layer: Option<&str>,
     with: &[varve_core::runwith::WithRequest],
+    recorded: Option<&varve_core::runwith::ShimRecord>,
     tool: &str,
     args: &[std::ffi::OsString],
     via_shim: bool,
@@ -2505,7 +2591,13 @@ fn dispatch(
         pin.layer = layer.parse()?;
         pin.digest = None;
     }
-    apply_with(&ctx, &mut pin, &pin_file, with)?;
+    match recorded {
+        None => apply_with(&ctx, &mut pin, &pin_file, with)?,
+        Some(record) => apply_recorded(&mut pin, &pin_file, record)?,
+    }
+    // `varve run --with` (not a private shim) spawns its command with a
+    // private shim directory first on PATH; everything else execs.
+    let spawn = !with.is_empty() && recorded.is_none();
     let resolved = match resolve(&pin, &ctx.store) {
         Ok(resolved) => resolved,
         Err(e) if with.is_empty() => return Err(e.into()),
@@ -2529,7 +2621,22 @@ fn dispatch(
     };
     vouch_for_resolved(&ctx, &resolved)?;
     refuse_unreachable_override(&resolved, tool)?;
-    let Some((tool, path)) = dispatch_target(&resolved, tool) else {
+    // Under `varve run --with` the command may be a program the layer does
+    // not carry — a script, `make` — run from PATH with the private shims
+    // first (REQ-RUNWITH-001). Never a name the layer HOLDS or CARRIES: a
+    // carried tool is never run from outside the layer (REQ-PASSTHROUGH-001
+    // clause 2), and a composition varve cannot read counts as carrying it.
+    let ambient = spawn
+        && dispatch_target(&resolved, tool).is_none()
+        && held_payload(&ctx.store, &resolved.layer, tool).is_none()
+        && varve_core::carried_tool_names(&pin, &resolved.layer, &ctx.store)
+            .is_ok_and(|names| !names.contains(&tool.to_ascii_lowercase()));
+    let target = if ambient {
+        Some((tool, std::path::Path::new(tool)))
+    } else {
+        dispatch_target(&resolved, tool)
+    };
+    let Some((tool, path)) = target else {
         // The same correction `which` carries: the layer HOLDS a `wit`, `crate`
         // or `vsix` payload, it just does not dispatch one (REQ-INSPECT-001
         // clause 3). "not part of layer" sends the reader to re-deposit
@@ -2734,7 +2841,115 @@ fn dispatch(
     } else {
         cmd.env("VARVE_WITH", varve_core::runwith::env_value(with));
     }
+    if spawn {
+        return spawn_with_private_shims(cmd, &pin_file, &resolved, with, tool);
+    }
     launch(cmd, tool)
+}
+
+/// Run `cmd` as a child of this process with a private shim directory first on
+/// PATH (REQ-RUNWITH-001), wait for it, remove the directory, and exit with
+/// its status (128 + N for a child killed by signal N).
+///
+/// The directory is made by mkdtemp under TMPDIR (0700, an unpredictable
+/// name) — never under VARVE_ROOT or the project, so nothing of it persists
+/// there even while it exists. For each `--with` tool it holds a wrapper
+/// naming the directory in its own text; a call by bare name from anywhere in
+/// the command's process tree reaches that wrapper first. The directory holds
+/// a lock this process keeps for the child's whole life: a wrapper is honoured
+/// only while the lock is held, so a directory leaked by a SIGKILL of this
+/// process grants nothing.
+fn spawn_with_private_shims(
+    mut cmd: std::process::Command,
+    pin_file: &std::path::Path,
+    resolved: &varve_core::Resolved,
+    with: &[varve_core::runwith::WithRequest],
+    tool: &str,
+) -> anyhow::Result<()> {
+    let record = varve_core::runwith::ShimRecord {
+        pin: std::fs::canonicalize(pin_file)
+            .with_context(|| format!("cannot locate {}", pin_file.display()))?,
+        overrides: resolved
+            .recorded_overrides()
+            .into_iter()
+            .filter(|o| with.iter().any(|r| r.tool == o.tool))
+            .collect(),
+        with: with.to_vec(),
+    };
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("varve-with-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Asked for explicitly: tempfile's default follows the umask.
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let dir = builder
+        .tempdir_in(std::env::temp_dir())
+        .context("cannot create the private shim directory for --with")?;
+    let varve = std::env::current_exe().context("cannot locate the varve binary")?;
+    #[cfg(unix)]
+    let lock = varve_core::runwith::fill_shim_dir(dir.path(), &record, &varve)
+        .map_err(|why| anyhow::anyhow!(why))?;
+    #[cfg(not(unix))]
+    let lock = ();
+    let mut path = vec![dir.path().to_path_buf()];
+    if let Some(inherited) = std::env::var_os("PATH") {
+        path.extend(std::env::split_paths(&inherited));
+    }
+    cmd.env(
+        "PATH",
+        std::env::join_paths(path).context("PATH cannot hold the shim directory")?,
+    );
+    let status = run_child(cmd, tool);
+    drop(lock);
+    let shown = dir.path().display().to_string();
+    let removed = dir.close();
+    let code = status?;
+    removed.with_context(|| format!("could not remove the --with shim directory {shown}"))?;
+    std::process::exit(code)
+}
+
+/// Spawn `cmd`, forward SIGINT, SIGTERM and SIGHUP to it while it runs, and
+/// return its exit status. The handlers are installed BEFORE the spawn, so a
+/// signal arriving at any point is forwarded (queued until the child exists)
+/// rather than killing this process before it can clean up.
+#[cfg(unix)]
+fn run_child(mut cmd: std::process::Command, tool: &str) -> anyhow::Result<i32> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    use std::os::unix::process::ExitStatusExt;
+    let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP])
+        .context("cannot install signal forwarding")?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to run {tool}"))?;
+    let pid = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw);
+    let handle = signals.handle();
+    let forward = std::thread::spawn(move || {
+        for sig in signals.forever() {
+            if let (Some(pid), Some(sig)) = (pid, rustix::process::Signal::from_named_raw(sig)) {
+                let _ = rustix::process::kill_process(pid, sig);
+            }
+        }
+    });
+    let status = child.wait();
+    handle.close();
+    let _ = forward.join();
+    let status = status.with_context(|| format!("failed to wait for {tool}"))?;
+    Ok(varve_core::runwith::exit_code(
+        status.code(),
+        status.signal(),
+    ))
+}
+
+#[cfg(not(unix))]
+fn run_child(mut cmd: std::process::Command, tool: &str) -> anyhow::Result<i32> {
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to run {tool}"))?;
+    Ok(varve_core::runwith::exit_code(status.code(), None))
 }
 
 /// Resolve which installed layer an export targets, and verify it (trust

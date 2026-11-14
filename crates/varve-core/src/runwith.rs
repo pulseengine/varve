@@ -18,7 +18,8 @@ use crate::pin::{ToolOverride, ToolSelector};
 use crate::store::{Store, StoreError};
 
 /// One `--with tool@version`, parsed.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WithRequest {
     /// Bare: the source layer is in the pin's realm, as for an override.
     pub tool: String,
@@ -367,6 +368,135 @@ pub fn choose(
         layer: chosen.layer.clone(),
         digest: chosen.digest.clone(),
     })
+}
+
+// ---- the private shim directory a `--with` command gets first on PATH ----
+//
+// `varve run --with` spawns its command with a directory of its own first on
+// PATH. For each overridden tool the directory holds a wrapper that execs
+// `varve run --with-shim-dir <that directory> -- <tool>`: the directory is
+// named in the wrapper's own text, never in the environment, so no inherited
+// variable can point a shim at an override. The directory also holds the
+// record of what the run resolved (`RECORD_FILE`) and a lock the run holds
+// for its whole life (`LOCK_FILE`).
+//
+// A shim reading the directory first checks that the lock is still HELD. An
+// advisory lock dies with its holder, whatever kills it — SIGKILL included —
+// so a directory that outlived its run (a leak) grants nothing, and its record
+// is not even read. While the run lives, the record is re-verified against the
+// store exactly as a varve.toml override is (`resolve`), so an edited record
+// can name only what the pin could have overridden anyway.
+
+/// The record of what a `--with` run resolved, beside its private shims.
+pub const RECORD_FILE: &str = "with.json";
+/// Held, exclusively, by the run for its whole life.
+pub const LOCK_FILE: &str = "owner.lock";
+
+/// What a private shim directory records: the pin the run resolved (its
+/// varve.toml, canonical), the overrides `--with` resolved to, and what was
+/// asked. `deny_unknown_fields`: a record this varve cannot fully read is
+/// refused, not partly obeyed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShimRecord {
+    pub pin: std::path::PathBuf,
+    pub overrides: Vec<crate::overrides::RecordedOverride>,
+    pub with: Vec<WithRequest>,
+}
+
+/// The wrapper a private shim directory holds for `tool`. Paths that are not
+/// UTF-8 cannot be quoted for `sh` faithfully and are refused.
+pub fn wrapper_script(
+    varve: &std::path::Path,
+    dir: &std::path::Path,
+    tool: &str,
+) -> Result<String, String> {
+    let text = |p: &std::path::Path| {
+        p.to_str()
+            .map(crate::shellquote::quote_sh)
+            .ok_or_else(|| format!("{} is not UTF-8", p.display()))
+    };
+    Ok(format!(
+        "#!/bin/sh\n# varve run --with: a private shim, honoured only while that run lives \
+         (REQ-RUNWITH-001).\nexec {} run --with-shim-dir {} -- {} \"$@\"\n",
+        text(varve)?,
+        text(dir)?,
+        crate::shellquote::quote_sh(tool)
+    ))
+}
+
+/// Fill `dir` (created 0700 by the caller): take the lock FIRST, so no
+/// wrapper ever exists without a live owner, then the record, then one
+/// wrapper (0700) per override. Returns the lock: the directory is honoured
+/// exactly as long as it is held.
+#[cfg(unix)]
+pub fn fill_shim_dir(
+    dir: &std::path::Path,
+    record: &ShimRecord,
+    varve: &std::path::Path,
+) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let io = |what: &str, e: std::io::Error| format!("{what} in {}: {e}", dir.display());
+    let lock = std::fs::File::create(dir.join(LOCK_FILE)).map_err(|e| io("lock", e))?;
+    lock.lock().map_err(|e| io("lock", e))?;
+    let json = serde_json::to_vec_pretty(record).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(RECORD_FILE), json).map_err(|e| io("record", e))?;
+    for o in &record.overrides {
+        let path = dir.join(&o.tool);
+        std::fs::write(&path, wrapper_script(varve, dir, &o.tool)?).map_err(|e| io("shim", e))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| io("shim", e))?;
+    }
+    Ok(lock)
+}
+
+/// Read a private shim directory, or refuse. Refused: a path that is not a
+/// directory of `uid`'s, or that group or others can write or read; a
+/// directory whose run is gone (its lock is not held) — then the record is
+/// never read; a record this varve cannot read whole.
+#[cfg(unix)]
+pub fn read_shim_dir(dir: &std::path::Path, uid: u32) -> Result<ShimRecord, String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let meta = std::fs::symlink_metadata(dir)
+        .map_err(|e| format!("{}: not a --with shim directory: {e}", dir.display()))?;
+    if !meta.is_dir() {
+        return Err(format!("{}: not a --with shim directory", dir.display()));
+    }
+    if meta.uid() != uid || meta.permissions().mode() & 0o077 != 0 {
+        return Err(format!(
+            "{}: a --with shim directory is private to the user who made it (0700) — refusing",
+            dir.display()
+        ));
+    }
+    let lock = std::fs::File::open(dir.join(LOCK_FILE))
+        .map_err(|e| format!("{}: no lock: {e}", dir.display()))?;
+    match lock.try_lock() {
+        // Taken by us: nobody holds it, so the run that made this is gone.
+        Ok(()) => {
+            return Err(format!(
+                "{} outlived the `varve run --with` that made it — its shims grant nothing \
+                 after that run ends. Remove the directory.",
+                dir.display()
+            ));
+        }
+        Err(std::fs::TryLockError::WouldBlock) => {}
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(format!("{}: cannot check its lock: {e}", dir.display()));
+        }
+    }
+    let bytes = std::fs::read(dir.join(RECORD_FILE))
+        .map_err(|e| format!("{}: no record: {e}", dir.display()))?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("{}: unreadable record: {e}", dir.display()))
+}
+
+/// The exit status `varve run --with` passes on: the child's code, or 128 + N
+/// for a child killed by signal N (the shell's convention).
+pub fn exit_code(code: Option<i32>, signal: Option<i32>) -> i32 {
+    match (code, signal) {
+        (Some(code), _) => code,
+        (None, Some(signal)) => 128 + signal,
+        (None, None) => 1,
+    }
 }
 
 #[cfg(test)]
@@ -746,5 +876,124 @@ mod tests {
         bytes.truncate(bytes.len() - 3);
         std::fs::write(&layer_json, bytes).unwrap();
         assert!(carriers(&store, "synth", HOST).is_err());
+    }
+
+    fn record() -> ShimRecord {
+        ShimRecord {
+            pin: "/p/varve.toml".into(),
+            overrides: vec![crate::overrides::RecordedOverride {
+                tool: "synth".into(),
+                layer: "2026.08.0".into(),
+                digest: "sha256:a".into(),
+            }],
+            with: vec![req("synth", "0.57.0")],
+        }
+    }
+
+    fn uid_of(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).unwrap().uid()
+    }
+
+    fn private_dir() -> tempfile::TempDir {
+        // 0700 asked for explicitly, as varve's own is: tempfile's default
+        // follows the umask, which leaves a directory others can read.
+        use std::os::unix::fs::PermissionsExt;
+        tempfile::Builder::new()
+            .prefix("varve-with-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_wrapper_names_its_directory_in_its_own_text_and_quotes_everything() {
+        let s = wrapper_script(
+            std::path::Path::new("/opt/v arve/varve"),
+            std::path::Path::new("/tmp/varve-with-x'y"),
+            "synth",
+        )
+        .unwrap();
+        assert_eq!(
+            s,
+            "#!/bin/sh\n# varve run --with: a private shim, honoured only while that run lives \
+             (REQ-RUNWITH-001).\nexec '/opt/v arve/varve' run --with-shim-dir \
+             '/tmp/varve-with-x'\\''y' -- 'synth' \"$@\"\n"
+        );
+        use std::os::unix::ffi::OsStrExt;
+        let bad = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff"));
+        assert!(wrapper_script(bad, std::path::Path::new("/d"), "synth").is_err());
+        assert!(wrapper_script(std::path::Path::new("/v"), bad, "synth").is_err());
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_live_directory_is_read_and_a_leaked_one_grants_nothing() {
+        let dir = private_dir();
+        let uid = uid_of(dir.path());
+        let lock = fill_shim_dir(dir.path(), &record(), std::path::Path::new("/v")).unwrap();
+        // The wrapper is there, 0700, and the record reads back whole.
+        use std::os::unix::fs::PermissionsExt;
+        let shim = dir.path().join("synth");
+        assert_eq!(
+            std::fs::metadata(&shim).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(
+            std::fs::read_to_string(&shim)
+                .unwrap()
+                .contains("--with-shim-dir")
+        );
+        assert_eq!(read_shim_dir(dir.path(), uid), Ok(record()));
+        // Another user's directory, or one others can read, is refused.
+        let why = read_shim_dir(dir.path(), uid + 1).unwrap_err();
+        assert!(why.contains("private"), "{why}");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(read_shim_dir(dir.path(), uid).is_err());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o702)).unwrap();
+        assert!(read_shim_dir(dir.path(), uid).is_err());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        // An edited record is refused when this varve cannot read it whole.
+        std::fs::write(dir.path().join(RECORD_FILE), "{\"pin\":\"/p\",\"x\":1}").unwrap();
+        let why = read_shim_dir(dir.path(), uid).unwrap_err();
+        assert!(why.contains("unreadable record"), "{why}");
+        // The run is gone (its lock released): refused, record never read.
+        drop(lock);
+        let why = read_shim_dir(dir.path(), uid).unwrap_err();
+        assert!(why.contains("outlived"), "{why}");
+        // No lock file, or not a directory at all.
+        std::fs::remove_file(dir.path().join(LOCK_FILE)).unwrap();
+        assert!(
+            read_shim_dir(dir.path(), uid)
+                .unwrap_err()
+                .contains("no lock")
+        );
+        assert!(read_shim_dir(&shim, uid).is_err());
+        assert!(read_shim_dir(&dir.path().join("absent"), uid).is_err());
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn a_live_directory_without_a_record_is_refused() {
+        let dir = private_dir();
+        let uid = uid_of(dir.path());
+        let lock = std::fs::File::create(dir.path().join(LOCK_FILE)).unwrap();
+        lock.lock().unwrap();
+        assert!(
+            read_shim_dir(dir.path(), uid)
+                .unwrap_err()
+                .contains("no record")
+        );
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[test]
+    fn the_exit_status_is_the_childs_or_128_plus_its_signal() {
+        assert_eq!(exit_code(Some(0), None), 0);
+        assert_eq!(exit_code(Some(7), None), 7);
+        assert_eq!(exit_code(None, Some(15)), 143);
+        assert_eq!(exit_code(None, Some(2)), 130);
+        assert_eq!(exit_code(None, None), 1);
     }
 }
