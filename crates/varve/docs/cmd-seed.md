@@ -26,7 +26,7 @@ and run `varve install` there as usual. The registry is still the primary: a mir
 
 ## Which layers
 
-By default the current project's pinned layer **and every layer it composes**, transitively, each from the realm partition that holds it. A seed that left one out would send the other store back to the registry for exactly that layer, so a composed layer that is not installed here is a refusal that names it, not a smaller seed.
+By default the current project's pinned layer, the source layer of each `[toolchain.override.<tool>]` it declares, **and every layer they compose**, transitively, each from the realm partition that holds it. A seed that left one out would send the other store back to the registry for exactly that layer, so a composed layer that is not installed here is a refusal that names it, not a smaller seed.
 
 To seed one installed layer instead, name it by id **and** digest (both, so a name is never taken for a layer it does not belong to). It still brings the layers it composes:
 

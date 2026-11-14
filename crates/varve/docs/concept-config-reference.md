@@ -26,6 +26,50 @@ A `tools` entry is either a plain name (`"rivet"`) or a **realm-qualified** one 
 
 The qualifier is how a pin chooses between two realms shipping one name, which is the ordinary case once a fork sits beside its upstream. It changes only what a **bare** name dispatches to; the layer you did not choose stays installed and verified, and `varve run pulseengine/wasm-tools` still reaches it. Where nothing collides, a bare name behaves exactly as it always did.
 
+### `[toolchain.override.<tool>]` — one tool from another layer of the realm
+
+```toml
+manifest-version = 1
+
+[toolchain]
+realm   = "pulseengine"
+channel = "rolling"
+layer   = "2026.11.0"
+
+[toolchain.override.synth]
+layer  = "2026.08.0"                 # required: the layer the tool comes from
+digest = "sha256:83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"   # EXAMPLE — required: that layer's digest, from `varve list`
+```
+
+Takes ONE tool the pin already has from another signed layer of the **pin's own realm** — gale's case, where committed objects must stay byte-identical with an older `synth` while the rest of the toolchain moves (REQ-OVERRIDE-001). Both fields are required: the id is what a reviewer reads in the diff, the digest is the artifact. `varve install` fetches that layer through the same path an `[[include]]` takes — signed manifest against the realm's root, its line index and anti-rollback mark checked (the override's digest is not consent to go below the mark), every payload against its signed digest. Nothing reaches the store another way.
+
+Refused with the reason, exit 1. **Where** each refusal happens matters, because a refusal that comes after a fetch has already changed the store:
+
+- **Before any override layer is fetched** (`install`), and before anything runs (every other command): a tool the pinned layer does not provide, or that the pin's `tools` leaves out — an override **replaces**, it never adds (use the passthrough, `varve docs shim`, or add the tool to a layer). `install` decides this from what the pinned layer's composition carries as a dispatched tool for the install's TARGET platform (the host, or `--platform`), and, where the pin lists `tools`, from that list too — a name the list has but the layer never carried, a held payload's name such as a crate, or a tool the layer ships only for another platform is not a tool the pin has there. So `install --platform <other>` is not refused for a pinned tool only this host lacks, and nothing is fetched for a tool the target does not get. An override layer that is already installed is held to the same manifest checks as one being fetched.
+- **When varve.toml is read**: the same tool overridden twice (names are compared without case), an override nested in another, a missing `layer` or `digest`, or any other key.
+- **On the verified manifest, before any payload is laid down or the line's anti-rollback mark moves** (`install`): a digest that is another layer than the one named, a layer on another channel than the pin's (naming both), a layer that does not carry the tool as a dispatched tool for this platform, or that runs it through a runner it does not carry, and a layer that fails verification — it is never installed, and never fetched from anywhere else. A digest no source serves is refused there too. A source that answers the digest with another, even validly signed, layer is a substitution, not a fault of the pin: the next source of the realm (a mirror) is asked, and the bytes that pass are exactly the bytes laid down — the manifest is fetched once. A layer below its line's anti-rollback mark is refused by the install pipeline before anything is laid down.
+- **At resolve time, before anything runs**: a digest no installed layer of the realm has, a layer installed only under another realm's root, and a layer installed for another platform (`varve install --platform …`): its payloads are that machine's, so every command refuses it, naming the platform, until `varve install` lays it down for this one. `resolve` enforces the same rules on the installed override layer before anything runs: the layer the digest names, the pin's channel, the tool declared in the layer's signed manifest as a dispatched tool for this host (a file in `bin/` alone is not one), and the runner it names carried by that layer.
+
+The key is a plain tool name: no realm qualifier, no path. A varve older than v0.48.0 refuses a varve.toml with an override (unknown key) instead of running the pinned tool. What the override layer composes is installed with it, from the realm each include names, exactly as for the pinned layer.
+
+While any override is active the toolchain is **MIXED**. These say so rather than naming the pinned layer:
+
+- `varve status` (`state = "mixed"` in `--json`);
+- `varve which <tool>` (both layers);
+- `varve inspect` (the override layer's entry DISPATCHED, the composition's OVERRIDDEN);
+- `varve verify`: verifies each override layer and its anti-rollback mark, and ends with a `MIXED:` line, also under `--all`. A carried attestation made under another mix than the project's is reported as not matching this toolchain;
+- `varve run` (`VARVE_LAYER` stays the pinned layer; `VARVE_OVERRIDES=tool=layer@digest,…`);
+- `varve-serve context`;
+- `varve export-bazel` (the overridden tool's registry is the override layer's, or none when that layer records no provenance for it);
+- export stamps (`layer = "<layer>+mixed"` plus the recorded overrides);
+- attestations: `check-attestation` refuses a statement that does not record the same overrides.
+
+Every address of an overridden tool reaches the override layer: `synth` and the pin's own `realm/synth` both run it. Another realm's `other/synth` is refused, naming the override. `varve run --varve <layer>` is refused in a project with overrides, because a one-off layer plus the project's overrides is a mix nobody declared. `varve sbom` of a mixed project is refused — ask for each layer with `--layer`. `varve seed` carries the override layers, and what they compose, with the pin.
+
+**What stays about the pinned layer only.** `varve status` reports the pinned line's line-status; the override layers' lines are not covered, so a yanked override layer is not flagged there. `varve outdated` asks about the pinned line only. `varve-serve`'s documentation pages and `export-docs` come from the pinned composition. Every other export carries crates, extensions, WIT, SDK or Zephyr payloads, which an override (a dispatched tool) does not replace; their stamps still record the mix.
+
+**The limit of a stamp or statement read by an older varve.** An export stamp keeps the pinned layer's `manifest_digest` as its join key, and records the mix in `layer` (`<layer>+mixed`) and `overrides`. The mix is visible to **v0.47.0 and later**: v0.47.0 refuses such a stamp as malformed (it denies fields it does not know), and later readers compare the recorded overrides with the project's. A varve **before v0.47.0** cannot parse a pin with an override at all, but it reads a leftover mixed export's stamp as the pure layer's: it ignores the extra fields and compares `manifest_digest` alone. An attestation statement records the overrides with the same limit — v0.47.0 refuses it, an earlier reader takes it for the pure layer's.
+
 ### `[[export]]` — what this project materialises out of the layer
 
 The pin says which layer the project consumes; these say **how**. Declared means checked: `varve verify` looks at every one of them without being told (REQ-EXPORTDECL-001).

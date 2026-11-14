@@ -55,4 +55,27 @@ error: pin digest sha256:83a6991d0… is not installed — run `varve install` �
 Install by name first, then paste the digest `varve list` prints for the layer
 you actually got.
 
+## One tool at another version
+
+`[toolchain.override.<tool>]` takes one tool from another signed layer of the
+same realm, by layer id and digest; everything else stays the pinned layer's:
+
+```toml
+manifest-version = 1
+
+[toolchain]
+realm   = "pulseengine"
+channel = "rolling"
+layer   = "2026.11.0"
+
+[toolchain.override.synth]
+layer  = "2026.08.0"
+digest = "sha256:83a6991d0c2f4b7e5a8d3c6f9b2e4a7d1c8f5b3e6a9d2c7f4b1e8a5d3c6f9b2e"   # EXAMPLE — paste yours from `varve list`
+```
+
+The toolchain is then MIXED, and `status`, `which`, `verify`, `run`'s
+environment, exports and attestations all say so. An override can only
+replace a tool the pin has — never add one. The rules and every refusal are
+under `varve docs config-reference`.
+
 Full field reference: `varve docs config-reference`.

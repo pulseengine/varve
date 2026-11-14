@@ -96,6 +96,11 @@ pub struct AttestationReport {
     /// (REQ-PASSTHROUGH-001 clause 4): empty for a pure session, and for a
     /// statement that did not verify (nothing it says can be trusted).
     pub ambient_tools: Vec<String>,
+    /// The MIXED toolchain the statement was signed under (REQ-OVERRIDE-001):
+    /// empty for a pure one, and for a statement that did not verify. Whether
+    /// it describes THIS project's toolchain is the caller's comparison
+    /// (`overrides::mismatch`), because the layer alone cannot say.
+    pub overrides: Vec<crate::overrides::RecordedOverride>,
 }
 
 fn io(path: &Path, source: std::io::Error) -> CarryError {
@@ -295,6 +300,7 @@ pub fn report(
                             binds: false,
                             reason: Some(e.to_string()),
                             ambient_tools: Vec::new(),
+                            overrides: Vec::new(),
                         };
                     }
                 };
@@ -307,6 +313,7 @@ pub fn report(
                 binds: reason.is_none(),
                 reason,
                 ambient_tools: st.ambient_tools.clone(),
+                overrides: st.overrides.clone(),
             }
         })
         .collect()
@@ -481,6 +488,43 @@ mod tests {
         assert_eq!(reports[0].producer, "acme-ci");
     }
 
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn the_report_carries_the_mix_a_statement_was_signed_under() {
+        let (sk, pk) = generate_root_keypair();
+        let trust = crate::keyroles::test_support::rt(&pk);
+        let bytes = br#"{"_type":"https://in-toto.io/Statement/v1","subject":[]}"#;
+        let o = crate::overrides::RecordedOverride {
+            tool: "synth".into(),
+            layer: "2026.07.0".into(),
+            digest: "sha256:cc".into(),
+        };
+        let st = statement(
+            LAYER,
+            LAYER_DIGEST,
+            AttestationKind::Provenance,
+            bytes,
+            "acme-ci",
+        )
+        .with_overrides(vec![o.clone()]);
+        let envelope = sign(&st, &sk, "root-1").unwrap();
+        let tmp = layout();
+        attach(tmp.path(), envelope.as_bytes(), bytes).unwrap();
+        let carried = read_all(tmp.path(), LAYER).unwrap();
+        let r = report(&carried, LAYER_DIGEST, LAYER, &trust);
+        assert!(r[0].binds, "it still binds to the LAYER: {:?}", r[0].reason);
+        assert_eq!(r[0].overrides, [o], "and says which mix it was made under");
+        // A statement that does not verify states nothing, a mix included.
+        let (_, other) = generate_root_keypair();
+        let r = report(
+            &carried,
+            LAYER_DIGEST,
+            LAYER,
+            &crate::keyroles::test_support::rt(&other),
+        );
+        assert!(!r[0].binds && r[0].overrides.is_empty());
+    }
+
     // rivet: verifies REQ-PASSTHROUGH-001
     #[test]
     fn the_report_carries_the_signing_sessions_ambient_tools_binding_or_not() {
@@ -506,6 +550,10 @@ mod tests {
         };
         let pure = report(&carry(&[]), LAYER_DIGEST, LAYER, &trust);
         assert!(pure[0].binds && pure[0].ambient_tools.is_empty());
+        assert!(
+            pure[0].overrides.is_empty(),
+            "a pure statement records no mix"
+        );
 
         let amb = carry(&["ghost"]);
         let binding = report(&amb, LAYER_DIGEST, LAYER, &trust);

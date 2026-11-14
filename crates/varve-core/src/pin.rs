@@ -268,6 +268,23 @@ impl std::fmt::Display for ToolSelector {
     }
 }
 
+/// One `[toolchain.override.<tool>]` (REQ-OVERRIDE-001, DD-043): this tool is
+/// taken from another layer of the pin's own realm, named by id AND digest.
+///
+/// Both are required. The id is what a reviewer reads in the diff; the digest
+/// is the artifact, so the override resolves offline and to exactly one set of
+/// bytes. A version alone would need the line index to carry tool versions,
+/// which it does not (DD-043, maintainer decision 2026-11-11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOverride {
+    /// The dispatchable name, always bare: the source layer is in the pin's
+    /// realm, so a realm qualifier would name something this cannot do.
+    pub tool: String,
+    pub layer: LayerId,
+    /// `sha256:<hex>` of the source layer's signed manifest.
+    pub digest: String,
+}
+
 /// A parsed, validated pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pin {
@@ -286,6 +303,10 @@ pub struct Pin {
     /// The exports this project declares (REQ-EXPORTDECL-001). Declared means
     /// checked: `verify` looks at every one of these without being told.
     pub exports: Vec<ExportDecl>,
+    /// Tools taken from another layer of the realm (REQ-OVERRIDE-001), sorted
+    /// by tool. Non-empty means the toolchain is MIXED, and every identity
+    /// report must say so.
+    pub overrides: Vec<ToolOverride>,
 }
 
 /// Why a pin failed to parse or validate.
@@ -328,6 +349,49 @@ pub enum PinError {
          tools = [\"bytecodealliance/wasm-tools\"]."
     )]
     ToolNameIsAPath { path: String, name: String },
+    #[error(
+        "{path}: [toolchain.override.{tool}] is missing {missing} — an override needs both: \
+         `layer` is what a reviewer reads, `digest` is the artifact that is installed and \
+         verified. Write layer = \"<layer id>\" and digest = \"sha256:<hex>\" (`varve list` \
+         shows both for an installed layer)."
+    )]
+    OverrideIncomplete {
+        path: String,
+        tool: String,
+        missing: String,
+    },
+    #[error(
+        "{path}: [toolchain.override.{tool:?}] does not name a tool — the key is the plain \
+         name a shim dispatches (e.g. synth). It cannot carry a realm: an override comes from \
+         a layer of this pin's own realm."
+    )]
+    OverrideToolNotAName { path: String, tool: String },
+    #[error("{path}: [toolchain.override.{tool}] has an invalid layer identifier")]
+    OverrideLayer {
+        path: String,
+        tool: String,
+        #[source]
+        source: LayerIdError,
+    },
+    #[error(
+        "{path}: [toolchain.override.{tool}] digest '{found}' is not a valid digest: expected \
+         'sha256:' followed by 64 hex characters"
+    )]
+    OverrideMalformedDigest {
+        path: String,
+        tool: String,
+        found: String,
+    },
+    #[error(
+        "{path}: [toolchain.override.{first}] and [toolchain.override.{second}] override one \
+         tool — a shim name is matched without regard to case, so the pin would choose two \
+         binaries for it. Keep one."
+    )]
+    OverrideTwice {
+        path: String,
+        first: String,
+        second: String,
+    },
     #[error("{path}: tools list is present but empty — omit it to select every tool in the layer")]
     EmptyTools { path: String },
     #[error(
@@ -452,6 +516,87 @@ struct RawToolchain {
     layer: String,
     digest: Option<String>,
     tools: Option<Vec<String>>,
+    /// `[toolchain.override.<tool>]` (DD-043). This struct KEEPS
+    /// deny_unknown_fields: every varve released before overrides existed
+    /// refuses a varve.toml carrying one, instead of running the pinned tool.
+    #[serde(default, rename = "override")]
+    overrides: std::collections::BTreeMap<String, RawOverride>,
+}
+
+/// Both fields optional HERE so the refusal can say why both are needed;
+/// serde's "missing field" is true and teaches nothing.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOverride {
+    layer: Option<String>,
+    digest: Option<String>,
+}
+
+/// Is `digest` `sha256:` and exactly 64 hex characters?
+fn well_formed_digest(digest: &str) -> bool {
+    digest
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Validate the override tables (REQ-OVERRIDE-001 clause 1, DD-043 (1)).
+fn parse_overrides(
+    raw: &std::collections::BTreeMap<String, RawOverride>,
+    origin: &str,
+) -> Result<Vec<ToolOverride>, PinError> {
+    let mut out: Vec<ToolOverride> = Vec::with_capacity(raw.len());
+    for (tool, o) in raw {
+        // The same rule a `tools` entry obeys, minus the realm qualifier.
+        if !matches!(
+            ToolSelector::parse(tool),
+            Some(ToolSelector { realm: None, .. })
+        ) {
+            return Err(PinError::OverrideToolNotAName {
+                path: origin.to_string(),
+                tool: tool.clone(),
+            });
+        }
+        let (layer, digest) = match (&o.layer, &o.digest) {
+            (Some(layer), Some(digest)) => (layer, digest),
+            (layer, _) => {
+                return Err(PinError::OverrideIncomplete {
+                    path: origin.to_string(),
+                    tool: tool.clone(),
+                    missing: match (layer, &o.digest) {
+                        (None, None) => "layer and digest",
+                        (None, Some(_)) => "layer",
+                        _ => "digest",
+                    }
+                    .to_string(),
+                });
+            }
+        };
+        let layer = LayerId::from_str(layer).map_err(|source| PinError::OverrideLayer {
+            path: origin.to_string(),
+            tool: tool.clone(),
+            source,
+        })?;
+        if !well_formed_digest(digest) {
+            return Err(PinError::OverrideMalformedDigest {
+                path: origin.to_string(),
+                tool: tool.clone(),
+                found: digest.clone(),
+            });
+        }
+        if let Some(first) = out.iter().find(|seen| seen.tool.eq_ignore_ascii_case(tool)) {
+            return Err(PinError::OverrideTwice {
+                path: origin.to_string(),
+                first: first.tool.clone(),
+                second: tool.clone(),
+            });
+        }
+        out.push(ToolOverride {
+            tool: tool.clone(),
+            layer,
+            digest: digest.clone(),
+        });
+    }
+    Ok(out)
 }
 
 impl Pin {
@@ -518,6 +663,7 @@ impl Pin {
             }
         };
         let exports = parse_exports(&raw.exports, origin)?;
+        let overrides = parse_overrides(&raw.toolchain.overrides, origin)?;
         Ok(Pin {
             realm: raw.toolchain.realm,
             channel: raw.toolchain.channel,
@@ -525,6 +671,7 @@ impl Pin {
             digest: raw.toolchain.digest,
             tools,
             exports,
+            overrides,
         })
     }
 
@@ -728,6 +875,7 @@ pub fn check_declared_export(
     decl: &ExportDecl,
     project_root: &Path,
     current_manifest_digest: &str,
+    current_overrides: &[crate::overrides::RecordedOverride],
 ) -> DeclaredExportStatus {
     use crate::exportstamp::{
         ContentStatus, ExportStampError, ExportStatus, read_stamp, status, verify_content,
@@ -743,7 +891,7 @@ pub fn check_declared_export(
                     stamped: stamp.kind,
                 };
             }
-            match status(&stamp, current_manifest_digest) {
+            match status(&stamp, current_manifest_digest, current_overrides) {
                 ExportStatus::Current => match verify_content(&dir, &stamp) {
                     Ok(ContentStatus::Intact) => DeclaredExportStatus::Current,
                     Ok(ContentStatus::Unverifiable) => DeclaredExportStatus::Unverifiable,
@@ -1408,7 +1556,7 @@ path   = "before-shims"
         // Nothing generated yet: every declared export fails, none is skipped.
         for decl in &pin.exports {
             assert_eq!(
-                check_declared_export(decl, root, current),
+                check_declared_export(decl, root, current, &[]),
                 DeclaredExportStatus::Missing,
                 "{} must fail while it does not exist",
                 decl.out
@@ -1418,7 +1566,7 @@ path   = "before-shims"
         // Generated against the current pin: fresh.
         for decl in &pin.exports {
             stamped(&decl.dir(root), decl.kind.as_str(), current);
-            let got = check_declared_export(decl, root, current);
+            let got = check_declared_export(decl, root, current, &[]);
             assert!(
                 got.is_current(),
                 "{} should be fresh, got {got:?}",
@@ -1429,7 +1577,7 @@ path   = "before-shims"
         // The pin moves on and the exports do not.
         let moved = "sha256:bbbb";
         assert_eq!(
-            check_declared_export(&pin.exports[0], root, moved),
+            check_declared_export(&pin.exports[0], root, moved, &[]),
             DeclaredExportStatus::Stale {
                 stamped: current.into(),
                 current: moved.into(),
@@ -1442,7 +1590,7 @@ path   = "before-shims"
         let vsix = &pin.exports[1];
         stamped(&vsix.dir(root), "cargo", current);
         assert_eq!(
-            check_declared_export(vsix, root, current),
+            check_declared_export(vsix, root, current, &[]),
             DeclaredExportStatus::KindMismatch {
                 declared: "vsix".into(),
                 stamped: "cargo".into(),
@@ -1458,7 +1606,7 @@ path   = "before-shims"
         )
         .unwrap();
         assert!(matches!(
-            check_declared_export(cargo, root, current),
+            check_declared_export(cargo, root, current, &[]),
             DeclaredExportStatus::Unreadable(_)
         ));
     }
@@ -1476,16 +1624,16 @@ path   = "before-shims"
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.json"), b"{}").unwrap();
         stamped(&dir, decl.kind.as_str(), current);
-        assert!(check_declared_export(decl, root, current).is_current());
+        assert!(check_declared_export(decl, root, current, &[]).is_current());
 
         std::fs::write(dir.join("index.json"), b"{ }").unwrap();
         assert_eq!(
-            check_declared_export(decl, root, current),
+            check_declared_export(decl, root, current, &[]),
             DeclaredExportStatus::ContentDrift(ContentDrift::Modified("index.json".into()))
         );
         // A stale pin is still reported as stale, not as content drift.
         assert!(matches!(
-            check_declared_export(decl, root, "sha256:bbbb"),
+            check_declared_export(decl, root, "sha256:bbbb", &[]),
             DeclaredExportStatus::Stale { .. }
         ));
 
@@ -1495,11 +1643,43 @@ path   = "before-shims"
         old.files.clear();
         std::fs::write(dir.join(STAMP_FILE), serde_json::to_vec(&old).unwrap()).unwrap();
         assert_eq!(
-            check_declared_export(decl, root, current),
+            check_declared_export(decl, root, current, &[]),
             DeclaredExportStatus::Unverifiable
         );
         assert!(!DeclaredExportStatus::Unverifiable.is_current());
         assert!(!DeclaredExportStatus::ContentDrift(ContentDrift::Extra("x".into())).is_current());
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_declared_export_is_checked_against_the_toolchains_overrides() {
+        use crate::exportstamp::{read_stamp, write_stamp};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let pin = parse(DECLARED).unwrap();
+        let decl = &pin.exports[0];
+        let dir = decl.dir(root);
+        let current = "sha256:aaaa";
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.json"), b"{}").unwrap();
+        stamped(&dir, decl.kind.as_str(), current);
+        let o = crate::overrides::RecordedOverride {
+            tool: "synth".into(),
+            layer: "2026.08.0".into(),
+            digest: "sha256:cc".into(),
+        };
+        // A pure export for a mixed toolchain is stale.
+        assert!(matches!(
+            check_declared_export(decl, root, current, std::slice::from_ref(&o)),
+            DeclaredExportStatus::Stale { .. }
+        ));
+        let mixed = read_stamp(&dir).unwrap().with_overrides(vec![o.clone()]);
+        write_stamp(&dir, &mixed).unwrap();
+        assert!(check_declared_export(decl, root, current, std::slice::from_ref(&o)).is_current());
+        assert!(matches!(
+            check_declared_export(decl, root, current, &[]),
+            DeclaredExportStatus::Stale { .. }
+        ));
     }
 
     // rivet: verifies REQ-EXPORTDECL-001
@@ -1732,6 +1912,209 @@ path   = "before-shims"
 #[cfg(test)]
 mod version_message_tests {
     use super::*;
+
+    const OVERRIDE_HEX: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn with_override(body: &str) -> Result<Pin, PinError> {
+        Pin::parse(
+            &format!(
+                "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.11.0\"\n{body}"
+            ),
+            "varve.toml",
+        )
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_names_its_source_layer_by_id_and_digest() {
+        // DD-043 (1): [toolchain.override.<tool>] with layer and digest.
+        let pin = with_override(&format!(
+            "[toolchain.override.synth]\nlayer = \"2026.08.0\"\ndigest = \"sha256:{OVERRIDE_HEX}\"\n\
+             [toolchain.override.loom]\nlayer = \"2026.09.1\"\ndigest = \"sha256:{OVERRIDE_HEX}\"\n"
+        ))
+        .unwrap();
+        let got: Vec<(String, String, String)> = pin
+            .overrides
+            .iter()
+            .map(|o| (o.tool.clone(), o.layer.to_string(), o.digest.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    "loom".to_string(),
+                    "2026.09.1".to_string(),
+                    format!("sha256:{OVERRIDE_HEX}")
+                ),
+                (
+                    "synth".to_string(),
+                    "2026.08.0".to_string(),
+                    format!("sha256:{OVERRIDE_HEX}")
+                ),
+            ],
+            "sorted by tool, so every report lists them in one order"
+        );
+        // A pin without the table has none: the pure case stays pure.
+        assert!(with_override("").unwrap().overrides.is_empty());
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_needs_both_a_layer_and_a_digest() {
+        // A digest alone is unreviewable in a diff; a layer id alone is a name,
+        // and a name resolves to whatever was installed under it.
+        for (body, missing) in [
+            ("layer = \"2026.08.0\"\n".to_string(), "digest"),
+            (format!("digest = \"sha256:{OVERRIDE_HEX}\"\n"), "layer"),
+            (String::new(), "layer and digest"),
+        ] {
+            let err = with_override(&format!("[toolchain.override.synth]\n{body}")).unwrap_err();
+            match &err {
+                PinError::OverrideIncomplete {
+                    tool, missing: m, ..
+                } => {
+                    assert_eq!(tool, "synth");
+                    assert_eq!(m, missing, "{err}");
+                }
+                other => panic!("expected OverrideIncomplete, got {other}"),
+            }
+            let msg = err.to_string();
+            assert!(msg.contains("both"), "says both are required: {msg}");
+        }
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_refuses_an_unknown_key_and_a_nested_override() {
+        // RawToolchain and the override table both keep deny_unknown_fields:
+        // a key this varve does not understand must not be read as absent.
+        for body in [
+            format!(
+                "[toolchain.override.synth]\nlayer = \"2026.08.0\"\ndigest = \"sha256:{OVERRIDE_HEX}\"\nversion = \"0.57.0\"\n"
+            ),
+            format!(
+                "[toolchain.override.synth]\nlayer = \"2026.08.0\"\ndigest = \"sha256:{OVERRIDE_HEX}\"\n\
+                 [toolchain.override.synth.override.loom]\nlayer = \"2026.08.0\"\ndigest = \"sha256:{OVERRIDE_HEX}\"\n"
+            ),
+            format!(
+                "[toolchain.overrides.synth]\nlayer = \"2026.08.0\"\ndigest = \"sha256:{OVERRIDE_HEX}\"\n"
+            ),
+        ] {
+            let err = with_override(&body).unwrap_err();
+            assert!(matches!(err, PinError::Toml { .. }), "{body}\ngot: {err}");
+        }
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn a_varve_without_override_support_refuses_the_table_instead_of_ignoring_it() {
+        // DD-043 (1): the fail-closed property rests on deny_unknown_fields in
+        // the toolchain table of every varve released before this. This is a
+        // byte-for-byte copy of that RawToolchain (v0.47.0): a varve.toml with
+        // an override must be REFUSED by it, never parsed as the pure pin.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct RawToolchainV047 {
+            #[serde(default)]
+            realm: Option<String>,
+            channel: Channel,
+            layer: String,
+            digest: Option<String>,
+            tools: Option<Vec<String>>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct RawPinV047 {
+            #[serde(rename = "manifest-version")]
+            manifest_version: i64,
+            toolchain: RawToolchainV047,
+        }
+        let text = format!(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.11.0\"\n\
+             [toolchain.override.synth]\nlayer = \"2026.08.0\"\ndigest = \"sha256:{OVERRIDE_HEX}\"\n"
+        );
+        let old = toml::from_str::<RawPinV047>(&text);
+        assert!(old.is_err(), "an older reader must refuse, not run the pin");
+        assert!(
+            old.err().unwrap().to_string().contains("override"),
+            "and name the key it does not know"
+        );
+        // …while the same file without the table still parses for it.
+        let pure =
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.11.0\"\n";
+        assert!(toml::from_str::<RawPinV047>(pure).is_ok());
+        assert!(
+            Pin::parse(&text, "varve.toml").is_ok(),
+            "this varve reads it"
+        );
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_key_is_a_plain_tool_name() {
+        // The source layer is the pin's realm (DD-043, maintainer decision
+        // 2026-11-11), so a realm qualifier names something this cannot do; a
+        // path would index outside the layer's bin/.
+        for key in ["\"acme/synth\"", "\"../synth\"", "\"\"", "\"..\""] {
+            let err = with_override(&format!(
+                "[toolchain.override.{key}]\nlayer = \"2026.08.0\"\ndigest = \"sha256:{OVERRIDE_HEX}\"\n"
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(err, PinError::OverrideToolNotAName { .. }),
+                "{key} got: {err}"
+            );
+        }
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn an_override_layer_and_digest_are_validated_like_the_pins_own() {
+        let err = with_override(&format!(
+            "[toolchain.override.synth]\nlayer = \"2026.08\"\ndigest = \"sha256:{OVERRIDE_HEX}\"\n"
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, PinError::OverrideLayer { tool, .. } if tool == "synth"),
+            "got: {err}"
+        );
+        for bad in ["sha256:short", "md5:aaaa", "sha256:GGGG", OVERRIDE_HEX] {
+            let err = with_override(&format!(
+                "[toolchain.override.synth]\nlayer = \"2026.08.0\"\ndigest = \"{bad}\"\n"
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(&err, PinError::OverrideMalformedDigest { tool, found, .. } if tool == "synth" && found == bad),
+                "input {bad:?} got: {err}"
+            );
+        }
+        // Exactly 64 hex characters, as for the pin's own digest.
+        let long = format!("sha256:{OVERRIDE_HEX}a");
+        assert!(
+            with_override(&format!(
+                "[toolchain.override.synth]\nlayer = \"2026.08.0\"\ndigest = \"{long}\"\n"
+            ))
+            .is_err()
+        );
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
+    fn one_tool_overridden_twice_is_refused_however_it_is_spelled() {
+        // An override of an override: on a case-insensitive filesystem the
+        // shim `SYNTH` IS `synth`, so two spellings are one tool and the pin
+        // would have chosen two binaries for it.
+        let err = with_override(&format!(
+            "[toolchain.override.synth]\nlayer = \"2026.08.0\"\ndigest = \"sha256:{OVERRIDE_HEX}\"\n\
+             [toolchain.override.Synth]\nlayer = \"2026.09.0\"\ndigest = \"sha256:{OVERRIDE_HEX}\"\n"
+        ))
+        .unwrap_err();
+        assert!(matches!(&err, PinError::OverrideTwice { .. }), "got: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("Synth") && msg.contains("synth"), "{msg}");
+    }
 
     /// The refusal must name the version this build actually understands.
     ///

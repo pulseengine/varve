@@ -485,6 +485,7 @@ mod seam_tests {
             digest: "sha256:bb".into(),
             producer: "varve".into(),
             ambient_tools: Vec::new(),
+            overrides: Vec::new(),
         }
     }
 

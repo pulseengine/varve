@@ -118,16 +118,19 @@ fn main() -> anyhow::Result<()> {
     http::accept_loop(&site, &listener)
 }
 
+/// The pinned layer, its verified composition, and each override's tool with
+/// its verified source layer (REQ-OVERRIDE-001).
+type ResolvedLayers = (
+    varve_core::InstalledLayer,
+    Vec<varve_core::compose::ComposedLayer>,
+    Vec<(String, varve_core::compose::ComposedLayer)>,
+);
+
 /// The pinned layer and every layer it composes, each verified.
 ///
 /// Both the viewer and the orientation start here, so there is one answer to
 /// "what does this pin contain" (see `tests/follows_composition.rs`).
-fn resolve_layers(
-    layer: Option<&str>,
-) -> anyhow::Result<(
-    varve_core::InstalledLayer,
-    Vec<varve_core::compose::ComposedLayer>,
-)> {
+fn resolve_layers(layer: Option<&str>) -> anyhow::Result<ResolvedLayers> {
     // The BASE root. Named `base` because `effective_root` below maps a base
     // root to a realm partition, and handing it a partition instead nests them.
     let base = varve_core::Store::at(store_root()?);
@@ -173,7 +176,8 @@ fn resolve_layers(
 
     // `resolve` already returns the installed layer the pin names, so asking
     // the store for it again would be a second way to answer one question.
-    let entry = varve_core::resolve(&pin, &store)?.layer;
+    let resolved = varve_core::resolve(&pin, &store)?;
+    let entry = resolved.layer.clone();
     // Re-verified before anything is read: serving the contents of a layer
     // varve cannot vouch for would look authoritative and be worthless.
     // varve#189: the platform this layer was installed for, not the host.
@@ -199,6 +203,34 @@ fn resolve_layers(
         &varve_core::host_platform(),
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    // REQ-OVERRIDE-001: each override's source layer is verified like the
+    // pinned one before anything of it is read or run, and travels with the
+    // composition so the orientation lists its tool and says MIXED.
+    let mut overrides = Vec::with_capacity(resolved.overrides.len());
+    for o in &resolved.overrides {
+        // `resolve` refused an override installed for another platform, so
+        // this is the host's, as the orientation's own check requires.
+        varve_core::verify_installed(&store, &o.layer, &verifier, &host).with_context(|| {
+            format!(
+                "override {}: layer {} {} does not verify",
+                o.tool, o.layer.layer, o.layer.digest
+            )
+        })?;
+        overrides.push((
+            o.tool.clone(),
+            varve_core::compose::ComposedLayer {
+                store: store.clone(),
+                entry: o.layer.clone(),
+                realm: own_realm.clone(),
+            },
+        ));
+    }
+    if !overrides.is_empty() {
+        eprintln!(
+            "MIXED toolchain: {}",
+            varve_core::overrides::env_value(&resolved.recorded_overrides())
+        );
+    }
     if layers.len() > 1 {
         eprintln!(
             "following the composition: {} layers — {}",
@@ -210,7 +242,7 @@ fn resolve_layers(
                 .join(", ")
         );
     }
-    Ok((entry, layers))
+    Ok((entry, layers, overrides))
 }
 
 /// Every `docs` payload of the pinned layer, verified, with what the producer
@@ -221,7 +253,7 @@ fn resolve_layers(
 /// implementation of "which payloads does this layer have" is a second thing
 /// to keep in step.
 fn collect(layer: Option<&str>) -> anyhow::Result<Vec<DocsPayload>> {
-    let (entry, layers) = resolve_layers(layer)?;
+    let (entry, layers, _) = resolve_layers(layer)?;
     let out: Vec<DocsPayload> = layers::docs_sources(&layers, &varve_core::host_platform())?
         .into_iter()
         .map(|d| d.payload)
@@ -244,7 +276,7 @@ fn collect(layer: Option<&str>) -> anyhow::Result<Vec<DocsPayload>> {
 /// The orientation for the pin. Everything is verified before anything is read
 /// or run; a failure anywhere returns an error and the caller prints nothing.
 fn orient(layer: Option<&str>) -> anyhow::Result<context::Context> {
-    let (entry, layers) = resolve_layers(layer)?;
+    let (entry, layers, overrides) = resolve_layers(layer)?;
     // Harvesting RUNS the host's binaries, so the layer must have been
     // verified for the host. One installed for another platform (varve#189)
     // was verified for that platform's payloads, not for the ones run here.
@@ -258,7 +290,7 @@ fn orient(layer: Option<&str>) -> anyhow::Result<context::Context> {
             entry.layer
         );
     }
-    let pinned = layers::pinned(&layers, &host)?;
+    let pinned = layers::pinned(&layers, &overrides, &host)?;
     Ok(context::orient(pinned, &Sandbox::default()).with_layer_override(layer))
 }
 
@@ -291,7 +323,7 @@ fn run_ask(layer: Option<&str>, query: &str, format: Format, limit: usize) -> an
 }
 
 fn run_page(layer: Option<&str>, doc: &str, path: &str) -> anyhow::Result<()> {
-    let (_, layers) = resolve_layers(layer)?;
+    let (_, layers, _) = resolve_layers(layer)?;
     let sources = layers::docs_sources(&layers, &varve_core::host_platform())?;
     let Some(source) = sources.iter().find(|d| d.payload.name == doc) else {
         let names: Vec<&str> = sources.iter().map(|d| d.payload.name.as_str()).collect();

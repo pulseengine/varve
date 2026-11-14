@@ -48,6 +48,7 @@ pub mod manifest;
 pub mod manifestversions;
 pub mod mirror;
 pub mod mutationscope;
+pub mod overrides;
 pub mod pin;
 pub mod platform;
 pub mod realm;
@@ -88,7 +89,8 @@ pub use ingest::{
 pub use install::{DigestConsent, cached_consent_why_not};
 pub use install::{
     DigestRole, InstallError, InstallOutcome, InstallPolicy, ManifestVerifier, OmissionSkipped,
-    VerifyError, install, install_by_digest, install_by_digest_from, install_from,
+    VerifyError, install, install_by_digest, install_by_digest_checked, install_by_digest_from,
+    install_from,
 };
 pub use kind::{ANN_KIND, PayloadKind, UnknownKind};
 pub use layer::{LayerId, LayerIdError, Line};
@@ -110,7 +112,8 @@ pub use linestatus::{
 pub use manifest::{LayerManifest, ManifestError};
 pub use pin::{
     Channel, DeclaredExportStatus, ExportDecl, ExportEnv, ExportKind, Pin, PinError,
-    ShadowDeclaration, ShimOrder, check_declared_export, classify_shadowing, env_lines,
+    ShadowDeclaration, ShimOrder, ToolOverride, check_declared_export, classify_shadowing,
+    env_lines,
 };
 pub use platform::host_platform;
 pub use realm::{Realm, RealmError, resolve_realm};
@@ -118,7 +121,10 @@ pub use referrers::{
     CarriedWork, WouldDestroy, guard as guard_layout, scan as scan_layout_referrers,
 };
 pub use registry::{RegistryRef, RegistrySource};
-pub use resolve::{ResolveError, Resolved, RunnerContract, carried_tool_names, resolve};
+pub use resolve::{
+    ResolveError, Resolved, ResolvedOverride, RunnerContract, carried_tool_names,
+    overrides_carried_by_pin, overrides_in_pin, resolve,
+};
 pub use reverify::{
     ReverifyError, VerifyTiming, verify_installed, verify_installed_timed, verify_retained_envelope,
 };

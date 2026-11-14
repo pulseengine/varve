@@ -146,6 +146,9 @@ pub(crate) struct Row {
 }
 
 const DISPATCHED: &str = "dispatched";
+/// A tool of the composition that a `[toolchain.override.<tool>]` replaces:
+/// carried, verified, and NOT what dispatches (REQ-OVERRIDE-001).
+const OVERRIDDEN: &str = "overridden";
 const HELD: &str = "held";
 const UNKNOWN: &str = "unknown";
 
@@ -153,7 +156,27 @@ pub fn run(store: &Store, layer: Option<&str>, json: bool) -> anyhow::Result<()>
     let target = crate::export_target(store, layer)?;
     let layers = crate::composition_for_export(&target)?;
     let host = varve_core::host_platform();
-    let rows = rows_of(&layers)?;
+    let mut rows = rows_of(&layers)?;
+    // A MIXED toolchain (REQ-OVERRIDE-001): the composition's entry for an
+    // overridden tool is not what dispatches here — it is marked OVERRIDDEN —
+    // and the override layer's entry for that tool is listed as dispatched.
+    for (tool, entry) in &target.override_layers {
+        for r in rows.iter_mut() {
+            if r.name == *tool && r.dispatch == DISPATCHED {
+                r.dispatch = OVERRIDDEN;
+            }
+        }
+        let source = varve_core::compose::ComposedLayer {
+            store: target.store.clone(),
+            entry: entry.clone(),
+            realm: target.realm.clone(),
+        };
+        rows.extend(
+            rows_of(std::slice::from_ref(&source))?
+                .into_iter()
+                .filter(|r| r.name == *tool && r.dispatch == DISPATCHED),
+        );
+    }
 
     if json {
         print_json(&target, &layers, &rows, &host);
@@ -391,12 +414,16 @@ fn print_json(
         // `host_platform` alone cannot tell a cross-platform install from a
         // tampered store, and those want opposite responses (varve#178).
         "installed_for": target.entry.platform,
+        // REQ-OVERRIDE-001: always present, `pinned` or `mixed`.
+        "state": varve_core::overrides::state(&target.overrides),
+        "overrides": target.overrides,
         "composition": composition,
         "payloads": payloads,
         "summary": {
             "payloads": rows.len(),
             "dispatched": rows.iter().filter(|r| r.dispatch == DISPATCHED).count(),
             "held": rows.iter().filter(|r| r.dispatch == HELD).count(),
+            "overridden": rows.iter().filter(|r| r.dispatch == OVERRIDDEN).count(),
             "layers": layers.len(),
             // Surfaced in the SUMMARY, not only per payload, so a CI gate can
             // assert "nothing in this layer went unverified" without walking
@@ -439,6 +466,18 @@ fn print_text(
             target.entry.layer, target.entry.channel, target.entry.digest
         ),
     }
+    if !target.overrides.is_empty() {
+        println!(
+            "MIXED toolchain {}:",
+            varve_core::overrides::identity(&target.entry.layer.to_string(), &target.overrides)
+        );
+        for (tool, entry) in &target.override_layers {
+            println!(
+                "  {tool} is dispatched from layer {} {}, not from this composition",
+                entry.layer, entry.digest
+            );
+        }
+    }
     if layers.len() > 1 {
         println!("composition: {} layers —", layers.len());
         for l in layers {
@@ -460,17 +499,25 @@ fn print_text(
         return;
     }
     let dispatched = rows.iter().filter(|r| r.dispatch == DISPATCHED).count();
-    let held = rows.len() - dispatched;
+    let overridden = rows.iter().filter(|r| r.dispatch == OVERRIDDEN).count();
+    let held = rows.len() - dispatched - overridden;
     // The host qualifies PRESENCE, never dispatch. Printing it beside the
     // DISPATCHED/HELD counts read as "4 payloads dispatch on this host",
     // which was false whenever the layer was installed for another platform —
     // dispatch is decided by payload KIND and the host decides nothing about
     // it (varve#178). Nothing was computed wrongly; the label sat on the
     // wrong number.
-    println!(
-        "\n{} payload(s): {dispatched} DISPATCHED, {held} HELD",
-        rows.len()
-    );
+    if overridden == 0 {
+        println!(
+            "\n{} payload(s): {dispatched} DISPATCHED, {held} HELD",
+            rows.len()
+        );
+    } else {
+        println!(
+            "\n{} payload(s): {dispatched} DISPATCHED, {overridden} OVERRIDDEN, {held} HELD",
+            rows.len()
+        );
+    }
     let present = rows.iter().filter(|r| r.present).count();
     match target.entry.platform.as_deref() {
         // Installed for somewhere else: say so plainly rather than leaving a

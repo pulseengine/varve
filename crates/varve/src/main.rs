@@ -1310,7 +1310,7 @@ fn shim_install(store: &Store, extra_tools: &[String]) -> anyhow::Result<()> {
     // dispatch does (REQ-NOPINNOTOOL-001 clause 2; second clean-room review).
     let ctx = dispatch_ctx(store)?;
     let resolved = resolve(&ctx.pin, &ctx.store)?;
-    vouch_for_dispatch(&ctx, &resolved.layer)?;
+    vouch_for_resolved(&ctx, &resolved)?;
     let mut names: Vec<String> = resolved.tools.iter().map(|(n, _)| n.clone()).collect();
     names.extend(extra_tools.iter().cloned());
     names.sort();
@@ -1550,12 +1550,31 @@ fn status(
     }
     let verdict = doc.report_for(&pin.layer);
     let ambient = ambient_report(&ctx);
+    // REQ-OVERRIDE-001 clause 3: the overrides the pin declares, from the pin
+    // itself — status answers for the pin, and a pin with an override is a
+    // MIXED toolchain whether or not its layers are installed yet.
+    let overrides: Vec<varve_core::overrides::RecordedOverride> = pin
+        .overrides
+        .iter()
+        .map(|o| varve_core::overrides::RecordedOverride {
+            tool: o.tool.clone(),
+            layer: o.layer.to_string(),
+            digest: o.digest.clone(),
+        })
+        .collect();
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "command": "status",
                 "layer": pin.layer.to_string(),
+                // Always present (REQ-OVERRIDE-001 clause 3): `pinned` or
+                // `mixed`, so a script can tell "pure" from "this varve
+                // predates the field". The line-status verdict below is the
+                // PINNED layer's; the overrides' layers are named here.
+                "state": varve_core::overrides::state(&overrides),
+                "identity": varve_core::overrides::identity(&pin.layer.to_string(), &overrides),
+                "overrides": overrides,
                 "line": line.to_string(),
                 "status_counter": doc.counter,
                 "yanked": verdict.yanked_reason.is_some(),
@@ -1579,10 +1598,26 @@ fn status(
             .expect("status report serialises")
         );
     } else {
-        println!(
-            "layer {} (line {line}, status document #{})",
-            pin.layer, doc.counter
-        );
+        if overrides.is_empty() {
+            println!(
+                "layer {} (line {line}, status document #{})",
+                pin.layer, doc.counter
+            );
+        } else {
+            println!(
+                "MIXED toolchain {}: layer {} (line {line}, status document #{}) with \
+                 overridden tools",
+                varve_core::overrides::identity(&pin.layer.to_string(), &overrides),
+                pin.layer,
+                doc.counter
+            );
+            for o in &overrides {
+                println!(
+                    "  override {}: from layer {} {} (this line-status does not cover it)",
+                    o.tool, o.layer, o.digest
+                );
+            }
+        }
         match &verdict.yanked_reason {
             Some(reason) => println!("  YANKED: {reason}"),
             None => println!("  not yanked"),
@@ -2094,6 +2129,36 @@ fn dispatch_target<'a>(
         .map(|(name, path)| (name.as_str(), path.as_path()))
 }
 
+/// An address of an overridden tool that does not reach the override — a
+/// realm-qualified name for another realm's provider — is refused, naming the
+/// override (REQ-OVERRIDE-001). `resolve` maps the pin's own qualified name to
+/// the override layer; any other provider of that name would run a binary
+/// the pin has overridden.
+fn refuse_unreachable_override(resolved: &varve_core::Resolved, arg: &str) -> anyhow::Result<()> {
+    if let Some(o) = resolved.override_for(arg)
+        && dispatch_target(resolved, arg).is_none()
+    {
+        bail!(
+            "'{arg}' names '{tool}', which this project has overridden: '{tool}' runs from \
+             layer {} \
+             ({}), and no other provider of it is reachable here. Address it as '{tool}'{}.",
+            o.layer.layer,
+            o.layer.digest,
+            match resolved
+                .qualified
+                .iter()
+                .find(|(p, _)| p.tool == o.tool)
+                .and_then(|(p, _)| p.qualified())
+            {
+                Some(q) => format!(" or '{q}'"),
+                None => String::new(),
+            },
+            tool = o.tool,
+        );
+    }
+    Ok(())
+}
+
 /// Every address this pin answers to: the bare names, plus the realm-qualified
 /// form of any name more than one layer of the composition provides. An error
 /// listing only bare names would hide the very binary clause 4b keeps alive.
@@ -2294,13 +2359,30 @@ fn run_tool(
     let pinned_channel = ctx.pin.channel;
     let mut pin = ctx.pin.clone();
     if let Some(layer) = override_layer {
+        // A one-off layer plus this project's overrides would be a mix nobody
+        // declared (REQ-OVERRIDE-001): refused, naming both, rather than
+        // silently dropping either.
+        if !pin.overrides.is_empty() {
+            bail!(
+                "--varve {layer} runs ONE layer, but {} overrides {} from other layers — the \
+                 combination is a toolchain nobody declared. Run without --varve, or from a \
+                 directory whose varve.toml has no [toolchain.override.*].",
+                pin_file.display(),
+                pin.overrides
+                    .iter()
+                    .map(|o| format!("{} ({} {})", o.tool, o.layer, o.digest))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         // A one-off: resolve another layer for this invocation only. The
         // checked-in pin is not read past this point and never written.
         pin.layer = layer.parse()?;
         pin.digest = None;
     }
     let resolved = resolve(&pin, &ctx.store)?;
-    vouch_for_dispatch(&ctx, &resolved.layer)?;
+    vouch_for_resolved(&ctx, &resolved)?;
+    refuse_unreachable_override(&resolved, tool)?;
     let Some((tool, path)) = dispatch_target(&resolved, tool) else {
         // The same correction `which` carries: the layer HOLDS a `wit`, `crate`
         // or `vsix` payload, it just does not dispatch one (REQ-INSPECT-001
@@ -2462,8 +2544,9 @@ fn run_tool(
     // Runnered entries (portable wasm) execute through their runner — from
     // the SAME verified layer, never from PATH (REQ-RUNNER-001).
     let mut cmd = if let Some(contract) = resolved.runners.get(tool) {
-        let Some((_, runner_path)) = resolved.tools.iter().find(|(n, _)| n == &contract.tool)
-        else {
+        // The runner of the SAME layer set as the tool (REQ-RUNNER-001):
+        // `resolve` paired each contract with its layer's runner binary.
+        let Some(runner_path) = contract.path.as_ref() else {
             bail!(
                 "tool '{tool}' runs via '{runner}' but the layer does not expose it — refusing",
                 runner = contract.tool
@@ -2485,6 +2568,18 @@ fn run_tool(
     };
     cmd.env("VARVE_LAYER", resolved.layer.layer.to_string())
         .env("VARVE_LAYER_MANIFEST_DIGEST", &resolved.layer.digest);
+    // REQ-OVERRIDE-001 clause 3, DD-043 (5): VARVE_LAYER stays the pinned
+    // layer, and a MIXED toolchain says so beside it. A pure one REMOVES any
+    // inherited value: a tool run by a mixed project's script must not hand
+    // the mix on to a pure project's tool as though it were its own.
+    if resolved.is_mixed() {
+        cmd.env(
+            "VARVE_OVERRIDES",
+            varve_core::overrides::env_value(&resolved.recorded_overrides()),
+        );
+    } else {
+        cmd.env_remove("VARVE_OVERRIDES");
+    }
     launch(cmd, tool)
 }
 
@@ -2504,6 +2599,13 @@ struct ExportTarget {
     verifier: varve_core::PinnedKeyVerifier,
     /// The realm whose root vouched for the root layer, named for messages.
     realm: String,
+    /// The overrides of the project's MIXED toolchain (REQ-OVERRIDE-001),
+    /// each source layer verified. Empty for an explicit `--layer`, which
+    /// names one layer and nothing else.
+    overrides: Vec<varve_core::overrides::RecordedOverride>,
+    /// Each override's tool and its VERIFIED source layer, for an export or
+    /// a report that must name the bytes the tool actually dispatches.
+    override_layers: Vec<(String, varve_core::store::InstalledLayer)>,
 }
 
 fn export_target(base: &Store, layer: Option<&str>) -> anyhow::Result<ExportTarget> {
@@ -2546,6 +2648,8 @@ fn export_target(base: &Store, layer: Option<&str>) -> anyhow::Result<ExportTarg
                 entry,
                 verifier,
                 realm,
+                overrides: Vec::new(),
+                override_layers: Vec::new(),
             })
         }
         None => {
@@ -2558,9 +2662,31 @@ fn export_target(base: &Store, layer: Option<&str>) -> anyhow::Result<ExportTarg
                 &verifier,
                 &varve_core::host_platform(),
             )?;
+            // Every override's source layer is verified too: an export or an
+            // attestation that records a MIXED toolchain vouches for all of it.
+            for o in &resolved.overrides {
+                varve_core::verify_installed(
+                    &ctx.store,
+                    &o.layer,
+                    &verifier,
+                    &varve_core::host_platform(),
+                )
+                .with_context(|| {
+                    format!(
+                        "override {}: layer {} {} does not verify",
+                        o.tool, o.layer.layer, o.layer.digest
+                    )
+                })?;
+            }
             Ok(ExportTarget {
                 realm: ctx_realm_name(&ctx),
                 store: ctx.store,
+                overrides: resolved.recorded_overrides(),
+                override_layers: resolved
+                    .overrides
+                    .iter()
+                    .map(|o| (o.tool.clone(), o.layer.clone()))
+                    .collect(),
                 entry: resolved.layer,
                 verifier,
             })
@@ -2787,22 +2913,33 @@ fn realm_trusts(
 /// can later catch a stale export whose pin has moved on.
 fn write_export_stamp(
     out: &std::path::Path,
-    entry: &varve_core::store::InstalledLayer,
+    target: &ExportTarget,
     kind: &str,
 ) -> anyhow::Result<()> {
+    let entry = &target.entry;
     // Scanned AFTER the adapter finished writing: the stamp records the tree
     // as it now is, which is what `verify --export` re-hashes (varve#288).
     // The session's ambient-tool policy is part of the provenance: an export
     // made where shims could run PATH binaries says so (REQ-PASSTHROUGH-001).
     let stamp =
         varve_core::exportstamp::stamp_for(out, &entry.layer.to_string(), &entry.digest, kind)?
-            .with_ambient_tools(ambient_policy());
+            .with_ambient_tools(ambient_policy())
+            // DD-043 (6): a MIXED toolchain's export says so in its identity.
+            .with_overrides(target.overrides.clone());
     varve_core::exportstamp::write_stamp(out, &stamp)?;
     println!(
-        "stamped {} — export bound to layer {} ({}); `varve verify --export {}` checks it",
+        "stamped {} — export bound to layer {} ({}){}; `varve verify --export {}` checks it",
         out.join(varve_core::exportstamp::STAMP_FILE).display(),
-        entry.layer,
+        stamp.layer,
         entry.digest,
+        if target.overrides.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", MIXED with {}",
+                varve_core::overrides::env_value(&target.overrides)
+            )
+        },
         out.display(),
     );
     Ok(())
@@ -2823,6 +2960,12 @@ fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
         let manifest = varve_core::LayerManifest::parse(&payload)?;
         let export = varve_core::bazel::export(&manifest);
         for (tool, json) in export.registries {
+            // An overridden tool's registry comes from its override layer
+            // below; what the composition says about it is not exported, so
+            // two of its layers disagreeing about it refuses nothing.
+            if target.override_layers.iter().any(|(t, _)| *t == tool) {
+                continue;
+            }
             if let Some((first, first_realm)) = registries.get(&tool)
                 && first != &json
             {
@@ -2839,12 +2982,31 @@ fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
             eprintln!("skipped {tool} ({platform}): {reason}");
         }
     }
-    std::fs::create_dir_all(out)?;
-    for (tool, (json, _)) in &registries {
-        let path = out.join(format!("{tool}.json"));
-        std::fs::write(&path, serde_json::to_vec_pretty(json)?)?;
-        println!("wrote {}", path.display());
+    // A MIXED toolchain (REQ-OVERRIDE-001): the overridden tool's registry is
+    // the OVERRIDE layer's, never the composition's, so Bazel fetches the
+    // tool `varve run` dispatches. One the override layer cannot describe is
+    // refused rather than written from the pin's.
+    for (tool, layer) in &target.override_layers {
+        let payload = std::fs::read(layer.root.join("layer.json"))?;
+        let manifest = varve_core::LayerManifest::parse(&payload)?;
+        match varve_core::bazel::export(&manifest).registries.remove(tool) {
+            Some(json) => {
+                registries.insert(tool.clone(), (json, target.realm.clone()));
+            }
+            // As for any tool without provenance: no registry file — and never
+            // the pinned layer's, which describes a tool this project does
+            // not run.
+            None => eprintln!(
+                "skipped {tool}: overridden by layer {} ({}), which records no source \
+                 provenance for it — no registry is written for it (the pinned layer's would \
+                 describe a tool this project does not run)",
+                layer.layer, layer.digest
+            ),
+        }
     }
+    // Everything that can refuse is decided BEFORE the directory changes, so
+    // a refusal leaves it as it was: first whether there is anything to
+    // export at all, then every stale registry to remove.
     if registries.is_empty() {
         bail!(
             "nothing exported — no entry in layer {} (or the {} layer(s) it composes) carries \
@@ -2853,7 +3015,38 @@ fn export_bazel(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
             layers.len() - 1
         );
     }
-    write_export_stamp(out, &target.entry, "bazel-registry")?;
+    // A re-export removes every registry the last export here wrote and this
+    // one does not — an override added, removed or swapped, a pin moved —
+    // so the new stamp never seals a registry for a tool this project does
+    // not run (REQ-OVERRIDE-001, REQ-EXPORT-SYNC-001). A `*.json` no export
+    // recorded, or one edited since, is refused rather than deleted.
+    let written: std::collections::BTreeSet<String> = registries
+        .keys()
+        .map(|tool| format!("{tool}.json"))
+        .collect();
+    let present = if out.is_dir() {
+        varve_core::exportstamp::scan_tree(out)?
+    } else {
+        Vec::new()
+    };
+    let prior = varve_core::exportstamp::read_stamp(out).ok();
+    let stale = varve_core::exportstamp::stale_registries(prior.as_ref(), &present, &written)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?;
+    for name in &stale {
+        let path = out.join(name);
+        std::fs::remove_file(&path).with_context(|| format!("cannot remove {}", path.display()))?;
+        eprintln!(
+            "removed {name}: the earlier export's registry for a tool this export does not \
+             write"
+        );
+    }
+    std::fs::create_dir_all(out)?;
+    for (tool, (json, _)) in &registries {
+        let path = out.join(format!("{tool}.json"));
+        std::fs::write(&path, serde_json::to_vec_pretty(json)?)?;
+        println!("wrote {}", path.display());
+    }
+    write_export_stamp(out, &target, "bazel-registry")?;
     Ok(())
 }
 
@@ -3158,9 +3351,12 @@ fn sign_attestation(
     let kind: varve_core::attest::AttestationKind = kind.parse()?;
     // Trust first, as everywhere: binding an attestation to a layer we cannot
     // verify would assert an association we have no basis for.
-    let entry = export_target(store, layer)?.entry;
+    let target = export_target(store, layer)?;
+    let entry = target.entry;
     let bytes = std::fs::read(file)
         .with_context(|| format!("cannot read attestation {}", file.display()))?;
+    // A MIXED toolchain's attestation records the overrides it was made
+    // under, signed with the rest (REQ-OVERRIDE-001 clause 3, DD-043 (6)).
     let st = varve_core::attest::statement(
         &entry.layer.to_string(),
         &entry.digest,
@@ -3168,7 +3364,8 @@ fn sign_attestation(
         &bytes,
         producer,
     )
-    .with_ambient_tools(ambient_policy());
+    .with_ambient_tools(ambient_policy())
+    .with_overrides(target.overrides.clone());
     let signer = role_signer(key, key_id, delegation, varve_core::keyroles::Role::Layer)?;
     let key_id = signer.realm_key_id();
     let key_id = key_id.as_str();
@@ -3193,7 +3390,15 @@ fn sign_attestation(
          \u{20}\u{20}attestation digest : {adigest}\n\
          \u{20}\u{20}bound to layer     : {layer} ({ldigest})\n\
          varve vouches that these bytes accompany this layer; what {producer} claims is \
-         {producer}'s to prove.",
+         {producer}'s to prove.{mixed}",
+        mixed = if st.overrides.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\u{20}\u{20}MIXED toolchain   : {}",
+                varve_core::overrides::env_value(&st.overrides)
+            )
+        },
         out = out.display(),
         adigest = st.digest,
         layer = entry.layer,
@@ -3217,6 +3422,8 @@ fn sign_attestation(
             "attestation_digest": st.digest,
             "layer": entry.layer.to_string(),
             "layer_manifest_digest": st.layer_manifest_digest,
+            "state": varve_core::overrides::state(&st.overrides),
+            "overrides": st.overrides,
             "key_id": key_id,
             "out": out.display().to_string(),
             "attached_to": attach_to.map(|l| l.display().to_string()),
@@ -3240,7 +3447,8 @@ fn check_attestation(
     // parsed from layer.json, neither authenticated until verify_installed
     // re-checks the retained envelope. This is the command a disconnected
     // consumer runs; it must not be the one that trusts unverified local state.
-    let entry = export_target(store, None)?.entry;
+    let target = export_target(store, None)?;
+    let entry = target.entry;
     let envelope = std::fs::read(statement)
         .with_context(|| format!("cannot read statement {}", statement.display()))?;
     let bytes = std::fs::read(file)
@@ -3249,14 +3457,32 @@ fn check_attestation(
     let st = varve_core::attest::verify_statement(&envelope, &trust)?;
     // 2. …and it must actually describe THESE bytes and THIS layer.
     varve_core::attest::check(&st, &bytes, &entry.digest, &entry.layer.to_string())?;
+    // 3. …and it must describe THIS toolchain (REQ-OVERRIDE-001, DD-043 (6)):
+    // evidence about the pure pin does not describe a MIXED project, nor
+    // evidence about one mix another.
+    if let Some(why) = varve_core::overrides::mismatch(&st.overrides, &target.overrides) {
+        bail!(
+            "this attestation does not describe this project's toolchain: {why}. A MIXED \
+             toolchain is attested only by a statement that records the same overrides — \
+             re-sign it with `varve sign-attestation` in this project."
+        );
+    }
     println!(
         "attestation OK: a {kind} document produced by {producer}, {n} bytes\n\
          \u{20}\u{20}attestation digest : {adigest}\n\
          \u{20}\u{20}bound to layer     : {layer} ({ldigest})\n\
          note: varve verified the ASSOCIATION and the bytes' integrity, and re-verified the \
          layer itself. Any claim {producer} makes INSIDE the document is verified with \
-         {producer}'s own key, not this one.{ambient}",
+         {producer}'s own key, not this one.{ambient}{mixed}",
         ambient = ambient_sentence(&st.ambient_tools, "the signing session"),
+        mixed = if st.overrides.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nMIXED toolchain: the statement records, and this project has, {}",
+                varve_core::overrides::env_value(&st.overrides)
+            )
+        },
         kind = st.kind,
         producer = st.producer,
         n = bytes.len(),
@@ -3278,6 +3504,20 @@ fn sbom_cmd(
     // Trust first: an SBOM for a layer we cannot verify would describe bytes
     // nobody vouched for — worse than none, because it looks authoritative.
     let target = export_target(store, layer)?;
+    // An SBOM describes ONE signed manifest. For a MIXED toolchain
+    // (REQ-OVERRIDE-001) the pinned layer's would list a tool that does not
+    // run here, so the project's own SBOM is refused rather than written as
+    // the pinned layer's; each layer's is available by name.
+    if !target.overrides.is_empty() {
+        bail!(
+            "this project's toolchain is MIXED ({}): an SBOM transcribes one signed layer, and \
+             the pinned layer's would describe a tool this project does not run. Ask for each \
+             layer by name — `varve sbom --layer {}` and `varve sbom --layer <override layer>` \
+             — and ship both.",
+            varve_core::overrides::env_value(&target.overrides),
+            target.entry.layer
+        );
+    }
     let entry = target.entry;
     let payload = std::fs::read(entry.root.join("layer.json"))?;
     let manifest = varve_core::LayerManifest::parse(&payload)?;
@@ -3366,7 +3606,7 @@ fn export_cargo(store: &Store, layer: Option<&str>, out: &std::path::Path) -> an
          differently than you expect, `varve export-crates-vendor` sidesteps index \
          resolution entirely by vendoring the sources — it is the stronger of the two."
     );
-    write_export_stamp(out, &target.entry, "cargo")?;
+    write_export_stamp(out, &target, "cargo")?;
     Ok(())
 }
 
@@ -3386,7 +3626,7 @@ fn export_bazel_distdir(
         out.display(),
         out.display()
     );
-    write_export_stamp(out, &target.entry, "bazel-distdir")?;
+    write_export_stamp(out, &target, "bazel-distdir")?;
     Ok(())
 }
 
@@ -3424,7 +3664,7 @@ fn export_vsix(store: &Store, layer: Option<&str>, out: &std::path::Path) -> any
                 .display()
         );
     }
-    write_export_stamp(out, &target.entry, "vsix")?;
+    write_export_stamp(out, &target, "vsix")?;
     Ok(())
 }
 
@@ -3488,7 +3728,7 @@ fn export_wit(
     for w in &report.written {
         println!("  {w}");
     }
-    write_export_stamp(out, &target.entry, varve_core::ExportKind::Wit.as_str())?;
+    write_export_stamp(out, &target, varve_core::ExportKind::Wit.as_str())?;
     // The stanza is PRINTED, never written: varve does not edit a consumer's
     // tool configuration, and the registry name is theirs because it is what
     // their wkg.toml or build rule already refers to.
@@ -3562,7 +3802,7 @@ fn export_docs(
         }
         None => println!("  (this document declares no entry point)"),
     }
-    write_export_stamp(out, &target.entry, "docs")?;
+    write_export_stamp(out, &target, "docs")?;
     Ok(())
 }
 
@@ -3654,7 +3894,7 @@ fn export_sdk(
     // Exactly `ExportKind::Sdk`, not the string "sdk" spelled again: a
     // declaration in varve.toml is compared against this stamp, and a
     // mismatch reports the declared export as never produced at all.
-    write_export_stamp(out, &target.entry, varve_core::ExportKind::Sdk.as_str())?;
+    write_export_stamp(out, &target, varve_core::ExportKind::Sdk.as_str())?;
     Ok(())
 }
 
@@ -3720,11 +3960,7 @@ fn export_zephyr_modules(
         script.display(),
         script.display(),
     );
-    write_export_stamp(
-        out,
-        &target.entry,
-        varve_core::ExportKind::ZephyrModule.as_str(),
-    )?;
+    write_export_stamp(out, &target, varve_core::ExportKind::ZephyrModule.as_str())?;
     Ok(())
 }
 
@@ -3757,7 +3993,7 @@ fn export_crates_vendor(
         varve_core::crateexport::VENDOR_SUBDIR,
         out.display(),
     );
-    write_export_stamp(out, &target.entry, "crates-vendor")?;
+    write_export_stamp(out, &target, "crates-vendor")?;
     Ok(())
 }
 
@@ -4098,10 +4334,21 @@ fn seed(
         None => {
             let ctx = project_ctx(store)?;
             let resolved = varve_core::resolve(&ctx.pin, &ctx.store)?;
+            let realm = ctx.realm.as_ref().map(|r| (r.name.clone(), r.signed_index));
+            // A MIXED toolchain (REQ-OVERRIDE-001) is the pinned layer AND each
+            // override's source layer: a store seeded with the pin alone could
+            // not resolve this project. Each is seeded as its own layer.
+            for o in &resolved.overrides {
+                queue.push(SeedTarget {
+                    store: ctx.store.clone(),
+                    layer: o.layer.clone(),
+                    realm: realm.clone(),
+                });
+            }
             queue.push(SeedTarget {
                 store: ctx.store.clone(),
                 layer: resolved.layer,
-                realm: ctx.realm.as_ref().map(|r| (r.name.clone(), r.signed_index)),
+                realm,
             });
         }
     }
@@ -4330,6 +4577,18 @@ fn vouch_for_dispatch(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> a
             ctx.store.root().display()
         )
     })
+}
+
+/// [`vouch_for_dispatch`] for EVERY layer a resolution dispatches from: the
+/// pinned layer and each override's source layer (REQ-OVERRIDE-001). An
+/// override layer in a realmless store is no more vouched for than the pinned
+/// one, so it gets the same check.
+fn vouch_for_resolved(ctx: &ProjectCtx, resolved: &varve_core::Resolved) -> anyhow::Result<()> {
+    vouch_for_dispatch(ctx, &resolved.layer)?;
+    for o in &resolved.overrides {
+        vouch_for_dispatch(ctx, &o.layer)?;
+    }
+    Ok(())
 }
 
 /// How this project's signatures are judged (REQ-KEYROLES-001): the realm's
@@ -4857,6 +5116,96 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Fetch, transitively, every layer `start` composes that is not installed
+/// (REQ-COMPOSEINSTALL-001), each from the realm its include names. Returns
+/// the layers that could not be fetched, each with its own reason.
+///
+/// One walk for the pinned layer and for an override's source layer: an
+/// override layer that composes others is installed with them, as `seed` and
+/// `verify` expect (REQ-OVERRIDE-001). `seen` and `composed_count` span both.
+#[allow(clippy::too_many_arguments)]
+fn follow_includes_from(
+    ctx: &ProjectCtx,
+    start: Vec<varve_core::store::InstalledLayer>,
+    follow_includes: bool,
+    platform: &str,
+    now: &str,
+    pinned_origin: Option<&str>,
+    seen: &mut std::collections::BTreeSet<String>,
+    composed_count: &mut usize,
+) -> anyhow::Result<Vec<String>> {
+    let mut missing: Vec<String> = Vec::new();
+    let mut queue: Vec<varve_core::store::InstalledLayer> = start;
+    // A work bound, and named as one: the cycle and depth limits live in
+    // the walker. This only stops a pathological graph from spinning here.
+    let mut visits = 0usize;
+    while let Some(current) = queue.pop() {
+        visits += 1;
+        if visits > varve_core::compose::MAX_DEPTH * 64 {
+            bail!(
+                "composition graph has more than {} nodes to visit — refusing to walk \
+                 further; this is a mistake, not a design",
+                varve_core::compose::MAX_DEPTH * 64
+            );
+        }
+        let Ok(bytes) = std::fs::read(current.root.join("layer.json")) else {
+            continue;
+        };
+        let Ok(view) = varve_core::compose::view(&bytes) else {
+            continue;
+        };
+        for inc in &view.includes {
+            if !seen.insert(inc.digest.clone()) {
+                continue;
+            }
+            *composed_count += 1;
+            if let Some((_, found)) = ctx.store.find_anywhere(&inc.digest)? {
+                queue.push(found);
+                continue;
+            }
+            // Not installed. Fetch it from the realm the include NAMES —
+            // that realm's registry, verified against that realm's root,
+            // laid down in that realm's partition. Never ours: the include
+            // naming a realm is the whole trust boundary.
+            let name = inc.layer.clone().unwrap_or_else(|| inc.digest.clone());
+            let realm_name = match (&inc.realm, follow_includes) {
+                (Some(r), true) => r.clone(),
+                _ => {
+                    missing.push(match &inc.realm {
+                        Some(r) => format!(
+                            "{name} (realm '{r}'): not fetched — --no-follow-includes was given"
+                        ),
+                        None => format!(
+                            "{name}: not fetched — the include names no realm, so there is \
+                             no registry to fetch it from and no root that vouches for it"
+                        ),
+                    });
+                    continue;
+                }
+            };
+            match fetch_included_layer(
+                ctx,
+                &inc.digest,
+                inc.layer.as_deref(),
+                &realm_name,
+                platform,
+                now,
+                pinned_origin,
+            ) {
+                Ok(entry) => {
+                    println!(
+                        "  fetched composed layer {} from realm '{realm_name}'",
+                        entry.layer
+                    );
+                    queue.push(entry);
+                }
+                Err(e) => missing.push(format!("{name} (realm '{realm_name}'): {e:#}")),
+            }
+        }
+    }
+    Ok(missing)
+}
+
 fn install(
     store: &Store,
     from: Option<&str>,
@@ -5049,7 +5398,7 @@ fn install(
     // not define, or whose registry cannot be reached — "I could not fetch it"
     // must never look like "it is not needed".
     let mut composed_count = 0usize;
-    let mut fetched: Vec<String> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Some(entry) = ctx.store.get(&outcome.digest)? {
         // One list, each entry carrying its OWN reason. A layer we tried to
         // fetch and could not (credentials, network, a digest the registry
@@ -5058,77 +5407,16 @@ fn install(
         // and no root, so there is nothing to fetch it FROM) send an operator
         // to different places, and a single blended paragraph of advice names
         // credentials at someone whose realm is simply undefined.
-        let mut missing: Vec<String> = Vec::new();
-        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut queue: Vec<varve_core::store::InstalledLayer> = vec![entry];
-        // A work bound, and named as one: the cycle and depth limits live in
-        // the walker. This only stops a pathological graph from spinning here.
-        let mut visits = 0usize;
-        while let Some(current) = queue.pop() {
-            visits += 1;
-            if visits > varve_core::compose::MAX_DEPTH * 64 {
-                bail!(
-                    "composition graph has more than {} nodes to visit — refusing to walk \
-                     further; this is a mistake, not a design",
-                    varve_core::compose::MAX_DEPTH * 64
-                );
-            }
-            let Ok(bytes) = std::fs::read(current.root.join("layer.json")) else {
-                continue;
-            };
-            let Ok(view) = varve_core::compose::view(&bytes) else {
-                continue;
-            };
-            for inc in &view.includes {
-                if !seen.insert(inc.digest.clone()) {
-                    continue;
-                }
-                composed_count += 1;
-                if let Some((_, found)) = ctx.store.find_anywhere(&inc.digest)? {
-                    queue.push(found);
-                    continue;
-                }
-                // Not installed. Fetch it from the realm the include NAMES —
-                // that realm's registry, verified against that realm's root,
-                // laid down in that realm's partition. Never ours: the include
-                // naming a realm is the whole trust boundary.
-                let name = inc.layer.clone().unwrap_or_else(|| inc.digest.clone());
-                let realm_name = match (&inc.realm, follow_includes) {
-                    (Some(r), true) => r.clone(),
-                    _ => {
-                        missing.push(match &inc.realm {
-                            Some(r) => format!(
-                                "{name} (realm '{r}'): not fetched — --no-follow-includes was given"
-                            ),
-                            None => format!(
-                                "{name}: not fetched — the include names no realm, so there is \
-                                 no registry to fetch it from and no root that vouches for it"
-                            ),
-                        });
-                        continue;
-                    }
-                };
-                match fetch_included_layer(
-                    &ctx,
-                    &inc.digest,
-                    inc.layer.as_deref(),
-                    &realm_name,
-                    &platform,
-                    &now,
-                    pinned_origin.as_deref(),
-                ) {
-                    Ok(entry) => {
-                        println!(
-                            "  fetched composed layer {} from realm '{realm_name}'",
-                            entry.layer
-                        );
-                        fetched.push(format!("{} (realm '{realm_name}')", entry.layer));
-                        queue.push(entry);
-                    }
-                    Err(e) => missing.push(format!("{name} (realm '{realm_name}'): {e:#}")),
-                }
-            }
-        }
+        let missing = follow_includes_from(
+            &ctx,
+            vec![entry],
+            follow_includes,
+            &platform,
+            &now,
+            pinned_origin.as_deref(),
+            &mut seen,
+            &mut composed_count,
+        )?;
         if !missing.is_empty() {
             // Clause 3: REFUSE BEFORE claiming success. This used to print
             // "installed layer X" and THEN error, leaving a layer in
@@ -5159,6 +5447,166 @@ fn install(
             );
         }
     }
+    // Overrides (REQ-OVERRIDE-001 clause 1, DD-043 (2)): each source layer is
+    // fetched THROUGH THE SAME PIPELINE an `[[include]]` uses —
+    // `install_by_digest_checked`, from this pin's own sources, verified
+    // against this pin's realm root, its line index and high-water mark
+    // checked, payloads laid down content-addressed in this pin's partition.
+    // There is no other way in: a digest no source serves, or bytes that fail
+    // the root, refuse the install (clause 2).
+    //
+    // Refusals happen as early as they can be decided (the review's M4):
+    //   1. clause 4 needs only the pin and the pinned layer — asked before any
+    //      override layer is fetched;
+    //   2. another layer under the digest, another channel, no such tool for
+    //      this platform — asked of the VERIFIED manifest, before payloads are
+    //      laid down or the line's high-water mark moves;
+    //   3. anything else `resolve` decides is asked once all is installed.
+    // Clause 4 from what the pinned layer CARRIES, not from what resolves
+    // on this host: `install --platform <other>` must not be refused because
+    // this machine has no build of a pinned tool.
+    if !pin.overrides.is_empty() {
+        // "Could not tell" refuses: with the pinned layer's store entry gone,
+        // nothing says what the pin has, and an override must not pass on it.
+        let Some(pinned) = store.get(&outcome.digest)? else {
+            bail!(
+                "layer {} ({}) is not in the store it was just installed into, so what it \
+                 carries cannot be told — refusing every override rather than guessing",
+                outcome.layer,
+                outcome.digest
+            );
+        };
+        varve_core::overrides_carried_by_pin(pin, &pinned, store, &platform)?;
+    }
+    let mut override_entries: Vec<varve_core::store::InstalledLayer> = Vec::new();
+    for o in &pin.overrides {
+        // Already here FOR THIS PLATFORM: nothing to fetch. One laid down for
+        // another platform is fetched again for this one — the refusal that
+        // sends a user here must name a fix that works.
+        if let Some(have) = store.get(&o.digest)?
+            && have.platform.as_deref().is_none_or(|p| p == platform)
+        {
+            // Installed already — by an earlier install, or by pinning it
+            // directly — and still held to the same manifest checks: on
+            // another platform nothing after this would check it.
+            let bytes = std::fs::read(have.root.join("layer.json"))
+                .with_context(|| format!("cannot read layer {}'s manifest", have.layer))?;
+            let manifest = varve_core::LayerManifest::parse(&bytes)?;
+            varve_core::overrides::check_manifest(
+                &o.tool,
+                &o.layer,
+                pin.channel,
+                &platform,
+                &manifest,
+            )
+            .map_err(|why| {
+                anyhow::anyhow!(
+                    "override {}: layer {} ({}) is refused: {why}",
+                    o.tool,
+                    o.layer,
+                    o.digest
+                )
+            })?;
+            override_entries.push(have);
+            continue;
+        }
+        let expected_line = o.layer.line().clone();
+        let check = |m: &varve_core::LayerManifest| {
+            varve_core::overrides::check_manifest(&o.tool, &o.layer, pin.channel, &platform, m)
+        };
+        let fetched = sources
+            .attempt(
+                |source, is_primary| {
+                    varve_core::install_by_digest_checked(
+                        &o.digest,
+                        source,
+                        &verifier,
+                        store,
+                        &mut marks,
+                        &policy,
+                        if is_primary {
+                            varve_core::DigestRole::Primary
+                        } else {
+                            varve_core::DigestRole::Mirror {
+                                expected_line: Ok(&expected_line),
+                            }
+                        },
+                        &check,
+                    )
+                },
+                varve_core::InstallError::fails_over,
+            )
+            .map_err(|failures| {
+                let realm = ctx.realm.as_ref().map_or("-", |r| r.name.as_str());
+                sources_failed(realm, failures).context(format!(
+                    "override {}: layer {} ({}) could not be installed from this pin's realm — \
+                     nothing else is tried; the override is refused",
+                    o.tool, o.layer, o.digest
+                ))
+            })?;
+        println!(
+            "  override {}: installed layer {} (counter {}) {}",
+            o.tool, fetched.layer, fetched.counter, fetched.digest
+        );
+        // Just installed into this store, so it must be there; if it is not,
+        // its includes cannot be followed — "could not tell" refuses.
+        let Some(entry) = store.get(&fetched.digest)? else {
+            bail!(
+                "override {}: layer {} ({}) is not in the store it was just installed into, so \
+                 what it composes cannot be followed — refusing",
+                o.tool,
+                fetched.layer,
+                fetched.digest
+            );
+        };
+        override_entries.push(entry);
+    }
+    // What an override layer composes is installed with it, by the same walk
+    // the pinned layer's includes take, so `seed` (which carries an override
+    // layer's includes) finds them here. Dispatch takes only the tool from the
+    // override layer's own `bin/`, and `verify` checks that layer itself.
+    // Counted apart from the pin's: they are not what the pinned layer
+    // composes.
+    let mut override_composed = 0usize;
+    if !override_entries.is_empty() {
+        let missing = follow_includes_from(
+            &ctx,
+            override_entries,
+            follow_includes,
+            &platform,
+            &now,
+            pinned_origin.as_deref(),
+            &mut seen,
+            &mut override_composed,
+        )?;
+        if !missing.is_empty() {
+            bail!(
+                "an override layer composes {} layer(s) that are not installed:\n  {}\n\
+                 They are fetched from the registry each include's realm names, exactly as the \
+                 pinned layer's are; see `varve docs composition`.",
+                missing.len(),
+                missing.join("\n  ")
+            );
+        }
+    }
+    // Every other override refusal (DD-043 (3)) is decided by `resolve`;
+    // asking it here makes `install` refuse what every later dispatch would.
+    // Only for THIS machine: `resolve` refuses an override layer installed
+    // for another platform, which is exactly what `install --platform <other>`
+    // lays down; the check then runs where the toolchain is dispatched.
+    if !pin.overrides.is_empty() && platform == varve_core::host_platform() {
+        let resolved = varve_core::resolve(pin, store)?;
+        println!(
+            "  toolchain is MIXED: {} from other layers of the realm (VARVE_OVERRIDES={})",
+            resolved
+                .overrides
+                .iter()
+                .map(|o| o.tool.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            varve_core::overrides::env_value(&resolved.recorded_overrides())
+        );
+    }
     println!(
         "installed layer {} (counter {}) {}",
         outcome.layer, outcome.counter, outcome.digest
@@ -5172,6 +5620,12 @@ fn install(
         println!(
             "  composes {composed_count} installed layer(s), transitively — `varve verify` \
              checks each against its own realm's trust root"
+        );
+    }
+    if override_composed > 0 {
+        println!(
+            "  the override layer(s) compose {override_composed} further installed layer(s), \
+             transitively — fetched from the realm each include names"
         );
     }
 
@@ -5253,12 +5707,57 @@ fn verify(
         // layer in another realm passed with exit 0 (varve#84). The realm
         // boundary is preserved in WHICH KEY verifies WHAT, not in what gets
         // looked at.
-        return verify_every_partition(&ctx, timing);
+        verify_every_partition(&ctx, timing)?;
+        // `--all` verified every installed layer, override layers included;
+        // the project's own toolchain is still named for what it is.
+        if !ctx.pin.overrides.is_empty() {
+            let recorded: Vec<varve_core::overrides::RecordedOverride> = ctx
+                .pin
+                .overrides
+                .iter()
+                .map(|o| varve_core::overrides::RecordedOverride {
+                    tool: o.tool.clone(),
+                    layer: o.layer.to_string(),
+                    digest: o.digest.clone(),
+                })
+                .collect();
+            println!(
+                "MIXED: this project's toolchain is {} — layer {} with {}",
+                varve_core::overrides::identity(&ctx.pin.layer.to_string(), &recorded),
+                ctx.pin.layer,
+                varve_core::overrides::env_value(&recorded)
+            );
+        }
+        return Ok(());
     }
-    let layers = vec![varve_core::resolve(&ctx.pin, store)?.layer];
-    if layers.is_empty() {
-        bail!("nothing to verify — no layers installed");
+    let resolved = varve_core::resolve(&ctx.pin, store)?;
+    for o in &resolved.overrides {
+        // DD-043 (5): the override's source layer is verified like the pinned
+        // one — its signature against this realm's root, every payload against
+        // its signed digest. Reported BEFORE the pinned layer's verdict so no
+        // "verified" line for the pin can be read without the mix above it.
+        let (checked, spent) = varve_core::verify_installed_timed(
+            store,
+            &o.layer,
+            &verifier,
+            &varve_core::host_platform(),
+        )
+        .with_context(|| {
+            format!(
+                "override {}: layer {} {} does not verify",
+                o.tool, o.layer.layer, o.layer.digest
+            )
+        })?;
+        if timing {
+            report_timing(&o.layer.layer.to_string(), &spent);
+        }
+        println!(
+            "override {}: layer {} {} verified: signature OK, {checked} tool(s) match their \
+             signed digests",
+            o.tool, o.layer.layer, o.layer.digest
+        );
     }
+    let layers = vec![resolved.layer.clone()];
     for layer in layers {
         let (checked, spent) = varve_core::verify_installed_timed(
             store,
@@ -5273,7 +5772,7 @@ fn verify(
             "layer {} {} verified: signature OK, {checked} tool(s) match their signed digests",
             layer.layer, layer.digest
         );
-        report_attestations(&ctx, &layer)?;
+        report_attestations(&ctx, &layer, &resolved.recorded_overrides())?;
         // A composition is only as trustworthy as every layer in it. Verifying
         // the root alone left an UNSIGNED included layer dispatching while
         // verify reported OK (found by clean-room review) — the included
@@ -5286,8 +5785,11 @@ fn verify(
     // is the whole difference between a gate and a habit.
     verify_declared_exports(&ctx, store)?;
     if !exports.is_empty() {
-        let current = varve_core::resolve(&ctx.pin, store)?.layer.digest;
-        verify_exports(&current, exports)?;
+        verify_exports(
+            &resolved.layer.digest,
+            &resolved.recorded_overrides(),
+            exports,
+        )?;
     }
     if let Some(path) = lockfile {
         verify_lockfile(&ctx, path)?;
@@ -5305,6 +5807,20 @@ fn verify(
     // anti-rollback is varve's most defensible property; the command a
     // consumer runs to check it must check it.
     verify_no_rollback(&ctx, store)?;
+    if resolved.is_mixed() {
+        // The last line a CI log shows: the verdict is for a MIXED toolchain,
+        // never for the pinned layer alone (REQ-OVERRIDE-001 clause 3).
+        println!(
+            "MIXED: verified toolchain {} — layer {} with {} (every override layer verified \
+             above)",
+            varve_core::overrides::identity(
+                &resolved.layer.layer.to_string(),
+                &resolved.recorded_overrides()
+            ),
+            resolved.layer.layer,
+            varve_core::overrides::env_value(&resolved.recorded_overrides())
+        );
+    }
     Ok(())
 }
 
@@ -5535,6 +6051,27 @@ fn verify_no_rollback(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
             manifest.layer
         );
     }
+    // An override's layer was installed the way an include is: its digest is
+    // not consent to go below the mark (DD-043 (2)), so verify refuses what
+    // install would have refused.
+    for o in &resolved.overrides {
+        let payload = std::fs::read(o.layer.root.join("layer.json"))?;
+        let manifest = varve_core::LayerManifest::parse(&payload)?;
+        if let varve_core::RollbackVerdict::Rollback {
+            line,
+            presented,
+            high_water,
+        } = marks.check(&manifest)
+        {
+            bail!(
+                "override {}: layer {} presents counter {presented} while the {line} line's \
+                 high-water mark is {high_water} — a validly-signed older layer is what \
+                 anti-rollback exists to refuse, and `install` would have refused it",
+                o.tool,
+                o.layer.layer
+            );
+        }
+    }
     Ok(())
 }
 
@@ -5553,7 +6090,11 @@ fn verify_no_rollback(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()> {
 /// the layer's name and digest are local labels until then, and joining an
 /// attestation onto unverified labels is the defect clean-room review already
 /// found in `check-attestation`.
-fn report_attestations(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> anyhow::Result<()> {
+fn report_attestations(
+    ctx: &ProjectCtx,
+    layer: &varve_core::InstalledLayer,
+    current: &[varve_core::overrides::RecordedOverride],
+) -> anyhow::Result<()> {
     let trust = ctx_trust(ctx)?;
     let reports = match varve_core::attestcarry::report_installed(
         &layer.root,
@@ -5574,7 +6115,20 @@ fn report_attestations(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> 
     }
     println!("  carries {} attestation(s):", reports.len());
     for r in &reports {
-        if r.binds {
+        // REQ-OVERRIDE-001: a statement signed under a MIXED toolchain says
+        // which, and one that binds to this LAYER but was made under other
+        // overrides than this project has does not describe this toolchain.
+        let toolchain = varve_core::overrides::mismatch(&r.overrides, current);
+        if r.binds
+            && let Some(why) = &toolchain
+        {
+            println!(
+                "    {kind} by {producer}: binds to this layer, but does NOT match this \
+                 project's toolchain — {why}",
+                kind = r.kind,
+                producer = r.producer,
+            );
+        } else if r.binds {
             println!(
                 "    {kind} by {producer}: binds to this layer (varve vouches for the \
                  association and the bytes' integrity — what {producer} CLAIMS is verified \
@@ -5593,6 +6147,17 @@ fn report_attestations(ctx: &ProjectCtx, layer: &varve_core::InstalledLayer) -> 
         // The signer's session, as recorded in the signed statement. Printed
         // for a statement that verifies whether or not it still binds: the
         // record is about who signed it, not about this layer.
+        if !r.overrides.is_empty() {
+            println!(
+                "      made under MIXED toolchain {}{}",
+                varve_core::overrides::env_value(&r.overrides),
+                if toolchain.is_none() {
+                    " — matches this project's toolchain"
+                } else {
+                    ""
+                }
+            );
+        }
         let ambient = ambient_sentence(&r.ambient_tools, "the signing session");
         if !ambient.is_empty() {
             println!("      {}", ambient.trim_start());
@@ -5692,6 +6257,10 @@ fn verify_lockfile(ctx: &ProjectCtx, path: &std::path::Path) -> anyhow::Result<(
         entry: resolved.layer.clone(),
         verifier: ctx_verifier(ctx)?,
         realm: ctx_realm_name(ctx),
+        // Overrides replace dispatched TOOLS only; the crates a lockfile is
+        // checked against are the pinned composition's either way.
+        overrides: resolved.recorded_overrides(),
+        override_layers: Vec::new(),
     };
     let layers = composition_for_export(&target)?;
     let crates = match collect_verified_crates(&layers) {
@@ -5918,11 +6487,13 @@ fn verify_declared_exports(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()
     if ctx.pin.exports.is_empty() {
         return Ok(());
     }
-    let current = varve_core::resolve(&ctx.pin, store)?.layer.digest;
+    let resolved = varve_core::resolve(&ctx.pin, store)?;
+    let current = resolved.layer.digest.clone();
+    let overrides = resolved.recorded_overrides();
     let mut faults = Vec::new();
     for decl in &ctx.pin.exports {
         let dir = decl.dir(&ctx.root);
-        let status = varve_core::check_declared_export(decl, &ctx.root, &current);
+        let status = varve_core::check_declared_export(decl, &ctx.root, &current, &overrides);
         match status {
             varve_core::DeclaredExportStatus::Current => println!(
                 "declared export {} ({}) — fresh: bound to the layer the pin resolves{}",
@@ -5994,14 +6565,20 @@ fn verify_declared_exports(ctx: &ProjectCtx, store: &Store) -> anyhow::Result<()
 /// (REQ-EXPORT-SYNC-001). A stamp that names a different layer than the pin now
 /// resolves is stale; an absent or malformed stamp is not a verified export.
 /// Any of these fails the command — the whole point is a loud CI gate.
-fn verify_exports(current_digest: &str, exports: &[PathBuf]) -> anyhow::Result<()> {
+fn verify_exports(
+    current_digest: &str,
+    current_overrides: &[varve_core::overrides::RecordedOverride],
+    exports: &[PathBuf],
+) -> anyhow::Result<()> {
     use varve_core::exportstamp::{
         ContentStatus, ExportStatus, read_stamp, status, verify_content,
     };
     let mut faults = Vec::new();
     for dir in exports {
         let stamp = read_stamp(dir)?;
-        if let ExportStatus::Stale { stamped, current } = status(&stamp, current_digest) {
+        if let ExportStatus::Stale { stamped, current } =
+            status(&stamp, current_digest, current_overrides)
+        {
             eprintln!(
                 "export {} — STALE: stamped from layer {} ({stamped}); the pin now \
                  resolves {current}. Re-run the export against the current pin.",
@@ -6090,8 +6667,9 @@ fn load_pin() -> anyhow::Result<(Pin, PathBuf)> {
 fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
     let ctx = dispatch_ctx(store)?;
     let resolved = resolve(&ctx.pin, &ctx.store)?;
-    vouch_for_dispatch(&ctx, &resolved.layer)?;
+    vouch_for_resolved(&ctx, &resolved)?;
     let asked = tool.to_string();
+    refuse_unreachable_override(&resolved, tool)?;
     let Some((tool, path)) = dispatch_target(&resolved, tool) else {
         // "is not part of layer" was FALSE for a held payload: the layer holds
         // it, verifies it, and hands it to an export adapter — it is simply not
@@ -6136,6 +6714,30 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
         "layer {} ({}) {}",
         resolved.layer.layer, resolved.layer.channel, resolved.layer.digest
     );
+    // REQ-OVERRIDE-001 clause 3: a MIXED toolchain is never reported as the
+    // pinned layer. The asked tool, if overridden, names BOTH layers: the one
+    // its bytes come from and the pinned one it replaces.
+    if resolved.is_mixed() {
+        if let Some(o) = resolved.overrides.iter().find(|o| o.tool == tool) {
+            eprintln!(
+                "MIXED: '{tool}' is overridden — it runs from layer {} ({}) {}, not from the \
+                 pinned layer {} {}",
+                o.layer.layer,
+                o.layer.channel,
+                o.layer.digest,
+                resolved.layer.layer,
+                resolved.layer.digest
+            );
+        }
+        eprintln!(
+            "MIXED toolchain: {} (VARVE_OVERRIDES={})",
+            varve_core::overrides::identity(
+                &resolved.layer.layer.to_string(),
+                &resolved.recorded_overrides()
+            ),
+            varve_core::overrides::env_value(&resolved.recorded_overrides())
+        );
+    }
     // The line above names the layer the PIN resolves to, which for a composed
     // tool is not the layer that owns the binary (`docs composition` says so).
     // Someone who ASKED qualified is asking precisely about a provider, so name
