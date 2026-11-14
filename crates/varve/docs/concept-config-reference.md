@@ -58,7 +58,7 @@ While any override is active the toolchain is **MIXED**. These say so rather tha
 - `varve which <tool>` (both layers);
 - `varve inspect` (the override layer's entry DISPATCHED, the composition's OVERRIDDEN);
 - `varve verify`: verifies each override layer and its anti-rollback mark, and ends with a `MIXED:` line, also under `--all`. A carried attestation made under another mix than the project's is reported as not matching this toolchain;
-- `varve run` (`VARVE_LAYER` stays the pinned layer; `VARVE_OVERRIDES=tool=layer@digest,…`);
+- `varve run` (`VARVE_LAYER` stays the pinned layer; `VARVE_OVERRIDES=tool=layer@digest,…`). `varve run --with <tool>@<version>` applies an override for one command only, chosen among installed layers, with the same rules; nothing persists (`varve docs run`);
 - `varve-serve context`;
 - `varve export-bazel` (the overridden tool's registry is the override layer's, or none when that layer records no provenance for it);
 - export stamps (`layer = "<layer>+mixed"` plus the recorded overrides);

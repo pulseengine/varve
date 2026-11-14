@@ -13,7 +13,9 @@ Every variable varve reads, and which one wins.
 
 `varve run` and the shims additionally *export* `VARVE_LAYER` and
 `VARVE_LAYER_MANIFEST_DIGEST` into the dispatched tool — provenance handed
-downward, not configuration read upward (`varve docs run`).
+downward, not configuration read upward (`varve docs run`). In a mixed
+toolchain they add `VARVE_OVERRIDES`, and `varve run --with` adds `VARVE_WITH`
+(`tool@version`); varve never reads either back.
 
 ## VARVE_ROOT
 

@@ -217,6 +217,13 @@ enum Cmd {
         /// touching the checked-in pin.
         #[arg(long, value_name = "LAYER")]
         varve: Option<String>,
+        /// Run with TOOL at VERSION for this one command (REQ-RUNWITH-001):
+        /// resolved among layers ALREADY INSTALLED from the pin's realm (never
+        /// fetched) and applied as an in-memory `[toolchain.override.TOOL]`,
+        /// with every refusal an override has. Nothing persists. Repeatable,
+        /// one per tool. The command sees `VARVE_WITH` and `VARVE_OVERRIDES`.
+        #[arg(long = "with", value_name = "TOOL@VERSION")]
+        with: Vec<String>,
         /// Tool and its arguments, after `--`. The tool may be realm-qualified
         /// (`bytecodealliance/wasm-tools`) to reach one specific provider where
         /// two realms of the composition ship the same name. `OsString`, so an
@@ -949,15 +956,23 @@ fn run() -> anyhow::Result<Outcome> {
         ),
         Cmd::Run {
             varve,
+            with,
             tool_and_args,
         } => {
-            let (tool, args) = tool_and_args
-                .split_first()
-                .context("no tool named — usage: varve run [--varve LAYER] -- <tool> [args…]")?;
+            let (tool, args) = tool_and_args.split_first().context(
+                "no tool named — usage: varve run [--varve LAYER | --with TOOL@VERSION…] -- \
+                 <tool> [args…]",
+            )?;
             let tool = tool
                 .to_str()
                 .context("tool name must be valid UTF-8 — it names an entry in the layer")?;
-            run_tool(&store, varve.as_deref(), tool, args, false)
+            let with = with
+                .iter()
+                .map(|spec| varve_core::runwith::parse_request(spec))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|why| anyhow::anyhow!(why))?;
+            varve_core::runwith::check_distinct(&with).map_err(|why| anyhow::anyhow!(why))?;
+            run_tool_with(&store, varve.as_deref(), &with, tool, args)
         }
         Cmd::Deposit {
             spec,
@@ -2351,6 +2366,107 @@ fn run_tool(
     args: &[std::ffi::OsString],
     via_shim: bool,
 ) -> anyhow::Result<()> {
+    dispatch(store, override_layer, &[], tool, args, via_shim)
+}
+
+/// `varve run`, with any `--with` (REQ-RUNWITH-001). A shim never takes one:
+/// the pin alone decides what a shim runs.
+fn run_tool_with(
+    store: &Store,
+    override_layer: Option<&str>,
+    with: &[varve_core::runwith::WithRequest],
+    tool: &str,
+    args: &[std::ffi::OsString],
+) -> anyhow::Result<()> {
+    dispatch(store, override_layer, with, tool, args, false)
+}
+
+/// Turn each `--with tool@version` into an in-memory `[toolchain.override]`
+/// on `pin` (REQ-RUNWITH-001, DD-043 (7)). Nothing is written: `pin` is the
+/// caller's copy, and the store is only read. Every refusal here happens
+/// before anything runs.
+fn apply_with(
+    ctx: &ProjectCtx,
+    pin: &mut Pin,
+    pin_file: &std::path::Path,
+    with: &[varve_core::runwith::WithRequest],
+) -> anyhow::Result<()> {
+    if with.is_empty() {
+        return Ok(());
+    }
+    // The same tool overridden in varve.toml AND by --with is refused, not
+    // replaced: an override of an override is refused in varve.toml (DD-043
+    // (3)), and replacing the declared one would run a mix the reviewed pin
+    // never named while every report took its override as what ran.
+    for r in with {
+        if let Some(o) = pin
+            .overrides
+            .iter()
+            .find(|o| o.tool.eq_ignore_ascii_case(&r.tool))
+        {
+            bail!(
+                "--with {r}: {} already overrides '{}' with layer {} ({}) — an override of an \
+                 override is refused. Run without --with {}, or change the override in \
+                 varve.toml.",
+                pin_file.display(),
+                o.tool,
+                o.layer,
+                o.digest,
+                r.tool
+            );
+        }
+    }
+    // Clause 4 first, from the pin as it stands: --with replaces a tool the
+    // pinned composition dispatches here, it never adds one. Asked before any
+    // layer is looked for, so the reason given is the real one.
+    let base = resolve(pin, &ctx.store)?;
+    for r in with {
+        if !base.tools.iter().any(|(name, _)| *name == r.tool) {
+            let mut available: Vec<&str> = base.tools.iter().map(|(n, _)| n.as_str()).collect();
+            available.sort();
+            return Err(
+                anyhow::Error::from(varve_core::ResolveError::OverrideNotInPin {
+                    tool: r.tool.clone(),
+                    layer: base.layer.layer.to_string(),
+                    available: if available.is_empty() {
+                        "nothing".into()
+                    } else {
+                        available.join(", ")
+                    },
+                })
+                .context(format!("--with {r} is an override for this one command")),
+            );
+        }
+    }
+    let host = varve_core::host_platform();
+    let realm = pin
+        .realm
+        .clone()
+        .unwrap_or_else(|| "(none: the store VARVE_TRUST_ROOT vouches for)".into());
+    for r in with {
+        let here = varve_core::runwith::carriers(&ctx.store, &r.tool, &host)?;
+        let mut elsewhere = Vec::new();
+        for (_, partition) in ctx.store.partitions() {
+            if partition.root() != ctx.store.root() {
+                elsewhere.extend(varve_core::runwith::carriers(&partition, &r.tool, &host)?);
+            }
+        }
+        let chosen =
+            varve_core::runwith::choose(r, &realm, pin.channel.as_str(), &host, &here, &elsewhere)?;
+        pin.overrides.push(chosen);
+    }
+    pin.overrides.sort_by(|a, b| a.tool.cmp(&b.tool));
+    Ok(())
+}
+
+fn dispatch(
+    store: &Store,
+    override_layer: Option<&str>,
+    with: &[varve_core::runwith::WithRequest],
+    tool: &str,
+    args: &[std::ffi::OsString],
+    via_shim: bool,
+) -> anyhow::Result<()> {
     let ctx = dispatch_ctx(store)?;
     // Kept before the move: a refusal below names the pin that caused it, and
     // the realm is what makes that sentence answer the user's real question.
@@ -2358,6 +2474,15 @@ fn run_tool(
     let pinned_realm = ctx.pin.realm.clone();
     let pinned_channel = ctx.pin.channel;
     let mut pin = ctx.pin.clone();
+    if let (Some(layer), Some(first)) = (override_layer, with.first()) {
+        // The same reason as the project overrides below: one layer swapped whole, plus a tool from
+        // another, is a toolchain nobody declared.
+        bail!(
+            "--varve {layer} runs ONE layer, but --with {first} takes '{}' from another — the \
+             combination is a toolchain nobody declared. Use one or the other.",
+            first.tool
+        );
+    }
     if let Some(layer) = override_layer {
         // A one-off layer plus this project's overrides would be a mix nobody
         // declared (REQ-OVERRIDE-001): refused, naming both, rather than
@@ -2380,7 +2505,28 @@ fn run_tool(
         pin.layer = layer.parse()?;
         pin.digest = None;
     }
-    let resolved = resolve(&pin, &ctx.store)?;
+    apply_with(&ctx, &mut pin, &pin_file, with)?;
+    let resolved = match resolve(&pin, &ctx.store) {
+        Ok(resolved) => resolved,
+        Err(e) if with.is_empty() => return Err(e.into()),
+        // Say which override the refusal is about: the message names
+        // `[toolchain.override.<tool>]`, which for --with is in memory only.
+        Err(e) => {
+            return Err(anyhow::Error::from(e).context(format!(
+                "--with {} is applied as an in-memory override: {}",
+                varve_core::runwith::env_value(with),
+                pin.overrides
+                    .iter()
+                    .filter(|o| with.iter().any(|r| r.tool == o.tool))
+                    .map(|o| format!(
+                        "[toolchain.override.{}] layer {} {}",
+                        o.tool, o.layer, o.digest
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    };
     vouch_for_resolved(&ctx, &resolved)?;
     refuse_unreachable_override(&resolved, tool)?;
     let Some((tool, path)) = dispatch_target(&resolved, tool) else {
@@ -2579,6 +2725,14 @@ fn run_tool(
         );
     } else {
         cmd.env_remove("VARVE_OVERRIDES");
+    }
+    // REQ-RUNWITH-001 clause 3: what was ASKED for (tool@version) beside what
+    // it resolved to (VARVE_OVERRIDES). Removed when nothing was asked, so an
+    // inherited value never describes a run that had no --with.
+    if with.is_empty() {
+        cmd.env_remove("VARVE_WITH");
+    } else {
+        cmd.env("VARVE_WITH", varve_core::runwith::env_value(with));
     }
     launch(cmd, tool)
 }
