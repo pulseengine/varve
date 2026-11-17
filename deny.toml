@@ -52,6 +52,17 @@ ignore = [
   # elliptic-curve 0.14.x, and re-argue rather than inherit if the posture
   # changes.
   "RUSTSEC-2026-0387",
+  # RUSTSEC-2026-0543 — `chrono` is unmaintained (all versions; no patched
+  # release). Not a vulnerability report. varve names no chrono dependency of
+  # its own: chrono 0.4.45 arrives only through sigil's `wsc` 0.11.0
+  # (varve-core, varve-producer) and `wsc-attestation` 0.11.0/0.12.0 (wsc, and
+  # varve's dev-dependencies). Those are the latest published versions, so no
+  # `cargo update` removes it.
+  #
+  # Drop this entry when wsc and wsc-attestation ship without chrono, tracked
+  # in pulseengine/sigil#382. If an actual chrono vulnerability is published,
+  # `cargo deny` reports it under its own ID and this entry does not cover it.
+  "RUSTSEC-2026-0543",
 ]
 
 [bans]
