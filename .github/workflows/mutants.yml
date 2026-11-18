@@ -53,7 +53,7 @@ env:
 jobs:
   plan:
     name: plan (shard the not-yet files)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -83,7 +83,7 @@ jobs:
   mutants:
     name: cargo mutants (${{ matrix.shard }}, advisory)
     needs: [plan]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       # One shard's failure says nothing about the others; the point is to
