@@ -57,6 +57,7 @@ pub mod registry;
 pub mod resolve;
 pub mod reverify;
 pub mod rollback;
+pub mod runwith;
 pub mod sbom;
 pub mod sdkexport;
 pub mod seed;

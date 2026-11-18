@@ -18,6 +18,22 @@ clap = { version = "4.6.6", features = ["derive"] }
 clap_complete = "4.6.9"
 serde_json = "1.0.151"
 varve-core.workspace = true
+# `varve run --with` (REQ-RUNWITH-001): the private shim directory a spawned
+# command gets first on PATH. mkdtemp semantics (0700, unpredictable name);
+# already in the graph as a dev-dependency.
+tempfile = "3.27.0"
+
+# `varve run --with` starts its command through a gate (this binary, run
+# again) instead of exec'ing it, catches SIGHUP/SIGINT/SIGQUIT/SIGTERM (and
+# SIGCHLD) to outlive them and remove the shim directory, forwards SIGTERM,
+# and dies of the signal its child died of where that is not a core dump.
+# This crate forbids unsafe code, so the handling is signal-hook's safe
+# iterator, flag and `emulate_default_handler`, and rustix supplies
+# `kill_process`, `waitid`, the parent pid for the gate and the lock-open
+# flags (already in the graph via tempfile; its `fs` and `process` features).
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.6"
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 
 [dev-dependencies]
 flate2 = "1.1.9"

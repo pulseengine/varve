@@ -49,6 +49,12 @@ ureq = ">=3, <3.5"
 wit-parser = { version = "0.263.0", default-features = false, features = ["decoding"] }
 wsc = "0.11.0"
 
+# `run --with` opens a private shim directory's lock with the platform's
+# O_NONBLOCK | O_NOFOLLOW (they differ between architectures). Already in the
+# graph via tempfile; only its `fs` feature is used.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.6", features = ["fs"] }
+
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 proptest = "1.11.0"
