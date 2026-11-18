@@ -146,7 +146,12 @@ fn hosted_jobs_pin_an_ubuntu_release() {
         .filter(|n| n.ends_with(".yml") || n.ends_with(".yaml"))
         .collect();
     names.sort();
-    assert!(names.len() >= 9, "only {} workflows found in {}", names.len(), dir.display());
+    assert!(
+        names.len() >= 9,
+        "only {} workflows found in {}",
+        names.len(),
+        dir.display()
+    );
     let mut offenders = Vec::new();
     for name in &names {
         for (i, line) in workflow(name).lines().enumerate() {
