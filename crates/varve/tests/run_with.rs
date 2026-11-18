@@ -1489,21 +1489,61 @@ fn no_shell_stands_between_varve_and_the_command_or_its_shims() {
 // rivet: verifies REQ-RUNWITH-001
 #[test]
 fn high_numbered_inherited_descriptors_do_not_break_the_run() {
-    // dash rejected a gate pipe on fd >= 10. Start varve with fds 3-15 open.
+    // A gate that handed over a pipe on a high fd broke under dash (it rejects
+    // fds >= 10). Start varve with fds 3-15 open and prove they reached the
+    // command: it lists its own /dev/fd. The fds are opened by bash, named
+    // absolutely — /bin/sh is dash on Ubuntu, which cannot open them at all.
+    let Some(bash) = ["/bin/bash", "/usr/bin/bash"]
+        .into_iter()
+        .map(Path::new)
+        .find(|p| p.is_file())
+    else {
+        eprintln!("NOT RUN: no bash at /bin/bash or /usr/bin/bash to open fds 10-15");
+        return;
+    };
+    use std::os::unix::process::CommandExt;
     let w = world();
     let opener = (3..=15)
-        .map(|fd| format!("exec {fd}</dev/null;"))
+        .map(|fd| format!("exec {fd}</dev/null; "))
         .collect::<String>();
-    let mut child = spawn_sh(
-        &w,
-        &format!(
-            "{opener} exec \"$VARVE\" run --with synth@0.57.0 -- sh -c 'synth > \"{}\"'",
-            w.dir.join("out").display()
-        ),
-    );
+    let fds = w.dir.join("fds");
+    let out = w.dir.join("out");
+    let none = w.dir.join("no-user-config");
+    let mut child = std::process::Command::new(bash)
+        .arg("-c")
+        .arg(format!(
+            "{opener}exec \"$VARVE\" run --with synth@0.57.0 -- sh -c 'ls /dev/fd > \"{}\"; synth > \"{}\"'",
+            fds.display(),
+            out.display()
+        ))
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE", assert_cmd::cargo::cargo_bin("varve"))
+        .env("VARVE_ROOT", &w.root)
+        .env("XDG_CONFIG_HOME", &none)
+        .env("HOME", &none)
+        .env("RUNWITH_TEST_MARKS", w.marks())
+        .env("TMPDIR", w.tmp())
+        .env_remove("VARVE_TRUST_ROOT")
+        .env_remove("VARVE_WITH")
+        .env_remove("VARVE_OVERRIDES")
+        .current_dir(&w.project)
+        .process_group(0)
+        .spawn()
+        .unwrap();
     let status = wait_exit(&mut child).expect("varve never exited");
     assert_eq!(status.code(), Some(0));
-    let out = std::fs::read_to_string(w.dir.join("out")).unwrap();
+    let open: Vec<String> = std::fs::read_to_string(&fds)
+        .expect("the command never ran")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    for fd in 10..=15 {
+        assert!(
+            open.contains(&fd.to_string()),
+            "fd {fd} did not reach the command: {open:?}"
+        );
+    }
+    let out = std::fs::read_to_string(&out).unwrap();
     assert!(out.starts_with("synth-0.57 "), "{out}");
 }
 

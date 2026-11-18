@@ -33,7 +33,7 @@ tempfile = "3.27.0"
 # flags (already in the graph via tempfile; its `fs` and `process` features).
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.4.6"
-rustix = { version = "1.1.4", features = ["fs", "process"] }
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 
 [dev-dependencies]
 flate2 = "1.1.9"

@@ -53,7 +53,7 @@ wsc = "0.11.0"
 # O_NONBLOCK | O_NOFOLLOW (they differ between architectures). Already in the
 # graph via tempfile; only its `fs` feature is used.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1.4", features = ["fs"] }
+rustix = { version = "1.1.6", features = ["fs"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
