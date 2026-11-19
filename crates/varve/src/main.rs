@@ -6063,6 +6063,7 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
             "pinned": pinned.to_string(),
             "answerable": true,
             "index_counter": index.counter,
+            "pin_listed": pin_listed(pinned, &index),
             "newer": newer.iter().map(|l| serde_json::json!({
                 "layer": l.layer,
                 "digest": l.digest,
@@ -6073,10 +6074,7 @@ fn outdated(store: &Store, json: bool) -> anyhow::Result<()> {
             .expect("report serialises")
         );
     } else if newer.is_empty() {
-        println!(
-            "{} is the newest layer realm '{}' has signed for line {line} (index #{})",
-            pinned, realm.name, index.counter
-        );
+        println!("{}", nothing_newer(pinned, &realm.name, &line, &index));
     } else {
         println!(
             "{} newer layer(s) for line {line}, signed by realm '{}' (index #{}):",
@@ -8234,6 +8232,105 @@ mod trust_root_reach_tests {
              cannot reach them: {offenders:?}. Use `trust_here` (realm \
              first, environment only when no realm is pinned), or add the \
              function to ALLOWED with a reason."
+        );
+    }
+}
+
+/// Whether the signed index names the pinned layer itself. A pin can be
+/// deposited before the index that lists it is published (varve#375).
+fn pin_listed(pinned: &varve_core::LayerId, index: &varve_core::LineIndex) -> bool {
+    index.layers.iter().any(|l| {
+        l.layer
+            .parse::<varve_core::LayerId>()
+            .is_ok_and(|id| &id == pinned)
+    })
+}
+
+/// The `outdated` sentence when the index lists nothing newer than the pin.
+/// It says only what the index establishes: a pin the index does not list is
+/// never called the index's newest layer (varve#375).
+fn nothing_newer(
+    pinned: &varve_core::LayerId,
+    realm: &str,
+    line: &str,
+    index: &varve_core::LineIndex,
+) -> String {
+    if pin_listed(pinned, index) {
+        return format!(
+            "{pinned} is the newest layer realm '{realm}' has signed for line {line} (index #{})",
+            index.counter
+        );
+    }
+    let last = index
+        .layers
+        .iter()
+        .filter_map(|l| l.layer.parse::<varve_core::LayerId>().ok())
+        .max()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "no layer".to_string());
+    format!(
+        "realm '{realm}' has signed nothing newer than {pinned} for line {line} (index #{}), \
+         but that index does not list {pinned} itself: its newest entry is {last}",
+        index.counter
+    )
+}
+
+#[cfg(test)]
+mod outdated_wording_tests {
+    use super::nothing_newer;
+
+    fn index(layers: &[&str]) -> varve_core::LineIndex {
+        varve_core::LineIndex {
+            line: "2026.11".into(),
+            counter: 16,
+            issued_at: "2026-11-18T06:52:00Z".into(),
+            layers: layers
+                .iter()
+                .enumerate()
+                .map(|(i, l)| varve_core::IndexedLayer {
+                    layer: (*l).into(),
+                    digest: format!("sha256:{i:064}"),
+                    channel: "rolling".into(),
+                    counter: i as u64 + 1,
+                })
+                .collect(),
+        }
+    }
+
+    // rivet: verifies REQ-LAYERDIFF-001
+    #[test]
+    fn a_pin_the_index_does_not_list_is_never_called_its_newest_layer() {
+        // varve#375: covalent 2026.11.16 was deposited while the served index
+        // #16 still ended at 2026.11.15, and the old sentence named 2026.11.16
+        // as the newest layer index #16 signs.
+        let pinned = "2026.11.16".parse().unwrap();
+        let text = nothing_newer(
+            &pinned,
+            "covalent",
+            "2026.11",
+            &index(&["2026.11.14", "2026.11.15"]),
+        );
+        assert!(
+            !text.contains("2026.11.16 is the newest layer"),
+            "a pin absent from the index was called its newest layer: {text}"
+        );
+        assert!(text.contains("does not list 2026.11.16"), "{text}");
+        assert!(text.contains("newest entry is 2026.11.15"), "{text}");
+    }
+
+    // rivet: verifies REQ-LAYERDIFF-001
+    #[test]
+    fn a_pin_the_index_lists_is_reported_as_its_newest_layer() {
+        let pinned = "2026.11.15".parse().unwrap();
+        let text = nothing_newer(
+            &pinned,
+            "covalent",
+            "2026.11",
+            &index(&["2026.11.14", "2026.11.15"]),
+        );
+        assert_eq!(
+            text,
+            "2026.11.15 is the newest layer realm 'covalent' has signed for line 2026.11 (index #16)"
         );
     }
 }
