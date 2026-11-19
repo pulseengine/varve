@@ -5635,3 +5635,61 @@ artifacts:
         target: REQ-OVERRIDE-001
       - type: satisfies
         target: REQ-RUNWITH-001
+
+  - id: REQ-CAPSULE-001
+    type: requirement
+    title: An assessor can rebuild and re-check the exact pinned toolchain of an evidence bundle offline, from one capsule
+    status: draft
+    release: v0.49.0
+    description: "DRAFT for maintainer decision; serves O2 (enables it; moves no count in v0.49.0). Bet A of docs/plan-v0.49.0.md. Clauses (proposed): (1) varve archive writes, per pin and platform, a capsule carrying every composed layer, the signed line index, baseline line-status, carried attestations, the realm trust root and any override layers. (2) Given only the capsule, a layer attestation and the realm root fingerprint, a second command rebuilds that toolchain in an empty store with no network and no credential, then varve verify and varve check-attestation pass, and one verdict names layer, digest, overrides and yanks. (3) A superseded layer reconstructs on a machine that has seen newer ones, and a later normal install of it is still refused (assessor mode does not leak). (4) Negative controls: a dropped composed layer, a dropped line index, a flipped payload byte, and a pure-pin attestation for a MIXED project each fail with a named cause. Kill: any network call during reconstruction; unsound offline first contact; a covalent capsule over 2 GiB. Covers the pinned tools only, single platform, compiler excluded. Precondition: a durable capsule home per deposit (layer repos)."
+    tags: [north-star-O2, assessor, offline]
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-ARCHIVE-002
+      - type: traces-to
+        target: REQ-FIRSTCONTACT-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-19T22:13:43Z
+
+  - id: REQ-WSCRUNG-001
+    type: requirement
+    title: A component's embedded wsc signature is verified at ingestion against a committed publisher key, and the component runs under the layer's own kiln
+    status: draft
+    release: v0.49.0
+    description: "DRAFT for maintainer decision; serves O5 (precondition; adds nothing to the numerator). Bet B of docs/plan-v0.49.0.md. Adopt only after a spike: (P1) wsc offers a key-based verify of an embedded module signature (wsc 0.11.0 source read 2026-11-19 found none outside the keyless path; question for sigil); (P2) kiln runs a wasip2 CLI component that reads a preopened directory and writes stdout; (P3) sieve or plant builds for wasm32-wasip2. Clauses (proposed): (1) a producer rung verifies the embedded signature against a publisher key in the operator's committed input, never fetched, no fallback; (2) rung and signer are signed into the layer and shown by varve inspect; (3) varve verify re-checks it offline and goes red on a tampered installed component; (4) a runner-contract component runs under the layer's kiln with no kiln on PATH. Negative controls: stripped signature, other key, one altered code byte, each aborting the deposit. Accepted debt: no publisher-key rotation or revocation (as DD-034 for PGP)."
+    tags: [north-star-O5, ingest, wasm]
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-INGEST-001
+      - type: traces-to
+        target: REQ-RUNNER-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-19T22:13:43Z
+
+  - id: REQ-OWNCHAINGATE-001
+    type: requirement
+    title: One existing CI gate runs as a signed WASI component under kiln, with wasmtime as a required differential
+    status: draft
+    release: v0.49.0
+    description: "DRAFT for maintainer decision; serves O5 (targets its guard). Bet C of docs/plan-v0.49.0.md. Preconditions with owners: the O5 indicator script and an agreed denominator list (pulseengine.eu); the candidate (sieve or plant) is an existing gate with an old version to compare against; REQ-WSCRUNG-001 probe P3 passes. Clauses (proposed): (1) a required check runs the gate through varve run under the layer's kiln; (2) a required equivalence job runs the same inputs under wasmtime and fails on any difference, proven by a divergence planted on one runner's side only; (3) removing the component from the layer fails the gate closed; (4) the component was built, optimised and signed by our chain, and its attestation says so; (5) a layer JSON listing lets the indicator script count it. Kill: the gate needs what wasip2 lacks or only builds behind a feature cut; kiln and wasmtime disagree on valid input without resolution; over 3x slower than native and made non-required. Without the preconditions the honest outcome is one gate meets the O5 guard and O5 stays unmeasured."
+    tags: [north-star-O5, ci, wasm]
+    fields:
+      category: functional
+      priority: should
+    links:
+      - type: traces-to
+        target: REQ-WSCRUNG-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-19T22:13:43Z
