@@ -62,10 +62,30 @@ if [ "${1:-}" = "--self-test" ]; then
   else
     echo "  rejects: a secret bound to an innocent name"
   fi
+  # Review before v0.48.0: shapes of the same write the patterns above missed.
+  must_reject_env() { # name, the value SIGNER is bound to, run line
+    printf 'jobs:\n  x:\n    steps:\n      - env:\n          SIGNER: %s\n        run: %s\n' "$2" "$3" > "$work/wf/a.yml"
+    if "$0" "$work/wf" >/dev/null 2>&1; then
+      echo "::error::self-test: gate ACCEPTED what it must reject ($1): SIGNER: $2 / $3"; fail=1
+    else
+      echo "  rejects: $1"
+    fi
+  }
+  must_reject_env "a double-quoted secret binding" '"${{ secrets.X }}"' 'printf %s "$SIGNER" > /tmp/s'
+  must_reject_env "a single-quoted secret binding" "'\${{ secrets.X }}'" 'printf %s "$SIGNER" > /tmp/s'
+  must_reject "a redirect with no space"   'echo "$SIGNING_SECRET" >/tmp/s'
+  must_reject "an append with no space"    'printf %s "$VARVE_ROOT_KEY" >>/tmp/s'
+  must_reject "a pipe through a command"   'echo "$VARVE_ROOT_KEY" | base64 -d > /tmp/s'
+  must_reject_env "a bound secret piped through a command" '${{ secrets.X }}' 'printf %s "$SIGNER" | base64 -d > /tmp/s'
+  must_reject "bracket access, single quotes" "echo \"\${{ secrets['VARVE_ROOT_KEY'] }}\" > /tmp/s"
+  must_reject "bracket access, double quotes" 'echo "${{ secrets["VARVE_ROOT_KEY"] }}" > /tmp/s'
+  must_reject_env "a bracket-access binding" "\${{ secrets['X'] }}" 'printf %s "$SIGNER" > /tmp/s'
   must_accept "the documented fd form"     "varve deposit --key <(printf '%s' \"\$VARVE_ROLLING_KEY\") --out o"
   must_accept "a pipe to /dev/stdin"       "printf '%s' \"\$K\" | varve sign-status --key /dev/stdin"
+  # `>&2` duplicates a descriptor; it writes no file.
+  must_accept "stderr joined to stdout"    'printf %s "$VARVE_ROOT_KEY" | varve sign-status --key /dev/stdin 2>&1'
   [ "$fail" -eq 0 ] || { echo "::error::no-key-on-disk self-test FAILED"; exit 1; }
-  echo "no-key-on-disk: self-test OK — the gate rejects 6 shapes and accepts 2"
+  echo "no-key-on-disk: self-test OK — the gate rejects 15 shapes and accepts 3"
   exit 0
 fi
 

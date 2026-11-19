@@ -1789,16 +1789,47 @@ mod tests {
         }
         let long = format!("/{}", "x".repeat(240));
         assert!(wrapper_text(std::path::Path::new(&long)).is_err());
-        let fits = format!("/{}", "x".repeat(255 - 4 - SHIM_MARKER.len() - 1));
+        // The whole line, `#!` and newline included, is at most 127 bytes on
+        // Linux (a_shebang_longer_than_an_old_kernel_reads_is_refused_naming_the_limit)
+        // and 255 elsewhere.
+        #[cfg(target_os = "linux")]
+        let max = 127;
+        #[cfg(not(target_os = "linux"))]
+        let max = 255;
+        let fits = format!("/{}", "x".repeat(max - 4 - SHIM_MARKER.len() - 1));
         assert!(
             wrapper_text(std::path::Path::new(&fits)).is_ok(),
-            "exactly 255"
+            "exactly {max}"
         );
-        let over = format!("/{}", "x".repeat(255 - 4 - SHIM_MARKER.len()));
-        assert!(wrapper_text(std::path::Path::new(&over)).is_err(), "256");
+        let over = format!("/{}", "x".repeat(max - 4 - SHIM_MARKER.len()));
+        assert!(
+            wrapper_text(std::path::Path::new(&over)).is_err(),
+            "{max} + 1"
+        );
         use std::os::unix::ffi::OsStrExt;
         let not_utf8 = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/opt/\xff"));
         assert!(wrapper_text(not_utf8).is_err());
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_shebang_longer_than_an_old_kernel_reads_is_refused_naming_the_limit() {
+        // Linux before 5.1 (RHEL 8 runs 4.18) reads only 128 bytes of a
+        // script's first line (BINPRM_BUF_SIZE) and silently cuts the rest, so
+        // a long TMPDIR would truncate the interpreter's path to a name another
+        // user can create in a sticky /tmp. A realistic shim directory under a
+        // 65-byte TMPDIR: well inside the 255 a newer kernel reads, over 127.
+        // A Linux build only: macOS reads 512 bytes, and its default TMPDIR
+        // alone would push a shim's line past 127.
+        let tmpdir = format!("/tmp/{}", "t".repeat(60));
+        let varve =
+            std::path::PathBuf::from(format!("{tmpdir}/{}/{INTERPRETER}", shim_dir_name(1, 2)));
+        let line = 2 + varve.as_os_str().len() + 1 + SHIM_MARKER.len() + 1;
+        assert!((128..=255).contains(&line), "{line}");
+        let err = wrapper_text(&varve).expect_err("a first line over 127 bytes must be refused");
+        assert!(err.contains("127"), "names the limit: {err}");
+        assert!(err.contains("TMPDIR"), "says what to shorten: {err}");
     }
 
     // rivet: verifies REQ-RUNWITH-001

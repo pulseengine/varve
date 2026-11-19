@@ -125,5 +125,40 @@ class GateProbe(unittest.TestCase):
             self.assertEqual(classify([NOT_CODE], cwd=notrepo), "true")
 
 
+def git_in(repo, *args):
+    """git in a scratch repository, independent of the user's configuration."""
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+        cwd=repo, check=True, capture_output=True, text=True).stdout
+
+
+class PullRequestDiff(unittest.TestCase):
+    def test_code_moved_to_a_markdown_path_runs_everything(self):
+        # Rename detection lists only the NEW name of a moved file, so code
+        # moved out of crates/ to a `.md` path looked like a docs-only change
+        # and every heavy job skipped. Both names must be classified.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(os.path.join(repo, "crates", "x", "src"))
+            git_in(repo, "init", "-q")
+            with open(os.path.join(repo, "crates", "x", "src", "lib.rs"), "w") as f:
+                f.write("pub fn moved() -> u32 {\n    42\n}\n" * 8)
+            git_in(repo, "add", "crates/x/src/lib.rs")
+            git_in(repo, "commit", "-q", "-m", "base")
+            base = git_in(repo, "rev-parse", "HEAD").strip()
+            git_in(repo, "mv", "crates/x/src/lib.rs", "moved-out.md")
+            git_in(repo, "commit", "-q", "-m", "move")
+            out = os.path.join(tmp, "output")
+            open(out, "w").close()
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                   "EVENT_NAME": "pull_request", "BASE_SHA": base,
+                   "GITHUB_OUTPUT": out}
+            subprocess.run([DETECTOR], cwd=repo, env=env, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with open(out) as f:
+                self.assertEqual(f.read().split(), ["code=true"])
+
+
 if __name__ == "__main__":
     unittest.main()

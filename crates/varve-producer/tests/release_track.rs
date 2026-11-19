@@ -243,3 +243,101 @@ fn the_readme_says_how_to_get_the_assembler_and_to_verify_it_first() {
         "the README still tells users a working install path does not work"
     );
 }
+
+/// The release step named `name`, from the PARSED workflow: one step, in
+/// whichever job.
+fn release_step(name: &str) -> yaml_rust2::Yaml {
+    let docs = yaml_rust2::YamlLoader::load_from_str(&workflow()).expect("release.yml parses");
+    let jobs = docs[0]["jobs"].as_hash().expect("release.yml has jobs");
+    let found: Vec<&yaml_rust2::Yaml> = jobs
+        .values()
+        .filter_map(|job| job["steps"].as_vec())
+        .flatten()
+        .filter(|step| step["name"].as_str() == Some(name))
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "release.yml must have exactly one step {name:?}"
+    );
+    found[0].clone()
+}
+
+/// The DSSE envelope over SHA256SUMS.txt is what every consumer's self-update
+/// verifies (REQ-SELF-001), and a release without it fails closed in all of
+/// them. So the signing step must FAIL the run when no key is provisioned
+/// (#366, #369), never warn and carry on.
+///
+/// A GUARD, not a red-first test: the step is right today. It runs the step's
+/// own key-selection block under bash, so softening the no-key branch to a
+/// warning, an `exit 0`, or a fall-through fails here.
+// rivet: verifies REQ-SELF-001
+#[cfg(unix)]
+#[test]
+fn the_release_signing_step_fails_the_run_when_no_key_is_provisioned() {
+    let step = release_step("Sign SHA256SUMS with the varve root (DSSE)");
+    assert!(
+        step["continue-on-error"].is_badvalue(),
+        "the signing step may not continue on error"
+    );
+    assert!(
+        step["if"].is_badvalue(),
+        "the signing step may not be skipped"
+    );
+    let script = step["run"]
+        .as_str()
+        .expect("the signing step runs a script");
+    // The key selection: the script up to the `fi` that closes it, before
+    // anything is built or signed.
+    let mut selection = String::new();
+    for line in script.lines() {
+        selection.push_str(line);
+        selection.push('\n');
+        if line.trim() == "fi" {
+            break;
+        }
+    }
+    assert!(
+        selection.trim_end().ends_with("fi") && selection.contains("set -euo pipefail"),
+        "no strict key-selection block in:\n{script}"
+    );
+    let run = |env: &[(&str, &str)]| {
+        let mut cmd = std::process::Command::new("bash");
+        cmd.env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .arg("-c")
+            .arg(&selection);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.output().expect("bash runs")
+    };
+    // A secret that is not provisioned reaches the step as an empty string;
+    // an unset variable is the same answer.
+    for env in [
+        &[][..],
+        &[("VARVE_ROOT_KEY", ""), ("VARVE_ROLLING_KEY", "")][..],
+    ] {
+        let out = run(env);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "with no key ({env:?}) the step must exit 1:\n{said}"
+        );
+        assert!(
+            said.contains("::error::"),
+            "the refusal is an error: {said}"
+        );
+    }
+    // Controls: either key passes the selection, so the failure above is the
+    // missing key and nothing else.
+    for key in ["VARVE_ROOT_KEY", "VARVE_ROLLING_KEY"] {
+        let out = run(&[(key, "k")]);
+        assert!(
+            out.status.success(),
+            "{key} alone must select a key: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
