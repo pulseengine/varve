@@ -175,3 +175,51 @@ fn hosted_jobs_pin_an_ubuntu_release() {
         offenders.join("\n")
     );
 }
+
+/// A job in a workflow a pull request can trigger reaches the self-hosted pool
+/// only through the fail-closed fork guard: the head repository must BE this
+/// repository. A literal `[self-hosted, …]` list hands the pool to any fork,
+/// and it runs the PR's own checkout (the `changes` jobs ran the PR's
+/// `tools/ci/detect-changes.sh` there; found by the v0.48.0 clean-room review).
+#[test]
+fn no_pull_request_job_reaches_the_pool_without_the_fork_guard() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows");
+    let mut offenders = Vec::new();
+    let mut pr_workflows = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        if !(name.ends_with(".yml") || name.ends_with(".yaml")) {
+            continue;
+        }
+        let w = workflow(&name);
+        let triggers_on_pr = w.lines().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("pull_request:")
+                || t.starts_with("pull_request_target:")
+                || t == "- pull_request"
+        });
+        if !triggers_on_pr {
+            continue;
+        }
+        pr_workflows += 1;
+        for (i, line) in w.lines().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with('#') || !t.starts_with("runs-on:") || !t.contains("self-hosted") {
+                continue;
+            }
+            if !t.contains("github.event.pull_request.head.repo.full_name == github.repository") {
+                offenders.push(format!("{name}:{}: {}", i + 1, t));
+            }
+        }
+    }
+    assert!(
+        pr_workflows >= 3,
+        "only {pr_workflows} pull_request workflows found"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these pull_request-triggered jobs reach the self-hosted pool with no fork guard, \
+         so a fork PR runs its own code there:\n{}",
+        offenders.join("\n")
+    );
+}

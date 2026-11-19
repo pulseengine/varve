@@ -21,7 +21,9 @@ permissions:
 jobs:
   changes:
     name: Detect changed areas (ci)
-    runs-on: [self-hosted, linux, x64, light]
+    # Fork-guarded like every other job: this runs the PR's own
+    # tools/ci/detect-changes.sh, so a fork PR must not reach the pool.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","light"]') || 'ubuntu-24.04' }}
     timeout-minutes: 5
     outputs:
       code: ${{ steps.filter.outputs.code }}
