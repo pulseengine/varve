@@ -51,6 +51,11 @@ as it always is.
 
 `--json` gives the same facts with an `answerable` flag, so a pipeline can tell
 "nothing newer" from "could not be established" without parsing prose.
+`pin_listed` says whether the index names the pinned layer itself. A layer can
+be deposited, and pinned, before the index that lists it is published; then
+nothing in the index is newer, but the index does not vouch that the pin is its
+newest entry either, and the text output says so instead of calling the pin
+the newest layer (varve#375).
 
 ## Ordering
 
