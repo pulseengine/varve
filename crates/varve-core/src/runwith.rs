@@ -438,11 +438,26 @@ pub const INTERPRETER: &str = ".v/varve";
 /// a plain run or a shim.
 pub const SHIM_DIR_PREFIX: &str = "varve-with-";
 
+/// The longest first line a wrapper may have, `#!` and newline included.
+/// Linux before 5.1 (RHEL 8 runs 4.18) reads only 128 bytes of a script's
+/// first line (BINPRM_BUF_SIZE) and SILENTLY cuts the rest, so a longer line
+/// would run a truncated interpreter path — a name another user may be able
+/// to create in a sticky /tmp. Newer kernels read 255; a Linux build holds
+/// to the old limit, since it may run on one.
+#[cfg(target_os = "linux")]
+pub const MAX_SHEBANG_LINE: usize = 127;
+/// The longest first line a wrapper may have, `#!` and newline included.
+/// macOS reads 512 bytes, and its default TMPDIR alone would put a shim's
+/// line past Linux's 127, so a build for it keeps the 255-byte bound.
+#[cfg(not(target_os = "linux"))]
+pub const MAX_SHEBANG_LINE: usize = 255;
+
 /// The text of every wrapper in a private shim directory. The shebang line
 /// holds varve's absolute path and the marker and nothing else: a kernel
-/// takes the interpreter up to the first blank, and Linux reads at most 255
-/// bytes of the line, so a path with a blank or control character, or one
-/// too long, is refused rather than truncated into another program.
+/// takes the interpreter up to the first blank, and reads at most
+/// [`MAX_SHEBANG_LINE`] bytes of the line, so a path with a blank or control
+/// character, or one too long, is refused rather than truncated into another
+/// program.
 pub fn wrapper_text(varve: &std::path::Path) -> Result<String, String> {
     let shown = varve
         .to_str()
@@ -455,11 +470,14 @@ pub fn wrapper_text(varve: &std::path::Path) -> Result<String, String> {
             )
         })?;
     let line = format!("#!{shown} {SHIM_MARKER}\n");
-    if line.len() > 255 {
+    if line.len() > MAX_SHEBANG_LINE {
         return Err(format!(
-            "{} is too long to name in a script's first line (at most 255 bytes) — --with \
-             cannot make its shims",
-            varve.display()
+            "{} is too long to name in a script's first line: the line would be {} bytes, more \
+             than the {MAX_SHEBANG_LINE} a kernel can be relied on to read (Linux before 5.1 \
+             reads 128 and silently runs a truncated path) — --with cannot make its shims. \
+             Point TMPDIR at a shorter directory (for example TMPDIR=/tmp)",
+            varve.display(),
+            line.len()
         ));
     }
     Ok(line)

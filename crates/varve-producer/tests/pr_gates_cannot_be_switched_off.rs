@@ -15,7 +15,7 @@
 //! release or deposit workflow may legitimately be switched by a variable
 //! (`CRATES_PUBLISH_ENABLED`), because it is not a merge gate.
 
-const PR_WORKFLOWS: &[&str] = &["ci.yml", "systest.yml", "fuzz.yml"];
+const PR_WORKFLOWS: &[&str] = &["ci.yml", "systest.yml", "fuzz.yml", "gate-probe.yml"];
 
 fn workflow(name: &str) -> String {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -304,7 +304,11 @@ fn setting_readers(workflow: &str, text: &str) -> Vec<(String, String)> {
                             .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.')
                     })
                 };
-                if reads("vars.") || reads("secrets.") {
+                // Both spellings GitHub accepts: `vars.X` and `vars['X']`.
+                let reads_ctx = |ctx: &str| {
+                    reads(format!("{ctx}.").as_str()) || reads(format!("{ctx}[").as_str())
+                };
+                if reads_ctx("vars") || reads_ctx("secrets") {
                     out.push((path, s.clone()));
                 }
             }

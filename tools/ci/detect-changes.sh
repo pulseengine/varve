@@ -34,7 +34,10 @@ else
     *) run_all "event ${EVENT_NAME:-<none>}" ;;
   esac
   [ -n "${BASE_SHA:-}" ] || run_all "no base sha"
-  changed="$(git diff --name-only "$BASE_SHA"...HEAD)" || run_all "git diff failed against $BASE_SHA"
+  # --no-renames: with rename detection a moved file shows only its NEW name,
+  # so code moved out of crates/ to a `.md` path classified as docs-only.
+  # Without it a move is a deletion and an addition, and both names count.
+  changed="$(git diff --no-renames --name-only "$BASE_SHA"...HEAD)" || run_all "git diff failed against $BASE_SHA"
 fi
 [ -n "$changed" ] || run_all "git diff returned no paths"
 echo "changed files:"; echo "$changed"

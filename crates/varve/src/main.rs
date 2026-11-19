@@ -6494,6 +6494,25 @@ fn install(
                     o.digest
                 )
             })?;
+            // …and to the line's mark, as a fetch would be: being installed
+            // already is not consent to go below it (DD-043 (2)). The mark
+            // may have moved past the layer since it was laid down; `verify`
+            // refuses that, so `install` must not accept it.
+            if let varve_core::RollbackVerdict::Rollback {
+                line,
+                presented,
+                high_water,
+            } = marks.check(&manifest)
+            {
+                bail!(
+                    "override {}: layer {} presents counter {presented} while the {line} line's \
+                     high-water mark is {high_water} — a validly-signed older layer is what \
+                     anti-rollback exists to refuse, and it is refused though it is installed \
+                     already",
+                    o.tool,
+                    have.layer
+                );
+            }
             override_entries.push(have);
             continue;
         }

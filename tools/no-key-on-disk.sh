@@ -91,19 +91,30 @@ fi
 
 DIR="${1:-.github/workflows}"
 
-# A secret-looking variable redirected into a file. Covers `> f`, `>> f`, and
-# `tee f`, with or without quotes around the variable.
-PATTERN='(\$\{?[A-Za-z_]*(KEY|SECRET|TOKEN)[A-Za-z_]*\}?"?[[:space:]]*(>>?|\|[[:space:]]*tee)[[:space:]])|((>>?|\|[[:space:]]*tee)[[:space:]]*[^[:space:]|]*(key|secret)[^[:space:]|]*$)'
+# Where a write lands in a file: `> f`, `>f`, `>> f`, `>>f`, or `| tee f`.
+# Not `>&2`: that duplicates a descriptor and writes no file.
+SINK='(>>?[[:space:]]*[^&[:space:]]|\|[[:space:]]*tee[[:space:]])'
+# What may sit between the secret and the sink: a closing quote, and at most
+# one command it is piped through first (`"$K" | base64 -d > f`).
+GAP="[\"']?[[:space:]]*(\\|[^|>]*)?"
+# A quote, either kind, for the index form `secrets['X']` / `secrets["X"]`.
+Q="['\"]"
 
-# A `${{ secrets.X }}` expression redirected straight into a file (#352).
-SECRET_EXPR='\$\{\{[[:space:]]*secrets\.[A-Za-z0-9_]+[[:space:]]*\}\}"?[[:space:]]*(>>?|\|[[:space:]]*tee)[[:space:]]'
-PATTERN="$PATTERN|($SECRET_EXPR)"
+# A secret-looking variable written into a file.
+NAMED='\$\{?[A-Za-z_]*(KEY|SECRET|TOKEN)[A-Za-z_]*\}?'
+# A `${{ secrets.X }}` expression written straight into a file (#352), in
+# either spelling GitHub accepts: `secrets.X` or `secrets['X']`.
+SECRET_EXPR='\$\{\{[[:space:]]*secrets(\.[A-Za-z0-9_]+|\[[[:space:]]*'"$Q"'[A-Za-z0-9_-]+'"$Q"'[[:space:]]*])[[:space:]]*\}\}'
+# A redirect into a file whose name looks like a key, whatever is written.
+KEY_FILE='(>>?|\|[[:space:]]*tee)[[:space:]]*[^[:space:]|]*(key|secret)[^[:space:]|]*$'
+PATTERN="(($NAMED|$SECRET_EXPR)$GAP$SINK)|($KEY_FILE)"
 # Names an `env:` entry binds to a secret, whatever they are called (#352: a
-# secret bound to SIGNER passed the KEY/SECRET/TOKEN name rule).
-bound="$(grep -rhoE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*\$\{\{[[:space:]]*secrets\.' "$DIR" 2>/dev/null \
+# secret bound to SIGNER passed the KEY/SECRET/TOKEN name rule), the value
+# quoted or not, in either spelling.
+bound="$(grep -rhoE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*'"$Q"'?\$\{\{[[:space:]]*secrets(\.|\[)' "$DIR" 2>/dev/null \
          | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*):.*/\1/' | sort -u | paste -sd'|' - || true)"
 if [ -n "$bound" ]; then
-  PATTERN="$PATTERN|(\\\$\{?($bound)\}?\"?[[:space:]]*(>>?|\|[[:space:]]*tee)[[:space:]])"
+  PATTERN="$PATTERN|(\\\$\{?($bound)\}?$GAP$SINK)"
 fi
 
 found=0
