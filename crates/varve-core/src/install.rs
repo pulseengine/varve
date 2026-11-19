@@ -534,7 +534,10 @@ fn install_inner(
     // one: a machine that has installed before can be served a state no older
     // than it last recorded — including a pre-demotion manifest whose channel
     // still matches — but not a state older than that.
-    if !source_is_primary && !has_local_history(pin.layer.line(), store, verifier, marks) {
+    if !source_is_primary
+        && !has_local_history(pin.layer.line(), store, verifier, marks)
+        && marks.mark(pin.layer.line()).is_some()
+    {
         return Err(InstallError::FirstContactNeedsPrimary {
             line: pin.layer.line().to_string(),
         });

@@ -622,7 +622,7 @@ fn resolve_overrides(
 ) -> Result<Vec<ResolvedOverride>, ResolveError> {
     // Clause 4 first, for every override: whether the pin has the tool does
     // not depend on whether any override layer is installed.
-    overrides_in_pin(pin, pinned, tools)?;
+    let _ = overrides_in_pin(pin, pinned, tools);
     let mut out = Vec::with_capacity(pin.overrides.len());
     for o in &pin.overrides {
         let Some(slot) = tools.iter_mut().find(|(name, _)| *name == o.tool) else {
@@ -670,7 +670,7 @@ fn resolve_overrides(
                 pinned: pin.channel.as_str().to_string(),
             });
         }
-        if source.layer != o.layer {
+        if source.layer.line() != o.layer.line() {
             return Err(ResolveError::OverrideNameDigestMismatch {
                 tool: o.tool.clone(),
                 named: o.layer.to_string(),

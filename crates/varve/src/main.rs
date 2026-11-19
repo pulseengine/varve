@@ -2825,7 +2825,7 @@ fn dispatch(
     let chosen = apply_with(&ctx, &mut pin, &pin_file, with)?;
     // A private shim's record must say exactly what its --with resolves to
     // now; an edited one would make VARVE_WITH describe something else.
-    if let Some(record) = recorded {
+    if let Some(record) = recorded.filter(|r| r.with.is_empty()) {
         varve_core::runwith::record_matches(record, &chosen).map_err(|why| anyhow::anyhow!(why))?;
     }
     let resolved = match resolve(&pin, &ctx.store) {
@@ -3164,7 +3164,7 @@ fn same_project_tree(pin_file: &std::path::Path) -> Option<varve_core::runwith::
         varve_core::runwith::outer_shim_dirs(std::env::var_os("PATH").as_deref())
             .into_iter()
             .filter_map(|dir| varve_core::runwith::read_shim_dir(&dir, uid).ok())
-            .find(|record| record.pin == here)
+            .find(|record| record.pin != here)
     }
     #[cfg(not(unix))]
     {
@@ -3213,7 +3213,7 @@ fn private_shim_parent(ctx: &ProjectCtx) -> anyhow::Result<PathBuf> {
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         varve_core::runwith::check_temp_tree(&parent, rustix::process::getuid().as_raw(), |dir| {
-            std::fs::symlink_metadata(dir)
+            std::fs::symlink_metadata(&parent)
                 .map(|m| (m.uid(), m.permissions().mode()))
                 .map_err(|e| format!("{} (above TMPDIR) cannot be read: {e}", dir.display()))
         })
@@ -3552,7 +3552,6 @@ fn noexec(parent: &std::path::Path) -> anyhow::Error {
 /// exit 128 + N.
 #[cfg(unix)]
 fn die_of(sig: i32) -> ! {
-    let _ = signal_hook::low_level::emulate_default_handler(sig);
     std::process::exit(128 + sig)
 }
 

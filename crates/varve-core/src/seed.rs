@@ -325,6 +325,7 @@ fn seed_layer(
             allow_no_status: false,
         },
     )?;
+    let _ = std::fs::write(staged.join("origin"), store.root().display().to_string());
     if let Some(envelope) = index {
         crate::lineindex::attach_to_layout(&staged, &layer.layer.line().to_string(), envelope)?;
     }
