@@ -60,10 +60,26 @@ A second command takes only the capsule, a layer attestation from an evidence bu
 
 **What ships.** A producer rung that verifies a wasm component's embedded wsc signature at ingestion, against a publisher key committed in the operator's producer input. Its custody rule is that of `pgp-key-file`: never fetched, never read from beside the artifact, no fallback on failure. The rung and signer are signed into the layer. `varve verify` re-checks the signature offline. A component with a runner contract runs through the layer's own kiln.
 
-**Spike first, before this bet is adopted.** One day, three probes. Each can kill a bet:
-1. **wsc key-based embedded verify.** Probed 2026-11-19 by reading wsc 0.11.0 source: `lib.rs` says "`PublicKey::verify()` is what most runtimes should use", but no such key-based module verify was found outside the keyless (Fulcio/Rekor) path; `airgapped::bundle` has key-based `verify(data, public_key)`. **Open question for sigil:** is there, or will there be, a stable key-based verify of an embedded module signature?
-2. **kiln** runs a wasip2 CLI component that reads a preopened directory and writes stdout (kiln#480 was the recorded blocker; state unconfirmed).
-3. **sieve or plant** builds for `wasm32-wasip2` without a feature cut.
+**Spike, run 2026-11-19/20.** Results are summarised here, with the raw evidence kept by the varve session.
+1. **wsc key-based embedded verify: YES, with gaps.**
+   - `PublicKey::verify` works offline (sigil `src/verify-core/src/signature/simple.rs:90`, re-exported by `wsc`). An earlier reading that said it did not exist was wrong.
+   - `wsc verify -K` (0.12.1) on a real component: right key, exit 0; other key, stripped signature, or one flipped code bit, exit 1.
+   - Gaps the rung must close itself:
+     - the 8-byte file header is unsigned (sigil#303): component and core-module headers both verify;
+     - varve pins wsc 0.11.0, which accepts a truncated module; the rung needs at least 0.12.1;
+     - a stale-entry rollback after re-signing is fixed on sigil main (#304) but not in a release;
+     - `verify-chain` passes a one-bit-flipped attested file (sigil#395), so it must never be the gate.
+   - The rung therefore: calls `PublicKey::verify` over the whole file, checks the header itself, binds the result to the release digest (REQ-INGEST-001), and recomputes any attestation hash itself.
+2. **kiln runs a wasip2 CLI component: NO. This is the kill criterion.**
+   - kiln 0.7.3 (and 0.8.0, per a kiln#480 comment) refuses with "No core instance exports _start".
+   - After `meld fuse` it refuses with 3 unresolved `wasi:filesystem` imports that Rust std pulls in (kiln#687, proposed for kiln v0.9.0).
+   - wasmtime 50 runs the same component.
+   - varve's runner contract also has no preopened-directory field.
+3. **wasm32-wasip2 build: sieve YES, plant NO.**
+   - sieve builds unchanged, and its `classify` gate runs correctly under wasmtime. `check-graph` and `equivalence` start processes.
+   - plant needs process groups and signals by design.
+
+**Consequence.** The ingestion half (the rung) can be built in v0.49.0. The "runnable under the layer's kiln" half waits for kiln#480 or #687. Bet B splits: B1 (the rung) can proceed now; B2 (run under kiln) is blocked on kiln. Bet C's first gate is sieve `classify`.
 
 **Acceptance.**
 1. A deposit of a signed component exits 0, and `varve inspect --json` shows the rung and signer.
@@ -121,4 +137,4 @@ Without these, the honest outcome is "one gate meets the O5 guard; O5 stays unme
 4. Bet B, if the spike passes.
 5. Bet C, only if B landed and its preconditions have owners.
 
-Realistically: bet A complete; B conditional on the spike; C only with sigil, kiln, the wasip2 build and the O5 script confirmed.
+Realistically: bet A complete; B1 (the rung) in v0.49.0; B2 and C wait for kiln#480 or #687 (proposed for kiln v0.9.0). C also needs the O5 script, which pulseengine.eu defines in pulseengine.eu#393 with schema #392.
