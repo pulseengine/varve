@@ -37,7 +37,7 @@ jobs:
     # dead signal, not a gate. Re-running is safe: each crate is skipped when
     # that exact name@version is already on crates.io.
     if: github.repository == 'pulseengine/varve' && vars.CRATES_PUBLISH_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       id-token: write   # required for trusted publishing
       contents: read

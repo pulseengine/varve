@@ -41,3 +41,11 @@ retired-roots = [
   # 2026.08.0 to 2026.09.1 was signed by it and none of them verify here.
   { key = "4e771dc62a08be89e3450f8cd807da58ff70af4a4e124ebf2d2b71684cfd9973", retired = "2026-09-07", last-layer = "2026.09.1" },
 ]
+
+# The realm that composes the two above (pulseengine + pulseengine-wasm) into
+# one pin. Its layers are signed by covalent's own root, published as
+# realm-root.pub in pulseengine/covalent-layers, and its signed line index is
+# what `varve outdated` reads for `realm = "covalent"`.
+[realm.covalent]
+registry   = "oci://ghcr.io/pulseengine/covalent-layers"
+trust-root = "32d09d12ec3dcd448fcfd9f5768327126d3d9c54a74fe01266882b43362eb8a5"

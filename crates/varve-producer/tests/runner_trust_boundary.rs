@@ -124,3 +124,54 @@ fn every_lean_mem_job_caps_its_address_space() {
         );
     }
 }
+
+/// Hosted jobs name an Ubuntu release, never `ubuntu-latest`.
+///
+/// GitHub moves that label to a new release on its own schedule (24.04 to
+/// 26.04 between 2026-10-19 and 2026-11-19), which changes apt packages,
+/// Python and preinstalled tools under every hosted job with no diff here.
+/// For `release.yml` it also moves the glibc the shipped Linux binaries link
+/// against, which is a published compatibility floor. Moving to a newer
+/// release is a reviewed edit to this pin, run advisory first.
+///
+/// The one exempt line is ci.yml's `- os: ubuntu-latest`: it is only the
+/// platform label in the required check name `fmt · clippy · test
+/// (ubuntu-latest)`, not a runner.
+#[test]
+fn hosted_jobs_pin_an_ubuntu_release() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display()))
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".yml") || n.ends_with(".yaml"))
+        .collect();
+    names.sort();
+    assert!(
+        names.len() >= 9,
+        "only {} workflows found in {}",
+        names.len(),
+        dir.display()
+    );
+    let mut offenders = Vec::new();
+    for name in &names {
+        for (i, line) in workflow(name).lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with('#') {
+                continue;
+            }
+            let code = code.split(" #").next().unwrap_or(code);
+            if name == "ci.yml" && code == "- os: ubuntu-latest" {
+                continue;
+            }
+            if code.contains("ubuntu-latest") {
+                offenders.push(format!("{name}:{}: {}", i + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these lines run on `ubuntu-latest`, which GitHub re-points without a \
+         diff here; name the release (ubuntu-24.04):\n{}",
+        offenders.join("\n")
+    );
+}
