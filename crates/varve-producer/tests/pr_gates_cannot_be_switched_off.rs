@@ -15,7 +15,7 @@
 //! release or deposit workflow may legitimately be switched by a variable
 //! (`CRATES_PUBLISH_ENABLED`), because it is not a merge gate.
 
-const PR_WORKFLOWS: &[&str] = &["ci.yml", "systest.yml", "fuzz.yml"];
+const PR_WORKFLOWS: &[&str] = &["ci.yml", "systest.yml", "fuzz.yml", "gate-probe.yml"];
 
 fn workflow(name: &str) -> String {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -176,6 +176,40 @@ fn no_pr_gate_is_switched_by_a_repository_variable() {
     }
 }
 
+/// `PR_WORKFLOWS` is a hand-kept list, so a workflow added with a
+/// `pull_request` trigger would be checked by nothing above. Every workflow
+/// that a pull request runs must be on it.
+// rivet: verifies REQ-SYSTEST-001
+#[test]
+fn every_workflow_a_pull_request_runs_is_checked() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows");
+    let mut unlisted = Vec::new();
+    for entry in
+        std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+    {
+        let path = entry.expect("a workflow directory entry").path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !(name.ends_with(".yml") || name.ends_with(".yaml")) {
+            continue;
+        }
+        let text = workflow(name);
+        // Parse only what can be a PR workflow: the trigger's name is in it.
+        if text.contains("pull_request")
+            && runs_on_pull_request(&parse(name, &text))
+            && !PR_WORKFLOWS.contains(&name)
+        {
+            unlisted.push(name.to_string());
+        }
+    }
+    assert!(
+        unlisted.is_empty(),
+        "pull requests run {unlisted:?}, which PR_WORKFLOWS does not list, so no gate rule \
+         here checks them"
+    );
+}
+
 /// The scanner itself must be able to find what it looks for, at both the
 /// job and the step level, or the test above would pass on nothing. The
 /// negative controls are permanent: a `vars.` switch AND a non-variable one
@@ -270,7 +304,11 @@ fn setting_readers(workflow: &str, text: &str) -> Vec<(String, String)> {
                             .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.')
                     })
                 };
-                if reads("vars.") || reads("secrets.") {
+                // Both spellings GitHub accepts: `vars.X` and `vars['X']`.
+                let reads_ctx = |ctx: &str| {
+                    reads(format!("{ctx}.").as_str()) || reads(format!("{ctx}[").as_str())
+                };
+                if reads_ctx("vars") || reads_ctx("secrets") {
                     out.push((path, s.clone()));
                 }
             }
@@ -316,11 +354,17 @@ fn the_reader_scan_flags_env_run_and_with_but_not_comments() {
         "jobs:\n  x:\n    steps:\n      - run: echo \"${{ secrets.VARVE_ROOT_KEY }}\" > k.pem\n";
     let with = "jobs:\n  x:\n    steps:\n      - uses: a/b@c\n        with:\n          skip: ${{ vars.X }}\n";
     let job_env = "env:\n  S: ${{ vars.S }}\njobs: {}\n";
+    // Index syntax reads the same context: `secrets['X']` is `secrets.X`.
+    let secret_index = "jobs:\n  x:\n    steps:\n      - env:\n          K: ${{ secrets['VARVE_ROOT_KEY'] }}\n        run: true\n";
+    let var_index =
+        "jobs:\n  x:\n    steps:\n      - run: '[ \"${{ vars[\"SKIP\"] }}\" = 1 ] && exit 0'\n";
     for (name, text) in [
         ("env", env),
         ("run", run),
         ("with", with),
         ("workflow env", job_env),
+        ("secrets index", secret_index),
+        ("vars index", var_index),
     ] {
         assert_eq!(
             setting_readers("t.yml", text).len(),

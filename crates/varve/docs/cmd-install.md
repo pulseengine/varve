@@ -11,4 +11,4 @@ Two consequences worth knowing before you rely on the count:
 
 A layer whose entries name *no* entry for this platform is refused outright rather than installed empty.
 
-A pin with `[toolchain.override.<tool>]` (REQ-OVERRIDE-001) also installs each override's layer, by digest, from the same sources and through the same verified path an `[[include]]` takes (`override synth: installed layer …`), then refuses — exit 1 — any override that cannot be honoured. A layer that fails verification is never installed. See `varve docs config-reference`.
+A pin with `[toolchain.override.<tool>]` (REQ-OVERRIDE-001) also installs each override's layer, by digest, from the same sources and through the same verified path an `[[include]]` takes (`override synth: installed layer …`), then refuses — exit 1 — any override that cannot be honoured. A layer that fails verification is never installed. An override layer's digest is not consent to go below its line's high-water mark, so one below the mark is refused — also when it is in the store already, laid down before the mark moved past it, as `varve verify` refuses it. See `varve docs config-reference`.

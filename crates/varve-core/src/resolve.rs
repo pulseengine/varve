@@ -1776,6 +1776,22 @@ mod tests {
 
     // rivet: verifies REQ-OVERRIDE-001
     #[test]
+    fn an_override_naming_another_layer_of_the_same_line_is_refused() {
+        // A guard: the comparison is of the whole layer id. Two layers of one
+        // line are different artifacts, so 2026.08.5 named with 2026.08.0's
+        // digest is the same disagreement; comparing lines would let it pass.
+        let (_tmp, store) = store();
+        let older = mixed_store(&store);
+        let err = resolve(&pin_overriding("synth", "2026.08.5", &older), &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::OverrideNameDigestMismatch { named, found, .. }
+                if named == "2026.08.5" && found == "2026.08.0"),
+            "got: {err}"
+        );
+    }
+
+    // rivet: verifies REQ-OVERRIDE-001
+    #[test]
     fn an_override_layer_installed_under_another_realm_is_refused() {
         // DD-043: the source layer is in the pin's OWN realm. A layer another
         // realm's root vouched for lives in that realm's partition, and is not

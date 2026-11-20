@@ -438,11 +438,26 @@ pub const INTERPRETER: &str = ".v/varve";
 /// a plain run or a shim.
 pub const SHIM_DIR_PREFIX: &str = "varve-with-";
 
+/// The longest first line a wrapper may have, `#!` and newline included.
+/// Linux before 5.1 (RHEL 8 runs 4.18) reads only 128 bytes of a script's
+/// first line (BINPRM_BUF_SIZE) and SILENTLY cuts the rest, so a longer line
+/// would run a truncated interpreter path — a name another user may be able
+/// to create in a sticky /tmp. Newer kernels read 255; a Linux build holds
+/// to the old limit, since it may run on one.
+#[cfg(target_os = "linux")]
+pub const MAX_SHEBANG_LINE: usize = 127;
+/// The longest first line a wrapper may have, `#!` and newline included.
+/// macOS reads 512 bytes, and its default TMPDIR alone would put a shim's
+/// line past Linux's 127, so a build for it keeps the 255-byte bound.
+#[cfg(not(target_os = "linux"))]
+pub const MAX_SHEBANG_LINE: usize = 255;
+
 /// The text of every wrapper in a private shim directory. The shebang line
 /// holds varve's absolute path and the marker and nothing else: a kernel
-/// takes the interpreter up to the first blank, and Linux reads at most 255
-/// bytes of the line, so a path with a blank or control character, or one
-/// too long, is refused rather than truncated into another program.
+/// takes the interpreter up to the first blank, and reads at most
+/// [`MAX_SHEBANG_LINE`] bytes of the line, so a path with a blank or control
+/// character, or one too long, is refused rather than truncated into another
+/// program.
 pub fn wrapper_text(varve: &std::path::Path) -> Result<String, String> {
     let shown = varve
         .to_str()
@@ -455,11 +470,14 @@ pub fn wrapper_text(varve: &std::path::Path) -> Result<String, String> {
             )
         })?;
     let line = format!("#!{shown} {SHIM_MARKER}\n");
-    if line.len() > 255 {
+    if line.len() > MAX_SHEBANG_LINE {
         return Err(format!(
-            "{} is too long to name in a script's first line (at most 255 bytes) — --with \
-             cannot make its shims",
-            varve.display()
+            "{} is too long to name in a script's first line: the line would be {} bytes, more \
+             than the {MAX_SHEBANG_LINE} a kernel can be relied on to read (Linux before 5.1 \
+             reads 128 and silently runs a truncated path) — --with cannot make its shims. \
+             Point TMPDIR at a shorter directory (for example TMPDIR=/tmp)",
+            varve.display(),
+            line.len()
         ));
     }
     Ok(line)
@@ -1789,16 +1807,47 @@ mod tests {
         }
         let long = format!("/{}", "x".repeat(240));
         assert!(wrapper_text(std::path::Path::new(&long)).is_err());
-        let fits = format!("/{}", "x".repeat(255 - 4 - SHIM_MARKER.len() - 1));
+        // The whole line, `#!` and newline included, is at most 127 bytes on
+        // Linux (a_shebang_longer_than_an_old_kernel_reads_is_refused_naming_the_limit)
+        // and 255 elsewhere.
+        #[cfg(target_os = "linux")]
+        let max = 127;
+        #[cfg(not(target_os = "linux"))]
+        let max = 255;
+        let fits = format!("/{}", "x".repeat(max - 4 - SHIM_MARKER.len() - 1));
         assert!(
             wrapper_text(std::path::Path::new(&fits)).is_ok(),
-            "exactly 255"
+            "exactly {max}"
         );
-        let over = format!("/{}", "x".repeat(255 - 4 - SHIM_MARKER.len()));
-        assert!(wrapper_text(std::path::Path::new(&over)).is_err(), "256");
+        let over = format!("/{}", "x".repeat(max - 4 - SHIM_MARKER.len()));
+        assert!(
+            wrapper_text(std::path::Path::new(&over)).is_err(),
+            "{max} + 1"
+        );
         use std::os::unix::ffi::OsStrExt;
         let not_utf8 = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/opt/\xff"));
         assert!(wrapper_text(not_utf8).is_err());
+    }
+
+    // rivet: verifies REQ-RUNWITH-001
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_shebang_longer_than_an_old_kernel_reads_is_refused_naming_the_limit() {
+        // Linux before 5.1 (RHEL 8 runs 4.18) reads only 128 bytes of a
+        // script's first line (BINPRM_BUF_SIZE) and silently cuts the rest, so
+        // a long TMPDIR would truncate the interpreter's path to a name another
+        // user can create in a sticky /tmp. A realistic shim directory under a
+        // 65-byte TMPDIR: well inside the 255 a newer kernel reads, over 127.
+        // A Linux build only: macOS reads 512 bytes, and its default TMPDIR
+        // alone would push a shim's line past 127.
+        let tmpdir = format!("/tmp/{}", "t".repeat(60));
+        let varve =
+            std::path::PathBuf::from(format!("{tmpdir}/{}/{INTERPRETER}", shim_dir_name(1, 2)));
+        let line = 2 + varve.as_os_str().len() + 1 + SHIM_MARKER.len() + 1;
+        assert!((128..=255).contains(&line), "{line}");
+        let err = wrapper_text(&varve).expect_err("a first line over 127 bytes must be refused");
+        assert!(err.contains("127"), "names the limit: {err}");
+        assert!(err.contains("TMPDIR"), "says what to shorten: {err}");
     }
 
     // rivet: verifies REQ-RUNWITH-001

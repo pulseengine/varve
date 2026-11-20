@@ -1301,6 +1301,22 @@ fn an_override_below_its_lines_mark_is_refused_by_install_and_by_verify() {
 
 // rivet: verifies REQ-OVERRIDE-001
 #[test]
+fn an_override_layer_already_installed_below_its_lines_mark_is_refused_by_install() {
+    // The layer was laid down while it was current; the line's mark has moved
+    // past it since. `install` finds it in the store and fetches nothing, and
+    // must still refuse it, as `verify` does: being installed already is not
+    // consent to go below the mark.
+    let w = installed_mixed();
+    raise_mark(&w, "2026.08", 9);
+    assert_refused(
+        &w,
+        &["install"],
+        "override synth: layer 2026.08.0 presents counter 1",
+    );
+}
+
+// rivet: verifies REQ-OVERRIDE-001
+#[test]
 fn an_export_refuses_a_tampered_override_layer() {
     // export_target verifies the override layer's bytes itself: resolve
     // does not read them, so nothing earlier would stop this.

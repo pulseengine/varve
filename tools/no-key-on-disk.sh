@@ -62,28 +62,59 @@ if [ "${1:-}" = "--self-test" ]; then
   else
     echo "  rejects: a secret bound to an innocent name"
   fi
+  # Review before v0.48.0: shapes of the same write the patterns above missed.
+  must_reject_env() { # name, the value SIGNER is bound to, run line
+    printf 'jobs:\n  x:\n    steps:\n      - env:\n          SIGNER: %s\n        run: %s\n' "$2" "$3" > "$work/wf/a.yml"
+    if "$0" "$work/wf" >/dev/null 2>&1; then
+      echo "::error::self-test: gate ACCEPTED what it must reject ($1): SIGNER: $2 / $3"; fail=1
+    else
+      echo "  rejects: $1"
+    fi
+  }
+  must_reject_env "a double-quoted secret binding" '"${{ secrets.X }}"' 'printf %s "$SIGNER" > /tmp/s'
+  must_reject_env "a single-quoted secret binding" "'\${{ secrets.X }}'" 'printf %s "$SIGNER" > /tmp/s'
+  must_reject "a redirect with no space"   'echo "$SIGNING_SECRET" >/tmp/s'
+  must_reject "an append with no space"    'printf %s "$VARVE_ROOT_KEY" >>/tmp/s'
+  must_reject "a pipe through a command"   'echo "$VARVE_ROOT_KEY" | base64 -d > /tmp/s'
+  must_reject_env "a bound secret piped through a command" '${{ secrets.X }}' 'printf %s "$SIGNER" | base64 -d > /tmp/s'
+  must_reject "bracket access, single quotes" "echo \"\${{ secrets['VARVE_ROOT_KEY'] }}\" > /tmp/s"
+  must_reject "bracket access, double quotes" 'echo "${{ secrets["VARVE_ROOT_KEY"] }}" > /tmp/s'
+  must_reject_env "a bracket-access binding" "\${{ secrets['X'] }}" 'printf %s "$SIGNER" > /tmp/s'
   must_accept "the documented fd form"     "varve deposit --key <(printf '%s' \"\$VARVE_ROLLING_KEY\") --out o"
   must_accept "a pipe to /dev/stdin"       "printf '%s' \"\$K\" | varve sign-status --key /dev/stdin"
+  # `>&2` duplicates a descriptor; it writes no file.
+  must_accept "stderr joined to stdout"    'printf %s "$VARVE_ROOT_KEY" | varve sign-status --key /dev/stdin 2>&1'
   [ "$fail" -eq 0 ] || { echo "::error::no-key-on-disk self-test FAILED"; exit 1; }
-  echo "no-key-on-disk: self-test OK — the gate rejects 6 shapes and accepts 2"
+  echo "no-key-on-disk: self-test OK — the gate rejects 15 shapes and accepts 3"
   exit 0
 fi
 
 DIR="${1:-.github/workflows}"
 
-# A secret-looking variable redirected into a file. Covers `> f`, `>> f`, and
-# `tee f`, with or without quotes around the variable.
-PATTERN='(\$\{?[A-Za-z_]*(KEY|SECRET|TOKEN)[A-Za-z_]*\}?"?[[:space:]]*(>>?|\|[[:space:]]*tee)[[:space:]])|((>>?|\|[[:space:]]*tee)[[:space:]]*[^[:space:]|]*(key|secret)[^[:space:]|]*$)'
+# Where a write lands in a file: `> f`, `>f`, `>> f`, `>>f`, or `| tee f`.
+# Not `>&2`: that duplicates a descriptor and writes no file.
+SINK='(>>?[[:space:]]*[^&[:space:]]|\|[[:space:]]*tee[[:space:]])'
+# What may sit between the secret and the sink: a closing quote, and at most
+# one command it is piped through first (`"$K" | base64 -d > f`).
+GAP="[\"']?[[:space:]]*(\\|[^|>]*)?"
+# A quote, either kind, for the index form `secrets['X']` / `secrets["X"]`.
+Q="['\"]"
 
-# A `${{ secrets.X }}` expression redirected straight into a file (#352).
-SECRET_EXPR='\$\{\{[[:space:]]*secrets\.[A-Za-z0-9_]+[[:space:]]*\}\}"?[[:space:]]*(>>?|\|[[:space:]]*tee)[[:space:]]'
-PATTERN="$PATTERN|($SECRET_EXPR)"
+# A secret-looking variable written into a file.
+NAMED='\$\{?[A-Za-z_]*(KEY|SECRET|TOKEN)[A-Za-z_]*\}?'
+# A `${{ secrets.X }}` expression written straight into a file (#352), in
+# either spelling GitHub accepts: `secrets.X` or `secrets['X']`.
+SECRET_EXPR='\$\{\{[[:space:]]*secrets(\.[A-Za-z0-9_]+|\[[[:space:]]*'"$Q"'[A-Za-z0-9_-]+'"$Q"'[[:space:]]*])[[:space:]]*\}\}'
+# A redirect into a file whose name looks like a key, whatever is written.
+KEY_FILE='(>>?|\|[[:space:]]*tee)[[:space:]]*[^[:space:]|]*(key|secret)[^[:space:]|]*$'
+PATTERN="(($NAMED|$SECRET_EXPR)$GAP$SINK)|($KEY_FILE)"
 # Names an `env:` entry binds to a secret, whatever they are called (#352: a
-# secret bound to SIGNER passed the KEY/SECRET/TOKEN name rule).
-bound="$(grep -rhoE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*\$\{\{[[:space:]]*secrets\.' "$DIR" 2>/dev/null \
+# secret bound to SIGNER passed the KEY/SECRET/TOKEN name rule), the value
+# quoted or not, in either spelling.
+bound="$(grep -rhoE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*'"$Q"'?\$\{\{[[:space:]]*secrets(\.|\[)' "$DIR" 2>/dev/null \
          | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*):.*/\1/' | sort -u | paste -sd'|' - || true)"
 if [ -n "$bound" ]; then
-  PATTERN="$PATTERN|(\\\$\{?($bound)\}?\"?[[:space:]]*(>>?|\|[[:space:]]*tee)[[:space:]])"
+  PATTERN="$PATTERN|(\\\$\{?($bound)\}?$GAP$SINK)"
 fi
 
 found=0

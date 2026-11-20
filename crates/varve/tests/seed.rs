@@ -362,13 +362,19 @@ fn a_never_installed_store_does_not_take_a_seed_through_mirrors() {
     let fresh = w.path("fresh-root");
     let fresh_project = w.path("fresh-project");
     w.project(&fresh_project, DEAD, &mirror_paths, "2026.08.0", "");
+    // The ROOT layer's line (2026.08) is refused, before any mirror is asked
+    // for it. The included layer's check (line 2026.09) prints the same words,
+    // so without the line a broken root check would still pass here: the root
+    // would come from a mirror and only its include be refused.
     w.varve(&fresh, &fresh_project)
         .arg("install")
         .assert()
         .failure()
         .code(1)
-        .stderr(predicate::str::contains("first contact"))
-        .stderr(predicate::str::contains("needs the realm's primary"));
+        .stderr(predicate::str::contains(
+            "first contact with line 2026.08 needs the realm's primary",
+        ))
+        .stderr(predicate::str::contains("first contact with line 2026.09").not());
 }
 
 // rivet: verifies REQ-SEED-001
