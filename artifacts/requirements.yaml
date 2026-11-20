@@ -5635,3 +5635,23 @@ artifacts:
         target: REQ-OVERRIDE-001
       - type: satisfies
         target: REQ-RUNWITH-001
+
+  - id: REQ-OSTRUST-001
+    type: requirement
+    title: HTTPS trust comes from the operating system's store, with no bundled fallback
+    status: draft
+    release: v0.49.0
+    description: "Maintainer decision for v0.49.0. Before it, every varve HTTPS client trusted ureq's default root set, Mozilla's roots compiled into the binary (webpki-roots 1.0.10 at ureq 3.4.3), so every CA distrust needed a varve release to reach users and a site's own CA could not be added without a rebuild. Clauses: (1) Every HTTPS client varve builds (the registry client, registry.rs agent_config, and both self-update fetches, update.rs release_agent_config) verifies servers through the OS trust store: ureq's platform-verifier feature with RootCerts::PlatformVerifier (rustls-platform-verifier 0.7.1). macOS reads the Security framework, Windows the CryptoAPI store, Linux and other non-Apple Unix rustls-native-certs: the distribution bundle, or ONLY SSL_CERT_FILE and/or SSL_CERT_DIR when either is set (read from rustls-native-certs 0.8.5; macOS and Windows ignore both variables). (2) No bundled fallback: varve's clients never use a compiled-in root set. Stated limit: wsc 0.11.0 still depends on ureq with its default features and on webpki-roots directly, so webpki-roots remains in Cargo.lock and is compiled; varve's own agents do not select it, and a debug build of the varve binary (2026-11-20, macOS) contained none of its root data (no 'ISRG Root X1' bytes), the linker dropping it as unreferenced. A release build was not checked. (3) A host with no usable CA store fails the fetch: the verifier refuses with 'No CA certificates were loaded from the system', and varve appends that the host has no usable CA certificate store, that varve carries no bundled fallback, and the fix: install the ca-certificates package, or point SSL_CERT_FILE at a PEM bundle (SSL_CERT_DIR at a directory of them). (4) Evidence, a negative and a positive control against an in-process HTTPS server whose certificate chains to a CA generated per test run: the production registry agent and the self-update path refuse it with a certificate verdict ('invalid peer certificate'), and the same registry agent with only the root set changed to that CA accepts it. The negative control was shown able to fail: with the production TLS config temporarily set to disable verification, both negative tests failed (registry: 'a certificate from an untrusted CA must be refused'; self-update: the refusal text was 'expected value at line 1 column 1', a JSON error after a successful handshake). On Linux, a child test run with SSL_CERT_FILE naming an empty file drives the real verifier into clause 3's failure and checks varve's message."
+    tags: [security, network]
+    fields:
+      category: functional
+      priority: must
+    links:
+      - type: traces-to
+        target: REQ-REGISTRY-002
+      - type: traces-to
+        target: REQ-UPDATE-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-20T12:00:00Z

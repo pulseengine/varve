@@ -9,6 +9,7 @@ Every variable varve reads, and which one wins.
 | `XDG_CONFIG_HOME`, `HOME` | the user-level configuration (`varve/config.toml`, shim passthrough; see `varve docs shim`) — only a file outside every repository counts | `~/.config` |
 | `VARVE_REGISTRY_AUTH` | `oci://` pulls against a private registry | none |
 | `VARVE_UPDATE_API` | `varve self-update` only | the GitHub releases API |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR` | every HTTPS fetch, on Linux and other non-Apple Unix only | the distribution's CA bundle |
 | `VARVE_INSTALL_DIR`, `VARVE_VERSION`, `VARVE_ALLOW_ROOT` | `install.sh` only, never the binary | `~/.varve/bin`, `latest`, refuse |
 
 `varve run` and the shims additionally *export* `VARVE_LAYER` and
@@ -115,6 +116,19 @@ Overrides the release-metadata endpoint `varve self-update` queries, for mirrors
 and tests. It decides *availability* only: the candidate binary is still
 accepted or refused by the signed sums against the pinned root, so pointing this
 at a hostile server gets you a failed update, not a bad one.
+
+## HTTPS trust: SSL_CERT_FILE, SSL_CERT_DIR
+
+Every HTTPS fetch (`oci://` pulls, token requests, `varve self-update`)
+trusts the operating system's CA store: the keychain on macOS, the system
+store on Windows, the distribution's bundle on Linux. varve carries no
+bundled roots to fall back on, so a host with no CA store (a `scratch` or
+`debian-slim` container without `ca-certificates`) fails the fetch with an
+error that says so. Install `ca-certificates`, or on Linux set
+`SSL_CERT_FILE` to a PEM bundle (or `SSL_CERT_DIR` to a directory of
+them); either one replaces the system bundle rather than adding to it.
+macOS and Windows ignore both variables. Like `VARVE_REGISTRY_AUTH`, this
+decides transport, never acceptance (REQ-OSTRUST-001).
 
 ## install.sh only
 

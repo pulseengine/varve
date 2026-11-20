@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased (v0.49.0)
+
+### Upgrading: behaviour that changes
+
+- HTTPS trust now comes from the operating system's CA store instead of the Mozilla roots compiled into varve (REQ-OSTRUST-001). The registry client and both `varve self-update` fetches use ureq's `platform-verifier` (rustls-platform-verifier 0.7.1): the Security framework on macOS, the system store on Windows, the distribution bundle on Linux. There is no bundled fallback: on a host without a CA store (a `scratch` or `debian-slim` container without `ca-certificates`) a fetch fails with `No CA certificates were loaded from the system`, followed by the fix: install `ca-certificates`, or on Linux point `SSL_CERT_FILE` at a PEM bundle (or `SSL_CERT_DIR` at a directory of them). A CA distrust or a site's own CA now takes effect through the OS, without a varve release. `webpki-roots` is still in `Cargo.lock`, pulled by wsc 0.11.0; varve's own clients do not use it.
+
 ## v0.47.0 — 2026-11-11
 
 *Every ingestion proof is bound to the release it is deposited for, a
