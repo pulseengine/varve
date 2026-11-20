@@ -515,6 +515,14 @@ jobs:
           - shard: varve-core (shim-fallback)
             files: >-
               -f crates/varve-core/src/shimfallback.rs
+          # NEW at v0.49.0 (REQ-OSTRUST-001), gated on arrival. It decides
+          # which roots every HTTPS client trusts and what a host without a CA
+          # store is told; a mutant that swapped the OS store back for a
+          # bundle, or dropped the fix from the message, must be killed. A
+          # handful of mutants, so its own shard rather than growing one.
+          - shard: varve-core (tls)
+            files: >-
+              -f crates/varve-core/src/tls.rs
           # GATED ON ARRIVAL, and this one was earned the hard way. An
           # independent review mutated the `Other` arm of `linkage` to round an
           # unrecognised PT_INTERP to glibc and watched all 311 producer tests

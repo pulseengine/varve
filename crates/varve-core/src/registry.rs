@@ -763,10 +763,19 @@ impl RegistryRef {
 /// `http_status_as_error(false)` is required for clause 1: ureq's default
 /// turns a 401 into an `Err` with the response — and therefore the
 /// `WWW-Authenticate` challenge — discarded.
+///
+/// TLS trust is the OS store, with no bundled fallback (REQ-OSTRUST-001).
 fn agent_config() -> ureq::config::Config {
+    agent_config_trusting(crate::tls::os_trust())
+}
+
+/// [`agent_config`] with the root set as the only variable, so a test can
+/// trust a generated CA and change nothing else.
+fn agent_config_trusting(tls: ureq::tls::TlsConfig) -> ureq::config::Config {
     ureq::Agent::config_builder()
         .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
         .http_status_as_error(false)
+        .tls_config(tls)
         .build()
 }
 
@@ -956,7 +965,7 @@ impl RegistrySource {
         }
         let mut response = request
             .call()
-            .map_err(|e| SourceError::Transport(e.to_string()))?;
+            .map_err(|e| SourceError::Transport(crate::tls::describe(&e)))?;
         let status = response.status().as_u16();
         let header = |name: &str| {
             response
@@ -1007,9 +1016,12 @@ impl RegistrySource {
         if credential_allowed && let CredentialLookup::Found(credential) = self.credential() {
             request = request.header("Authorization", &credential.basic_header());
         }
-        let mut response = request
-            .call()
-            .map_err(|e| SourceError::Transport(format!("token request to {url} failed: {e}")))?;
+        let mut response = request.call().map_err(|e| {
+            SourceError::Transport(format!(
+                "token request to {url} failed: {}",
+                crate::tls::describe(&e)
+            ))
+        })?;
         let status = response.status().as_u16();
         if status == 401 || status == 403 {
             return Err(self.auth_error(&format!("the token endpoint {url}"), status));
@@ -2027,6 +2039,72 @@ mod tests {
             !config.http_status_as_error(),
             "a 401 must arrive as a response so its WWW-Authenticate challenge can be read"
         );
+    }
+
+    // ─────────────── REQ-OSTRUST-001: trust is the OS store ───────────────
+
+    /// The source exactly as production builds it, pointed at the in-process
+    /// server (whose CA is in no OS store and no bundle).
+    fn source_at(server: &crate::tls::test_server::TestServer) -> RegistrySource {
+        let reference = format!(
+            "oci://{}/ostrust/probe",
+            server.base.trim_start_matches("https://")
+        );
+        RegistrySource::new(RegistryRef::parse(&reference).unwrap())
+    }
+
+    // rivet: verifies REQ-OSTRUST-001
+    #[test]
+    fn the_production_agent_refuses_a_ca_the_os_does_not_trust() {
+        let server = crate::tls::test_server::start();
+        let source = source_at(&server);
+        let url = format!("{}/v2/", server.base);
+        let Err(SourceError::Transport(text)) = source.send(&url, "*/*", None) else {
+            panic!("a certificate from an untrusted CA must be refused");
+        };
+        assert!(
+            text.contains("invalid peer certificate"),
+            "the refusal must be a certificate verdict, not some other failure: {text}"
+        );
+        assert!(
+            !text.contains("ca-certificates"),
+            "this host HAS a store; the no-store fix would mislead: {text}"
+        );
+    }
+
+    // rivet: verifies REQ-OSTRUST-001
+    #[test]
+    fn the_same_agent_accepts_that_server_once_its_ca_is_the_root() {
+        let server = crate::tls::test_server::start();
+        let mut source = source_at(&server);
+        let config = agent_config_trusting(crate::tls::test_server::only(&server.ca_der));
+        // Only the root set differs from production.
+        let production = agent_config();
+        assert_eq!(
+            config.redirect_auth_headers(),
+            production.redirect_auth_headers()
+        );
+        assert_eq!(
+            config.http_status_as_error(),
+            production.http_status_as_error()
+        );
+        source.agent = ureq::Agent::new_with_config(config);
+        let fetched = source
+            .send(&format!("{}/v2/", server.base), "*/*", None)
+            .expect("the generated CA is the root: the handshake must succeed");
+        assert_eq!(
+            (fetched.status, fetched.bytes.as_slice()),
+            (200, &b"ok"[..])
+        );
+    }
+
+    // rivet: verifies REQ-OSTRUST-001
+    #[test]
+    fn the_registry_agent_trusts_the_os_store() {
+        assert!(matches!(
+            agent_config().tls_config().root_certs(),
+            ureq::tls::RootCerts::PlatformVerifier
+        ));
     }
 
     #[test]

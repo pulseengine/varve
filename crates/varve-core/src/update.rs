@@ -73,6 +73,15 @@ pub fn already_current(running_binary: &[u8], latest_binary: &[u8]) -> bool {
     crate::store::manifest_digest(running_binary) == crate::store::manifest_digest(latest_binary)
 }
 
+/// The agent both self-update fetches use: ureq's defaults (a non-2xx status
+/// is an error here, which is what both callers want) with TLS trust from the
+/// OS store and no bundled fallback (REQ-OSTRUST-001).
+fn release_agent_config() -> ureq::config::Config {
+    ureq::Agent::config_builder()
+        .tls_config(crate::tls::os_trust())
+        .build()
+}
+
 /// Ask the release API for the latest tag and locate this platform's assets.
 /// `api_latest_url` is the GitHub "latest release" endpoint (or a mirror /
 /// test double — the URL changes availability, never acceptance).
@@ -81,13 +90,13 @@ pub fn check_latest(
     current_version: &str,
     platform: &str,
 ) -> Result<Option<UpdatePlan>, UpdateError> {
-    let agent = ureq::Agent::new_with_defaults();
+    let agent = ureq::Agent::new_with_config(release_agent_config());
     let body = agent
         .get(api_latest_url)
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "varve-self-update")
         .call()
-        .map_err(|e| UpdateError::Api(e.to_string()))?
+        .map_err(|e| UpdateError::Api(crate::tls::describe(&e)))?
         .body_mut()
         .read_to_string()
         .map_err(|e| UpdateError::Api(e.to_string()))?;
@@ -161,13 +170,13 @@ pub fn fetch_verified_binary(
     plan: &UpdatePlan,
     trust: &crate::keyroles::RealmTrust,
 ) -> Result<(Vec<u8>, String), UpdateError> {
-    let agent = ureq::Agent::new_with_defaults();
+    let agent = ureq::Agent::new_with_config(release_agent_config());
     let fetch = |url: &str| -> Result<Vec<u8>, UpdateError> {
         agent
             .get(url)
             .header("User-Agent", "varve-self-update")
             .call()
-            .map_err(|e| UpdateError::Api(e.to_string()))?
+            .map_err(|e| UpdateError::Api(crate::tls::describe(&e)))?
             .body_mut()
             .with_config()
             .limit(8 * 1024 * 1024 * 1024)
@@ -263,6 +272,31 @@ pub fn perform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // rivet: verifies REQ-OSTRUST-001
+    #[test]
+    fn self_update_trusts_the_os_store_and_keeps_status_errors() {
+        let config = release_agent_config();
+        assert!(matches!(
+            config.tls_config().root_certs(),
+            ureq::tls::RootCerts::PlatformVerifier
+        ));
+        assert!(
+            config.http_status_as_error(),
+            "a 404 for a release asset must stay an error, as with ureq's defaults"
+        );
+    }
+
+    // rivet: verifies REQ-OSTRUST-001
+    #[test]
+    fn self_update_refuses_a_ca_the_os_does_not_trust() {
+        let server = crate::tls::test_server::start();
+        let Err(UpdateError::Api(text)) = check_latest(&server.base, "0.0.1", "linux-x86_64")
+        else {
+            panic!("a certificate from an untrusted CA must be refused");
+        };
+        assert!(text.contains("invalid peer certificate"), "{text}");
+    }
 
     // rivet: verifies REQ-UPDATE-001
     #[test]

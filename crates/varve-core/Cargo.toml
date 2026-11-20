@@ -39,7 +39,12 @@ toml = "1.1.4"
 # version it builds against wherever no lockfile decides: the fuzz workspace
 # (all five fuzz jobs went red on #279) and `cargo install varve` without
 # --locked. Lift it when sigil ships a wsc that builds against 3.5.
-ureq = ">=3, <3.5"
+# `platform-verifier`: TLS trust comes from the OS store (REQ-OSTRUST-001),
+# selected per agent with `RootCerts::PlatformVerifier` in src/tls.rs. The
+# default features stay on — they carry ureq's ring provider, and wsc enables
+# them anyway (it pulls `webpki-roots` itself), so dropping them here would
+# remove nothing from the graph.
+ureq = { version = ">=3, <3.5", features = ["platform-verifier"] }
 # Reading a binary WIT package (DD-036). The `wit` payload form is the one
 # `wkg`'s local backend reads, so the closure must be derived by DECODING that
 # form — and hand-rolling a component-model reader to avoid a dependency would
@@ -59,6 +64,11 @@ rustix = { version = "1.1.6", features = ["fs"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 proptest = "1.11.0"
 tempfile = "3.27.0"
+# REQ-OSTRUST-001's negative and positive controls: an in-process HTTPS server
+# whose certificate chains to a CA generated per run. Both are already in the
+# graph (rcgen via wsc, rustls via ureq), on ring, so no new crate is built.
+rcgen = "0.13.2"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 # The reference ENCODER for binary WIT packages, used only to build fixtures so
 # the closure tests read the same bytes `wkg` writes rather than a shape we
 # invented. Deliberately a dev-dependency: varve decodes WIT packages, it never

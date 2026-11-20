@@ -68,6 +68,7 @@ pub mod shimfallback;
 pub mod source;
 pub mod store;
 pub mod support;
+mod tls;
 pub mod update;
 pub mod verify;
 pub mod vsixexport;
