@@ -896,7 +896,15 @@ fn unaudited_locks(runs: &[String], lock_dirs: &[String]) -> Vec<String> {
         .filter(|l| l.contains("cargo deny"))
         .collect();
     let audits = |line: &str, dir: &str| {
-        let words: Vec<&str> = line.split_whitespace().collect();
+        // cargo-deny's own arguments end at the first shell separator
+        // (`cargo deny --locked check || rc=1`).
+        let line = &line[line.find("cargo deny").unwrap_or(0)..];
+        let end = ["|", "&", ";", ")", ">"]
+            .iter()
+            .filter_map(|s| line.find(s))
+            .min()
+            .unwrap_or(line.len());
+        let words: Vec<&str> = line[..end].split_whitespace().collect();
         let manifest = words
             .iter()
             .position(|w| *w == "--manifest-path")
@@ -994,6 +1002,25 @@ fn the_audit_scan_flags_a_lock_no_deny_step_audits() {
                 "cargo deny --locked check",
                 "cargo deny --locked --manifest-path fuzz/Cargo.toml check licenses"
             ]),
+            &dirs
+        ),
+        vec!["fuzz/Cargo.lock"]
+    );
+    // A trailing `|| rc=1` is not a check name: both still audited, and a
+    // licenses-only audit with one is still flagged.
+    assert!(
+        unaudited_locks(
+            &s(&["rc=0\ncargo deny --locked check || rc=1\n\
+                  cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories || rc=1\n\
+                  exit \"$rc\""]),
+            &dirs
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        unaudited_locks(
+            &s(&["cargo deny --locked check || rc=1\n\
+                  cargo deny --locked --manifest-path fuzz/Cargo.toml check licenses || rc=1"]),
             &dirs
         ),
         vec!["fuzz/Cargo.lock"]

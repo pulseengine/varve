@@ -298,14 +298,20 @@ jobs:
       # metadata` re-resolves a stale lock and the audit passes on a graph no
       # build uses. The guard in pr_gates_cannot_be_switched_off.rs finds the
       # locks on disk and fails if one is not audited here.
-      - name: Audit dependencies (advisories, licenses, sources)
-        run: cargo deny --locked check
-      - name: Audit the fuzz workspace's own lock (fuzz/Cargo.lock)
-        # Same deny.toml (cargo-deny reads <cwd>/deny.toml). Licenses are not
-        # checked here: the fuzz harness is never built into anything varve
-        # distributes, and libfuzzer-sys is `(MIT OR Apache-2.0) AND NCSA`,
-        # which the shipped binaries' allow-list rightly does not carry.
-        run: cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories bans sources
+      #
+      # One step, every audit run, red if any is: a red root audit must not
+      # skip the fuzz one and hide a second finding (the --no-fail-fast rule).
+      # fuzz/ uses the same deny.toml (cargo-deny reads <cwd>/deny.toml).
+      # Licenses are not checked there: the fuzz harness is never built into
+      # anything varve distributes, and libfuzzer-sys is
+      # `(MIT OR Apache-2.0) AND NCSA`, which the shipped binaries' allow-list
+      # rightly does not carry.
+      - name: Audit dependencies (advisories, licenses, sources; root and fuzz/ locks)
+        run: |
+          rc=0
+          cargo deny --locked check || rc=1
+          cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories bans sources || rc=1
+          exit "$rc"
 
   corrosion:
     name: corrosion offline build (REQ-CORROSION-001)
