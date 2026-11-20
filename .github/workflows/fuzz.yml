@@ -52,6 +52,16 @@ jobs:
       - name: Fuzz duration
         id: dur
         run: echo "secs=${{ github.event_name == 'schedule' && 600 || 60 }}" >> "$GITHUB_OUTPUT"
+      - name: fuzz/Cargo.lock is current (REQ-LOCKED-001)
+        # fuzz/ is its own workspace with its own committed lock. cargo-fuzz
+        # has no --locked: it runs `cargo build --manifest-path
+        # fuzz/Cargo.toml --target <triple>` and hands everything after `--`
+        # to libFuzzer (cargo-fuzz 0.13.1, src/project.rs `fn cargo`). So the
+        # lock is proved current here, by the same nightly cargo, before the
+        # build can re-resolve it — and the step after the run proves the
+        # build did not touch it. A required check that resolves fresh on
+        # every run goes red on whatever a new upstream release breaks.
+        run: cargo +nightly fetch --locked --manifest-path fuzz/Cargo.toml
       - name: Run ${{ matrix.target }}
         # The build target is stated, not inherited. On the self-hosted pool
         # cargo-fuzz resolved its default target to
@@ -69,6 +79,8 @@ jobs:
           cargo +nightly fuzz run ${{ matrix.target }} \
             --target x86_64-unknown-linux-gnu \
             -- -max_total_time=${{ steps.dur.outputs.secs }} -rss_limit_mb=4096
+      - name: the fuzz build did not re-resolve fuzz/Cargo.lock (REQ-LOCKED-001)
+        run: git diff --exit-code -- fuzz/Cargo.lock
       - name: Upload any crash corpus
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

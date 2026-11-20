@@ -5635,3 +5635,21 @@ artifacts:
         target: REQ-OVERRIDE-001
       - type: satisfies
         target: REQ-RUNWITH-001
+
+  - id: REQ-LOCKED-001
+    type: requirement
+    title: Every lockfile is committed, every CI build uses it locked, and every lock is audited
+    status: draft
+    release: v0.49.0
+    description: "Maintainer-approved CI hardening, 2026-11-20. Evidence: an audit of main at af780c3b found fuzz/Cargo.lock gitignored, so the five required cargo fuzz checks resolved their dependencies fresh on every run (the failure that turned a required spar job red when a new highs-sys was published); deposit-layer.yml, measure-verify.yml, release.yml's sums-signing build, and the clippy, test, run and llvm-cov steps of ci.yml and systest.yml ran without --locked; and cargo deny audited only the root lock, also without --locked, so it would audit a re-resolved graph rather than the committed one. Clauses: (1) Every Cargo workspace in the repository has a Cargo.lock tracked by git, and no ignore rule matches one. (2) Every cargo invocation in a workflow or a tools/ shell script that resolves the dependency graph (build, test, clippy, run, llvm-cov, doc, fuzz, install, deny, package, publish) carries --locked or --frozen; an invocation that cannot take it is listed, with the reason, beside what the same file runs to prove the lock current instead. cargo-fuzz 0.13.1 has no --locked (it runs cargo build --manifest-path fuzz/Cargo.toml and passes everything after -- to libFuzzer), so fuzz.yml runs cargo +nightly fetch --locked --manifest-path fuzz/Cargo.toml before the build and git diff --exit-code -- fuzz/Cargo.lock after it. (3) The required cargo deny (supply-chain audit) job audits every Cargo.lock for advisories, with --locked. fuzz/Cargo.lock is checked for advisories, bans and sources; licenses are not checked there, because the fuzz harness is never distributed and libfuzzer-sys carries NCSA. The set of locks is found from the tree (every Cargo.toml with [workspace], every Cargo.lock), never from a hand list. Verified by crates/varve-producer/tests/pr_gates_cannot_be_switched_off.rs: every_cargo_lock_is_committed_and_none_is_ignored, every_ci_cargo_build_runs_locked and every_cargo_lock_is_audited_for_advisories, each with a negative control (the_lockfile_scan_flags_..., the_locked_scan_flags_..., the_audit_scan_flags_...). Planted CI controls (a stale lock, a lock carrying a known advisory) are on branch review/lockfile-controls, which is never merged."
+    tags: [security, process]
+    fields:
+      category: non-functional
+      priority: must
+    links:
+      - type: traces-to
+        target: REQ-FUZZ-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-20T20:03:04Z

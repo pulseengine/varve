@@ -70,13 +70,13 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
-        run: cargo test --workspace --no-fail-fast
+        run: cargo test --workspace --locked --no-fail-fast
       - name: docs coverage (every subcommand documented)
         # REQ-DOCS-001: a subcommand cannot ship undocumented. The unit test
         # enforces the same invariant; this exercises the user-facing CLI gate.
-        run: cargo run -q -p varve -- docs check --coverage --strict
+        run: cargo run -q --locked -p varve -- docs check --coverage --strict
 
   fish:
     # REQ-ENVQUOTE-001 clause 2: the `varve env` round trip is SHOWN by running
@@ -103,7 +103,7 @@ jobs:
         # also insists that exactly this one test ran.
         run: |
           set -euo pipefail
-          cargo test -p varve --test cli -- --exact \
+          cargo test --locked -p varve --test cli -- --exact \
             env_quotes_a_hostile_root_for_fish_so_eval_cannot_run_embedded_commands 2>&1 | tee fish.log
           grep -q 'test result: ok. 1 passed' fish.log
       - name: run --with refuses a TMPDIR where programs cannot run (REQ-RUNWITH-001)
@@ -116,7 +116,7 @@ jobs:
         # only where VARVE_TEST_NOEXEC_DIR is set, so the step insists it ran.
         run: |
           set -euo pipefail
-          cargo test -p varve --test run_with --no-run
+          cargo test --locked -p varve --test run_with --no-run
           # The run copies the (debug) varve binary into the mount: size it
           # from the binary, with room to spare.
           size=$(( $(stat -c %s target/debug/varve) * 2 / 1048576 + 64 ))
@@ -127,7 +127,7 @@ jobs:
           findmnt -no OPTIONS /srv/varve-noexec | tr ',' '\n' | grep -qx noexec \
             || { echo "::error::/srv/varve-noexec is not mounted noexec"; exit 1; }
           for d in /srv/varve-noexec /srv /; do stat -c '%A %U:%G %n' "$d"; done
-          if VARVE_TEST_NOEXEC_DIR=/srv/varve-noexec cargo test -p varve --test run_with -- --exact \
+          if VARVE_TEST_NOEXEC_DIR=/srv/varve-noexec cargo test --locked -p varve --test run_with -- --exact \
             a_tmpdir_where_programs_cannot_run_is_refused --nocapture > noexec.log 2>&1; then
             status=0
           else
@@ -255,7 +255,7 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install --locked cargo-llvm-cov
       - name: Measure (advisory — evidence, not a gate)
-        run: cargo llvm-cov --workspace --no-fail-fast --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --locked --no-fail-fast --lcov --output-path lcov.info
       - name: Upload coverage evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -293,8 +293,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install cargo-deny
         run: cargo install --locked cargo-deny
+      # Every Cargo.lock in the repository is audited, and audited AS
+      # COMMITTED (REQ-LOCKED-001). Without --locked, cargo-deny's `cargo
+      # metadata` re-resolves a stale lock and the audit passes on a graph no
+      # build uses. The guard in pr_gates_cannot_be_switched_off.rs finds the
+      # locks on disk and fails if one is not audited here.
       - name: Audit dependencies (advisories, licenses, sources)
-        run: cargo deny check
+        run: cargo deny --locked check
+      - name: Audit the fuzz workspace's own lock (fuzz/Cargo.lock)
+        # Same deny.toml (cargo-deny reads <cwd>/deny.toml). Licenses are not
+        # checked here: the fuzz harness is never built into anything varve
+        # distributes, and libfuzzer-sys is `(MIT OR Apache-2.0) AND NCSA`,
+        # which the shipped binaries' allow-list rightly does not carry.
+        run: cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories bans sources
 
   corrosion:
     name: corrosion offline build (REQ-CORROSION-001)
@@ -323,7 +334,7 @@ jobs:
         # hermetic main test run and gated here.
         env:
           VARVE_CORROSION_TEST: "1"
-        run: cargo test -p varve-core --test corrosion_offline -- --nocapture
+        run: cargo test --locked -p varve-core --test corrosion_offline -- --nocapture
 
   keydisk:
     name: no signing key on disk (REQ-NOKEYDISK-001)

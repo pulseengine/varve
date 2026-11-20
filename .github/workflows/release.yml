@@ -647,7 +647,7 @@ jobs:
           refusing to publish a release without SHA256SUMS.txt.dsse.json."
             exit 1
           fi
-          cargo build --release -p varve
+          cargo build --release --locked -p varve
           # File descriptor, never a file (REQ-NOKEYDISK-001) -- see the same
           # correction in deposit-layer.yml.
           cd release-assets

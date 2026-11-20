@@ -452,3 +452,561 @@ fn the_fail_fast_scan_flags_a_workspace_test_without_no_fail_fast() {
     let good = "jobs:\n  t:\n    steps:\n      - run: cargo test --workspace --no-fail-fast\n      - run: cargo test -p varve --test cli\n";
     assert_eq!(fail_fast_runs("t.yml", good), (1, vec![]));
 }
+
+// ---------------------------------------------------------------------------
+// REQ-LOCKED-001: every lockfile committed, every CI build locked, every lock
+// audited.
+//
+// fuzz/Cargo.lock was gitignored, so the five required `cargo fuzz` checks
+// resolved their dependencies fresh on every run: a new upstream release could
+// turn a required check red with no change in this repository (spar's highs-sys
+// did exactly that). Builds without --locked silently re-resolve a stale lock,
+// and `cargo deny check` without --locked audits the re-resolved graph rather
+// than the committed one. The three checks below derive the set of locks from
+// the tree, never from a hand list.
+// ---------------------------------------------------------------------------
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Directories never searched for workspaces or locks: build output, git's own
+/// data, local mutation-testing copies and agent worktrees. Nothing in them is
+/// committed, and each holds whole copies of the tree whose locks are the
+/// tree's own.
+const NOT_SOURCE_DIRS: &[&str] = &[
+    "target",
+    ".git",
+    "mutants.out",
+    "mutants.out.old",
+    ".claude",
+    "node_modules",
+];
+
+/// Every Cargo workspace root and every Cargo.lock under `root`, as paths
+/// relative to it (`""` for `root` itself): (workspace dirs, lock files).
+fn cargo_workspaces_and_locks(root: &std::path::Path) -> (Vec<String>, Vec<String>) {
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        ws: &mut Vec<String>,
+        locks: &mut Vec<String>,
+    ) {
+        let rel = |p: &std::path::Path| {
+            p.strip_prefix(root)
+                .expect("under the root")
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+        for entry in entries {
+            let entry = entry.expect("a directory entry");
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let ft = entry.file_type().expect("a file type");
+            if ft.is_dir() {
+                if !NOT_SOURCE_DIRS.contains(&name.as_ref()) {
+                    walk(root, &path, ws, locks);
+                }
+            } else if name == "Cargo.lock" {
+                locks.push(rel(&path));
+            } else if name == "Cargo.toml" {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                if text.lines().any(|l| l.trim() == "[workspace]") {
+                    ws.push(rel(dir));
+                }
+            }
+        }
+    }
+    let (mut ws, mut locks) = (Vec::new(), Vec::new());
+    walk(root, root, &mut ws, &mut locks);
+    ws.sort();
+    locks.sort();
+    (ws, locks)
+}
+
+fn lock_of(dir: &str) -> String {
+    if dir.is_empty() {
+        "Cargo.lock".to_string()
+    } else {
+        format!("{dir}/Cargo.lock")
+    }
+}
+
+fn git_ok(root: &std::path::Path, args: &[&str]) -> bool {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("git runs");
+    out.status.success()
+}
+
+/// What is wrong with the locks under the git work tree `root`: a workspace
+/// with no Cargo.lock, a Cargo.lock git does not track, or one a .gitignore
+/// (any of them, or the global excludes) would ignore.
+fn lockfile_findings(root: &std::path::Path) -> Vec<String> {
+    let (ws, locks) = cargo_workspaces_and_locks(root);
+    let mut wanted: Vec<String> = ws.iter().map(|d| lock_of(d)).collect();
+    wanted.extend(locks);
+    wanted.sort();
+    wanted.dedup();
+    let mut bad = Vec::new();
+    for lock in &wanted {
+        if !root.join(lock).is_file() {
+            bad.push(format!("{lock}: a workspace with no Cargo.lock"));
+            continue;
+        }
+        if !git_ok(root, &["ls-files", "--error-unmatch", "--", lock]) {
+            bad.push(format!("{lock}: not tracked by git"));
+        }
+        // --no-index: judge the ignore rules themselves, not the index, so a
+        // lock that is tracked but would be ignored if re-added is still found.
+        if git_ok(root, &["check-ignore", "-q", "--no-index", "--", lock]) {
+            bad.push(format!("{lock}: matched by a .gitignore rule"));
+        }
+    }
+    bad
+}
+
+// rivet: verifies REQ-LOCKED-001
+#[test]
+fn every_cargo_lock_is_committed_and_none_is_ignored() {
+    let root = repo_root();
+    let (ws, locks) = cargo_workspaces_and_locks(&root);
+    assert!(
+        ws.contains(&String::new()) && ws.contains(&"fuzz".to_string()),
+        "the workspace scan did not find the root and fuzz/ workspaces ({ws:?}): it reads nothing"
+    );
+    assert!(
+        !locks.is_empty(),
+        "no Cargo.lock found: the scan reads nothing"
+    );
+    let bad = lockfile_findings(&root);
+    assert!(
+        bad.is_empty(),
+        "every Cargo.lock must be committed (REQ-LOCKED-001); a lock that is not \
+         resolves fresh in CI on every run:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
+/// Negative control: an ignored, untracked lock, and a workspace with none,
+/// are both found; a committed one is not.
+// rivet: verifies REQ-LOCKED-001
+#[test]
+fn the_lockfile_scan_flags_an_ignored_untracked_or_missing_lock() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = dir.path();
+    let git = |args: &[&str]| assert!(git_ok(root, args), "git {args:?} failed");
+    git(&["init", "-q"]);
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+    std::fs::write(root.join("Cargo.lock"), "version = 4\n").unwrap();
+    std::fs::create_dir_all(root.join("fuzz")).unwrap();
+    std::fs::write(root.join("fuzz/Cargo.toml"), "[package]\n\n[workspace]\n").unwrap();
+    std::fs::write(root.join("fuzz/Cargo.lock"), "version = 4\n").unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    std::fs::write(root.join("other/Cargo.toml"), "[workspace]\n").unwrap();
+    // A build directory's lock is not source.
+    std::fs::create_dir_all(root.join("target/x")).unwrap();
+    std::fs::write(root.join("target/x/Cargo.lock"), "").unwrap();
+    std::fs::write(root.join(".gitignore"), "fuzz/Cargo.lock\n/target\n").unwrap();
+    git(&["add", "Cargo.toml", "Cargo.lock", ".gitignore"]);
+
+    let bad = lockfile_findings(root);
+    let has = |needle: &str| bad.iter().any(|b| b.contains(needle));
+    assert!(has("fuzz/Cargo.lock: not tracked"), "{bad:?}");
+    assert!(has("fuzz/Cargo.lock: matched by a .gitignore"), "{bad:?}");
+    assert!(
+        has("other/Cargo.lock: a workspace with no Cargo.lock"),
+        "{bad:?}"
+    );
+    assert_eq!(bad.len(), 3, "only those three: {bad:?}");
+
+    // Fixed: committed, not ignored, the stray workspace given its lock.
+    std::fs::write(root.join(".gitignore"), "/target\n").unwrap();
+    std::fs::write(root.join("other/Cargo.lock"), "version = 4\n").unwrap();
+    git(&["add", ".gitignore", "fuzz/Cargo.lock", "other/Cargo.lock"]);
+    assert_eq!(lockfile_findings(root), Vec::<String>::new());
+}
+
+/// cargo subcommands that resolve the dependency graph and must therefore
+/// carry --locked (or --frozen, which implies it) in CI.
+const RESOLVING_SUBCOMMANDS: &[&str] = &[
+    "build", "test", "clippy", "run", "llvm-cov", "doc", "fuzz", "install", "deny", "package",
+    "publish",
+];
+
+/// The cargo invocations that cannot take --locked, each with what the same
+/// file must run instead so the lock is still proved current, as (file, the
+/// invocation's text, compensating texts that must appear in that file's runs).
+const LOCKED_EXEMPT: &[(&str, &str, &[&str])] = &[(
+    // cargo-fuzz 0.13.1 has no --locked and forwards none: it runs `cargo
+    // build --manifest-path fuzz/Cargo.toml --target <triple>`, and every
+    // argument after `--` goes to libFuzzer, not cargo (src/project.rs, `fn
+    // cargo`). So the job proves the lock current with the same nightly cargo
+    // before the build, and proves the build left it untouched after.
+    "fuzz.yml",
+    "cargo +nightly fuzz run",
+    &[
+        "cargo +nightly fetch --locked --manifest-path fuzz/Cargo.toml",
+        "git diff --exit-code -- fuzz/Cargo.lock",
+    ],
+)];
+
+/// Shell lines with their `\` continuations joined, comment lines dropped.
+fn logical_lines(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in text.lines() {
+        if cur.is_empty() && line.trim_start().starts_with('#') {
+            continue;
+        }
+        match line.trim_end().strip_suffix('\\') {
+            Some(head) => {
+                cur.push_str(head);
+                cur.push(' ');
+            }
+            None => {
+                cur.push_str(line);
+                out.push(std::mem::take(&mut cur));
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Every resolving cargo invocation in the shell `text` (from `file`) that
+/// carries neither --locked nor --frozen, as (count seen, offending lines).
+/// Only cargo's own arguments count: they end at ` -- ` (what follows goes to
+/// the program) or at a shell separator.
+fn unlocked_cargo(file: &str, text: &str) -> (usize, Vec<String>) {
+    let re = regex::Regex::new(&format!(
+        r"(?:^|[\s;&|(])cargo(?:\s+\+\S+)?\s+({})(?:\s|$)",
+        RESOLVING_SUBCOMMANDS
+            .iter()
+            .map(|s| regex::escape(s))
+            .collect::<Vec<_>>()
+            .join("|")
+    ))
+    .expect("a valid regex");
+    let mut seen = 0;
+    let mut bad = Vec::new();
+    for line in logical_lines(text) {
+        // Text inside quotes is a message (`echo "... cargo package ..."`),
+        // not an invocation; masked to `_` so offsets stay put. A command run
+        // through `sh -c "cargo ..."` is missed by this; none exists today.
+        let mut quote = None;
+        let line: String = line
+            .chars()
+            .map(|c| match (quote, c) {
+                (None, '"' | '\'') => {
+                    quote = Some(c);
+                    c
+                }
+                (Some(q), _) if c == q => {
+                    quote = None;
+                    c
+                }
+                (Some(_), _) => '_',
+                (None, _) => c,
+            })
+            .collect();
+        for m in re.find_iter(&line) {
+            seen += 1;
+            let rest = &line[m.start()..];
+            let end = [" -- ", "|", "&&", ";", ")", ">"]
+                .iter()
+                .filter_map(|s| rest.find(s))
+                .min()
+                .unwrap_or(rest.len());
+            let args = &rest[..end];
+            let locked = args
+                .split_whitespace()
+                .any(|a| a == "--locked" || a == "--frozen");
+            let exempt = LOCKED_EXEMPT
+                .iter()
+                .any(|(f, inv, _)| *f == file && args.contains(inv));
+            if !locked && !exempt {
+                bad.push(format!("{file}: {}", line.trim()));
+            }
+        }
+    }
+    (seen, bad)
+}
+
+/// Every file whose cargo invocations CI runs: every workflow (not only the PR
+/// ones: a release or deposit build that re-resolves ships bytes no PR
+/// tested), and every shell script under tools/, which the workflows call.
+fn ci_cargo_sources() -> Vec<(String, String)> {
+    let root = repo_root();
+    let mut out = Vec::new();
+    let wf_dir = root.join(".github/workflows");
+    for entry in std::fs::read_dir(&wf_dir).expect("the workflow directory") {
+        let path = entry.expect("an entry").path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name.ends_with(".yml") || name.ends_with(".yaml") {
+            let text = workflow(&name);
+            let runs: Vec<String> = step_runs(&name, &text)
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+            out.push((name, runs.join("\n")));
+        }
+    }
+    fn sh(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("a tools directory") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                sh(&path, root, out);
+            } else if path.extension().is_some_and(|e| e == "sh") {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                out.push((rel, std::fs::read_to_string(&path).expect("a script")));
+            }
+        }
+    }
+    sh(&root.join("tools"), &root, &mut out);
+    out.sort();
+    out
+}
+
+// rivet: verifies REQ-LOCKED-001
+#[test]
+fn every_ci_cargo_build_runs_locked() {
+    let sources = ci_cargo_sources();
+    let mut seen = 0;
+    let mut bad = Vec::new();
+    for (file, text) in &sources {
+        let (n, b) = unlocked_cargo(file, text);
+        seen += n;
+        bad.extend(b);
+    }
+    assert!(
+        seen > 20,
+        "only {seen} cargo invocations found: the scan reads nothing"
+    );
+    assert!(
+        bad.is_empty(),
+        "cargo invocations that may silently re-resolve a stale lock; add --locked \
+         (REQ-LOCKED-001), or an entry in LOCKED_EXEMPT with what proves the lock instead:\n  {}",
+        bad.join("\n  ")
+    );
+    // Each exemption must still be needed, and its compensation present.
+    for (file, inv, needs) in LOCKED_EXEMPT {
+        let text = &sources
+            .iter()
+            .find(|(f, _)| f == file)
+            .unwrap_or_else(|| panic!("LOCKED_EXEMPT names {file}, which does not exist"))
+            .1;
+        assert!(
+            text.contains(inv),
+            "LOCKED_EXEMPT entry `{inv}` matches nothing in {file}: remove it"
+        );
+        for need in *needs {
+            assert!(
+                text.contains(need),
+                "{file} runs `{inv}` without --locked, and no longer runs `{need}`, which \
+                 is what proved the lock instead"
+            );
+        }
+    }
+}
+
+/// Negative and positive controls for `unlocked_cargo`.
+// rivet: verifies REQ-LOCKED-001
+#[test]
+fn the_locked_scan_flags_a_cargo_build_without_locked() {
+    let unlocked = [
+        "cargo build --release -p varve",
+        "cargo +nightly test --workspace",
+        "  cargo clippy --workspace -- -D warnings --locked",
+        "cargo run -q -p varve -- --locked",
+        "VAR=1 cargo test -p x \\\n  --test y",
+        "(cd \"$repo\" && cargo build --release -p varve)",
+        "cargo llvm-cov --workspace --lcov",
+        "cargo doc --no-deps -p x",
+        "cargo deny check",
+        "cargo +nightly fuzz run t -- -max_total_time=60",
+    ];
+    for text in unlocked {
+        let (n, bad) = unlocked_cargo("t.yml", text);
+        assert_eq!((n, bad.len()), (1, 1), "not flagged: {text}");
+    }
+    let locked = [
+        "cargo build --release --locked -p varve",
+        "cargo test -p x \\\n  --locked --test y -- --exact z",
+        "cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories",
+        "cargo build --frozen",
+        "# cargo build in a comment",
+        "cargo fmt --all --check",
+        "cargo mutants --list",
+        "echo \"::error::cargo package embeds the dep version\"; exit 1",
+    ];
+    for text in locked {
+        let (_, bad) = unlocked_cargo("t.yml", text);
+        assert!(bad.is_empty(), "flagged: {text}: {bad:?}");
+    }
+    // The exemption is per file: the same invocation elsewhere is flagged.
+    let fuzz = "cargo +nightly fuzz run t --target x -- -max_total_time=60";
+    assert!(unlocked_cargo("fuzz.yml", fuzz).1.is_empty());
+    assert_eq!(unlocked_cargo("ci.yml", fuzz).1.len(), 1);
+}
+
+/// The required job that audits the dependency graph, by its check name.
+const AUDIT_JOB_NAME: &str = "cargo deny (supply-chain audit)";
+
+/// The `run:` texts of the job named `AUDIT_JOB_NAME` in the workflow `text`.
+fn audit_job_runs(workflow: &str, text: &str) -> Vec<String> {
+    let doc = parse(workflow, text);
+    let mut out = Vec::new();
+    if let Some(Yaml::Hash(jobs)) = get(&doc, "jobs") {
+        for job in jobs.values() {
+            if get(job, "name").and_then(Yaml::as_str) != Some(AUDIT_JOB_NAME) {
+                continue;
+            }
+            if let Some(Yaml::Array(steps)) = get(job, "steps") {
+                for step in steps {
+                    if let Some(Yaml::String(run)) = get(step, "run") {
+                        out.push(run.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Which of the locks in `lock_dirs` (workspace dirs relative to the root, `""`
+/// for the root) no `cargo deny` line in `runs` audits for advisories, against
+/// the committed lock (--locked), at that workspace.
+fn unaudited_locks(runs: &[String], lock_dirs: &[String]) -> Vec<String> {
+    let lines: Vec<String> = runs
+        .iter()
+        .flat_map(|r| logical_lines(r))
+        .filter(|l| l.contains("cargo deny"))
+        .collect();
+    let audits = |line: &str, dir: &str| {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let manifest = words
+            .iter()
+            .position(|w| *w == "--manifest-path")
+            .and_then(|i| words.get(i + 1).copied())
+            .or_else(|| {
+                words
+                    .iter()
+                    .find_map(|w| w.strip_prefix("--manifest-path="))
+            });
+        let at_dir = match manifest {
+            None => dir.is_empty(),
+            Some(m) => {
+                let m = m.trim_start_matches("./");
+                m == format!("{dir}/Cargo.toml") || (dir.is_empty() && m == "Cargo.toml")
+            }
+        };
+        let locked = words.iter().any(|w| *w == "--locked" || *w == "--frozen");
+        let Some(check) = words.iter().position(|w| *w == "check") else {
+            return false;
+        };
+        // `check` alone runs every check; otherwise advisories must be named.
+        let checks: Vec<&str> = words[check + 1..]
+            .iter()
+            .copied()
+            .filter(|w| !w.starts_with('-'))
+            .collect();
+        let advisories = checks.is_empty() || checks.contains(&"advisories");
+        at_dir && locked && advisories
+    };
+    lock_dirs
+        .iter()
+        .filter(|d| !lines.iter().any(|l| audits(l, d)))
+        .map(|d| lock_of(d))
+        .collect()
+}
+
+// rivet: verifies REQ-LOCKED-001
+#[test]
+fn every_cargo_lock_is_audited_for_advisories() {
+    let root = repo_root();
+    let (_, locks) = cargo_workspaces_and_locks(&root);
+    let dirs: Vec<String> = locks
+        .iter()
+        .map(|l| {
+            l.strip_suffix("Cargo.lock")
+                .unwrap()
+                .trim_end_matches('/')
+                .to_string()
+        })
+        .collect();
+    assert!(
+        dirs.len() >= 2,
+        "expected the root and fuzz/ locks, found {locks:?}"
+    );
+    let runs = audit_job_runs("ci.yml", &workflow("ci.yml"));
+    assert!(
+        !runs.is_empty(),
+        "ci.yml has no job named `{AUDIT_JOB_NAME}`: the scan reads nothing"
+    );
+    let missing = unaudited_locks(&runs, &dirs);
+    assert!(
+        missing.is_empty(),
+        "locks the `{AUDIT_JOB_NAME}` job does not audit for advisories as committed \
+         (`cargo deny --locked [--manifest-path <dir>/Cargo.toml] check [advisories ...]`, \
+         REQ-LOCKED-001): {missing:?}"
+    );
+}
+
+/// Negative and positive controls for `unaudited_locks`.
+// rivet: verifies REQ-LOCKED-001
+#[test]
+fn the_audit_scan_flags_a_lock_no_deny_step_audits() {
+    let dirs = vec![String::new(), "fuzz".to_string()];
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    // Only the root audited: fuzz/ is flagged.
+    assert_eq!(
+        unaudited_locks(&s(&["cargo deny --locked check"]), &dirs),
+        vec!["fuzz/Cargo.lock"]
+    );
+    // Unlocked audits audit a re-resolved graph: both flagged.
+    assert_eq!(
+        unaudited_locks(
+            &s(&[
+                "cargo deny check",
+                "cargo deny --manifest-path fuzz/Cargo.toml check"
+            ]),
+            &dirs
+        ),
+        vec!["Cargo.lock", "fuzz/Cargo.lock"]
+    );
+    // An audit that skips advisories does not count.
+    assert_eq!(
+        unaudited_locks(
+            &s(&[
+                "cargo deny --locked check",
+                "cargo deny --locked --manifest-path fuzz/Cargo.toml check licenses"
+            ]),
+            &dirs
+        ),
+        vec!["fuzz/Cargo.lock"]
+    );
+    // Both audited.
+    assert!(
+        unaudited_locks(
+            &s(&[
+                "cargo deny --locked check",
+                "cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories bans sources"
+            ]),
+            &dirs
+        )
+        .is_empty()
+    );
+}

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased (v0.49.0)
+
+### Fixed
+
+- Every lockfile is committed, used locked and audited (REQ-LOCKED-001). `fuzz/Cargo.lock` was gitignored, so the five required `cargo fuzz` checks resolved their dependencies fresh on every run and a new upstream release could turn one red with no change here; it is now committed, generated from the root lock so every shared crate keeps the root's version. cargo-fuzz 0.13.1 has no `--locked` (it runs `cargo build --manifest-path fuzz/Cargo.toml` and hands everything after `--` to libFuzzer), so `fuzz.yml` runs `cargo +nightly fetch --locked` on the fuzz workspace before the build and `git diff --exit-code -- fuzz/Cargo.lock` after it. Every other `cargo build`, `test`, `clippy`, `run`, `llvm-cov` and `deny` in the workflows and in `tools/systest/*.sh` now carries `--locked`, including the deposit, measure-verify and release sums-signing builds. The `cargo deny (supply-chain audit)` job now audits `fuzz/Cargo.lock` for advisories, bans and sources as well as the root lock, both with `--locked`; without it, cargo-deny's `cargo metadata` would re-resolve a stale lock and audit a graph no build uses. `pr_gates_cannot_be_switched_off` finds the workspaces and locks from the tree and fails if a lock is untracked or ignored, if a resolving cargo invocation in a workflow or `tools/` script lacks `--locked` (the one exemption, cargo-fuzz, must keep its fetch and diff), or if the audit job leaves a lock out; each check has a negative control.
+
 ## v0.47.0 — 2026-11-11
 
 *Every ingestion proof is bound to the release it is deposited for, a

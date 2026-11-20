@@ -303,7 +303,7 @@ jobs:
         run: |
           set -euo pipefail
           VARVE_SDK_SHAR="$(ls "$RUNNER_TEMP"/zephyr-sdk-x86_64-hosttools-standalone-*.sh)" \
-            cargo test -p varve-core --test sdk_relocation_runs -- --ignored --test-threads=1
+            cargo test --locked -p varve-core --test sdk_relocation_runs -- --ignored --test-threads=1
 
   line-index:
     name: a published signed line index, read and acted on (REQ-LAYERDIFF-001 clause 1)

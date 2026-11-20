@@ -1,12 +1,12 @@
 /target
 **/*.rs.bk
-# Cargo.lock tracked (26262-8 config-management: releases must rebuild from VCS)
+# Every Cargo.lock is tracked, fuzz/Cargo.lock included (26262-8 config-management:
+# releases must rebuild from VCS; REQ-LOCKED-001). Never ignore one here.
 .DS_Store
 /dist
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
-fuzz/Cargo.lock
 
 # Python bytecode from tools/
 __pycache__/

@@ -194,7 +194,7 @@ systest_build_varve() {
   if [ -n "${VARVE_BIN:-}" ]; then
     VARVE="$VARVE_BIN"
   else
-    (cd "$repo" && cargo build --release -p varve)
+    (cd "$repo" && cargo build --release --locked -p varve)
     VARVE="$repo/target/release/varve"
   fi
   "$VARVE" --version

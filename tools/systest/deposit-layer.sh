@@ -720,7 +720,7 @@ echo "   …and a document that does not say what it is cannot be deposited at a
 # exported. `--check` does everything except bind a port, which is the form a
 # gate can run: it resolves the pin, re-verifies the layer, opens the archive
 # and reports what it would serve.
-(cd "$REPO" && cargo build --release -p varve-serve) >/dev/null 2>&1 \
+(cd "$REPO" && cargo build --release --locked -p varve-serve) >/dev/null 2>&1 \
   || fail "varve-serve does not build"
 SERVE="$REPO/target/release/varve-serve"
 ( cd "$WORK/docs-project" && PATH="$CLEAN_PATH" "$SERVE" --check ) \

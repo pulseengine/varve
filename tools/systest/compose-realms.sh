@@ -415,7 +415,7 @@ out = lines[:i] + ["        let picked: Vec<&ToolProvider> = offers.clone();",
 open(path, 'w').write('\n'.join(out))
 print("   mutation applied: select_tools ignores the pin's realm choice")
 PY
-( cd "$MUTANT" && CARGO_TARGET_DIR="$MUTANT/target" cargo build --release -p varve ) \
+( cd "$MUTANT" && CARGO_TARGET_DIR="$MUTANT/target" cargo build --release --locked -p varve ) \
   >"$WORK/logs/mutant-build.log" 2>&1 \
   || { tail -30 "$WORK/logs/mutant-build.log"; fail "the mutant would not build"; }
 MUTANT_VARVE="$MUTANT/target/release/varve"
