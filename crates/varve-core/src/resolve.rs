@@ -111,6 +111,15 @@ pub enum ResolveError {
         "layer {layer} is installed but incomplete: missing {missing:?} — run `varve install` to repair it; refusing to fall back to PATH"
     )]
     PartialLayer { layer: String, missing: Vec<String> },
+    /// The pin's `tools` lists a name the layer builds for OTHER platforms
+    /// only. Not an incomplete install — re-installing lands the same bytes
+    /// and the same refusal — so the remedy names the platform, not a repair.
+    #[error(
+        "{} — re-installing cannot help: the layer ships no build of it for this platform. \
+         Drop it from the `tools` list in varve.toml, or use it on a platform it is built for.",
+        gaps.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+    )]
+    NoBuildForPlatform { gaps: Vec<PlatformGap> },
     #[error(
         "this project's pin restricts `tools` to {missing:?}, which layer {layer} does not \
          contain. It exposes: {available}. Re-installing cannot help — the layer is complete, \
@@ -332,6 +341,16 @@ pub fn resolve(pin: &Pin, store: &Store) -> Result<Resolved, ResolveError> {
         }
     }
     if !missing.is_empty() {
+        // A name the layer builds for OTHER platforms only (a layer cut after
+        // Intel macOS was dropped, on an Intel Mac) is neither an incomplete
+        // install nor an unknown name: say which platform has no build.
+        let gaps: Vec<PlatformGap> = missing
+            .iter()
+            .filter_map(|m| platform_gap(pin, &layer, store, m))
+            .collect();
+        if !gaps.is_empty() {
+            return Err(ResolveError::NoBuildForPlatform { gaps });
+        }
         // A pin restricting `tools` to a name the layer never carried is NOT an
         // incomplete install, and telling the user to re-install is a fix that
         // cannot work: install succeeds, changes nothing, and the same error
@@ -451,12 +470,14 @@ fn runners_of(layer: &InstalledLayer) -> std::collections::BTreeMap<String, Runn
     runners
 }
 
-/// The tool names a layer's signed manifest declares as DISPATCHABLE for
-/// `platform`: dispatchable as the store decides it (`entry_is_dispatchable` —
-/// no kind annotation is a tool, an unknown kind is not), and an entry whose
-/// platform annotation `platform::entry_matches` the target. Read leniently,
-/// like `compose::view`, so a manifest this varve stored is never re-judged.
-fn dispatchable_names_of(entry: &InstalledLayer, platform: &str) -> Result<Vec<String>, String> {
+/// Every DISPATCHABLE entry a layer's signed manifest declares, as (tool name,
+/// platform annotation): dispatchable as the store decides it
+/// (`entry_is_dispatchable` — no kind annotation is a tool, an unknown kind is
+/// not). Read leniently, like `compose::view`, so a manifest this varve stored
+/// is never re-judged.
+fn dispatchable_entries_of(
+    entry: &InstalledLayer,
+) -> Result<Vec<(String, Option<String>)>, String> {
     let path = entry.root.join("layer.json");
     let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let json: serde_json::Value = serde_json::from_slice(&bytes)
@@ -466,41 +487,50 @@ fn dispatchable_names_of(entry: &InstalledLayer, platform: &str) -> Result<Vec<S
         .map(|entries| {
             entries
                 .iter()
-                .filter(|e| {
-                    let ann = &e["annotations"];
-                    let tool = match ann[crate::kind::ANN_KIND].as_str() {
-                        None => true,
-                        Some(kind) => kind
-                            .parse::<crate::kind::PayloadKind>()
-                            .is_ok_and(|k| k.is_dispatchable()),
-                    };
-                    tool && crate::platform::entry_matches(
-                        ann[crate::platform::ANN_PLATFORM].as_str(),
-                        platform,
-                    )
+                .filter(|e| match e["annotations"][crate::kind::ANN_KIND].as_str() {
+                    None => true,
+                    Some(kind) => kind
+                        .parse::<crate::kind::PayloadKind>()
+                        .is_ok_and(|k| k.is_dispatchable()),
                 })
-                .filter_map(|e| e["annotations"]["eu.pulseengine.tool"].as_str())
-                .map(str::to_string)
+                .filter_map(|e| {
+                    let ann = &e["annotations"];
+                    Some((
+                        ann["eu.pulseengine.tool"].as_str()?.to_string(),
+                        ann[crate::platform::ANN_PLATFORM]
+                            .as_str()
+                            .map(str::to_string),
+                    ))
+                })
                 .collect()
         })
         .unwrap_or_default())
 }
 
-/// Every DISPATCHABLE tool name the pinned layer's composition declares in its
-/// signed manifests for `platform` — the install's TARGET, which is what
-/// `resolve` exposes on the machine that runs it.
+/// The tool names a layer's signed manifest declares as DISPATCHABLE for
+/// `platform`: a dispatchable entry whose platform annotation
+/// `platform::entry_matches` the target.
+fn dispatchable_names_of(entry: &InstalledLayer, platform: &str) -> Result<Vec<String>, String> {
+    Ok(dispatchable_entries_of(entry)?
+        .into_iter()
+        .filter(|(_, p)| crate::platform::entry_matches(p.as_deref(), platform))
+        .map(|(name, _)| name)
+        .collect())
+}
+
+/// Every layer of the pinned composition — the root and each included layer
+/// that is installed.
 ///
 /// An include that is not installed is SKIPPED here, as `compose::walk` skips
-/// it (it cannot be read), not reported as "could not tell": the caller asks
-/// this only after `install` has fetched the pinned layer's includes and
-/// refused if any is missing. A layer that IS reached but whose manifest
-/// cannot be read is an error, never "carries nothing".
-fn dispatchable_tool_names(
+/// it (it cannot be read), not reported as "could not tell": callers ask this
+/// only after `install` has fetched the pinned layer's includes and refused if
+/// any is missing. A layer that IS reached but whose manifest cannot be read
+/// is an error, never "carries nothing".
+fn composition_layers(
     pin: &Pin,
     layer: &InstalledLayer,
     store: &Store,
-    platform: &str,
-) -> Result<std::collections::BTreeSet<String>, String> {
+) -> Result<Vec<InstalledLayer>, String> {
     let root_bytes = std::fs::read(layer.root.join("layer.json"))
         .map_err(|e| format!("cannot read the pinned layer's manifest: {e}"))?;
     let root_view = crate::compose::view(&root_bytes).map_err(|e| e.to_string())?;
@@ -515,7 +545,7 @@ fn dispatchable_tool_names(
         },
     )
     .map_err(|e| e.to_string())?;
-    let mut names = std::collections::BTreeSet::new();
+    let mut layers = Vec::with_capacity(walked.len());
     for step in &walked {
         let entry = if step.digest == layer.digest {
             layer.clone()
@@ -526,9 +556,98 @@ fn dispatchable_tool_names(
                 .map(|(_, entry)| entry)
                 .ok_or_else(|| format!("included layer {} is not installed", step.digest))?
         };
+        layers.push(entry);
+    }
+    Ok(layers)
+}
+
+/// Every DISPATCHABLE tool name the pinned layer's composition declares in its
+/// signed manifests for `platform` — the install's TARGET, which is what
+/// `resolve` exposes on the machine that runs it.
+fn dispatchable_tool_names(
+    pin: &Pin,
+    layer: &InstalledLayer,
+    store: &Store,
+    platform: &str,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut names = std::collections::BTreeSet::new();
+    for entry in composition_layers(pin, layer, store)? {
         names.extend(dispatchable_names_of(&entry, platform)?);
     }
     Ok(names)
+}
+
+/// A tool the pinned composition builds for OTHER platforms only — the shape
+/// of a layer cut after PulseEngine stopped building for Intel macOS
+/// (2026-11-20), seen from an Intel Mac. Reported by platform, because "not
+/// part of layer" is false (the manifest carries it) and "re-install" cannot
+/// help (the same bytes land again).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformGap {
+    pub tool: String,
+    pub layer: String,
+    /// The platform the layer was installed for.
+    pub platform: String,
+    /// Every platform the composition does build the tool for, sorted.
+    pub built_for: Vec<String>,
+}
+
+impl std::fmt::Display for PlatformGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tool '{}' has no build for {} in layer {} (it is built for: {})",
+            self.tool,
+            self.platform,
+            self.layer,
+            self.built_for.join(", ")
+        )
+    }
+}
+
+/// `Some` when the pinned composition's signed manifests declare `tool` as a
+/// dispatchable payload, every such entry is stamped for a platform, and none
+/// of them is the platform `layer` was installed for (the host, for a layer
+/// installed before that was recorded). Exact match, as install selects: a
+/// tool built for aarch64-apple-darwin only is a gap on x86_64-apple-darwin,
+/// never a substitute.
+///
+/// `None` for a tool built for this platform or for every platform (unstamped,
+/// or portable wasm), for a name the composition does not dispatch at all, and
+/// when the manifests cannot be read — the caller's existing message stands.
+pub fn platform_gap(
+    pin: &Pin,
+    layer: &InstalledLayer,
+    store: &Store,
+    tool: &str,
+) -> Option<PlatformGap> {
+    let platform = layer
+        .platform
+        .clone()
+        .unwrap_or_else(crate::platform::host_platform);
+    let mut built_for = std::collections::BTreeSet::new();
+    for entry in composition_layers(pin, layer, store).ok()? {
+        for (name, stamped) in dispatchable_entries_of(&entry).ok()? {
+            if name != tool {
+                continue;
+            }
+            match stamped {
+                Some(p) if !crate::platform::entry_matches(Some(&p), &platform) => {
+                    built_for.insert(p);
+                }
+                _ => return None,
+            }
+        }
+    }
+    if built_for.is_empty() {
+        return None;
+    }
+    Some(PlatformGap {
+        tool: tool.to_string(),
+        layer: layer.layer.to_string(),
+        platform,
+        built_for: built_for.into_iter().collect(),
+    })
 }
 
 /// Clause 4 as `install` asks it BEFORE fetching any override layer, for the
@@ -1442,6 +1561,210 @@ mod tests {
         let resolved = resolve(&qualified_pin("2026.07.0"), &store).unwrap();
         let names: Vec<&str> = resolved.tools.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["rivet"], "loom is declared, not laid down here");
+    }
+
+    /// A layer whose entries are (tool, platform, kind), plus an optional
+    /// include by digest.
+    fn platform_manifest(
+        layer: &str,
+        entries: &[(&str, Option<&str>, Option<&str>)],
+        include: Option<&str>,
+    ) -> Vec<u8> {
+        let mut out: Vec<String> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, (tool, platform, kind))| {
+                let mut ann = format!(r#""eu.pulseengine.tool":"{tool}""#);
+                if let Some(p) = platform {
+                    ann.push_str(&format!(r#","eu.pulseengine.platform":"{p}""#));
+                }
+                if let Some(k) = kind {
+                    ann.push_str(&format!(r#","eu.pulseengine.varve.kind":"{k}""#));
+                }
+                format!(r#"{{"digest":"sha256:{tool}{i}","annotations":{{{ann}}}}}"#)
+            })
+            .collect();
+        if let Some(inc) = include {
+            out.push(format!(
+                r#"{{"digest":"{inc}","annotations":{{"eu.pulseengine.varve.kind":"layer"}}}}"#
+            ));
+        }
+        format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","artifactType":"application/vnd.pulseengine.varve.layer.v1+json","annotations":{{"eu.pulseengine.varve.layer":"{layer}","eu.pulseengine.varve.channel":"qualified"}},"manifests":[{}]}}"#,
+            out.join(",")
+        )
+        .into_bytes()
+    }
+
+    const S390X: &str = "s390x-unknown-linux-gnu";
+
+    // rivet: verifies REQ-PLATFORM-001
+    #[test]
+    fn a_tool_built_only_for_other_platforms_is_named_as_a_platform_gap() {
+        let (_tmp, store) = store();
+        let host = crate::platform::host_platform();
+        store
+            .lay_down(
+                &platform_manifest(
+                    "2026.07.0",
+                    &[
+                        ("rivet", Some(&host), None),
+                        ("loom", Some(S390X), None),
+                        ("loom", Some(RISCV), None),
+                    ],
+                    None,
+                ),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let pin = qualified_pin("2026.07.0");
+        let layer = store.list().unwrap().remove(0);
+        let gap = platform_gap(&pin, &layer, &store, "loom").expect("a gap");
+        assert_eq!(
+            gap,
+            PlatformGap {
+                tool: "loom".into(),
+                layer: "2026.07.0".into(),
+                platform: host.clone(),
+                built_for: vec![RISCV.into(), S390X.into()],
+            }
+        );
+        assert_eq!(
+            gap.to_string(),
+            format!(
+                "tool 'loom' has no build for {host} in layer 2026.07.0 (it is built for: \
+                 {RISCV}, {S390X})"
+            )
+        );
+        assert_eq!(
+            platform_gap(&pin, &layer, &store, "rivet"),
+            None,
+            "built here"
+        );
+        assert_eq!(platform_gap(&pin, &layer, &store, "nosuch"), None, "absent");
+    }
+
+    // rivet: verifies REQ-PLATFORM-001
+    #[test]
+    fn a_platform_gap_is_judged_against_the_platform_the_layer_was_installed_for() {
+        let (_tmp, store) = store();
+        let host = crate::platform::host_platform();
+        store
+            .lay_down(
+                &platform_manifest(
+                    "2026.07.0",
+                    &[("rivet", Some(&host), None), ("loom", Some(RISCV), None)],
+                    None,
+                ),
+                &[("loom", b"l")],
+            )
+            .unwrap();
+        let entry = store.list().unwrap().remove(0);
+        crate::store::record_install_platform(&entry.root, RISCV).unwrap();
+        let layer = store.list().unwrap().remove(0);
+        let pin = qualified_pin("2026.07.0");
+        assert_eq!(platform_gap(&pin, &layer, &store, "loom"), None);
+        let gap = platform_gap(&pin, &layer, &store, "rivet").expect("rivet is host-only");
+        assert_eq!(gap.platform, RISCV);
+        assert_eq!(gap.built_for, [host]);
+    }
+
+    // rivet: verifies REQ-PLATFORM-001
+    #[test]
+    fn portable_unstamped_and_held_entries_are_never_a_platform_gap() {
+        let (_tmp, store) = store();
+        store
+            .lay_down(
+                &platform_manifest(
+                    "2026.07.0",
+                    &[
+                        ("anywhere", None, None),
+                        ("anywhere", Some(RISCV), None),
+                        ("wasmy", Some("wasm32-wasip2"), None),
+                        ("wasmy", Some(RISCV), None),
+                        ("kit", Some(RISCV), Some("crate")),
+                    ],
+                    None,
+                ),
+                &[("anywhere", b"a")],
+            )
+            .unwrap();
+        let pin = qualified_pin("2026.07.0");
+        let layer = store.list().unwrap().remove(0);
+        for name in ["anywhere", "wasmy", "kit"] {
+            assert_eq!(platform_gap(&pin, &layer, &store, name), None, "{name}");
+        }
+    }
+
+    // rivet: verifies REQ-PLATFORM-001
+    #[test]
+    fn a_platform_gap_is_found_in_an_included_layer() {
+        let (_tmp, store) = store();
+        let host = crate::platform::host_platform();
+        let up = store
+            .lay_down(
+                &platform_manifest(
+                    "2026.08.0",
+                    &[
+                        ("wasm-tools", Some(&host), None),
+                        ("loom", Some(RISCV), None),
+                    ],
+                    None,
+                ),
+                &[("wasm-tools", b"w")],
+            )
+            .unwrap();
+        store
+            .lay_down(
+                &platform_manifest("2026.07.0", &[("rivet", Some(&host), None)], Some(&up)),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let pin = qualified_pin("2026.07.0");
+        let layer = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.layer.to_string() == "2026.07.0")
+            .unwrap();
+        let gap = platform_gap(&pin, &layer, &store, "loom").expect("composed gap");
+        assert_eq!(gap.built_for, [RISCV]);
+        assert_eq!(gap.layer, "2026.07.0");
+    }
+
+    // rivet: verifies REQ-PLATFORM-001
+    #[test]
+    fn a_pin_listing_a_tool_built_only_elsewhere_names_the_gap_not_a_repair() {
+        // Before: PartialLayer, "installed but incomplete … run `varve
+        // install` to repair it" — a remedy that lands the same bytes again.
+        let (_tmp, store) = store();
+        let host = crate::platform::host_platform();
+        store
+            .lay_down(
+                &platform_manifest(
+                    "2026.07.0",
+                    &[("rivet", Some(&host), None), ("loom", Some(RISCV), None)],
+                    None,
+                ),
+                &[("rivet", b"r")],
+            )
+            .unwrap();
+        let pin = pin(
+            "manifest-version = 1\n[toolchain]\nchannel = \"qualified\"\nlayer = \"2026.07.0\"\n\
+             tools = [\"rivet\", \"loom\"]\n",
+        );
+        let err = resolve(&pin, &store).unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::NoBuildForPlatform { gaps }
+                if gaps.len() == 1 && gaps[0].tool == "loom"),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with(&format!("tool 'loom' has no build for {host}")),
+            "{msg}"
+        );
+        assert!(!msg.contains("varve install"), "{msg}");
     }
 
     // rivet: verifies REQ-REALM2-001

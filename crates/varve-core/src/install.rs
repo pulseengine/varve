@@ -92,6 +92,14 @@ pub struct InstallOutcome {
     /// high-water mark on the strength of a digest in the project's pin
     /// (REQ-ROLLBACK-002). Carries what the caller must say out loud.
     pub digest_consent: Option<DigestConsent>,
+    /// The platform these payloads were selected for.
+    pub platform: String,
+    /// Names the manifest carries for OTHER platforms but not for `platform`,
+    /// sorted (REQ-PLATFORM-001). The install succeeds — other entries
+    /// matched — but these tools will not be available, and saying so at
+    /// install time beats a puzzling refusal at first use (an Intel Mac after
+    /// PulseEngine stopped building x86_64-apple-darwin, 2026-11-20).
+    pub platform_gaps: Vec<String>,
 }
 
 /// An install that was below the machine's mark and accepted anyway because the
@@ -801,6 +809,9 @@ fn install_inner(
         .iter()
         .filter(|e| e.kind() != Ok(crate::kind::PayloadKind::Layer))
         .count();
+    // Names carried for some other platform: those with no entry here are
+    // reported once the selection is done.
+    let mut elsewhere = std::collections::BTreeSet::new();
     for entry in &manifest.entries {
         if !crate::platform::entry_matches(
             entry
@@ -809,6 +820,9 @@ fn install_inner(
                 .map(String::as_str),
             policy.platform,
         ) {
+            if let Some(name) = entry.annotations.get("eu.pulseengine.tool") {
+                elsewhere.insert(name.clone());
+            }
             continue;
         }
         // A composed layer is a REFERENCE, not a blob to lay down: its digest
@@ -850,6 +864,13 @@ fn install_inner(
             platform: policy.platform.to_string(),
         });
     }
+    // Some entries matched, so this is not the fail-closed case above — but a
+    // tool built only for other platforms will not be here, and the user is
+    // owed that by name now rather than "not part of layer" at first use.
+    let platform_gaps: Vec<String> = elsewhere
+        .into_iter()
+        .filter(|name| !tools.iter().any(|t| t.name == *name))
+        .collect();
 
     // 6. Lay down.
     let payloads: Vec<crate::store::Payload<'_>> = tools
@@ -927,6 +948,8 @@ fn install_inner(
         attestation_note,
         omission_check_skipped,
         digest_consent,
+        platform: policy.platform.to_string(),
+        platform_gaps,
     })
 }
 
@@ -1613,6 +1636,60 @@ mod tests {
             here,
             "the host-platform binary landed"
         );
+        assert_eq!(outcome.platform, "test-platform");
+        assert!(outcome.platform_gaps.is_empty(), "synth is built here");
+    }
+
+    // rivet: verifies REQ-PLATFORM-001
+    #[test]
+    fn install_reports_each_tool_with_no_build_for_the_target_and_takes_no_substitute() {
+        // The Intel-macOS shape: synth is built for the target, loom only for
+        // arm64 macOS and Linux. The install succeeds, names loom, and never
+        // fetches (let alone lays down) either foreign loom.
+        let (_tmp, store, mut marks) = setup();
+        let synth = b"synth-intel".to_vec();
+        let (loom_arm, loom_linux) = (b"loom-arm".to_vec(), b"loom-linux".to_vec());
+        let d_synth = manifest_digest(&synth);
+        let (d_arm, d_linux) = (manifest_digest(&loom_arm), manifest_digest(&loom_linux));
+        let bytes = crate::manifest::fixtures::manifest_with_platform_tools(
+            "2026.07.0",
+            "qualified",
+            1,
+            "2026-07-31T09:14:00Z",
+            &[
+                ("synth", &d_synth, Some("x86_64-apple-darwin")),
+                ("loom", &d_arm, Some("aarch64-apple-darwin")),
+                ("loom", &d_linux, Some("x86_64-unknown-linux-gnu")),
+                // Built here AND elsewhere: not a gap.
+                (
+                    "synth",
+                    &manifest_digest(b"synth-arm"),
+                    Some("aarch64-apple-darwin"),
+                ),
+            ],
+        );
+        let source = MemorySource::new()
+            .with_manifest(&bytes)
+            .with_blob(&d_synth, &synth);
+        let policy = InstallPolicy {
+            index: None,
+            now: "2026-08-07T00:00:00Z",
+            staleness_threshold_days: 90,
+            platform: "x86_64-apple-darwin",
+        };
+        let outcome = install(
+            &pin("2026.07.0"),
+            &source,
+            &AcceptAll,
+            &store,
+            &mut marks,
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(outcome.platform, "x86_64-apple-darwin");
+        assert_eq!(outcome.platform_gaps, ["loom"]);
+        let entry = store.get(&outcome.digest).unwrap().unwrap();
+        assert!(store.tool_path(&entry, "loom").is_none(), "no substitute");
     }
 
     // rivet: verifies REQ-PLATFORM-001

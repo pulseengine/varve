@@ -2104,3 +2104,146 @@ fn a_pinned_tool_for_another_platform_only_is_refused_before_any_fetch() {
     assert_eq!(std::fs::read(marks_file(&w)).unwrap(), before, "mark moved");
     assert!(!walk_has(&w.root, &ov.replace(':', "-")), "laid down");
 }
+
+// ── A tool the layer builds for other platforms only (Intel macOS) ─────────
+//
+// PulseEngine stopped building for x86_64-apple-darwin on 2026-11-20, so a
+// layer can carry a tool for every platform but that one. On an Intel Mac the
+// user must be told THAT, by platform, and never handed another platform's
+// payload or a remedy ("re-install") that cannot work. Installed with
+// `--platform x86_64-apple-darwin`, so the case is exercised on any host.
+
+const INTEL: &str = "x86_64-apple-darwin";
+
+/// Layer 2026.12.0: synth for Intel and arm64 macOS; loom for arm64 macOS and
+/// x86_64 Linux only — the shape of a layer cut after the Intel drop.
+fn intel_gap_world(pin_extra: &str) -> World {
+    let w = world();
+    let on = |p: &str| format!(r#","eu.pulseengine.platform":"{p}""#);
+    put_layer_full(
+        &w.registry,
+        &w.sk,
+        "2026.12.0",
+        "qualified",
+        &[
+            ("synth", script("synth-intel"), on(INTEL).as_str()),
+            (
+                "synth",
+                script("synth-arm"),
+                on("aarch64-apple-darwin").as_str(),
+            ),
+            (
+                "loom",
+                script("loom-arm"),
+                on("aarch64-apple-darwin").as_str(),
+            ),
+            (
+                "loom",
+                script("loom-linux"),
+                on("x86_64-unknown-linux-gnu").as_str(),
+            ),
+        ],
+        &[],
+        &[],
+    );
+    w.pin_layer("2026.12.0", pin_extra);
+    w
+}
+
+const GAP: &str = "tool 'loom' has no build for x86_64-apple-darwin in layer 2026.12.0 \
+                   (it is built for: aarch64-apple-darwin, x86_64-unknown-linux-gnu)";
+
+// rivet: verifies REQ-PLATFORM-001
+#[test]
+fn install_names_each_tool_the_layer_does_not_build_for_the_target() {
+    let w = intel_gap_world("");
+    let a = varve(&w)
+        .args(["install", "--platform", INTEL])
+        .assert()
+        .success();
+    let err = stderr(&a);
+    assert!(
+        err.contains(
+            "note: layer 2026.12.0 has no x86_64-apple-darwin build of loom; it will not be \
+             available here"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("build of synth"), "synth IS built: {err}");
+}
+
+// rivet: verifies REQ-PLATFORM-001
+#[test]
+fn which_names_the_platform_a_tool_is_not_built_for() {
+    let w = intel_gap_world("");
+    varve(&w)
+        .args(["install", "--platform", INTEL])
+        .assert()
+        .success();
+    let a = varve(&w).args(["which", "loom"]).assert().code(1);
+    assert!(stdout(&a).is_empty(), "{}", stdout(&a));
+    let err = stderr(&a);
+    assert!(err.contains(GAP), "{err}");
+    assert!(!err.contains("is not part of layer"), "{err}");
+    // A tool absent on EVERY platform keeps the existing message.
+    let a = varve(&w).args(["which", "nosuch"]).assert().code(1);
+    assert!(
+        stderr(&a).contains("is not part of layer"),
+        "{}",
+        stderr(&a)
+    );
+}
+
+// rivet: verifies REQ-PLATFORM-001
+#[cfg(unix)]
+#[test]
+fn a_shim_names_the_platform_a_tool_is_not_built_for_and_runs_nothing() {
+    let w = intel_gap_world("");
+    varve(&w)
+        .args(["install", "--platform", INTEL])
+        .assert()
+        .success();
+    w.clear_marks();
+    // `run`, and the shim — `run` reached through argv[0].
+    let a = varve(&w).args(["run", "loom"]).assert().code(1);
+    assert!(stderr(&a).contains(GAP), "{}", stderr(&a));
+    let shim = w.dir.join("shim-bin").join("loom");
+    std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(assert_cmd::cargo::cargo_bin("varve"), &shim).unwrap();
+    let out = Command::new(&shim)
+        .env("PATH", "/usr/bin:/bin")
+        .env("VARVE_ROOT", &w.root)
+        .env("XDG_CONFIG_HOME", w.dir.join("no-user-config"))
+        .env("HOME", w.dir.join("no-user-config"))
+        .env("OVERRIDE_TEST_MARKS", w.marks())
+        .current_dir(&w.project)
+        .assert()
+        .code(1);
+    let err = stderr(&out);
+    assert!(err.contains(GAP), "{err}");
+    assert!(!err.contains("is not part of layer"), "{err}");
+    // A missing build is not the pin's fault: no "pinned …, which is why".
+    assert!(!err.contains("which is why"), "{err}");
+    for id in ["loom-arm", "loom-linux", "synth-arm"] {
+        assert!(!w.ran(id), "{id} ran on an Intel install");
+    }
+}
+
+// rivet: verifies REQ-PLATFORM-001
+#[test]
+fn a_pin_listing_a_tool_not_built_for_the_target_names_the_gap_not_a_repair() {
+    let w = intel_gap_world("tools = [\"synth\", \"loom\"]\n");
+    // The pin's `tools` sits under [toolchain]; pin_layer appends after it.
+    varve(&w)
+        .args(["install", "--platform", INTEL])
+        .assert()
+        .success();
+    let a = varve(&w).args(["which", "synth"]).assert().code(1);
+    let err = stderr(&a);
+    assert!(err.contains(GAP), "{err}");
+    assert!(
+        !err.contains("varve install"),
+        "a repair that cannot work: {err}"
+    );
+    assert!(!err.contains("incomplete"), "{err}");
+}
