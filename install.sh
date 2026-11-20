@@ -98,19 +98,30 @@ fi
 
 # ── Detect the host, or refuse ────────────────────────────────────────────
 # Guessing a triple is how you get a binary that segfaults or silently runs
-# under emulation. varve names its four supported triples and stops.
+# under emulation. varve names the triples it selects and stops.
 detect_target() {
 	os="$(uname -s)"
 	arch="$(uname -m)"
 	case "${os}/${arch}" in
 		Darwin/arm64)                 echo "aarch64-apple-darwin" ;;
-		Darwin/x86_64)                echo "x86_64-apple-darwin" ;;
+		Darwin/x86_64)
+			# Owner decision 2026-11-20: PulseEngine no longer builds for
+			# Intel macOS. Say so by name rather than falling through to the
+			# generic "unsupported" list, and never hand out the arm64 build.
+			die "Intel macOS (x86_64-apple-darwin) is no longer published by varve
+       (owner decision 2026-11-20). Releases up to and including v0.47.0 carry
+       an x86_64-apple-darwin archive; check a later release's asset list
+       before assuming it has one.
+       Build from source instead: cargo install varve
+       (a source build is not covered by the release signature — see
+        \`varve docs bootstrap\`)."
+			;;
 		Linux/aarch64 | Linux/arm64)  echo "aarch64-unknown-linux-gnu" ;;
 		Linux/x86_64 | Linux/amd64)   echo "x86_64-unknown-linux-gnu" ;;
 		*)
 			die "unsupported platform: ${os} ${arch}.
        varve publishes binaries for exactly these targets:
-         aarch64-apple-darwin, x86_64-apple-darwin,
+         aarch64-apple-darwin,
          aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu,
          aarch64-unknown-linux-musl, x86_64-unknown-linux-musl
        (this script selects the gnu build on Linux; the musl archives are

@@ -11,13 +11,21 @@ this page reimplements that, and nothing here ever runs in the background.
 
 ## Supported targets
 
-Release binaries exist for exactly four triples:
+Release binaries exist for exactly these triples:
 
-    aarch64-apple-darwin        x86_64-apple-darwin
+    aarch64-apple-darwin
     aarch64-unknown-linux-gnu   x86_64-unknown-linux-gnu
+    aarch64-unknown-linux-musl  x86_64-unknown-linux-musl
 
-`install.sh` maps `uname -s` / `uname -m` onto these and **stops** on anything
-else rather than guessing. Elsewhere, build from source (route 4).
+`install.sh` maps `uname -s` / `uname -m` onto these (the gnu build on Linux;
+the musl archives are statically linked, for hosts whose glibc is older or
+absent) and **stops** on anything else rather than guessing. Elsewhere, build
+from source (route 4).
+
+Intel macOS (`x86_64-apple-darwin`) is no longer built (owner decision,
+2026-11-20). Releases up to and including v0.47.0 carry that archive; later
+ones may not, so read the release's asset list. On an Intel Mac `install.sh`
+refuses by name and points at the source build.
 
 ## 1. Verify the script, then run it
 
@@ -75,7 +83,7 @@ whether to trust the script.
 
 ```sh
 V=v0.25.0                       # any released tag
-T=aarch64-apple-darwin          # one of the four above
+T=aarch64-apple-darwin          # one of the triples above
 B="https://github.com/pulseengine/varve/releases/download/$V"
 curl -fsSLO "$B/varve-$V-$T.tar.gz"
 curl -fsSLO "$B/SHA256SUMS.txt"

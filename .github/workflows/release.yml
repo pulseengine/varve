@@ -93,14 +93,9 @@ jobs:
             os: ubuntu-24.04
             archive: tar.gz
             cross: true
-          # x86_64 is cross-compiled on an arm64 runner, as it always was:
-          # macos-14 was itself arm64. v0.45.0's first release run was
-          # cancelled at this leg with "The configuration
-          # 'macos-14-arm64-us-default' is not supported" once GitHub retired
-          # that image, so this leg follows aarch64 onto macos-latest.
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
+          # No x86_64-apple-darwin leg: PulseEngine stopped building for Intel
+          # macOS (owner decision, 2026-11-20). v0.47.0 is the last published
+          # release known to carry one; install.sh refuses an Intel Mac by name.
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
