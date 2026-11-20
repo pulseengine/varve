@@ -73,6 +73,12 @@ pub fn already_current(running_binary: &[u8], latest_binary: &[u8]) -> bool {
     crate::store::manifest_digest(running_binary) == crate::store::manifest_digest(latest_binary)
 }
 
+/// The largest release file self-update will read into memory: 8 GiB. A
+/// named constant so the bound is stated once and pinned by a test — as an
+/// inline `8 * 1024 * 1024 * 1024` its arithmetic could be mutated to 8 MiB
+/// or 1 GiB with no test noticing (cargo-mutants, 5 missed, 2026-11-20).
+const MAX_RELEASE_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
 /// The agent both self-update fetches use: ureq's defaults (a non-2xx status
 /// is an error here, which is what both callers want) with TLS trust from the
 /// OS store and no bundled fallback (REQ-OSTRUST-001).
@@ -179,7 +185,7 @@ pub fn fetch_verified_binary(
             .map_err(|e| UpdateError::Api(crate::tls::describe(&e)))?
             .body_mut()
             .with_config()
-            .limit(8 * 1024 * 1024 * 1024)
+            .limit(MAX_RELEASE_DOWNLOAD_BYTES)
             .read_to_vec()
             .map_err(|e| UpdateError::Api(e.to_string()))
     };
@@ -272,6 +278,11 @@ pub fn perform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_download_may_be_up_to_8_gib() {
+        assert_eq!(MAX_RELEASE_DOWNLOAD_BYTES, 1 << 33);
+    }
 
     // rivet: verifies REQ-OSTRUST-001
     #[test]
