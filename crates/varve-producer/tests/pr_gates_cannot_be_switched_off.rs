@@ -375,3 +375,80 @@ fn the_reader_scan_flags_env_run_and_with_but_not_comments() {
     let comment = "# vars.X is not read here\njobs:\n  x:\n    steps:\n      - run: echo myvars.x  # secrets.Y\n";
     assert!(setting_readers("t.yml", comment).is_empty());
 }
+
+/// Every `run:` of a job's steps, as (job, text).
+fn step_runs(workflow: &str, text: &str) -> Vec<(String, String)> {
+    let doc = parse(workflow, text);
+    let mut out = Vec::new();
+    if let Some(Yaml::Hash(jobs)) = get(&doc, "jobs") {
+        for (name, job) in jobs {
+            let job_name = name.as_str().unwrap_or("?").to_string();
+            if let Some(Yaml::Array(steps)) = get(job, "steps") {
+                for step in steps {
+                    if let Some(Yaml::String(run)) = get(step, "run") {
+                        out.push((job_name.clone(), run.clone()));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The workspace-wide test runs that must report every failing target.
+fn fail_fast_runs(workflow: &str, text: &str) -> (usize, Vec<String>) {
+    let mut seen = 0;
+    let mut bad = Vec::new();
+    for (job, run) in step_runs(workflow, text) {
+        for line in run.lines() {
+            let workspace_test = (line.contains("cargo test") || line.contains("cargo llvm-cov"))
+                && line.contains("--workspace");
+            if workspace_test {
+                seen += 1;
+                if !line.contains("--no-fail-fast") {
+                    bad.push(format!("{workflow} job `{job}`: {}", line.trim()));
+                }
+            }
+        }
+    }
+    (seen, bad)
+}
+
+/// A workspace `cargo test` without `--no-fail-fast` stops at the first failing
+/// test target. The other targets never run, so one red test hides every
+/// other regression on the same head: on #383 two new tests in a later target
+/// were never executed while an earlier one failed. A gate must report every
+/// failure it can see.
+// rivet: verifies REQ-SYSTEST-001
+#[test]
+fn every_workspace_test_run_reports_every_failing_target() {
+    let mut seen = 0;
+    let mut bad = Vec::new();
+    for wf in PR_WORKFLOWS {
+        let (n, b) = fail_fast_runs(wf, &workflow(wf));
+        seen += n;
+        bad.extend(b);
+    }
+    assert!(
+        seen > 0,
+        "no workspace-wide cargo test found in {PR_WORKFLOWS:?}: the scan reads nothing"
+    );
+    assert!(
+        bad.is_empty(),
+        "workspace test runs that stop at the first failing target:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
+/// Negative and positive controls for `fail_fast_runs`.
+#[test]
+fn the_fail_fast_scan_flags_a_workspace_test_without_no_fail_fast() {
+    let bare = "jobs:\n  t:\n    steps:\n      - run: cargo test --workspace\n";
+    let cov = "jobs:\n  c:\n    steps:\n      - run: |\n          cargo llvm-cov --workspace --lcov --output-path x\n";
+    for (name, text) in [("test", bare), ("llvm-cov", cov)] {
+        let (n, bad) = fail_fast_runs("t.yml", text);
+        assert_eq!((n, bad.len()), (1, 1), "{name} not flagged");
+    }
+    let good = "jobs:\n  t:\n    steps:\n      - run: cargo test --workspace --no-fail-fast\n      - run: cargo test -p varve --test cli\n";
+    assert_eq!(fail_fast_runs("t.yml", good), (1, vec![]));
+}
