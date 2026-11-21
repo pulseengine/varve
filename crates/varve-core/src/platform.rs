@@ -88,6 +88,26 @@ mod tests {
         ));
     }
 
+    // rivet: verifies REQ-PLATFORM-001
+    #[test]
+    fn an_intel_mac_is_never_handed_an_arm64_payload_or_the_reverse() {
+        // PulseEngine stopped building x86_64-apple-darwin (2026-11-20). The
+        // arm64 build is NOT a fallback for an Intel Mac: no Rosetta-style
+        // substitution, in either direction.
+        assert!(!entry_matches(
+            Some("aarch64-apple-darwin"),
+            "x86_64-apple-darwin"
+        ));
+        assert!(!entry_matches(
+            Some("x86_64-apple-darwin"),
+            "aarch64-apple-darwin"
+        ));
+        assert!(entry_matches(
+            Some("x86_64-apple-darwin"),
+            "x86_64-apple-darwin"
+        ));
+    }
+
     // rivet: verifies REQ-RUNNER-001
     #[test]
     fn wasm32_entries_are_portable_to_every_host() {

@@ -3028,19 +3028,29 @@ fn dispatch(
             pinned_channel,
             pinned_realm.as_deref(),
         );
+        let to_realm = match pinned_realm.as_deref() {
+            Some(r) => format!(" to realm '{r}'"),
+            None => String::new(),
+        };
+        // The layer carries it — for other platforms only (REQ-PLATFORM-001):
+        // name the platform rather than claim it is not part of the layer, and
+        // do not blame the pin for what is a missing build.
+        if let Some(gap) = varve_core::platform_gap(&pin, &resolved.layer, &ctx.store, tool) {
+            bail!(
+                "{gap}.\nThis directory is pinned by {}{to_realm}. `varve inspect` lists \
+                 every payload in the pinned layer.\n{options}{config_note}",
+                pin_file.display(),
+            );
+        }
         bail!(
             "tool '{tool}' is not part of layer {} — it exposes: {}.\n\
-             This directory is pinned by {}{}, which is why '{tool}' does not \
+             This directory is pinned by {}{to_realm}, which is why '{tool}' does not \
              resolve here even though a shim for it exists (one shim directory \
              serves every realm). `varve inspect` lists every payload in the \
              pinned layer; `varve docs pins` explains switching.\n{options}{config_note}",
             resolved.layer.layer,
             addressable(&resolved),
             pin_file.display(),
-            match pinned_realm.as_deref() {
-                Some(r) => format!(" to realm '{r}'"),
-                None => String::new(),
-            }
         );
     };
     // Runnered entries (portable wasm) execute through their runner — from
@@ -6338,6 +6348,14 @@ fn install(
             outcome.layer
         );
     }
+    // A tool the layer builds for other platforms only, named now rather than
+    // discovered as a refusal at first use (REQ-PLATFORM-001).
+    for tool in &outcome.platform_gaps {
+        eprintln!(
+            "note: layer {} has no {} build of {tool}; it will not be available here",
+            outcome.layer, outcome.platform
+        );
+    }
     // Carriage, reported at the moment the evidence crosses the boundary
     // (REQ-ATTEST-002). `varve verify` is what says whether each still binds;
     // this only says what travelled, so a consumer downstream of a mirror can
@@ -7695,6 +7713,11 @@ fn which(store: &Store, tool: &str) -> anyhow::Result<()> {
                     None => String::new(),
                 },
             );
+        }
+        // The layer carries it — for other platforms only (REQ-PLATFORM-001).
+        // "Not part of layer" would be false; name the platform instead.
+        if let Some(gap) = varve_core::platform_gap(&ctx.pin, &resolved.layer, &ctx.store, tool) {
+            bail!("{gap}. `varve inspect` lists every payload, dispatched and held.");
         }
         bail!(
             "tool '{tool}' is not part of layer {} as pinned here — the pin exposes: {}. \
