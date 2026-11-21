@@ -18,6 +18,7 @@
 # gets approved without one.
 version: 2
 updates:
+  # PAUSED 2026-11-21 under the fleet CI hold; restore the previous limits when it lifts.
   # ONE entry for the workspace. varve is a Cargo workspace with a single root
   # Cargo.lock; per-crate entries would raise duplicate and conflicting PRs
   # against that one lockfile, and would need adding to whenever a crate is.
@@ -27,7 +28,7 @@ updates:
       interval: weekly
     labels:
       - dependencies
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     groups:
       # The wasm-tools crates release in LOCKSTEP and must land as one set:
       # wit-component requires the wit-parser of its own release, so the two PRs
@@ -122,6 +123,7 @@ updates:
       interval: weekly
     labels:
       - dependencies
+    open-pull-requests-limit: 0
     groups:
       actions-minor-and-patch:
         update-types:
