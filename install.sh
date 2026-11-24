@@ -105,9 +105,16 @@ detect_target() {
 	case "${os}/${arch}" in
 		Darwin/arm64)                 echo "aarch64-apple-darwin" ;;
 		Darwin/x86_64)
+			# A shell under Rosetta 2 on Apple silicon reports x86_64, but the
+			# machine runs the arm64 build natively, so that is the one to use.
+			if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = "1" ]; then
+				echo "aarch64-apple-darwin"
+				return 0
+			fi
 			# Owner decision 2026-11-20: PulseEngine no longer builds for
 			# Intel macOS. Say so by name rather than falling through to the
-			# generic "unsupported" list, and never hand out the arm64 build.
+			# generic "unsupported" list, and never hand an Intel Mac the
+			# arm64 build.
 			die "Intel macOS (x86_64-apple-darwin) is no longer published by varve
        (owner decision 2026-11-20). Releases up to and including v0.47.0 carry
        an x86_64-apple-darwin archive; check a later release's asset list
