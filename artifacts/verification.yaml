@@ -3652,3 +3652,45 @@ artifacts:
       created-by: ai
       model: claude-opus-5-5
       timestamp: 2026-11-08T06:44:27Z
+  - id: VER-REVIEW-V0-48-0-B
+    type: verification
+    title: "Second independent clean-room review of v0.48.0: #376, #377, #383, #389, #390"
+    status: verified
+    release: v0.48.0
+    tags: [independence, review]
+    fields:
+      baseline: "Independent clean-room review (fresh context, refute-framed) of everything merged for v0.48.0 since VER-REVIEW-V0-48-0 (#376, #377, #383, #389, #390) and of no regression since c7ad6ea7, at 47ba6014, 2026-11-24, by a fresh-context clean-room reviewer (Claude). CI on 47ba6014 green (ci run 44932994315, cargo test --workspace --no-fail-fast on Ubuntu and macOS, including the Linux-only shebang test; systest run 44932994999); no-key-on-disk self-test rejects 15 shapes and accepts 3. Locally: seed 17/17, override 48/48, run_with 50/50, varve-core lib 991/991. VERDICTS: C1 #377 fork guard PARTIAL: every self-hosted runs-on in ci.yml, systest.yml, fuzz.yml and gate-probe.yml carries the head-repository guard and a deleted fork goes hosted, but the guard test was a line scan that missed a block-list runs-on, a matrix runner, a labels map and the on: pull_request / on: [..] triggers, and the guard lives in a file a fork PR controls (the boundary is org runner policy, pulseengine/warte#35, not checked). C2a shebang length PARTIAL: 127 on Linux and 255 elsewhere, checked before the directory is made, but nothing tests that ordering. C2b --no-renames CONFIRMED. C2c key-on-disk PARTIAL: the four claimed shapes are caught, five others pass (two pipes, a continuation before >, a here-string, dd of=, toJSON(secrets)). C2d override reinstall vs high-water mark CONFIRMED in scope (the in-store path re-checks manifest and mark, not the signed line index). C2e three guard tests CONFIRMED. C3 #376 outdated PARTIAL: nothing_newer is right and unit-tested, but nothing tested that outdated() calls it, pin_listed compares the layer id only, and an unparseable index entry still prints 'is the newest layer'. C4 #389 --no-fail-fast CONFIRMED. C5 #390 Intel macOS PARTIAL: release.yml, install.sh and docs agree, but the legacy deposit default platforms and systest still list x86_64-apple-darwin, a v0.47.0 Intel Mac self-update gets a generic error, and a shell under Rosetta on Apple silicon was refused as an Intel Mac. C6 no regression CONFIRMED (spot-check). NEGATIVE CONTROLS, 12 planted, all restored: red for the literal pool list in gate-probe.yml, --no-renames removed, the SINK space rule, the install-side mark check removed, exit 0 in the DSSE step, a line-only override comparison, the root first-contact check disabled, nothing_newer forced to 'listed', --no-fail-fast dropped from ci.yml; GREEN (missed) for a block-list runs-on in gate-probe.yml, the pre-create shebang check deleted, and the outdated() call site put back to the old sentence. Also seen: a flaky ETXTBSY failure of a_wrapper_script_around_a_second_varve_ends_in_a_loop_error_not_a_hang (run 44908233933). DISPOSITION: fixed in #397: the outdated call site is tested through the CLI (red with the call reverted), install.sh selects aarch64-apple-darwin under Rosetta (sysctl.proc_translated, test red before the fix), and the fork-guard scan parses workflows as YAML with controls for every spelling above (red under the reviewer's block-list control). FILED for v0.49.0: #398 (no-key-on-disk denylist), #399 (pin_listed by id, unparseable entry), #400 (ETXTBSY flake), #401 (Intel macOS leftovers), and the pre-create ordering added to #380. NOT CHECKED: org runner-group and fork-approval policy, macOS ACLs on TMPDIR, a real 4.18 kernel, a full workspace mutants run, the line index on the in-store override path."
+      method: review
+      steps: cargo test --workspace --no-fail-fast; cargo test -p varve --test seed; cargo test -p varve --test override; cargo test -p varve --test run_with; cargo test -p varve --test mirror_failover; cargo test -p varve-producer --test runner_trust_boundary; cargo test -p varve-producer --test release_targets; cargo test -p varve-producer --test pr_gates_cannot_be_switched_off; tools/no-key-on-disk.sh --self-test
+    links:
+      - type: verifies
+        target: REQ-SEED-001
+      - type: verifies
+        target: REQ-OVERRIDE-001
+      - type: verifies
+        target: REQ-RUNWITH-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-25T00:30:00Z
+  - id: VER-REVIEW-V0-48-0
+    type: verification
+    title: "Independent clean-room review of v0.48.0: #354, #368, #369, #370, #371, #372, #373"
+    status: verified
+    release: v0.48.0
+    tags: [independence, review]
+    fields:
+      baseline: "Independent clean-room review (fresh context, refute-framed) of the v0.48.0 scope merged at c7ad6ea7, 2026-11-19, by a fresh-context clean-room reviewer (Claude) with two clean-room sub-reviewers for C1 and C2; the reviewer spot-checked their key lines (install.rs:370, 497-541, 603, 674-687; resolve.rs:625, 673, 1764-1775). Nothing was built or run: the local disk was saturated, so every verdict comes from reading code, tests and CI logs. VERDICTS: C1 #354 seed PARTIAL: manifests and blobs are verified on install from a seed and a store with no history is refused when only a mirror answers, but with a high-water mark present the seed's line-status is never read (install.rs:674), without one a status that fails to verify is dropped by .ok() (install.rs:686-689), the never-installed test checks only exit 1 and 'first contact' so a broken root check at install.rs:537 would hide behind the included-layer check at :370, and the primary registry is always tried first (mirror.rs:285). C2 #368 override PARTIAL: all four refusals sit in resolve before exec and digests are compared in full, but no test used a same-line mislabel, VARVE_LAYER and the attestation layer field still name the pinned layer, install of an already-installed override layer skipped the high-water mark (sub-reviewer), and a yanked override layer is reported by no command (sub-reviewer). C3 #372 run --with PARTIAL: the design holds, but the 255-byte shebang assumption is unsafe on Linux kernels before 5.1 (128 bytes), ancestors are checked by mode bits only (macOS ACLs unseen), VARVE_OVERRIDES and VARVE_WITH pass through inside a live tree (reporting only), exit 127 was undocumented, and main.rs is outside the mutation gate. C4 #369 CONFIRMED but unguarded: no test read release.yml. C5 #371 PARTIAL: four no-key-on-disk.sh bypasses (quoted binding, >file with no space, a pipe into a file, secrets['X']), the reader scan missed secrets[ and left gate-probe.yml out of PR_WORKFLOWS, and detect-changes.sh failed open on renames. C6 #370 REFUTED: the changes jobs in ci.yml:24 and systest.yml:45 ran the PR checkout's own detect-changes.sh on the self-hosted pool for every pull_request. C7 #373 CONFIRMED: hosted jobs pinned to ubuntu-24.04 with a test, and the covalent trust root equals covalent-layers' realm-root.pub. C8 #376 not reviewed (unmerged at c7ad6ea7). DISPOSITION: C6 fixed in #377 (0d856c72), test-first: the guard test went red on the two lines before the fix. In #383 (0d025291), each test was seen red in CI on the tests-only head before the fix: shebang over 127 bytes refused on Linux; detect-changes --no-renames; the four no-key-on-disk forms plus secrets[ and gate-probe.yml in the reader scan; override reinstall checks the high-water mark; guards for the release DSSE step without a key, the same-line override, and the seed first-contact refusal naming the root layer's line. Two of those tests never ran on the tests-only head because cargo test stopped at the first failing target; #389 adds --no-fail-fast to CI with its own guard test. DEFERRED to v0.49.0 and stated as limits in cmd-status.md and DD-043: #378 (VARVE_LAYER, attestation and outdated name the pinned layer), #379 (ACLs), #380 (main.rs mutation gate), #381 (yanked override layer). NOT CHECKED: anything that needs a build or a run (the second review, VER-REVIEW-V0-48-0-B, runs the suite), live release signing, fork triggering."
+      method: review
+      steps: cargo test --workspace --no-fail-fast; cargo test -p varve-producer --test pr_gates_cannot_be_switched_off; cargo test -p varve-producer --test runner_trust_boundary; tools/no-key-on-disk.sh --self-test; python3 -m unittest discover -s tools -p test_*.py
+    links:
+      - type: verifies
+        target: REQ-SEED-001
+      - type: verifies
+        target: REQ-OVERRIDE-001
+      - type: verifies
+        target: REQ-RUNWITH-001
+    provenance:
+      created-by: ai
+      model: claude-opus-5-5
+      timestamp: 2026-11-24T23:10:00Z
