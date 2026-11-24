@@ -55,6 +55,9 @@ struct Spec<'a> {
     serve_index: bool,
     /// Counter of the served line index (default 1).
     index_counter: u64,
+    /// The served index lists this layer (default). False serves a signed
+    /// index with no entries: one deposited before the pin was indexed (#375).
+    index_lists_layer: bool,
     /// `min-counter` the baseline status states (REQ-FIRSTCONTACT-001).
     status_min_counter: Option<u64>,
     /// Hang up on the `tags/list` request: the source can serve its signed
@@ -87,6 +90,7 @@ fn serve_layer_signed(sk: &[u8], pk: &[u8], counter: u64) -> Served {
         baseline_counter: 1,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     })
@@ -107,6 +111,7 @@ fn serve_spec(spec: Spec<'_>) -> Served {
         baseline_counter,
         serve_index,
         index_counter,
+        index_lists_layer,
         status_min_counter,
         drop_tags_list,
     } = spec;
@@ -212,12 +217,16 @@ fn serve_spec(spec: Spec<'_>) -> Served {
             line: "2026.10".into(),
             counter: index_counter,
             issued_at: "2026-09-24T00:00:00Z".into(),
-            layers: vec![varve_core::IndexedLayer {
-                layer: LAYER.into(),
-                digest: digest.clone(),
-                channel: "rolling".into(),
-                counter,
-            }],
+            layers: if index_lists_layer {
+                vec![varve_core::IndexedLayer {
+                    layer: LAYER.into(),
+                    digest: digest.clone(),
+                    channel: "rolling".into(),
+                    counter,
+                }]
+            } else {
+                Vec::new()
+            },
         }
         .sign(sk, "k")
         .unwrap()
@@ -479,6 +488,7 @@ fn support_horizon_reads_an_include_through_a_mirror() {
         baseline_counter: 1,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     });
@@ -496,6 +506,7 @@ fn support_horizon_reads_an_include_through_a_mirror() {
         baseline_counter: 1,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     });
@@ -616,6 +627,7 @@ fn serve_with_tool(sk: &[u8], pk: &[u8], served: Vec<u8>, drop_blob: bool) -> Se
         baseline_counter: 1,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     })
@@ -887,6 +899,7 @@ fn support_horizon_tries_the_mirror_when_the_primary_serves_bytes_the_root_did_n
         baseline_counter: 5,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     });
@@ -904,6 +917,7 @@ fn support_horizon_tries_the_mirror_when_the_primary_serves_bytes_the_root_did_n
         baseline_counter: 1,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     });
@@ -1017,6 +1031,7 @@ fn serve_with_status(baseline: Option<&str>, published: Option<&str>) -> Served 
         baseline_counter: 1,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     })
@@ -1118,6 +1133,7 @@ fn a_mirror_cannot_grant_the_rollback_consent_the_primary_could_not_give() {
         baseline_counter: 1,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     });
@@ -1173,6 +1189,7 @@ fn an_unverifiable_published_correction_on_a_mirror_does_not_establish_the_windo
         baseline_counter: 1,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     });
@@ -1233,6 +1250,7 @@ fn rollback_consent_is_never_granted_by_a_mirror_after_the_primary_failed() {
         baseline_counter: 1,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     });
@@ -1359,6 +1377,7 @@ fn a_status_taken_from_a_mirror_is_not_cached_to_grant_consent_later() {
         baseline_counter: 1,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     });
@@ -1533,6 +1552,7 @@ fn outdated_through_a_mirror_serving_a_genuine_old_index_is_refused() {
         baseline_counter: 1,
         serve_index: true,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     });
@@ -1720,6 +1740,7 @@ fn install_a_mirror_older_index_is_refused_after_the_primary_verified_a_newer_on
         baseline_counter: 1,
         serve_index: true,
         index_counter,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     };
@@ -1765,6 +1786,7 @@ fn outdated_a_mirror_older_index_is_refused_after_the_primary_verified_a_newer_o
         baseline_counter: 1,
         serve_index: true,
         index_counter,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list,
     };
@@ -1808,6 +1830,7 @@ fn install_a_mirror_without_the_floor_the_primary_proved_is_refused_below_it() {
         baseline_counter: 3,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: Some(5),
         drop_tags_list: false,
     });
@@ -1825,6 +1848,7 @@ fn install_a_mirror_without_the_floor_the_primary_proved_is_refused_below_it() {
         baseline_counter: 2,
         serve_index: false,
         index_counter: 1,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list: false,
     });
@@ -1863,6 +1887,7 @@ fn install_a_mirror_older_index_is_refused_after_the_primary_failed_at_the_listi
         baseline_counter: 1,
         serve_index: true,
         index_counter,
+        index_lists_layer: true,
         status_min_counter: None,
         drop_tags_list,
     };
@@ -1902,6 +1927,7 @@ fn the_notice_names_a_status_verified_in_this_run_when_it_bounded_the_mirror() {
             baseline_counter,
             serve_index: false,
             index_counter: 1,
+            index_lists_layer: true,
             status_min_counter,
             drop_tags_list: false,
         };
@@ -1942,6 +1968,7 @@ fn the_notice_is_true_when_the_mirrors_own_status_bounded_it() {
             baseline_counter,
             serve_index: false,
             index_counter: 1,
+            index_lists_layer: true,
             status_min_counter,
             drop_tags_list: false,
         };
@@ -1958,4 +1985,55 @@ fn the_notice_is_true_when_the_mirrors_own_status_bounded_it() {
     );
     assert!(!stderr.contains("earlier"), "{stderr}");
     assert!(!stderr.contains("its cached line-status"), "{stderr}");
+}
+
+/// `varve outdated` itself prints `nothing_newer`'s wording (#375, #376). The
+/// unit tests in main.rs pin the sentence; this pins the CALL, which the
+/// v0.48.0 second review could put back to the old sentence with every test
+/// green. The pair: a signed index that does not list the pin must not call it
+/// the newest layer, and one that does list it still does.
+// rivet: verifies REQ-LAYERDIFF-001
+#[test]
+fn outdated_never_calls_a_pin_the_newest_layer_when_the_served_index_does_not_list_it() {
+    let (sk, pk) = varve_core::generate_root_keypair();
+    let run = |index_lists_layer: bool| {
+        let primary = serve_spec(Spec {
+            sk: &sk,
+            pk: &pk,
+            counter: 1,
+            tool: None,
+            drop_tool_blob: false,
+            baseline_until: Some("2027-01-01"),
+            published_until: None,
+            forge_published: false,
+            no_layer: false,
+            forge_layer: false,
+            baseline_counter: 1,
+            serve_index: true,
+            index_counter: 1,
+            index_lists_layer,
+            status_min_counter: None,
+            drop_tags_list: false,
+        });
+        let p = project(&primary.registry, &[], &primary.root_hex);
+        let out = varve(&p).arg("outdated").output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "listed={index_lists_layer}\nstdout:{stdout}\nstderr:{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout
+    };
+    let unlisted = run(false);
+    assert!(
+        unlisted.contains(&format!("does not list {LAYER} itself")),
+        "{unlisted}"
+    );
+    assert!(!unlisted.contains("is the newest layer"), "{unlisted}");
+    let listed = run(true);
+    assert!(
+        listed.contains(&format!("{LAYER} is the newest layer")),
+        "{listed}"
+    );
 }

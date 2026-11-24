@@ -118,7 +118,14 @@ fn the_advertised_target_list_is_the_one_that_is_published() {
 
 /// Runs install.sh's own `detect_target` with a faked `uname`, so the test
 /// exercises the shell a stranger runs rather than a pattern over its text.
+/// `sysctl` is faked as a native process (`sysctl.proc_translated` = 0).
 fn detect(os: &str, arch: &str) -> std::process::Output {
+    detect_translated(os, arch, "0")
+}
+
+/// As `detect`, with `sysctl -n sysctl.proc_translated` answering `translated`
+/// ("1": a shell running under Rosetta 2 on Apple silicon).
+fn detect_translated(os: &str, arch: &str, translated: &str) -> std::process::Output {
     let s = read("install.sh");
     let start = s
         .find("detect_target() {")
@@ -130,6 +137,7 @@ fn detect(os: &str, arch: &str) -> std::process::Output {
     let script = format!(
         "die() {{ printf '%s\\n' \"$*\" >&2; exit 3; }}\n\
          uname() {{ case \"$1\" in -s) echo '{os}' ;; -m) echo '{arch}' ;; esac; }}\n\
+         sysctl() {{ [ \"$2\" = sysctl.proc_translated ] && echo '{translated}'; }}\n\
          {func}\ndetect_target\n"
     );
     std::process::Command::new("sh")
@@ -172,4 +180,22 @@ fn an_intel_mac_is_refused_by_name_and_never_handed_another_build() {
         String::from_utf8_lossy(&arm.stdout).trim(),
         "aarch64-apple-darwin"
     );
+}
+
+/// A shell under Rosetta 2 on Apple silicon reports `uname -m` = x86_64. The
+/// machine runs the arm64 build natively, so it is selected rather than
+/// refusing the user as an Intel Mac (v0.48.0 second review).
+// rivet: verifies REQ-BOOTSTRAP-001
+#[test]
+fn a_shell_under_rosetta_on_apple_silicon_gets_the_arm64_build() {
+    let out = detect_translated("Darwin", "x86_64", "1");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "aarch64-apple-darwin"
+    );
+    // Control: the same harness on a native x86_64 process is the Intel Mac
+    // and is still refused.
+    let intel = detect_translated("Darwin", "x86_64", "0");
+    assert_eq!(intel.status.code(), Some(3), "{intel:?}");
 }
