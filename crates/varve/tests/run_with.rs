@@ -992,10 +992,7 @@ fn concurrent_shims_into_a_leaked_directory_are_all_refused() {
 }
 
 fn executable(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    exec_safe::write_executable(path, body);
 }
 
 // rivet: verifies REQ-RUNWITH-001
@@ -2034,7 +2031,7 @@ fn varve_copy(w: &World, name: &str) -> PathBuf {
     let bin = w.dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let p = bin.join(name);
-    std::fs::copy(assert_cmd::cargo::cargo_bin("varve"), &p).unwrap();
+    exec_safe::install_executable(&assert_cmd::cargo::cargo_bin("varve"), &p);
     p
 }
 
@@ -2231,8 +2228,7 @@ fn a_hard_linked_varve_keeps_the_installed_binarys_mode() {
     let installed = w.tmp().join("installed");
     std::fs::create_dir(&installed).unwrap();
     let varve_bin = installed.join("varve");
-    std::fs::copy(assert_cmd::cargo::cargo_bin("varve"), &varve_bin).unwrap();
-    std::fs::set_permissions(&varve_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    exec_safe::install_executable(&assert_cmd::cargo::cargo_bin("varve"), &varve_bin);
     let a = varve_at(&w, &varve_bin)
         .env("VINSTALLED", &varve_bin)
         .args([
@@ -2339,8 +2335,7 @@ fn a_tool_named_varve_never_overwrites_the_installed_binary() {
         let installed = w.tmp().join("installed");
         std::fs::create_dir(&installed).unwrap();
         let varve_bin = installed.join("varve");
-        std::fs::copy(assert_cmd::cargo::cargo_bin("varve"), &varve_bin).unwrap();
-        std::fs::set_permissions(&varve_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exec_safe::install_executable(&assert_cmd::cargo::cargo_bin("varve"), &varve_bin);
         let before = file_digest(&varve_bin);
         let out = varve_at(&w, &varve_bin)
             .args([
