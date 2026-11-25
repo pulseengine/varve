@@ -25,7 +25,10 @@ from source (route 4).
 Intel macOS (`x86_64-apple-darwin`) is no longer built (owner decision,
 2026-11-20). Releases up to and including v0.47.0 carry that archive; later
 ones may not, so read the release's asset list. On an Intel Mac `install.sh`
-refuses by name and points at the source build.
+refuses by name and points at the source build. A shell running under
+Rosetta 2 on Apple silicon also reports `x86_64`; `install.sh` asks
+`sysctl.proc_translated` and selects `aarch64-apple-darwin` there, which the
+machine runs natively.
 
 ## 1. Verify the script, then run it
 
