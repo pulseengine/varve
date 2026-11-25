@@ -1,5 +1,213 @@
 # Changelog
 
+## v0.48.0 — 2026-11-25
+
+*A store can seed another store with no network, a project can pin one tool
+at another verified version and every view says MIXED, one command can run
+with one tool swapped, and the covalent realm ships in the realms file.*
+
+Scope chosen by the maintainer (the lean cut): REQ-SEED-001 (#354),
+REQ-OVERRIDE-001 and DD-043 (#368), REQ-RUNWITH-001 (#372), the release
+signing fix (#369), the gate fixes from the v0.47.0 potency audit (#371,
+#352), the fork guard (#370, #377), the Ubuntu pin and the covalent realm
+(#373), `varve outdated` wording (#376, #375) and the fixes from the v0.48.0
+clean-room review (#383). The 14 requirements planned for v0.48.0 that were
+not chosen moved to v0.49.0.
+
+### Upgrading: behaviour that changes
+
+- **No Intel macOS build.** The x86_64-apple-darwin release archive is gone
+  (#390; the owner's decision of 2026-11-20). `install.sh` on Darwin/x86_64
+  exits with an error that names the triple and offers `cargo install varve`;
+  it refuses even with `--version v0.47.0`, so a user pinning an older
+  release on Intel downloads that archive directly. Five targets remain.
+- **A layer with no build for this host says so.** `varve which`, a shim and
+  a `tools = [...]` pin now report `tool 'X' has no build for <triple> in
+  layer L (it is built for: …)` where they said the tool was not part of the
+  layer, and `varve install` prints a note naming each missing build (#390,
+  REQ-PLATFORM-001).
+- **A varve before this release refuses a pin that uses
+  `[toolchain.override.<tool>]`**, because the toolchain table refuses
+  unknown keys. That is deliberate: an older varve would otherwise run the
+  pinned tool where the project asked for another.
+
+### Added
+
+- `varve seed <DIR>` writes the layers this store has installed into a
+  directory another store installs from, with no network and no registry
+  credential: one OCI layout per layer, in the form a realm's `mirrors` entry
+  accepts. By default the pinned layer and every layer it composes; a
+  composed layer that is not installed refuses and is named. Bytes are copied,
+  never re-encoded, and no absolute path from the source store reaches the
+  seed. A store that has installed the line before installs from it and
+  verifies every manifest and blob against the realm root; a store that never
+  installed the line still makes first contact through the realm's primary
+  registry, and the refusal names the root layer's line (REQ-SEED-001).
+  Limits: the primary is always tried first, so a registry that drops packets
+  instead of refusing them delays the fallback; with a high-water mark
+  present, the seed's line-status is not read.
+- `[toolchain.override.<tool>]` with `layer` and `digest` pins one tool at
+  another verified layer of the same realm. The override layer is installed
+  and verified like the pin (signed manifest against the realm root, the
+  digest in full, the line's high-water mark, its includes), also when it is
+  already in the store. Install and resolve refuse, before any fetch or exec:
+  a tool the pinned composition lacks, a tool the override layer lacks, an
+  override of an override, an override naming another layer of the pin's own
+  line, and a digest that does not match. `varve status`, `which`, `verify`,
+  `run`, export stamps (`+mixed`), `check-attestation` and `varve-serve`
+  report the toolchain as MIXED (REQ-OVERRIDE-001, DD-043). Limits stated in
+  DD-043 and `cmd-status.md`: `VARVE_LAYER` and the attestation's `layer`
+  field still name the pinned layer, and a yanked override layer is not yet
+  reported (#381, v0.49.0).
+- `varve run --with <tool>@<version> -- <command>` runs one command with one
+  tool resolved to the installed layer that ships that version, and every
+  other tool from the pin. Only layers already installed from the pin's
+  realm count; `--with` never fetches, and nothing persists. Wrappers are
+  one-line shebang scripts in a private 0700 directory whose ancestors are
+  checked, so no shell reads them and ambient state can only make varve
+  refuse. Signal handling and exit codes are documented in `varve docs run`
+  (REQ-RUNWITH-001). Limits stated there: ACLs on ancestor directories are
+  not checked, and a signal varve does not catch can leave the directory
+  behind, holding no lock.
+- The covalent realm is published in `varve-realms.toml`: registry
+  `oci://ghcr.io/pulseengine/covalent-layers` and the trust root of
+  covalent-layers' `realm-root.pub` (#373). Covalent composes the
+  pulseengine and pulseengine-wasm realms by digest.
+
+### Fixed
+
+- `varve outdated` no longer calls a pin the newest layer when the signed
+  line-index does not list the pin; it says the index lists nothing newer,
+  does not list the pin, and names its newest entry. `--json` gains
+  `pin_listed` (#376, fixing #375).
+- `varve run --with` refuses on Linux a wrapper whose first line is longer
+  than 127 bytes, before creating anything: kernels before 5.1 read 128 bytes
+  of a shebang and truncate silently, so a long TMPDIR could cut the
+  interpreter path to a name another user can create in `/tmp`. macOS keeps
+  255 (#383).
+- `varve install` of an override layer that is already in the store checks
+  its line's high-water mark, as `verify` did (#383).
+- `install.sh` selects `aarch64-apple-darwin` for a shell running under
+  Rosetta 2 on Apple silicon, which reports `x86_64`; it used to refuse it
+  as an Intel Mac. A native x86_64 process is still refused (#397).
+
+### CI and release machinery
+
+- `release.yml` fails the run when no key can sign `SHA256SUMS.txt`'s DSSE
+  envelope, before the release is created; it used to warn and exit 0. No
+  released version was affected (#369, #366). A test guards the step (#383).
+- On `pull_request`, a job runs on the self-hosted pool only when the head
+  repository is this one; a fork PR, including one from a deleted fork,
+  runs on a hosted runner (#370). The two `changes` jobs, which ran the PR's
+  own `detect-changes.sh` on the pool for every PR, were missed by #370 and
+  are guarded by #377, found by the v0.48.0 clean-room review.
+  `no_pull_request_job_reaches_the_pool_without_the_fork_guard` fails on any
+  unguarded self-hosted `runs-on` in a PR workflow. Since #397 it parses each
+  workflow as YAML, so a block-list or map `runs-on`, a runner supplied by the
+  job matrix and every spelling of the `pull_request` trigger are covered.
+- The gate bypasses recorded by the v0.47.0 potency audit (#352) are closed,
+  each with a control that failed before the fix (#371): no PR workflow value
+  may read `vars.` or `secrets.`; a failing `git grep` in
+  `detect-changes.sh` runs everything; a `-f` that appears only in a comment
+  no longer counts as mutation-gated; a shard fails on any MISSED line. #383
+  extends `no-key-on-disk.sh` to quoted bindings, `>file` with no space, a
+  secret piped into a file and `secrets['X']`, adds `gate-probe.yml` to the
+  PR-workflow scan, and makes `detect-changes.sh` read paths with
+  `--no-renames`, so code moved to a Markdown path is not docs-only.
+- Hosted jobs and the release matrix are pinned to `ubuntu-24.04` ahead of
+  GitHub moving `ubuntu-latest` to 26.04, which would also have moved the
+  glibc the Linux release binaries link against (#373).
+- CI's workspace `cargo test` and `cargo llvm-cov` run with
+  `--no-fail-fast`, so one failing target cannot hide another; a test fails
+  on any workspace run without it (#389).
+- Routine Dependabot version updates are paused under the fleet CI hold;
+  security updates are unaffected (#393).
+
+### Independent review
+
+Two fresh-context, refute-framed reviews cover the whole scope.
+
+* **VER-REVIEW-V0-48-0** (#354, #368-#373, at c7ad6ea7, read-only: the disk
+  was saturated): one claim refuted, the fork guard (#370), whose `changes`
+  jobs still ran PR code on the pool, fixed test-first in #377. Seed,
+  override, `run --with` and the gate fixes partial, confirmed after #383;
+  the DSSE step and the Ubuntu pin confirmed. Four findings moved to v0.49.0
+  as stated limits: #378, #379, #380, #381.
+* **VER-REVIEW-V0-48-0-B** (#376, #377, #383, #389, #390, at 47ba6014): none
+  refuted; `--no-renames`, the override reinstall check, the three guard
+  tests and `--no-fail-fast` confirmed, no regression. Of 12 planted faults,
+  9 turned a test red; the 3 that stayed green (a block-list `runs-on`, the
+  `outdated` call site, the `run --with` pre-create check) led to #397 for
+  the first two and #380 for the third. Further findings filed: #398, #399,
+  #400, #401.
+
+### Gate potency
+
+Audited before tagging over the 22 required checks, with a violation beside a
+clean run each time.
+
+* **5 potent this cycle:**
+  - both `fmt · clippy · test` legs: #383's tests-only head went red in the
+    test step, and the second review's 9 red controls are tests in this job
+    (the fork-guard scan, the PR-gate scan, the DSSE guard, `--no-fail-fast`,
+    `detect-changes`, the override and seed guards, `outdated`'s wording);
+  - `no signing key on disk`: the second review's control and #383's
+    tests-only head both turned its self-test red;
+  - `rivet validate · release plan`: a dangling `verifies` link fails
+    `rivet validate`, and a `verified` requirement with no evidence fails the
+    trace gate (local, CI's commands);
+  - `cargo mutants`: the verdict fails on a MISSED line and on an empty log
+    (local, `tools/mutants-verdict.py`). The shards themselves were not
+    controlled.
+* **17 unproven this cycle:** MSRV, cargo deny, corrosion, coverage, SMT,
+  the five fuzz targets, the installer-shadow check, the five system tests
+  and script portability.
+* **Weaker than they look:** the fork guard lives in a file a fork PR can
+  edit, so the boundary against a hostile fork is the org's runner policy
+  (pulseengine/warte#35); `no-key-on-disk.sh` is a denylist (#398); the
+  required `coverage` job's artifact round-trip fails on every re-run of that
+  job, since it downloads by name and gets the first attempt's file (#402,
+  seen on #397); `run_with`'s hard-link test flakes with ETXTBSY (#400).
+
+### Known limits
+
+* **A MIXED toolchain still names the pinned layer** in `VARVE_LAYER`, the
+  attestation statement's `layer` field and `varve outdated` (#378). A
+  yanked override layer is reported by no command, and `varve status` exits
+  0 (#381).
+* **`run --with`** checks TMPDIR's ancestors by mode bits only, so a macOS
+  ACL is not seen (#379), and a signal varve does not catch can leave the
+  private directory behind, holding no lock. Its wiring in `main.rs` is not
+  under the mutation gate (#380).
+* **Seed:** the realm's primary registry is always tried first, so one that
+  drops packets delays the fallback; with a high-water mark present, the
+  seed's line-status is not read.
+* **`varve outdated`** decides whether the index lists the pin by layer id,
+  not digest (#399).
+* **Intel macOS:** `varve self-update` on a v0.47.0 Intel Mac gets a generic
+  "no asset for platform" error, not the named one `install.sh` gives (#401).
+
+### Falsification
+
+This release is wrong if any of these is observed in the field:
+
+* a project with `[toolchain.override.<tool>]` runs that tool from a layer
+  whose manifest digest is not the pinned digest, whose envelope fails the
+  realm root, or whose counter is below its line's high-water mark;
+* `varve status`, `which`, `verify`, `run`, an export stamp, `check-attestation`
+  or `varve-serve` reports such a toolchain without MIXED (or `+mixed`);
+* `varve run --with` fetches anything, runs a version no installed layer's
+  signed manifest declares for this platform, or leaves `varve.toml`, the
+  store, the anti-rollback marks or the project changed;
+* a store installs a layer from a seed whose manifest or blob fails the realm
+  root, or a store that never installed the line takes first contact from a
+  seed or mirror;
+* a varve release is published without `SHA256SUMS.txt.dsse.json`;
+* a `pull_request` job from a fork, or from a deleted fork, runs on the
+  self-hosted pool;
+* `varve outdated` calls a pin the newest layer when the signed index does
+  not list it.
+
 ## v0.47.0 — 2026-11-11
 
 *Every ingestion proof is bound to the release it is deposited for, a
