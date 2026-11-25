@@ -13,6 +13,9 @@ use assert_cmd::Command;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+#[path = "support/exec_safe.rs"]
+mod exec_safe;
+
 const PINNED: &str = "2026.11.0";
 const OLDER: &str = "2026.08.0";
 
@@ -2520,4 +2523,50 @@ fn a_gate_refuses_a_varve_of_another_build() {
         "{}",
         stderr(&a)
     );
+}
+
+/// #400: an executable a test puts in place must exec although other test
+/// threads fork meanwhile. Four threads spawn `/usr/bin/true` in a loop while this
+/// one installs a binary or writes a script and execs it at once. A child
+/// forked while this process held the new file open for writing would keep
+/// that descriptor until its own exec, and the exec here would fail with
+/// ETXTBSY. Linux only: macOS does not refuse such an exec.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_executable_put_in_place_runs_while_other_threads_fork() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const ETXTBSY: i32 = 26;
+    const ROUNDS: usize = 400;
+    let dir = tempfile::tempdir().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let forkers: Vec<_> = (0..4)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::process::Command::new("/usr/bin/true").status();
+                }
+            })
+        })
+        .collect();
+    let mut busy = 0;
+    for i in 0..ROUNDS {
+        let dst = dir.path().join(format!("x{i}"));
+        if i % 2 == 0 {
+            exec_safe::install_executable(Path::new("/usr/bin/true"), &dst);
+        } else {
+            exec_safe::write_executable(&dst, "#!/bin/sh\nexit 0\n");
+        }
+        match std::process::Command::new(&dst).status() {
+            Ok(st) => assert!(st.success(), "{} exited {st}", dst.display()),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => busy += 1,
+            Err(e) => panic!("cannot exec {}: {e}", dst.display()),
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    for f in forkers {
+        f.join().unwrap();
+    }
+    assert_eq!(busy, 0, "{busy} of {ROUNDS} execs failed with ETXTBSY");
 }
