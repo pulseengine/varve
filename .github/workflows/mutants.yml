@@ -31,6 +31,15 @@
 # for the baseline build and a slow-test file, and no more: do not raise the
 # target without re-measuring. A file larger than that gets a shard to itself.
 #
+# THE CAP IS 150 MINUTES, NOT 90. The 90-minute cap left too little room on
+# hosted runners, whose speed varies between nights. On 2026-11-23 and -24 the
+# same shards took 65-76 minutes on one night and passed 90 on the other, and
+# each night one shard was cancelled at the cap (runs 45151703987,
+# 45387149236): 338 mutants took 76 min on 11-24 and >90 on 11-23; 300 took
+# 70 on 11-23 and >90 on 11-24. The report then said INCOMPLETE and the run
+# gave no verdict. 150 is about twice the slowest finished shard, and it stays
+# under the 6-hour hosted job limit. The packing target is unchanged.
+#
 # THE RESULT IS "MEASURED" OR "INCOMPLETE", NEVER A ZERO. The `report` job runs
 # even when shards were cancelled, and a shard with no cargo-mutants summary —
 # killed, OOMed, timed out, or never uploaded — is INCOMPLETE and turns the run
@@ -84,7 +93,7 @@ jobs:
     name: cargo mutants (${{ matrix.shard }}, advisory)
     needs: [plan]
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 150
     strategy:
       # One shard's failure says nothing about the others; the point is to
       # measure every file that can be measured.
