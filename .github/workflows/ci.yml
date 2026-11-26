@@ -303,11 +303,20 @@ jobs:
           done
           echo "::error::artifact $ARTIFACT_ID ($ARTIFACT_NAME) was not listed within 120 s"
           exit 1
+      # Without a token the action finds the artifact through the runner's
+      # internal artifact service, which can lag the REST listing the wait
+      # above polls: on main at 918a3867 the id was listed after 0 s and the
+      # download still said "not found". With `github-token` the action looks
+      # it up through that same REST listing, so the wait covers the lookup.
+      # Download and unpacking, the part whose shape release.yml relies on,
+      # is the same code either way.
       - name: Fetch it back — the action release.yml depends on, exercised here
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: coverage-lcov-${{ github.run_attempt }}
           path: rehearsal
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
       - name: What came back is what went out
         run: |
           set -euo pipefail
