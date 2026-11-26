@@ -247,6 +247,10 @@ jobs:
     name: coverage (advisory evidence)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    # actions: read lets the rehearsal below list this run's artifacts.
+    permissions:
+      contents: read
+      actions: read
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","rust-cpu"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -256,10 +260,16 @@ jobs:
         run: cargo install --locked cargo-llvm-cov
       - name: Measure (advisory — evidence, not a gate)
         run: cargo llvm-cov --workspace --no-fail-fast --lcov --output-path lcov.info
+      # The name carries the run attempt. A re-run of this job keeps the
+      # earlier attempt's artifact in the same run, and download-artifact
+      # lists with `latest: true`, which keeps one artifact per name; with one
+      # shared name the re-run fetched attempt 1's file and `cmp` failed
+      # (#402, seen on #397).
       - name: Upload coverage evidence
+        id: upload-lcov
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: coverage-lcov
+          name: coverage-lcov-${{ github.run_attempt }}
           path: lcov.info
           retention-days: 30
       # `release.yml` collects every platform's archives with
@@ -270,10 +280,33 @@ jobs:
       #
       # Round-tripping the artifact just uploaded is a real exercise of the
       # same action at the same pin, and costs one small file.
+      # An upload that has just finalized can be missing from the run's
+      # artifact list for a while: the download straight after it failed with
+      # "not found" on #397 (attempt 1) and on main at bf10c1c2. Wait, bounded
+      # at 120 s, until THIS upload's id is listed; a timeout fails the job.
+      - name: Wait until the uploaded artifact is listed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload-lcov.outputs.artifact-id }}
+          ARTIFACT_NAME: coverage-lcov-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          test -n "$ARTIFACT_ID" || { echo "::error::upload-artifact reported no artifact id"; exit 1; }
+          url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=$ARTIFACT_NAME&per_page=100"
+          for i in $(seq 0 24); do
+            listed=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$url" || true)
+            if grep -Eq "\"id\": *$ARTIFACT_ID," <<<"$listed"; then
+              echo "artifact $ARTIFACT_ID ($ARTIFACT_NAME) listed after $((i * 5)) s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::artifact $ARTIFACT_ID ($ARTIFACT_NAME) was not listed within 120 s"
+          exit 1
       - name: Fetch it back — the action release.yml depends on, exercised here
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: coverage-lcov
+          name: coverage-lcov-${{ github.run_attempt }}
           path: rehearsal
       - name: What came back is what went out
         run: |
