@@ -16,3 +16,7 @@ mutants.out.old/
 
 # Agent worktrees — never commit these (they are live git repos)
 .claude/worktrees/
+
+# `cargo cyclonedx` writes crates/<name>/<name>.cdx.json into the tree;
+# release.yml generates them for each release, so a local copy is never committed.
+crates/*/*.cdx.json

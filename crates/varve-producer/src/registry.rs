@@ -21,7 +21,7 @@
 //! none of them contained an incidental `404`.
 //!
 //! (A Go TCP error quotes the local ephemeral port — `read tcp
-//! 10.1.0.4:54043->…` — so roughly one connection reset in two hundred would
+//! 10.0.0.4:54043->…` — so roughly one connection reset in two hundred would
 //! have hit it against the live registry.)
 //!
 //! So absence is no longer inferred from prose. Two authoritative signals:
@@ -541,7 +541,7 @@ mod tests {
                 "2026.09.404",
             ),
             (
-                "read tcp 10.1.0.4:54043->140.82.121.34:443: read: connection reset by peer",
+                "read tcp 10.0.0.4:54043->192.0.2.1:443: read: connection reset by peer",
                 "2026.09.0",
             ),
         ] {

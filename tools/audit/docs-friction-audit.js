@@ -7,7 +7,8 @@ export const meta = {
   ],
 }
 
-const BINARY = '/Volumes/Home/git/pulseengine/varve/target/debug/varve'
+// Relative to the root of the varve checkout the workflow runs in.
+const BINARY = './target/debug/varve'
 
 const COMMON = `
 You are evaluating varve's EMBEDDED documentation by actually USING the tool, as a real
@@ -17,7 +18,7 @@ THE BINARY: ${BINARY}  (version 0.23.0)
 
 GROUND RULES — these matter, do not shortcut them:
 - Your ONLY sources of truth are \`varve docs\`, \`varve docs <topic>\`, \`varve docs --grep <q>\`
-  and \`--help\`. You may read README.md at /Volumes/Home/git/pulseengine/varve/README.md.
+  and \`--help\`. You may read README.md at the root of the same checkout.
   You may NOT read the Rust source to figure out how to do something — if you need the
   source to proceed, THAT IS A FINDING (the docs failed).
 - ACTUALLY RUN COMMANDS. Do not theorise. Work in your own scratch dir under /tmp and set
