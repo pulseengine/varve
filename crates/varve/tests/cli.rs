@@ -10539,3 +10539,102 @@ fn passthrough_never_runs_a_binary_the_repository_planted_via_a_relative_path_en
         assert!(!stderr.contains("passthrough:"), "{stderr}");
     }
 }
+
+/// `varve` with all three standard streams piped, so neither clap nor the
+/// grouped list finds a terminal and both read the width from `COLUMNS`.
+fn help_at(columns: usize, args: &[&str]) -> String {
+    let out = Command::cargo_bin("varve")
+        .unwrap()
+        .env("COLUMNS", columns.to_string())
+        .args(args)
+        .write_stdin("")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "varve {args:?} exited {:?}",
+        out.status
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// Help is read in whatever terminal the reader has: no line of any `-h` or
+/// `--help` may run past the width, from 60 columns up to the 100 cap.
+#[test]
+fn every_help_page_fits_the_terminal_width() {
+    let top = help_at(100, &["-h"]);
+    let subs: Vec<String> = top
+        .lines()
+        .filter(|l| l.starts_with("  ") && !l[2..].starts_with([' ', '-']))
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|n| *n != "help")
+        .map(str::to_string)
+        .collect();
+    assert!(
+        subs.len() >= 30,
+        "read {} subcommands from -h:\n{top}",
+        subs.len()
+    );
+    assert!(subs.iter().any(|s| s == "install") && subs.iter().any(|s| s == "deposit"));
+
+    let mut pages: Vec<Vec<&str>> = vec![vec!["-h"], vec!["--help"]];
+    for s in &subs {
+        pages.push(vec![s.as_str(), "-h"]);
+        pages.push(vec![s.as_str(), "--help"]);
+    }
+    let mut over = Vec::new();
+    for columns in [60, 80, 100, 160] {
+        let limit = columns.min(100);
+        for args in &pages {
+            for line in help_at(columns, args).lines() {
+                if line.chars().count() > limit {
+                    over.push(format!(
+                        "COLUMNS={columns} varve {}: {line}",
+                        args.join(" ")
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "{} help line(s) too wide:\n{}",
+        over.len(),
+        over.join("\n")
+    );
+}
+
+/// Narrow terminals keep the two-column list: a command's description
+/// starts on the command's own line, never on the line below it.
+#[test]
+fn narrow_help_keeps_descriptions_beside_the_commands() {
+    let help = help_at(60, &["--help"]);
+    for name in ["install", "export-zephyr-modules", "sign-delegation"] {
+        let line = help
+            .lines()
+            .find(|l| l.split_whitespace().next() == Some(name))
+            .unwrap_or_else(|| panic!("{name} is not listed:\n{help}"));
+        assert!(
+            line.split_whitespace().count() > 1,
+            "`{name}` stands alone on its line at 60 columns:\n{help}"
+        );
+    }
+    for heading in [
+        "Layers:",
+        "Inspect:",
+        "Run:",
+        "Export:",
+        "Producer:",
+        "Admin:",
+    ] {
+        assert!(
+            help.lines().any(|l| l == heading),
+            "no `{heading}` heading:\n{help}"
+        );
+    }
+    assert!(help.contains("Examples:"), "--help carries examples");
+    assert!(
+        !help_at(60, &["-h"]).contains("Examples:"),
+        "-h stays compact"
+    );
+}
