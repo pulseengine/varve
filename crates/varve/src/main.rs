@@ -12,12 +12,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, bail};
-use clap::{Parser, Subcommand};
+use clap::{FromArgMatches, Parser, Subcommand};
 use varve_core::{Pin, RealmSigner, Store, discover, resolve};
 
 mod diff;
 mod docs;
 mod exit;
+mod help;
 mod inspect;
 
 use exit::Outcome;
@@ -35,23 +36,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Which binary would actually run here — and which layer it comes from.
+    /// Show which binary runs here and which layer it comes from.
     Which {
         /// Tool name, e.g. `synth` — or realm-qualified, e.g.
         /// `bytecodealliance/wasm-tools`, to ask about one specific provider
         /// where two realms of the composition ship the same name.
         tool: String,
     },
-    /// Layers present in the local core.
+    /// List the layers in the local core.
     List,
-    /// What is actually IN a layer: every payload's name, version, kind and
-    /// platform, whether varve DISPATCHES it or merely HOLDS it, and every
-    /// layer of the composition it came from (REQ-INSPECT-001).
+    /// Show every payload a layer carries and where it came from.
+    ///
+    /// Every payload's name, version, kind and platform, whether varve DISPATCHES
+    /// it or merely HOLDS it, and every layer of the composition it came from.
     ///
     /// `list` prints layer ids and `sbom` collapses every non-tool payload to a
-    /// CycloneDX `library`; neither answers "what is in here". Offline: the
-    /// store already holds the answer, and the layer is re-verified before any
-    /// of it is printed.
+    /// CycloneDX `library`; neither answers "what is in here". Offline: the store
+    /// already holds the answer, and the layer is re-verified before any of it is
+    /// printed.
     Inspect {
         /// Layer to inspect, e.g. `2026.08.0`. Defaults to the resolved pin.
         #[arg(long)]
@@ -60,13 +62,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Is there a newer layer for this line? (CI)
+    /// Check the signed line index for a newer layer (CI).
     ///
     /// Answered from the realm's SIGNED line index and from nothing else. A
     /// registry's tag listing would answer faster and is refused: a host that
-    /// HIDES a layer serves nothing that fails verification, so a listing
-    /// cannot tell "there is nothing newer" from "I am not telling you".
-    /// Where the realm publishes no index this says so rather than guessing.
+    /// HIDES a layer serves nothing that fails verification, so a listing cannot
+    /// tell "there is nothing newer" from "I am not telling you". Where the realm
+    /// publishes no index this says so rather than guessing.
     ///
     /// Changes nothing — not the pin, not the store, not the rollback mark.
     Outdated {
@@ -74,16 +76,17 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// What changing from one installed layer to another would change (CI).
+    /// Compare two installed layers (CI).
     ///
-    /// A transcription, never a judgement: both manifests are signed, and this
+    /// What changing from one installed layer to another would change. A
+    /// transcription, never a judgement: both manifests are signed, and this
     /// states what two trust roots already attested. Offline — both layers must
-    /// already be installed, and an absent side is reported as absent rather
-    /// than fetched. Nothing here writes to the store or the pin.
+    /// already be installed, and an absent side is reported as absent rather than
+    /// fetched. Nothing here writes to the store or the pin.
     ///
     /// A payload that STOPPED being vouched for is reported as its own finding,
-    /// not as a column to scan past: it is the most consequential thing a bump
-    /// can carry and no version number shows it (REQ-LAYERDIFF-001, DD-032).
+    /// not as a column to scan past: it is the most consequential thing a bump can
+    /// carry and no version number shows it.
     Diff {
         /// The layer being moved FROM, e.g. `2026.09.12`.
         from: String,
@@ -93,15 +96,19 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// The exit-code contract every varve command obeys — what a pipeline
-    /// gates on (REQ-CIGATE-001). Also `varve docs exit-codes`.
+    /// Print the exit-code contract a pipeline gates on.
+    ///
+    /// Every varve command obeys it. Also `varve docs exit-codes`.
     ExitCodes {
-        /// Machine-readable: `{"codes":[{"code","name","meaning","commands"}]}`.
+        /// Machine-readable: a `codes` array whose entries carry `code`, `name`,
+        /// `meaning` and `commands`.
         #[arg(long)]
         json: bool,
     },
-    /// Resolve this project's pin, fetch, verify against the trust root, and
-    /// lay the layer down in the core.
+    /// Fetch, verify and install the project's pinned layer.
+    ///
+    /// Resolve this project's pin, fetch, verify against the trust root, and lay
+    /// the layer down in the core.
     Install {
         /// Source to fetch from: an OCI registry reference
         /// (`oci://ghcr.io/org/repo`), an oci-layout archive directory, or a
@@ -120,11 +127,12 @@ enum Cmd {
         #[arg(long)]
         no_follow_includes: bool,
     },
-    /// Re-check the pinned layer offline: retained signature, the signed
-    /// digest of every entry FOR THIS PLATFORM, each composed layer, the
-    /// line's anti-rollback mark, and PATH shadowing. Entries for other
-    /// platforms and files the manifest does not name are NOT checked — see
-    /// `varve docs verify`.
+    /// Re-check the pinned layer offline.
+    ///
+    /// Checks the retained signature, the signed digest of every entry FOR THIS
+    /// PLATFORM, each composed layer, the line's anti-rollback mark, and PATH
+    /// shadowing. Entries for other platforms and files the manifest does not name
+    /// are NOT checked — see `varve docs verify`.
     Verify {
         /// Verify every installed layer instead of only the pinned one.
         #[arg(long)]
@@ -148,13 +156,13 @@ enum Cmd {
         #[arg(long)]
         timing: bool,
     },
-    /// Extract the core: export an installed layer as a directory-shaped
-    /// OCI image layout — the offline artifact of record.
+    /// Export an installed layer as an OCI image layout.
     ///
-    /// The archive carries ONE platform's payloads: it exports what this
-    /// machine installed, and `varve install` fetches only its own platform's
-    /// bytes. A mixed air-gapped site needs one archive per platform, each made
-    /// on (or installed for) that platform.
+    /// The directory-shaped layout is the offline artifact of record. It carries
+    /// ONE platform's payloads: it exports what this machine installed, and `varve
+    /// install` fetches only its own platform's bytes. A mixed air-gapped site
+    /// needs one archive per platform, each made on (or installed for) that
+    /// platform.
     Archive {
         /// Layer to export, e.g. `2026.07.0`.
         layer: String,
@@ -176,14 +184,14 @@ enum Cmd {
         #[arg(long)]
         allow_no_status: bool,
     },
-    /// Write the installed layers to a directory another store can install
-    /// from — no network, no registry credential (REQ-SEED-001).
+    /// Write installed layers to a directory another store reads.
     ///
-    /// For a container's store, a CI cache or a second checkout: seed from the
-    /// store that already holds the layers, then name each printed path in the
-    /// other store's realm as a `mirrors` entry. The other store verifies every
-    /// manifest, blob, index and status against ITS realm's trust root, exactly
-    /// as from the registry — a seed is transport, not authority.
+    /// No network, no registry credential. For a container's store, a CI cache or
+    /// a second checkout: seed from the store that already holds the layers, then
+    /// name each printed path in the other store's realm as a `mirrors` entry. The
+    /// other store verifies every manifest, blob, index and status against ITS
+    /// realm's trust root, exactly as from the registry — a seed is transport, not
+    /// authority.
     ///
     /// By default the current project's pin and every layer it composes; or one
     /// layer by `--layer` and `--digest`. Shims and anything else holding this
@@ -209,9 +217,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Dispatch a tool from the pinned layer, with the layer identity in the
-    /// environment (VARVE_LAYER, VARVE_LAYER_MANIFEST_DIGEST) so provenance
-    /// tooling can record which qualified set produced the output.
+    /// Run a tool from the pinned layer.
+    ///
+    /// The layer identity goes into the environment (VARVE_LAYER,
+    /// VARVE_LAYER_MANIFEST_DIGEST) so provenance tooling can record which
+    /// qualified set produced the output.
     Run {
         /// One-off layer override — runs another installed layer WITHOUT
         /// touching the checked-in pin.
@@ -236,11 +246,12 @@ enum Cmd {
         #[arg(trailing_var_arg = true, required = true)]
         tool_and_args: Vec<std::ffi::OsString>,
     },
-    /// (CI) The support horizon for a layer issued now, derived from the
-    /// channel's stated policy (REQ-SUPPORTUNTIL-001).
+    /// (CI) Derive the support horizon for a new layer.
     ///
-    /// Derived, not typed: a window a human enters each release is one that
-    /// drifts, and the drift is invisible because every value looks plausible.
+    /// The horizon for a layer issued now, derived from the channel's stated
+    /// policy. Derived, not typed: a window a human enters each release is one
+    /// that drifts, and the drift is invisible because every value looks
+    /// plausible.
     SupportHorizon {
         /// `rolling` or `qualified`.
         #[arg(long)]
@@ -261,9 +272,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Mint a signing key and its public half — the value a realm pins as
-    /// `trust-root` (REQ-KEYGEN-001). Without this an organisation cannot
-    /// stand up its own realm at all: nothing else in varve emits a public key.
+    /// Create a signing key and its public half.
+    ///
+    /// The public half is the value a realm pins as `trust-root`. Without this an
+    /// organisation cannot stand up its own realm at all: nothing else in varve
+    /// emits a public key.
     Keygen {
         /// Where to write the signing key (128 hex characters). Keep it secret.
         #[arg(long, value_name = "FILE")]
@@ -273,19 +286,22 @@ enum Cmd {
         #[arg(long = "pub", value_name = "FILE")]
         public: Option<PathBuf>,
     },
-    /// Print the public half of an existing signing key, in exactly the form a
-    /// realm's `trust-root` accepts. Refuses a key whose halves disagree.
+    /// Print the public half of a signing key.
+    ///
+    /// In exactly the form a realm's `trust-root` accepts. Refuses a key whose
+    /// halves disagree.
     Pubkey {
         /// The signing key file.
         key: PathBuf,
     },
-    /// (CI) Translate a realm's `layer.toml` into the environment the layer
-    /// assembler reads (REQ-LAYERREPO-001). This is what lets a realm's
-    /// contents live in the realm's OWN repository — bumping a tool becomes a
-    /// one-line reviewed diff there, not a commit to the tool that signs it.
+    /// (CI) Translate a realm's layer.toml for the assembler.
     ///
-    /// Prints `KEY=value` lines for `$GITHUB_ENV`. It reads no network, writes
-    /// no files, and touches no key.
+    /// This is what lets a realm's contents live in the realm's OWN repository —
+    /// bumping a tool becomes a one-line reviewed diff there, not a commit to the
+    /// tool that signs it.
+    ///
+    /// Prints `KEY=value` lines for `$GITHUB_ENV`. It reads no network, writes no
+    /// files, and touches no key.
     LayerSpec {
         /// The realm's layer manifest.
         #[arg(long, value_name = "FILE", default_value = "layer.toml")]
@@ -294,10 +310,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// (CI) Assemble and SIGN a layer — the only way a layer comes into being.
-    /// Writes an OCI image layout directory, the same shape `archive` produces.
-    /// It does NOT publish: varve runs no server and pushes nothing, by design
-    /// (README, "No server of our own"). See `varve docs deploy` for the push.
+    /// (CI) Assemble and sign a layer.
+    ///
+    /// The only way a layer comes into being. Writes an OCI image layout
+    /// directory, the same shape `archive` produces. It does NOT publish: varve
+    /// runs no server and pushes nothing, by design. See `varve docs deploy` for
+    /// the push.
     Deposit {
         /// Deposit spec file (TOML: layer/channel/counter + [[tool]] with
         /// source provenance). Alternative to the individual flags below.
@@ -350,9 +368,11 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Compile a Bazel checksum registry (rules_wasm_component schema) from
-    /// a verified installed layer — every hash Bazel enforces becomes a
-    /// transcription from the signed manifest instead of TOFU.
+    /// Write a Bazel checksum registry from a layer.
+    ///
+    /// Uses the rules_wasm_component schema and a verified installed layer: every
+    /// hash Bazel enforces becomes a transcription from the signed manifest
+    /// instead of trust on first use.
     ExportBazel {
         /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
         /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
@@ -362,9 +382,11 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
-    /// Materialise a Cargo local registry from the layer's verified `crate`
-    /// entries + a `.cargo/config.toml` source-replacement, so a consumer
-    /// builds offline against varve-signed crates (REQ-CRATE-001).
+    /// Write a Cargo local registry from a layer's crates.
+    ///
+    /// Materialises the layer's verified `crate` entries plus a
+    /// `.cargo/config.toml` source-replacement, so a consumer builds offline
+    /// against varve-signed crates.
     ExportCargo {
         /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
         /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
@@ -374,10 +396,11 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
-    /// Materialise a `cargo vendor`-shaped directory from the layer's verified
-    /// `crate` entries — consumed offline by bare Cargo and Corrosion
-    /// (REQ-VENDOR-001). rules_rust needs BUILD files on top of this tree
-    /// (REQ-VENDOR-002), not yet emitted.
+    /// Write a cargo-vendor directory from a layer's crates.
+    ///
+    /// Materialises the layer's verified `crate` entries for offline use by bare
+    /// Cargo and Corrosion. rules_rust needs BUILD files on top of this tree, which
+    /// are not yet emitted.
     ExportCratesVendor {
         /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
         /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
@@ -387,10 +410,11 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
-    /// Materialise a Bazel distdir of the layer's verified `.crate` tarballs
-    /// (REQ-VENDOR-002, air-gap rules_rust). Build with a pre-generated
-    /// crate_universe output + `bazel build --distdir=<DIR>` (network off) —
-    /// each crate resolves from varve's verified bytes by sha256.
+    /// Write a Bazel distdir of a layer's crate tarballs.
+    ///
+    /// For air-gapped rules_rust. Build with a pre-generated crate_universe output
+    /// and `bazel build --distdir=<DIR>` (network off): each crate resolves from
+    /// varve's verified bytes by sha256.
     ExportBazelDistdir {
         /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
         /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
@@ -400,10 +424,11 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
-    /// Lay the layer's verified `vsix` entries out as
-    /// `publisher.name-version.vsix` files, so `code --install-extension
-    /// <file>` installs an editor extension whose bytes varve signed rather
-    /// than whatever the marketplace serves today (REQ-VSIX-001).
+    /// Write a layer's editor extensions as .vsix files.
+    ///
+    /// Each verified `vsix` entry becomes `publisher.name-version.vsix`, so `code
+    /// --install-extension <file>` installs an extension whose bytes varve signed
+    /// rather than whatever the marketplace serves today.
     ExportVsix {
         /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
         /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
@@ -413,14 +438,12 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
-    /// Compose a WIT package and its dependencies out of the layer
-    /// (REQ-WIT-001 clause 3).
+    /// Write a WIT package and its dependencies from a layer.
     ///
-    /// A layer carries WIT packages FLAT, one per `namespace:name@version`.
-    /// This writes the one you name plus its transitive closure into the
-    /// layout `wkg`'s local backend reads — `<ns>/<name>/<version>.wasm` —
-    /// so the bytes you build against are the bytes varve verified, copied
-    /// and not re-encoded.
+    /// A layer carries WIT packages FLAT, one per `namespace:name@version`. This
+    /// writes the one you name plus its transitive closure into the layout `wkg`'s
+    /// local backend reads — `<ns>/<name>/<version>.wasm` — so the bytes you build
+    /// against are the bytes varve verified, copied and not re-encoded.
     ///
     /// Offline. A dependency the layer does not carry is a refusal naming it,
     /// never a partial tree: a tree missing one package fails later, inside
@@ -445,14 +468,14 @@ enum Cmd {
         #[arg(long, value_name = "NAME")]
         registry: Option<String>,
     },
-    /// Lay the layer's verified `zephyr-module` payloads out for a Zephyr
-    /// build, and write the CMake script that adds them to
-    /// `ZEPHYR_EXTRA_MODULES` (REQ-ZMODEXPORT-001).
+    /// Lay out a layer's Zephyr modules for a build.
     ///
-    /// Each module lands in `<out>/<module-name>/`, the tree as stored, and
+    /// Writes the layer's verified `zephyr-module` payloads and the CMake script
+    /// that adds them to `ZEPHYR_EXTRA_MODULES`. Each module lands in
+    /// `<out>/<module-name>/`, the tree as stored, and
     /// `<out>/zephyr-extra-modules.cmake` APPENDS them to the list. Use it as
-    /// `west build ... -- -C <out>/zephyr-extra-modules.cmake`, or `include()`
-    /// it from a plain CMake build. Your `west.yml` is never touched.
+    /// `west build ... -- -C <out>/zephyr-extra-modules.cmake`, or `include()` it
+    /// from a plain CMake build. Your `west.yml` is never touched.
     ///
     /// Offline, and no Python: `module.yml` is read in Rust. A module whose
     /// `module.yml` declares a `build: depends` the export does not carry is
@@ -472,15 +495,15 @@ enum Cmd {
         #[arg(long, value_name = "NAME")]
         select: Option<String>,
     },
-    /// Unpack and RELOCATE the layer's verified `sdk` tree into a directory
-    /// you can source (REQ-SDK-001 clause 3). The store keeps the archive
-    /// exactly as its producer signed it; the usable tree lives here, with the
-    /// build-time prefix patched to `--out` the way Yocto's own
-    /// `relocate_sdk.py` and `toolchain-shar-relocate.sh` do it.
+    /// Unpack and relocate a layer's SDK into a directory.
     ///
-    /// An SDK's interpreter path is patched IN PLACE into a fixed-size field,
-    /// so it can only move to a path NO LONGER than the one it was built for —
-    /// a destination that does not fit is refused BEFORE anything is written.
+    /// The store keeps the archive exactly as its producer signed it; the usable
+    /// tree lives here, with the build-time prefix patched to `--out` the way
+    /// Yocto's own `relocate_sdk.py` and `toolchain-shar-relocate.sh` do it.
+    ///
+    /// An SDK's interpreter path is patched IN PLACE into a fixed-size field, so
+    /// it can only move to a path NO LONGER than the one it was built for — a
+    /// destination that does not fit is refused BEFORE anything is written.
     ExportSdk {
         /// Layer to export, e.g. `2026.08.0`. Defaults to the resolved
         /// project pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
@@ -497,17 +520,17 @@ enum Cmd {
         #[arg(long, value_name = "NAME")]
         select: Option<String>,
     },
-    /// Materialise the layer's verified `docs` payload — the documentation for
-    /// the versions this layer pins (REQ-LAYERDOCS-001).
+    /// Write a readable copy of a layer's documentation.
     ///
-    /// The store keeps the archive exactly as its producer signed it; this
-    /// writes a readable copy. To READ without copying anything, use
-    /// `varve-serve`, which serves straight out of the verified store.
+    /// The documentation for the versions this layer pins. The store keeps the
+    /// archive exactly as its producer signed it; this writes a readable copy. To
+    /// READ without copying anything, use `varve-serve`, which serves straight out
+    /// of the verified store.
     ///
     /// With one document the selector is optional: you have already said which
     /// layer you want by pinning it, and naming the document again is asking
-    /// twice. With several it is required — opening the wrong document
-    /// silently is worse than a question.
+    /// twice. With several it is required — opening the wrong document silently is
+    /// worse than a question.
     ExportDocs {
         /// Layer to export, e.g. `2026.09.3`. Defaults to the resolved project
         /// pin, so the export tracks the pin (REQ-EXPORT-SYNC-001).
@@ -524,10 +547,12 @@ enum Cmd {
         #[arg(long = "for", value_name = "PAYLOAD")]
         for_payload: Option<String>,
     },
-    /// Emit an SBOM for a verified layer, transcribed from its SIGNED manifest
-    /// rather than scanned from disk — every component, version and hash is
-    /// copied from what the trust root anchored (REQ-SBOM-001). Answers "which
-    /// components are in this product" for CRA Art. 13(5) due diligence.
+    /// Emit an SBOM from a layer's signed manifest.
+    ///
+    /// Transcribed from the SIGNED manifest of a verified layer rather than
+    /// scanned from disk: every component, version and hash is copied from what
+    /// the trust root anchored. Answers "which components are in this product" for
+    /// CRA Art. 13(5) due diligence.
     Sbom {
         /// Layer to describe, e.g. `2026.08.0`. Defaults to the resolved pin.
         #[arg(long)]
@@ -539,12 +564,13 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
-    /// Support window, yank state and known problems for the pinned layer,
-    /// from the newest verified line-status document.
+    /// Show support window, yanks and known problems.
     ///
-    /// EXITS 3 WHEN THE PINNED LAYER IS YANKED — a signed yank exists to stop
-    /// a build, so a pipeline gates on the exit code and never on stdout.
-    /// See `varve docs exit-codes`.
+    /// For the pinned layer, from the newest verified line-status document.
+    ///
+    /// EXITS 3 WHEN THE PINNED LAYER IS YANKED — a signed yank exists to stop a
+    /// build, so a pipeline gates on the exit code and never on stdout. See `varve
+    /// docs exit-codes`.
     Status {
         /// Ingest a status envelope first: verify, cache (monotonic), then
         /// report. Without it, report from the local cache.
@@ -555,9 +581,10 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// (CI) Sign a statement binding an attestation to a layer: "this digest,
-    /// of this kind, from this producer, accompanies this layer"
-    /// (REQ-ATTEST-001). varve vouches for the ASSOCIATION and the bytes'
+    /// (CI) Sign a statement tying an attestation to a layer.
+    ///
+    /// The statement says "this digest, of this kind, from this producer,
+    /// accompanies this layer". varve vouches for the ASSOCIATION and the bytes'
     /// integrity — never for what the producer claimed.
     SignAttestation {
         /// Layer the attestation accompanies. Defaults to the resolved pin.
@@ -604,9 +631,10 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Check that an attestation belongs to the pinned layer: verify the
-    /// statement against the trust root, then re-hash the carried bytes and
-    /// confirm the layer it names is the one resolved here (REQ-ATTEST-001).
+    /// Check that an attestation belongs to the pinned layer.
+    ///
+    /// Verifies the statement against the trust root, then re-hashes the carried
+    /// bytes and confirms the layer it names is the one resolved here.
     CheckAttestation {
         /// The signed statement (DSSE envelope) produced by sign-attestation.
         #[arg(long, value_name = "FILE")]
@@ -615,7 +643,9 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         file: PathBuf,
     },
-    /// (CI) Validate and sign a line-status document into a DSSE envelope.
+    /// (CI) Validate and sign a line-status document.
+    ///
+    /// The output is a DSSE envelope.
     SignStatus {
         /// The status document JSON (see docs: line, counter, issued-at,
         /// support-until, yanked, known-problems).
@@ -658,11 +688,12 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// (CI) Validate and sign a line-index document — the realm's statement of
-    /// which layers a line contains (REQ-INDEXAUTH-001). Without one, the
+    /// (CI) Validate and sign a line-index document.
+    ///
+    /// The realm's statement of which layers a line contains. Without one, the
     /// listing a consumer resolves against is the registry's unauthenticated
-    /// `/tags/list`, and a host that HIDES a layer is undetectable: every
-    /// artifact it does serve still verifies.
+    /// `/tags/list`, and a host that HIDES a layer is undetectable: every artifact
+    /// it does serve still verifies.
     SignIndex {
         /// The index document JSON (line, counter, issued-at, layers[] of
         /// layer/digest/channel/counter). See `varve docs sign-index`.
@@ -690,10 +721,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// (CI) Attach a signed line-index envelope to a deposit layout, so an
-    /// offline consumer of a realm declaring `signed-index = true` can obtain
-    /// it (REQ-INDEXAUTH-001). On a registry the same envelope is pushed under
-    /// the `line-index-<line>` tag — see `varve docs attach-index`.
+    /// (CI) Attach a signed line index to a deposit layout.
+    ///
+    /// So an offline consumer of a realm declaring `signed-index = true` can
+    /// obtain it. On a registry the same envelope is pushed under the
+    /// `line-index-<line>` tag — see `varve docs attach-index`.
     AttachIndex {
         /// The oci-layout directory produced by `varve deposit`.
         #[arg(long, value_name = "DIR")]
@@ -705,9 +737,10 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// (CI) Attach a signed line-status envelope to a deposit layout as its
-    /// baseline, so `varve status` works after an offline install and the
-    /// registry can carry it (REQ-STATUS-DIST-001).
+    /// (CI) Attach a signed line status to a deposit layout.
+    ///
+    /// Attached as the layout's baseline, so `varve status` works after an offline
+    /// install and the registry can carry it.
     AttachStatus {
         /// The oci-layout directory produced by `varve deposit`.
         #[arg(long, value_name = "DIR")]
@@ -729,26 +762,30 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         delegation: Option<PathBuf>,
     },
-    /// Shims on PATH: thin dispatchers that resolve the pin from the
-    /// invocation's working directory and exec — switching projects is cd.
+    /// Manage the shims that dispatch tools from PATH.
+    ///
+    /// Shims are thin dispatchers that resolve the pin from the invocation's
+    /// working directory and exec — switching projects is cd.
     #[command(subcommand)]
     Shim(ShimCmd),
-    /// Print idempotent shell code putting the shim directory on PATH.
-    /// Setup is one line: `eval "$(varve env)"` — or source the env file
-    /// `shim install` writes. Never hand-edit PATH.
+    /// Print shell code that puts the shims on PATH.
+    ///
+    /// Idempotent. Setup is one line: `eval "$(varve env)"` — or source the env
+    /// file `shim install` writes. Never hand-edit PATH.
     Env {
         /// Shell dialect: sh (default, works for bash/zsh) or fish.
         #[arg(long, default_value = "sh")]
         shell: String,
     },
-    /// Emit shell completion scripts (zsh, bash, fish, ...).
+    /// Print shell completion scripts (zsh, bash, fish, ...).
     Completions { shell: clap_complete::Shell },
-    /// (offline) Sign a realm's DELEGATION with the realm ROOT key: the one
-    /// document the root signs in a realm that declares key roles
-    /// (REQ-KEYROLES-001). The input names the root and the keys allowed to
-    /// sign for each role; the output is the DSSE envelope a realm's
-    /// `delegation-file` points at. The result is read back through the same
-    /// check a consumer runs, and a delegation it would refuse is not written.
+    /// (offline) Sign a realm's key delegation with its root key.
+    ///
+    /// The one document the root signs in a realm that declares key roles. The
+    /// input names the root and the keys allowed to sign for each role; the output
+    /// is the DSSE envelope a realm's `delegation-file` points at. The result is
+    /// read back through the same check a consumer runs, and a delegation it would
+    /// refuse is not written.
     SignDelegation {
         /// The delegation document JSON: `realm-root` (hex), `counter`,
         /// `issued-at`, and `roles` with `layer` and/or `status`, each
@@ -768,8 +805,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// (CI) Sign a release SHA256SUMS.txt into the DSSE envelope
-    /// `self-verify` consumes — the producing half of DD-009.
+    /// (CI) Sign a release SHA256SUMS.txt for self-verify.
+    ///
+    /// The output is the DSSE envelope `self-verify` consumes.
     SignSums {
         #[arg(long, value_name = "FILE")]
         sums: PathBuf,
@@ -795,9 +833,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Update varve itself: check the latest release, verify it with the
-    /// RUNNING binary against the trust root (old-verifies-new), replace
-    /// atomically. Explicit act only — varve never phones home.
+    /// Update varve itself, verified by the running binary.
+    ///
+    /// Checks the latest release, verifies it with the RUNNING binary against the
+    /// trust root (old verifies new), and replaces it atomically. Explicit act
+    /// only — varve never phones home.
     SelfUpdate {
         /// Report what is available without changing anything.
         #[arg(long)]
@@ -806,8 +846,9 @@ enum Cmd {
         #[arg(long, value_name = "PATH")]
         to: Option<PathBuf>,
     },
-    /// Verify a varve release file against its signed SHA256SUMS envelope —
-    /// the tool that gates the toolchain clearing its own gate.
+    /// Verify a varve release file against its signed sums.
+    ///
+    /// The tool that gates the toolchain clearing its own gate.
     SelfVerify {
         /// The release file to check (e.g. a downloaded varve tar.gz).
         #[arg(long, value_name = "FILE")]
@@ -816,9 +857,10 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         envelope: PathBuf,
     },
-    /// Embedded, queryable documentation (offline). `varve docs` lists topics;
-    /// `varve docs <topic>` shows one; `varve docs check --coverage` asserts
-    /// every subcommand is documented (REQ-DOCS-001).
+    /// Show the embedded documentation (offline).
+    ///
+    /// `varve docs` lists topics; `varve docs <topic>` shows one; `varve docs
+    /// check --coverage` asserts every subcommand is documented.
     Docs {
         /// A topic slug to show, or `check` to run the coverage invariant.
         topic: Option<String>,
@@ -940,7 +982,9 @@ fn run() -> anyhow::Result<Outcome> {
         })?;
         return Ok(Outcome::Ok);
     }
-    let cli = Cli::parse();
+    // Parsed through `help::command()`, which groups the subcommands in
+    // --help; the arguments themselves are the derived ones.
+    let cli = Cli::from_arg_matches(&help::command().get_matches()).unwrap_or_else(|e| e.exit());
     let store = Store::at(store_root()?);
     // Two commands report a VERDICT rather than merely succeeding or failing —
     // a yanked layer and an empty search are ANSWERS, and their exit code is

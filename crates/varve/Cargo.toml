@@ -14,7 +14,12 @@ categories = ["command-line-utilities", "development-tools", "development-tools:
 
 [dependencies]
 anyhow = "1.0.104"
-clap = { version = "4.6.6", features = ["derive"] }
+# `wrap_help`: --help wraps to the terminal width (COLUMNS when there is no
+# terminal), capped at 100 columns by `help::MAX_WIDTH`.
+clap = { version = "4.6.6", features = ["derive", "wrap_help"] }
+# The width `varve --help` lays its grouped command list out for, read the
+# way clap reads it; the same crate and version `wrap_help` brings in.
+terminal_size = "0.4.4"
 clap_complete = "4.6.9"
 serde_json = "1.0.151"
 varve-core.workspace = true
