@@ -371,5 +371,5 @@ releases; Bazel gets an export per kind (extending `varve export-bazel`).
 Apache-2.0
 
 <div align="center">
-<sub>Part of <a href="https://github.com/pulseengine">PulseEngine</a> — a WebAssembly toolchain for safety-critical systems, with formally verified components</sub>
+<sub>Part of <a href="https://github.com/pulseengine">PulseEngine</a> — a WebAssembly Component Model engine for safety-critical systems, with formally verified components</sub>
 </div>
